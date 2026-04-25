@@ -2805,6 +2805,143 @@ mod wal_replay_tests {
         );
     }
 
+    /// Audit #28 finding C — `$all: []` (empty array) currently matches
+    /// every doc that has an array field, because
+    /// `required.iter().all(...)` is vacuously true on an empty iterator.
+    /// MongoDB semantics: empty `$all: []` matches NO documents.
+    #[test]
+    fn audit28_all_empty_matches_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit28_all.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+
+        // Three docs with array fields, one with scalar.
+        for tags in [vec!["a", "b"], vec!["x"], vec!["b", "c"]] {
+            let mut d = std::collections::HashMap::new();
+            d.insert("tags".to_string(), serde_json::json!(tags));
+            db.insert_one("docs", d).unwrap();
+        }
+        let mut scalar = std::collections::HashMap::new();
+        scalar.insert("tags".to_string(), serde_json::json!("a"));
+        db.insert_one("docs", scalar).unwrap();
+
+        // $all: [] must return 0 (MongoDB semantics: vacuously empty match).
+        let n_empty = db
+            .count_documents("docs", &serde_json::json!({"tags": {"$all": []}}))
+            .unwrap();
+        assert_eq!(
+            n_empty, 0,
+            "$all: [] must match no documents; got {}",
+            n_empty
+        );
+
+        // Sanity: $all: ["a"] still works for the docs that have "a".
+        let n_a = db
+            .count_documents("docs", &serde_json::json!({"tags": {"$all": ["a"]}}))
+            .unwrap();
+        assert_eq!(n_a, 1, "$all: [\"a\"] must still match 1 doc; got {}", n_a);
+    }
+
+    /// Audit #28 finding B — `compare_values(Null, Null)` returned `None`
+    /// at `value_utils.rs:404` (the catch-all `_ => None` arm), which
+    /// caused `$gte: null` and `$lte: null` to NEVER match docs whose
+    /// field is null — pre-fix the `compare_with_predicate` helper saw
+    /// `None` from `compare_values` and returned `Ok(false)`.
+    ///
+    /// MongoDB semantics: `null == null`, so `$gte: null` MUST match a
+    /// null-valued field. Cross-type comparisons (Null vs Number etc.)
+    /// stay incomparable.
+    #[test]
+    fn audit28_gte_null_matches_null_value() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit28_null.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+
+        for _ in 0..3 {
+            let mut d = std::collections::HashMap::new();
+            d.insert("score".to_string(), serde_json::json!(null));
+            db.insert_one("docs", d).unwrap();
+        }
+        for v in [1, 5, 10] {
+            let mut d = std::collections::HashMap::new();
+            d.insert("score".to_string(), serde_json::json!(v));
+            db.insert_one("docs", d).unwrap();
+        }
+
+        // $gte: null must match the 3 null docs (cross-type with numeric
+        // 1/5/10 stays incomparable, so they don't match).
+        let n_gte = db
+            .count_documents("docs", &serde_json::json!({"score": {"$gte": null}}))
+            .unwrap();
+        assert_eq!(
+            n_gte, 3,
+            "$gte: null must match null-valued docs, not exclude them; got {}",
+            n_gte
+        );
+
+        // Symmetric: $lte: null also matches the 3 null docs.
+        let n_lte = db
+            .count_documents("docs", &serde_json::json!({"score": {"$lte": null}}))
+            .unwrap();
+        assert_eq!(n_lte, 3);
+    }
+
+    /// Audit #28 finding A (top priority) — `matches_filter` must not
+    /// silently match every document when the field's filter is an Object
+    /// containing zero `$`-prefixed keys (`{address: {city: "NYC"}}`).
+    ///
+    /// Pre-fix `matches_filter` (filter.rs:249) iterated only `$`-prefixed
+    /// keys; a non-operator object filter ran an empty loop and the
+    /// function fell through to `Ok(true)` for every doc.
+    ///
+    /// Post-fix: same shape must produce a deep-equality check
+    /// (MongoDB semantics) — only docs whose `address` deep-equals the
+    /// Object should match.
+    #[test]
+    fn audit28_object_filter_without_operators_is_deep_equality() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit28.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        // Three distinct address shapes.
+        for _ in 0..2 {
+            let mut d = std::collections::HashMap::new();
+            d.insert("address".to_string(), serde_json::json!(null));
+            db.insert_one("docs", d).unwrap();
+        }
+        for _ in 0..3 {
+            let mut d = std::collections::HashMap::new();
+            d.insert("address".to_string(), serde_json::json!({"city": "NYC"}));
+            db.insert_one("docs", d).unwrap();
+        }
+        let mut other = std::collections::HashMap::new();
+        other.insert("address".to_string(), serde_json::json!({"city": "LA"}));
+        db.insert_one("docs", other).unwrap();
+
+        // Total docs = 6. Pre-fix: filter matched all 6. Post-fix: only
+        // the 3 NYC ones match (deep equality).
+        let n = db
+            .count_documents("docs", &serde_json::json!({"address": {"city": "NYC"}}))
+            .unwrap();
+        assert_eq!(
+            n, 3,
+            "object filter without operators must be deep equality, not match-all; got {}",
+            n
+        );
+
+        // Also: an EXACT non-matching object must return 0.
+        let n_zero = db
+            .count_documents("docs", &serde_json::json!({"address": {"city": "Boston"}}))
+            .unwrap();
+        assert_eq!(n_zero, 0);
+
+        // Also: a non-existent field's object filter — 0 docs match
+        // (none of them have the field, so deep equality fails for all).
+        let n_missing = db
+            .count_documents("docs", &serde_json::json!({"missing": {"x": 1}}))
+            .unwrap();
+        assert_eq!(n_missing, 0);
+    }
+
     /// Audit #27 finding A — DB-level integration: object-equality
     /// query MUST NOT trigger the `fully_covered=true` index-count
     /// short-circuit that returned the count of NULL-valued docs.

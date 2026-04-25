@@ -208,6 +208,14 @@ impl OperatorMatcher for AllOperator {
             None => Ok(false),
             Some(Value::Array(doc_arr)) => {
                 if let Value::Array(required) = filter_value {
+                    // MongoDB semantics: `$all: []` matches NO documents.
+                    // Without this guard `required.iter().all(...)` would
+                    // be vacuously true and silently match every doc that
+                    // has any array field (audit #28 finding C).
+                    if required.is_empty() {
+                        return Ok(false);
+                    }
+
                     // Build HashSet from document array for O(1) lookups
                     let doc_hash_set = build_hash_set(doc_arr);
 

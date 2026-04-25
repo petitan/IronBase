@@ -243,28 +243,54 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                             }
                         }
                     }
-                } else {
+                } else if condition_obj.keys().any(|k| k.starts_with('$')) {
                     // Standard operator processing
                     // Field has operators like { age: { $gt: 18 } }
+                    //
+                    // INVARIANT (audit #28 finding A): if at least ONE key
+                    // is a `$`-operator we treat the whole object as
+                    // operator dispatch and require ALL keys to be
+                    // operators. A non-operator key here surfaces as
+                    // `Unknown operator: <name>` (a non-`$` key never
+                    // matches a registry entry). Pre-fix, non-`$` keys
+                    // were silently skipped — see the all-non-operator
+                    // branch below for the corresponding fix.
                     for (op_name, op_value) in condition_obj {
-                        if op_name.starts_with('$') {
-                            if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                                if !check_operator_match(
-                                    &doc_values,
-                                    doc_value,
-                                    operator.as_ref(),
-                                    op_value,
-                                    Some(document),
-                                )? {
-                                    return Ok(false);
-                                }
-                            } else {
-                                return Err(IronBaseError::InvalidQuery(format!(
-                                    "Unknown operator: {}",
-                                    op_name
-                                )));
+                        if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
+                            if !check_operator_match(
+                                &doc_values,
+                                doc_value,
+                                operator.as_ref(),
+                                op_value,
+                                Some(document),
+                            )? {
+                                return Ok(false);
                             }
+                        } else {
+                            return Err(IronBaseError::InvalidQuery(format!(
+                                "Unknown operator: {}",
+                                op_name
+                            )));
                         }
+                    }
+                } else {
+                    // No `$`-prefixed keys at all — treat the whole object
+                    // as a deep-equality value (MongoDB semantics).
+                    //
+                    // Pre-fix bug (audit #28 finding A): the for-loop
+                    // above iterated only `$`-keys. With zero such keys
+                    // the loop ran empty and `matches_filter` fell
+                    // through to `Ok(true)`, silently matching every
+                    // document. Now we hand the value to `EqOperator`
+                    // which performs proper deep equality.
+                    if !check_operator_match(
+                        &doc_values,
+                        doc_value,
+                        &EqOperator,
+                        value,
+                        Some(document),
+                    )? {
+                        return Ok(false);
                     }
                 }
             } else {

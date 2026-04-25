@@ -401,6 +401,11 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         }
         (Value::String(s1), Value::String(s2)) => Some(s1.cmp(s2)),
         (Value::Bool(b1), Value::Bool(b2)) => Some(b1.cmp(b2)),
+        // MongoDB-compatible: Null == Null. Without this case the
+        // catch-all returned None, so `$gte: null` / `$lte: null` would
+        // never match a null-valued field even though `null == null` is
+        // true (audit #28 finding B).
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
         _ => None,
     }
 }
