@@ -13,6 +13,7 @@
 //! If you need write operations, use DatabaseCore::insert_one(), etc.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -78,7 +79,9 @@ pub struct InsertOnePrepared {
     /// The validated document ready for storage (has _id, NO _collection)
     pub document: Document,
     /// WAL entry: document with _id AND _collection for recovery
-    pub wal_doc: Value,
+    /// Wrapped in `Arc` so it can be cheaply shared with `Operation::Insert.doc`
+    /// without deep-cloning the underlying JSON tree per insert.
+    pub wal_doc: Arc<Value>,
     /// Collection name for context
     pub(crate) collection_name: String,
 }
@@ -1575,14 +1578,20 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // This catches duplicates early, before any storage/WAL writes
         self.check_index_constraints(&doc, None)?;
 
-        // Prepare WAL document (PHASE 5: _collection is now added by commit_transaction)
-        let wal_doc =
+        // Prepare WAL document. `_collection` is injected here (instead of in
+        // `commit_transaction`) so the commit step can pass the Arc through
+        // without deep-cloning the Value tree per insert.
+        let mut wal_doc =
             serde_json::to_value(&doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+        if let Value::Object(ref mut map) = wal_doc {
+            map.entry("_collection".to_string())
+                .or_insert_with(|| Value::String(self.name.clone()));
+        }
 
         Ok(InsertOnePrepared {
             doc_id,
             document: doc,
-            wal_doc,
+            wal_doc: Arc::new(wal_doc),
             collection_name: self.name.clone(),
         })
     }
@@ -1729,18 +1738,24 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             self.validate_document(&doc)?;
 
             // Check for duplicates WITHIN the current batch
-            let doc_value = serde_json::to_value(&doc)
+            let mut doc_value = serde_json::to_value(&doc)
                 .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             batch_validator.check_and_track(&doc_value)?;
 
             // Check against EXISTING documents in index
             self.check_index_constraints(&doc, None)?;
 
-            // PHASE 5: _collection is now added by commit_transaction
+            // Inject `_collection` here so commit can pass the Arc through
+            // without deep-cloning the Value tree per insert.
+            if let Value::Object(ref mut map) = doc_value {
+                map.entry("_collection".to_string())
+                    .or_insert_with(|| Value::String(self.name.clone()));
+            }
+
             prepared_docs.push(InsertOnePrepared {
                 doc_id: doc_id.clone(),
                 document: doc,
-                wal_doc: doc_value, // Use doc_value directly, _collection added in commit_transaction
+                wal_doc: Arc::new(doc_value),
                 collection_name: self.name.clone(),
             });
             inserted_ids.push(doc_id);

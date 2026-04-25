@@ -67,7 +67,7 @@ mod benchmarks {
             tx.add_operation(Operation::Insert {
                 collection: "bench".to_string(),
                 doc_id: DocumentId::Int(i as i64),
-                doc: json!({"id": i, "data": "test"}),
+                doc: std::sync::Arc::new(json!({"id": i, "data": "test"})),
             })
             .unwrap();
 
@@ -108,7 +108,9 @@ mod benchmarks {
                 tx.add_operation(Operation::Insert {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int(doc_id as i64),
-                    doc: json!({"id": doc_id, "data": format!("item_{}", doc_id)}),
+                    doc: std::sync::Arc::new(
+                        json!({"id": doc_id, "data": format!("item_{}", doc_id)}),
+                    ),
                 })
                 .unwrap();
             }
@@ -154,7 +156,7 @@ mod benchmarks {
                 tx.add_operation(Operation::Insert {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int(doc_id as i64),
-                    doc: json!({"id": doc_id, "value": doc_id * 2}),
+                    doc: std::sync::Arc::new(json!({"id": doc_id, "value": doc_id * 2})),
                 })
                 .unwrap();
             }
@@ -199,7 +201,7 @@ mod benchmarks {
                 tx.add_operation(Operation::Insert {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int((i * 5 + j) as i64),
-                    doc: json!({"data": "test"}),
+                    doc: std::sync::Arc::new(json!({"data": "test"})),
                 })
                 .unwrap();
             }
@@ -266,7 +268,7 @@ mod benchmarks {
             tx.add_operation(Operation::Insert {
                 collection: "wal_bench".to_string(),
                 doc_id: DocumentId::Int(i as i64),
-                doc: json!({"data": "wal_test", "iteration": i}),
+                doc: std::sync::Arc::new(json!({"data": "wal_test", "iteration": i})),
             })
             .unwrap();
 
@@ -305,7 +307,7 @@ mod benchmarks {
                 tx.add_operation(Operation::Insert {
                     collection: "recovery_bench".to_string(),
                     doc_id: DocumentId::Int(i),
-                    doc: json!({"id": i}),
+                    doc: std::sync::Arc::new(json!({"id": i})),
                 })
                 .unwrap();
 

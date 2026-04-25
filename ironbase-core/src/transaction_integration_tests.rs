@@ -30,21 +30,21 @@ mod integration_tests {
         tx.add_operation(Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice", "email": "alice@example.com"}),
+            doc: std::sync::Arc::new(json!({"name": "Alice", "email": "alice@example.com"})),
         })
         .unwrap();
 
         tx.add_operation(Operation::Insert {
             collection: "posts".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"user_id": 1, "title": "First Post"}),
+            doc: std::sync::Arc::new(json!({"user_id": 1, "title": "First Post"})),
         })
         .unwrap();
 
         tx.add_operation(Operation::Insert {
             collection: "comments".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"post_id": 1, "text": "Nice post!"}),
+            doc: std::sync::Arc::new(json!({"post_id": 1, "text": "Nice post!"})),
         })
         .unwrap();
 
@@ -77,7 +77,7 @@ mod integration_tests {
             tx.add_operation(Operation::Insert {
                 collection: "large_test".to_string(),
                 doc_id: DocumentId::Int(i),
-                doc: json!({"id": i, "value": format!("item_{}", i)}),
+                doc: std::sync::Arc::new(json!({"id": i, "value": format!("item_{}", i)})),
             })
             .unwrap();
         }
@@ -107,7 +107,7 @@ mod integration_tests {
             tx.add_operation(Operation::Insert {
                 collection: "very_large_test".to_string(),
                 doc_id: DocumentId::Int(i),
-                doc: json!({"id": i, "data": i * 2}),
+                doc: std::sync::Arc::new(json!({"id": i, "data": i * 2})),
             })
             .unwrap();
         }
@@ -136,7 +136,7 @@ mod integration_tests {
         tx.add_operation(Operation::Insert {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Item 1"}),
+            doc: std::sync::Arc::new(json!({"name": "Item 1"})),
         })
         .unwrap();
 
@@ -151,7 +151,7 @@ mod integration_tests {
         tx.add_operation(Operation::Insert {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(2),
-            doc: json!({"name": "Item 2"}),
+            doc: std::sync::Arc::new(json!({"name": "Item 2"})),
         })
         .unwrap();
 
@@ -198,7 +198,7 @@ mod integration_tests {
             tx.add_operation(Operation::Insert {
                 collection: "concurrent_test".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"data": "test"}),
+                doc: std::sync::Arc::new(json!({"data": "test"})),
             })
             .unwrap();
 
@@ -229,7 +229,7 @@ mod integration_tests {
             .add_operation(Operation::Insert {
                 collection: "isolation_test".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"value": 100}),
+                doc: std::sync::Arc::new(json!({"value": 100})),
             })
             .unwrap();
         db.update_transaction(tx1, tx1_obj).unwrap();
@@ -284,7 +284,7 @@ mod integration_tests {
             tx.add_operation(Operation::Insert {
                 collection: format!("col_{}", i),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"collection": i}),
+                doc: std::sync::Arc::new(json!({"collection": i})),
             })
             .unwrap();
         }
@@ -317,7 +317,7 @@ mod integration_tests {
             tx.add_operation(Operation::Insert {
                 collection: "rollback_test".to_string(),
                 doc_id: DocumentId::Int(i),
-                doc: json!({"id": i}),
+                doc: std::sync::Arc::new(json!({"id": i})),
             })
             .unwrap();
         }
@@ -351,7 +351,7 @@ mod integration_tests {
                 .add_operation(Operation::Insert {
                     collection: "recovery_test".to_string(),
                     doc_id: DocumentId::Int(1),
-                    doc: json!({"tx": 1}),
+                    doc: std::sync::Arc::new(json!({"tx": 1})),
                 })
                 .unwrap();
             db.update_transaction(tx1, tx1_obj).unwrap();
@@ -364,7 +364,7 @@ mod integration_tests {
                 .add_operation(Operation::Insert {
                     collection: "recovery_test".to_string(),
                     doc_id: DocumentId::Int(2),
-                    doc: json!({"tx": 2}),
+                    doc: std::sync::Arc::new(json!({"tx": 2})),
                 })
                 .unwrap();
             db.update_transaction(tx2, tx2_obj).unwrap();
@@ -377,7 +377,7 @@ mod integration_tests {
                 .add_operation(Operation::Insert {
                     collection: "recovery_test".to_string(),
                     doc_id: DocumentId::Int(3),
-                    doc: json!({"tx": 3}),
+                    doc: std::sync::Arc::new(json!({"tx": 3})),
                 })
                 .unwrap();
             db.update_transaction(tx3, tx3_obj).unwrap();

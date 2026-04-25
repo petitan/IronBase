@@ -229,7 +229,7 @@ mod tests {
             let op = Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
-                doc: json!({"_id": 1, "name": "Alice"}),
+                doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
             };
             let op_data = serde_json::to_vec(&op).unwrap();
             wal.append(&WALEntry::new(1, WALEntryType::Operation, op_data))
@@ -268,7 +268,7 @@ mod tests {
             let op = Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
-                doc: json!({"_id": 1, "name": "Alice"}),
+                doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
             };
             let op_data = serde_json::to_vec(&op).unwrap();
             wal.append(&WALEntry::new(1, WALEntryType::Operation, op_data))
@@ -321,7 +321,7 @@ mod tests {
             let op = Operation::Insert {
                 collection: "test".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
-                doc: json!({"_id": 1}),
+                doc: std::sync::Arc::new(json!({"_id": 1})),
             };
             let op_data = serde_json::to_vec(&op).unwrap();
             wal.append(&WALEntry::new(1, WALEntryType::Operation, op_data))

@@ -376,7 +376,7 @@ fn test_recovery_wal_ahead_of_storage() {
         let operation = ironbase_core::transaction::Operation::Insert {
             collection: "users".to_string(),
             doc_id: ironbase_core::document::DocumentId::Int(999),
-            doc: json!({"name": "Recovered User", "status": "from_wal"}),
+            doc: std::sync::Arc::new(json!({"name": "Recovered User", "status": "from_wal"})),
         };
         let op_json = serde_json::to_string(&operation).unwrap();
 
@@ -532,7 +532,7 @@ fn test_large_transaction_crash_recovery() {
             let operation = ironbase_core::transaction::Operation::Insert {
                 collection: "large_tx".to_string(),
                 doc_id: ironbase_core::document::DocumentId::Int(i),
-                doc: json!({"index": i, "data": format!("item_{}", i)}),
+                doc: std::sync::Arc::new(json!({"index": i, "data": format!("item_{}", i)})),
             };
             let op_json = serde_json::to_string(&operation).unwrap();
             wal.append(&WALEntry::new(
@@ -592,7 +592,7 @@ fn test_checkpoint_clears_wal() {
         tx.add_operation(ironbase_core::transaction::Operation::Insert {
             collection: "test".to_string(),
             doc_id: ironbase_core::document::DocumentId::Int(1),
-            doc: json!({"value": 42}),
+            doc: std::sync::Arc::new(json!({"value": 42})),
         })
         .unwrap();
 
@@ -645,12 +645,12 @@ fn test_wal_recovery_metadata_convergence() {
             let operation = ironbase_core::transaction::Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: ironbase_core::document::DocumentId::Int(i),
-                doc: json!({
+                doc: std::sync::Arc::new(json!({
                     "_id": i,
                     "_collection": "users",
                     "name": format!("User {}", i),
                     "data": format!("data_{}", i)
-                }),
+                })),
             };
             let op_json = serde_json::to_string(&operation).unwrap();
             wal.append(&WALEntry::new(
@@ -735,11 +735,11 @@ fn test_wal_recovery_mixed_operations_metadata() {
             let operation = ironbase_core::transaction::Operation::Insert {
                 collection: "mixed".to_string(),
                 doc_id: ironbase_core::document::DocumentId::Int(i),
-                doc: json!({
+                doc: std::sync::Arc::new(json!({
                     "_id": i,
                     "_collection": "mixed",
                     "value": i * 10
-                }),
+                })),
             };
             let op_json = serde_json::to_string(&operation).unwrap();
             wal.append(&WALEntry::new(

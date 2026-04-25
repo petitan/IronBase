@@ -99,7 +99,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         tx.add_operation(Operation::Insert {
             collection: self.name.clone(),
             doc_id: doc_id.clone(),
-            doc: doc_value.clone(),
+            doc: std::sync::Arc::new(doc_value.clone()),
         })?;
 
         // Track index changes for two-phase commit

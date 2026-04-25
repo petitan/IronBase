@@ -127,10 +127,10 @@ impl OperationReplay {
                 let _ = storage.create_collection(collection);
 
                 // Extract document ID
-                let doc_id = DocumentId::extract_from_value(doc)?;
+                let doc_id = DocumentId::extract_from_value(doc.as_ref())?;
 
                 // Write document using raw storage
-                let doc_json = serde_json::to_string(doc)
+                let doc_json = serde_json::to_string(doc.as_ref())
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, &doc_id, doc_json.as_bytes())?;
 
@@ -262,7 +262,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"_id": 1, "name": "Alice"}),
+            doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
         };
 
         let entry_data = serde_json::to_vec(&op).unwrap();
@@ -284,7 +284,7 @@ mod tests {
         let insert_op = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"_id": 1, "name": "Alice"}),
+            doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
         };
 
         let insert_entry_data = serde_json::to_vec(&insert_op).unwrap();
@@ -318,7 +318,7 @@ mod tests {
         let insert_op = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"_id": 1, "name": "Alice"}),
+            doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
         };
 
         let insert_entry_data = serde_json::to_vec(&insert_op).unwrap();
@@ -351,12 +351,12 @@ mod tests {
             Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"_id": 1, "name": "Alice"}),
+                doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
             },
             Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(2),
-                doc: json!({"_id": 2, "name": "Bob"}),
+                doc: std::sync::Arc::new(json!({"_id": 2, "name": "Bob"})),
             },
             Operation::Update {
                 collection: "users".to_string(),
@@ -400,7 +400,7 @@ mod tests {
                 serde_json::to_vec(&Operation::Insert {
                     collection: "test".to_string(),
                     doc_id: DocumentId::Int(1),
-                    doc: json!({"_id": 1, "name": "Alice"}),
+                    doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
                 })
                 .unwrap(),
             ),
@@ -435,7 +435,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "new_collection".to_string(),
             doc_id: DocumentId::String("doc1".to_string()),
-            doc: json!({"_id": "doc1", "data": "test"}),
+            doc: std::sync::Arc::new(json!({"_id": "doc1", "data": "test"})),
         };
 
         let entry_data = serde_json::to_vec(&op).unwrap();
@@ -467,7 +467,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::String("my-custom-id".to_string()),
-            doc: json!({"_id": "my-custom-id", "name": "Test"}),
+            doc: std::sync::Arc::new(json!({"_id": "my-custom-id", "name": "Test"})),
         };
 
         let entry_data = serde_json::to_vec(&op).unwrap();
@@ -486,7 +486,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::ObjectId("507f1f77bcf86cd799439011".to_string()),
-            doc: json!({"_id": "507f1f77bcf86cd799439011", "name": "Test"}),
+            doc: std::sync::Arc::new(json!({"_id": "507f1f77bcf86cd799439011", "name": "Test"})),
         };
 
         let entry_data = serde_json::to_vec(&op).unwrap();
@@ -502,12 +502,12 @@ mod tests {
         let good1 = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"_id": 1, "name": "Alice"}),
+            doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
         };
         let good2 = Operation::Insert {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(3),
-            doc: json!({"_id": 3, "name": "Charlie"}),
+            doc: std::sync::Arc::new(json!({"_id": 3, "name": "Charlie"})),
         };
         vec![
             WALEntry::new(

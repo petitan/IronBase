@@ -18,7 +18,7 @@ mod property_tests {
                 Operation::Insert {
                     collection: "test".to_string(),
                     doc_id: DocumentId::Int(id),
-                    doc: json!({"id": id, "name": name}),
+                    doc: std::sync::Arc::new(json!({"id": id, "name": name})),
                 }
             }),
             // Update operations

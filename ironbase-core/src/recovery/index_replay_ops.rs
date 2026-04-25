@@ -177,7 +177,7 @@ mod tests {
         Operation::Insert {
             collection: "test".to_string(),
             doc_id,
-            doc,
+            doc: std::sync::Arc::new(doc),
         }
     }
 

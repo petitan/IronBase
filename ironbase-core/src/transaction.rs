@@ -2,12 +2,26 @@
 // Transaction management for ACID (Atomicity, Consistency, Isolation, Durability)
 // Isolation level: Read Committed (exclusive write lock, SQLite-style)
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+
+fn serialize_arc_value<S: Serializer>(
+    arc: &Arc<Value>,
+    ser: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    (**arc).serialize(ser)
+}
+
+fn deserialize_arc_value<'de, D: Deserializer<'de>>(
+    de: D,
+) -> std::result::Result<Arc<Value>, D::Error> {
+    Value::deserialize(de).map(Arc::new)
+}
 
 /// Unique transaction identifier
 pub type TransactionId = u64;
@@ -30,7 +44,11 @@ pub enum Operation {
     Insert {
         collection: String,
         doc_id: DocumentId,
-        doc: Value,
+        #[serde(
+            serialize_with = "serialize_arc_value",
+            deserialize_with = "deserialize_arc_value"
+        )]
+        doc: Arc<Value>,
     },
     /// Update an existing document
     Update {
@@ -245,7 +263,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice"}),
+            doc: Arc::new(json!({"name": "Alice"})),
         };
 
         assert!(tx.add_operation(op).is_ok());
@@ -260,7 +278,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice"}),
+            doc: Arc::new(json!({"name": "Alice"})),
         };
 
         assert!(matches!(
@@ -276,7 +294,7 @@ mod tests {
         let op = Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice"}),
+            doc: Arc::new(json!({"name": "Alice"})),
         };
         tx.add_operation(op).unwrap();
 

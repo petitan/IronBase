@@ -1355,12 +1355,24 @@ impl StorageEngine {
                     doc_id,
                     doc,
                 } => {
-                    let mut doc_clone = doc.clone();
-                    inject_collection(&mut doc_clone, collection);
+                    // Fast path: `_collection` is now injected during prepare()
+                    // so we can pass the Arc through with only a refcount bump.
+                    // Slow path (legacy callers without `_collection`) deep-clones once.
+                    let needs_inject = match doc.as_ref() {
+                        serde_json::Value::Object(map) => !map.contains_key("_collection"),
+                        _ => false,
+                    };
+                    let doc_out = if needs_inject {
+                        let mut cloned = (**doc).clone();
+                        inject_collection(&mut cloned, collection);
+                        std::sync::Arc::new(cloned)
+                    } else {
+                        std::sync::Arc::clone(doc)
+                    };
                     Operation::Insert {
                         collection: collection.clone(),
                         doc_id: doc_id.clone(),
-                        doc: doc_clone,
+                        doc: doc_out,
                     }
                 }
                 Operation::Update {
@@ -1629,7 +1641,7 @@ impl StorageEngine {
                     doc,
                 } => {
                     // Serialize and write document to storage with catalog update
-                    let doc_json = serde_json::to_string(doc)
+                    let doc_json = serde_json::to_string(doc.as_ref())
                         .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                     // Use write_document_raw to properly update document_catalog
                     self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
@@ -1694,7 +1706,7 @@ impl StorageEngine {
                 let _ = self.create_collection(collection);
 
                 // Serialize and write document with FULL metadata update
-                let doc_json = serde_json::to_string(doc)
+                let doc_json = serde_json::to_string(doc.as_ref())
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
             }
@@ -2680,7 +2692,7 @@ mod tests {
             tx.add_operation(crate::transaction::Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
-                doc: serde_json::json!({"name": "Alice", "age": 30}),
+                doc: std::sync::Arc::new(serde_json::json!({"name": "Alice", "age": 30})),
             })
             .unwrap();
 
@@ -2708,7 +2720,7 @@ mod tests {
         tx.add_operation(crate::transaction::Operation::Insert {
             collection: "users".to_string(),
             doc_id: crate::document::DocumentId::Int(1),
-            doc: serde_json::json!({"name": "Bob"}),
+            doc: std::sync::Arc::new(serde_json::json!({"name": "Bob"})),
         })
         .unwrap();
 
@@ -2738,7 +2750,7 @@ mod tests {
             let operation = crate::transaction::Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
-                doc: serde_json::json!({"name": "Recovered Alice", "age": 25}),
+                doc: std::sync::Arc::new(serde_json::json!({"name": "Recovered Alice", "age": 25})),
             };
             let op_json = serde_json::to_string(&operation).unwrap();
             wal.append(&WALEntry::new(
@@ -2792,7 +2804,9 @@ mod tests {
                 let operation = crate::transaction::Operation::Insert {
                     collection: "users".to_string(),
                     doc_id: crate::document::DocumentId::Int(tx_id as i64),
-                    doc: serde_json::json!({"name": format!("User {}", tx_id)}),
+                    doc: std::sync::Arc::new(
+                        serde_json::json!({"name": format!("User {}", tx_id)}),
+                    ),
                 };
                 let op_json = serde_json::to_string(&operation).unwrap();
                 wal.append(&WALEntry::new(

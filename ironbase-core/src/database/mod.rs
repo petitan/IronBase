@@ -687,7 +687,7 @@ mod tests {
         tx.add_operation(Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice"}),
+            doc: std::sync::Arc::new(json!({"name": "Alice"})),
         })
         .unwrap();
         db.update_transaction(tx_id, tx).unwrap();
@@ -717,13 +717,13 @@ mod tests {
         tx.add_operation(Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice", "age": 30}),
+            doc: std::sync::Arc::new(json!({"name": "Alice", "age": 30})),
         })
         .unwrap();
         tx.add_operation(Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(2),
-            doc: json!({"name": "Bob", "age": 25}),
+            doc: std::sync::Arc::new(json!({"name": "Bob", "age": 25})),
         })
         .unwrap();
         db.update_transaction(tx_id, tx).unwrap();
@@ -766,7 +766,7 @@ mod tests {
             tx.add_operation(Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"name": "Alice", "age": 30}),
+                doc: std::sync::Arc::new(json!({"name": "Alice", "age": 30})),
             })?;
 
             // Track index change
@@ -808,7 +808,7 @@ mod tests {
             tx.add_operation(Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"name": "Bob"}),
+                doc: std::sync::Arc::new(json!({"name": "Bob"})),
             })?;
             Ok(())
         })
@@ -858,7 +858,7 @@ mod tests {
             .add_operation(Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),
-                doc: json!({"name": "Alice"}),
+                doc: std::sync::Arc::new(json!({"name": "Alice"})),
             })
             .unwrap();
 
