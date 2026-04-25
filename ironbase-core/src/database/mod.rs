@@ -2084,4 +2084,421 @@ mod wal_replay_tests {
         eprintln!("   all index types + find + update + delete + fuzzy + fulltext verified ✓");
         eprintln!();
     }
+
+    // ========================================================================
+    // Fast-path EDGE CASES
+    //
+    // Each test exercises one boundary of the recovery decision tree
+    // (clean fast / WAL replay / rebuild fallback). The goal is to
+    // pin the behavior at every branch the week's changes touched.
+    // ========================================================================
+
+    fn doc_with_content(
+        i: usize,
+        content: &str,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("_id".to_string(), serde_json::json!(format!("d{}", i)));
+        m.insert("content".to_string(), serde_json::json!(content));
+        m
+    }
+
+    /// Edge: empty DB. First open creates the file, immediate clean close,
+    /// reopen — must not panic, must report 0 collections, 0 docs.
+    #[test]
+    fn fastpath_edge_empty_db() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("empty.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            db.close().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        // No collections, listing must succeed and be empty.
+        let names = db.list_collections();
+        assert!(names.is_empty(), "fresh DB should have no collections");
+    }
+
+    /// Edge: collection exists but is completely empty (no docs ever).
+    /// Reopen must take fast path (was_clean=true, no rebuild) and search
+    /// must return 0 results without error.
+    #[test]
+    fn fastpath_edge_empty_collection_with_index() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("empty_coll.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            // No inserts, no checkpoint — close immediately.
+            db.close().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "anything", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 0);
+    }
+
+    /// Edge: dirty shutdown but the WAL is empty (clean shutdown didn't
+    /// run, but no operations happened since the last checkpoint).
+    /// `recovered_ops_for_collection` is empty → `can_try_replay=false`
+    /// → fall through to fast path / rebuild based on file state.
+    #[test]
+    fn fastpath_edge_dirty_shutdown_empty_wal() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("empty_wal.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..5 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            db.checkpoint().unwrap(); // .ftidx written + WAL cleared
+                                      // No further writes → WAL stays empty even though we crash next.
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "alpha", Some(20), None, None, None)
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "post-checkpoint docs lost on empty-WAL crash"
+        );
+    }
+
+    /// Edge: exactly one post-watermark op. Verifies the `tx_id > watermark`
+    /// boundary fires correctly (and does NOT replay ops AT the watermark).
+    #[test]
+    fn fastpath_edge_one_op_above_watermark() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("boundary.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..3 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            db.checkpoint().unwrap();
+            // Single post-checkpoint op.
+            db.insert_one("docs", doc_with_content(3, "beta")).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Edge: replay applied twice (server reopened, no further writes,
+    /// reopened again). Helpers must be idempotent under repeat — second
+    /// reopen sees the now-clean state and skips replay.
+    #[test]
+    fn fastpath_edge_replay_then_clean_reopen_twice() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("repeat.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..5 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 5..8 {
+                db.insert_one("docs", doc_with_content(i, "beta")).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        // First reopen: replay path (3 ops > watermark).
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            assert_eq!(
+                coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                    .unwrap()
+                    .len(),
+                5
+            );
+            assert_eq!(
+                coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                    .unwrap()
+                    .len(),
+                3
+            );
+            db.close().unwrap();
+        }
+        // Second reopen: clean shutdown happened, fast path; counts must hold.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// Edge: multi-collection, only one has writes since checkpoint.
+    /// Each collection's recovery decision is independent; the quiet
+    /// collection takes fast path even though the active one needs replay.
+    #[test]
+    fn fastpath_edge_multi_collection_selective_replay() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("multi.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let active = db.collection("active").unwrap();
+            active
+                .create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            let quiet = db.collection("quiet").unwrap();
+            quiet
+                .create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+
+            for i in 0..3 {
+                db.insert_one("active", doc_with_content(i, "alpha"))
+                    .unwrap();
+                db.insert_one("quiet", doc_with_content(i, "alpha"))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Only `active` gets post-checkpoint writes.
+            for i in 3..5 {
+                db.insert_one("active", doc_with_content(i, "beta"))
+                    .unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        // Active: 3 alpha + 2 beta from replay or rebuild.
+        let active = db.collection("active").unwrap();
+        assert_eq!(
+            active
+                .fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            active
+                .fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        // Quiet: untouched, must still have its 3 docs.
+        let quiet = db.collection("quiet").unwrap();
+        assert_eq!(
+            quiet
+                .fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// Edge: WAL contains ops for a collection that does not exist (e.g.
+    /// metadata not yet committed). Must not panic; the unrelated
+    /// collection must recover correctly. Modeled by inserting before
+    /// the collection's index gets created — though in practice the
+    /// catalog is always written first, this test ensures any future
+    /// race or metadata-only op cannot crash recovery.
+    #[test]
+    fn fastpath_edge_replay_skips_indexless_collection() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("indexless.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            // Collection has NO non-btree indexes — so even with WAL ops
+            // there is nothing for `try_wal_replay_for_collection` to do.
+            db.collection("nofts").unwrap();
+            for i in 0..3 {
+                db.insert_one("nofts", doc_with_content(i, "alpha"))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 3..6 {
+                db.insert_one("nofts", doc_with_content(i, "beta")).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        // All 6 docs must be in the catalog regardless of replay path.
+        assert_eq!(
+            db.count_documents("nofts", &serde_json::json!({})).unwrap() as usize,
+            6
+        );
+    }
+
+    /// Edge: two consecutive crashes. First crash → replay → close → second
+    /// crash → another replay over a now-fresh watermark. Verifies the
+    /// watermark advances after replay-driven reopens too.
+    #[test]
+    fn fastpath_edge_consecutive_crashes() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("doublecrash.mlite");
+
+        // Round 1.
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..3 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 3..5 {
+                db.insert_one("docs", doc_with_content(i, "beta")).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        // Round 2: reopen + clean close so the next crash sees a watermark
+        // that already covers batches A+B.
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            // Verify post-replay state before doing anything else.
+            assert_eq!(
+                db.count_documents("docs", &serde_json::json!({})).unwrap() as usize,
+                5
+            );
+            db.checkpoint().unwrap();
+            for i in 5..7 {
+                db.insert_one("docs", doc_with_content(i, "gamma")).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        // Round 3: final reopen, all 7 docs must be findable.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        assert_eq!(
+            db.count_documents("docs", &serde_json::json!({})).unwrap() as usize,
+            7
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "gamma", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// Edge: no checkpoint ever, then crash. The .ftidx file never reaches
+    /// disk → load returns None → `all_non_btree_loaded=false` → safety
+    /// rail forces rebuild. All data still recovered via rebuild path.
+    #[test]
+    fn fastpath_edge_no_checkpoint_then_crash() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("nockpt.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..7 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            // NO checkpoint — index file never reaches disk.
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        // Rebuild fallback must restore all 7 docs.
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            7,
+            "rebuild fallback failed to recover all docs"
+        );
+    }
+
+    /// Edge: legacy V3 file simulation. We can't easily produce a
+    /// `last_flushed_tx_id == 0 && doc_count > 0` file from the live code,
+    /// but we can confirm the safety rail by deleting the .ftidx mid-cycle
+    /// — which forces `all_non_btree_loaded=false` and then rebuild.
+    /// (Equivalent code path in the safety rail.)
+    #[test]
+    fn fastpath_edge_missing_ftidx_forces_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("legacy.mlite");
+        let db_dir = tmp.path();
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..4 {
+                db.insert_one("docs", doc_with_content(i, "alpha")).unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 4..6 {
+                db.insert_one("docs", doc_with_content(i, "beta")).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+
+        // Simulate index file loss: delete every .ftidx in the directory
+        // before reopen. The safety rail must catch the missing-file case
+        // and rebuild from catalog (without panicking).
+        for entry in std::fs::read_dir(db_dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("ftidx") {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        // Rebuild from catalog must restore all 6 docs.
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            4,
+            "rebuild must reproduce alpha docs after .ftidx loss"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            2,
+            "rebuild must reproduce beta docs after .ftidx loss"
+        );
+    }
 }
