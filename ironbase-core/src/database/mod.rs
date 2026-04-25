@@ -2803,4 +2803,86 @@ mod wal_replay_tests {
             3
         );
     }
+
+    /// Audit #15 finding A — full DB integration test for the
+    /// Phase-2-delete-only sibling bug.
+    ///
+    /// Reproduces via the public API: insert + checkpoint, then
+    /// delete + checkpoint, then close, then reopen. Without the
+    /// `has_pending_entries()` extension to check `deleted_doc_ids`,
+    /// the second checkpoint would clear the dirty flag too eagerly
+    /// (Phase 2 of the second flush was a no-op for `inverted_index`
+    /// but added the deleted doc to `deleted_doc_ids`), the close
+    /// would skip the fulltext flush, and the reopen would resurrect
+    /// the deleted doc.
+    ///
+    /// The single-thread sequencing here doesn't actually race two
+    /// phases together, but the same `commit_flush` path runs and
+    /// the same `has_pending_entries` decision fires. Pinning here
+    /// guards the public-API surface against regression.
+    #[test]
+    fn audit15_phase2_delete_survives_close_reopen() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit15.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+
+            // Three docs with distinct content tokens.
+            for (i, word) in ["alpha", "beta", "gamma"].iter().enumerate() {
+                let mut d = std::collections::HashMap::new();
+                d.insert("_id".to_string(), serde_json::json!(format!("d{}", i)));
+                d.insert("content".to_string(), serde_json::json!(word.to_string()));
+                db.insert_one("docs", d).unwrap();
+            }
+            db.checkpoint().unwrap();
+            assert_eq!(
+                coll.fulltext_search("content", "alpha", Some(10), None, None, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            // Delete d0 (alpha) — only delete, no insert. The
+            // pre-fix code path: dirty cleared after this checkpoint.
+            db.delete_one("docs", &serde_json::json!({"_id": "d0"}))
+                .unwrap();
+            db.checkpoint().unwrap();
+
+            // Live search must already see the delete.
+            assert_eq!(
+                coll.fulltext_search("content", "alpha", Some(10), None, None, None)
+                    .unwrap()
+                    .len(),
+                0
+            );
+            db.close().unwrap();
+        }
+        // Reopen — the deleted doc must NOT reappear in fulltext search.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            0,
+            "deleted doc reappeared after close+reopen — Phase-2 delete-only \
+             sequence cleared the dirty flag prematurely"
+        );
+        // Sanity check: the other two docs survive.
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "gamma", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }
