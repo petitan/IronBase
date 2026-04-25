@@ -929,27 +929,48 @@ impl QueryPlanner {
                 // Determine the actual equality value:
                 // - {"field": {"$eq": X}} -> use X
                 // - {"field": X} where X is not an operator object -> use X
+                //
+                // Audit #27 finding A: Object and Array values are NOT
+                // indexable as keys — `IndexKey::from(&Value)` collapses both
+                // to `IndexKey::Null` (key.rs:119). Picking an index in that
+                // case produces an `IndexScan { key: Null }` plan that points
+                // at NULL-valued docs, not at docs whose field deep-equals
+                // the object/array. With `count_documents`'s `fully_covered`
+                // short-circuit (count.rs:215) the planner returns the wrong
+                // count silently. Skip the candidate; the `$eq` operator on
+                // the collection-scan path performs proper deep equality.
+                let is_indexable_value =
+                    |v: &Value| -> bool { !matches!(v, Value::Object(_) | Value::Array(_)) };
                 let equality_value: Option<&Value> = if let Value::Object(ref val_map) = value {
                     if val_map.len() == 1 {
                         if let Some(eq_val) = val_map.get("$eq") {
                             // Explicit $eq operator: {"field": {"$eq": X}}
-                            Some(eq_val)
+                            // — the inner value must itself be indexable.
+                            if is_indexable_value(eq_val) {
+                                Some(eq_val)
+                            } else {
+                                None
+                            }
                         } else if val_map.keys().any(|k| k.starts_with('$')) {
-                            // Other operators like $gt, $in, etc. - skip
+                            // Other operators like $gt, $in, etc. — handled
+                            // by the dedicated collect_*_candidates helpers.
                             None
                         } else {
-                            // Object value without operators - use as-is
-                            Some(value)
+                            // Plain object value — not indexable as a key.
+                            None
                         }
                     } else if val_map.keys().any(|k| k.starts_with('$')) {
-                        // Multiple operators or mixed - skip
+                        // Multiple operators or mixed — handled elsewhere.
                         None
                     } else {
-                        // Plain object value - use as-is
-                        Some(value)
+                        // Plain object value — not indexable.
+                        None
                     }
+                } else if matches!(value, Value::Array(_)) {
+                    // Array value — not indexable as a single key.
+                    None
                 } else {
-                    // Scalar or array value - use as-is
+                    // Scalar value (Null/Bool/Number/String) — usable.
                     Some(value)
                 };
 
@@ -2965,5 +2986,104 @@ mod tests {
         assert_eq!(in_arr.len(), 2);
         assert!(in_arr.contains(&json!(2024)));
         assert!(in_arr.contains(&json!(2025)));
+    }
+
+    /// Audit #27 finding A — Object/Array equality MUST NOT pick an index.
+    ///
+    /// `IndexKey::from(&Value)` collapses every Object and Array value to
+    /// `IndexKey::Null` (key.rs:119, `_ => IndexKey::Null`). If the planner
+    /// treats `{field: {sub: "x"}}` as an equality candidate, it builds an
+    /// `IndexScan { key: Null, ... }` plan that points at NULL-valued docs,
+    /// not at docs whose `field` deep-equals the object. Combined with
+    /// `count_documents`'s `fully_covered=true` short-circuit
+    /// (count.rs:215), the planner returns the wrong count silently.
+    ///
+    /// Correct behaviour: skip the index for Object/Array equality
+    /// candidates, fall through to collection scan + `$eq` operator
+    /// (which performs proper deep equality).
+    #[test]
+    fn audit27_object_equality_does_not_pick_index() {
+        let query = json!({"address": {"city": "NYC"}});
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "by_address".to_string(),
+            prefix_field: "address".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 100,
+            building: false,
+            num_keys: 100,
+            case_insensitive: false,
+            null_count: 0,
+            multikey_ratio: 0.0,
+            histogram: None,
+            mcv: None,
+        }];
+        let plan = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        // The planner MUST NOT pick an IndexScan for an object-valued
+        // equality — IndexKey::Null would mismatch every real address.
+        assert!(
+            !matches!(plan, Some((_, QueryPlan::IndexScan { .. }))),
+            "object-valued equality must not pick an IndexScan; got {:?}",
+            plan
+        );
+    }
+
+    /// Audit #27 finding A — same issue but for Array equality:
+    /// `{tags: ["x", "y"]}` with an index on `tags` must not produce an
+    /// IndexScan (the array → Null collapse is identical).
+    #[test]
+    fn audit27_array_equality_does_not_pick_index() {
+        let query = json!({"tags": ["x", "y"]});
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "by_tags".to_string(),
+            prefix_field: "tags".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 50,
+            building: false,
+            num_keys: 50,
+            case_insensitive: false,
+            null_count: 0,
+            multikey_ratio: 0.0,
+            histogram: None,
+            mcv: None,
+        }];
+        let plan = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(
+            !matches!(plan, Some((_, QueryPlan::IndexScan { .. }))),
+            "array-valued equality must not pick an IndexScan; got {:?}",
+            plan
+        );
+    }
+
+    /// Audit #27 finding A — explicit `$eq` with object value must also
+    /// skip the index (same root cause: the inner value is still an Object
+    /// that collapses to IndexKey::Null).
+    #[test]
+    fn audit27_explicit_eq_object_does_not_pick_index() {
+        let query = json!({"address": {"$eq": {"city": "NYC"}}});
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "by_address".to_string(),
+            prefix_field: "address".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 100,
+            building: false,
+            num_keys: 100,
+            case_insensitive: false,
+            null_count: 0,
+            multikey_ratio: 0.0,
+            histogram: None,
+            mcv: None,
+        }];
+        let plan = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(
+            !matches!(plan, Some((_, QueryPlan::IndexScan { .. }))),
+            "explicit $eq with object value must not pick an IndexScan; got {:?}",
+            plan
+        );
     }
 }

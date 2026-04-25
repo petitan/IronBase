@@ -2805,6 +2805,64 @@ mod wal_replay_tests {
         );
     }
 
+    /// Audit #27 finding A — DB-level integration: object-equality
+    /// query MUST NOT trigger the `fully_covered=true` index-count
+    /// short-circuit that returned the count of NULL-valued docs.
+    ///
+    /// The pre-fix bug: `db.count_documents({"address": {"city": "NYC"}})`
+    /// with btree index on `address` picked `IndexScan { key: Null, ... }`,
+    /// `count.rs:215` returned `index.count_range_validated(Null, Null)` =
+    /// the count of NULL-valued addresses (here: 2). With the planner
+    /// fix the count must NOT equal that NULL count any more.
+    ///
+    /// NOTE: A separate, deeper bug in `query/operators/filter.rs` causes
+    /// non-operator object filters to silently match ALL docs (the for-loop
+    /// at line 249 only iterates `$`-prefixed keys, so a value like
+    /// `{city: "NYC"}` becomes effectively a no-op). That bug is outside
+    /// the query-planner audit scope; this test asserts only what the
+    /// planner fix delivers — the NULL-collision count is no longer
+    /// returned silently.
+    #[test]
+    fn audit27_object_equality_does_not_return_null_collision_count() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit27.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        coll.create_index("address".to_string(), false, false)
+            .unwrap();
+
+        const NULL_DOCS: u64 = 2;
+        const NYC_DOCS: u64 = 3;
+        const OTHER_OBJ_DOCS: u64 = 1;
+
+        for _ in 0..NULL_DOCS {
+            let mut d = std::collections::HashMap::new();
+            d.insert("address".to_string(), serde_json::json!(null));
+            db.insert_one("docs", d).unwrap();
+        }
+        for _ in 0..NYC_DOCS {
+            let mut d = std::collections::HashMap::new();
+            d.insert("address".to_string(), serde_json::json!({"city": "NYC"}));
+            db.insert_one("docs", d).unwrap();
+        }
+        for _ in 0..OTHER_OBJ_DOCS {
+            let mut d = std::collections::HashMap::new();
+            d.insert("address".to_string(), serde_json::json!({"city": "LA"}));
+            db.insert_one("docs", d).unwrap();
+        }
+
+        let n = db
+            .count_documents("docs", &serde_json::json!({"address": {"city": "NYC"}}))
+            .unwrap();
+        // Pre-fix: would have returned NULL_DOCS = 2 silently (the planner
+        // chose IndexScan with key=Null → fully_covered → returns NULL count).
+        assert_ne!(
+            n, NULL_DOCS,
+            "object-valued query returned the NULL-collision count — \
+             planner picked IndexScan{{key=Null}} again"
+        );
+    }
+
     /// Audit #15 finding B — orphaned `.ftidx.tmp` cleanup.
     ///
     /// Mirrors `task11_fzidx_tmp_orphan_cleanup` and `task18_hnsw_tmp_orphan_cleanup`
