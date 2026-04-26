@@ -526,6 +526,27 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let _ = index_manager.set_index_ready(index_name);
         }
 
+        // FIX: Mark all rebuilt indexes dirty so the next checkpoint persists
+        // the in-memory state. Without this, the rebuild output never reaches
+        // disk and every subsequent SIGKILL repeats the rebuild from catalog
+        // (read-mostly DBs especially — never anything else dirties them).
+        // Touches all four index families that the rebuild loop populates.
+        if rebuild_id_index {
+            index_manager.mark_btree_dirty(id_index_name);
+        }
+        for index_meta in &btree_indexes_to_rebuild {
+            index_manager.mark_btree_dirty(&index_meta.name);
+        }
+        for (index_name, _) in &fuzzy_info {
+            index_manager.mark_fuzzy_dirty(index_name);
+        }
+        for (index_name, _) in &fulltext_info {
+            index_manager.mark_fulltext_dirty(index_name);
+        }
+        for (index_name, _, _) in &vector_indexes_to_rebuild {
+            index_manager.mark_vector_dirty(index_name);
+        }
+
         Ok(rebuilt_count)
     }
 
@@ -1114,10 +1135,33 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 &persisted_indexes,
                 &id_index_name,
             )?;
+            drop(storage_guard);
 
             log_debug!(
                 "Index rebuild completed - {} index entries rebuilt",
                 rebuilt_count
+            );
+
+            // Force flush every rebuilt index immediately so the next reopen
+            // (even if it's a SIGKILL away) finds them in the new format with
+            // `last_flushed_tx_id > 0` and uses the WAL-replay path instead of
+            // rebuilding again. Without this, the freshly-rebuilt state stays
+            // in memory until the periodic checkpoint (60s default) and a
+            // crash before then forces another rebuild — a known time-sink on
+            // read-mostly DBs.
+            let watermark = self.watermark_tx_id();
+            let flush_btree = index_manager.flush_btree_indexes(&db_path, watermark)?;
+            let flush_ft = index_manager.flush_fulltext_indexes(watermark)?;
+            let flush_fz = index_manager.flush_fuzzy_indexes(watermark)?;
+            let flush_vec = index_manager.flush_vector_indexes(&db_path, watermark)?;
+            log_info!(
+                "Post-rebuild flush for '{}': btree={} fulltext={} fuzzy={} vector={} (watermark={})",
+                name,
+                flush_btree,
+                flush_ft,
+                flush_fz,
+                flush_vec,
+                watermark
             );
         }
 
