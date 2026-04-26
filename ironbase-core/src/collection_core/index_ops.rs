@@ -352,6 +352,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         root_offset,
                         stats: IndexStats::default(),
                         building: false,
+                        last_flushed_tx_id: 0,
                     });
 
                 meta.indexes.push(index_meta);

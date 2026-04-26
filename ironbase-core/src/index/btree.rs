@@ -596,6 +596,12 @@ pub struct IndexMetadata {
     /// to prevent using partially populated indexes (which would return incomplete results)
     #[serde(default)]
     pub building: bool,
+    /// WAL-replay recovery watermark (task #26 btree follow-up) — stamped into
+    /// the persisted `.idx` metadata. On reload, ops with `tx_id > watermark`
+    /// are replayed; legacy files without this field deserialize to 0, which
+    /// triggers rebuild-from-catalog fallback.
+    #[serde(default)]
+    pub last_flushed_tx_id: u64,
 }
 
 impl IndexMetadata {
@@ -636,6 +642,7 @@ impl BPlusTree {
                 root_offset: 0,
                 stats: IndexStats::default(),
                 building: false,
+                last_flushed_tx_id: 0,
             },
             counters: StatisticsCounters::default(),
             source_path: None,
@@ -675,6 +682,7 @@ impl BPlusTree {
                 root_offset: 0,
                 stats: IndexStats::default(),
                 building: false,
+                last_flushed_tx_id: 0,
             },
             counters: StatisticsCounters::default(),
             source_path: None,
@@ -729,6 +737,7 @@ impl BPlusTree {
                 root_offset: 0,
                 stats: IndexStats::default(),
                 building: false,
+                last_flushed_tx_id: 0,
             },
             counters: StatisticsCounters::default(),
             source_path: None,
@@ -745,6 +754,21 @@ impl BPlusTree {
     /// Set the building flag (for index creation lifecycle)
     pub fn set_building(&mut self, building: bool) {
         self.metadata.building = building;
+    }
+
+    /// WAL-replay watermark — highest tx_id whose effects are persisted.
+    /// Recovery replays Operation entries with `tx_id > last_flushed_tx_id`.
+    pub fn last_flushed_tx_id(&self) -> u64 {
+        self.metadata.last_flushed_tx_id
+    }
+
+    /// Update the WAL-replay watermark. Monotonic — calls with a smaller
+    /// `tx_id` are silently ignored so a misordered flush cannot rewind
+    /// recovery beyond a previously-persisted point.
+    pub fn set_flushed_tx_id(&mut self, tx_id: u64) {
+        if tx_id > self.metadata.last_flushed_tx_id {
+            self.metadata.last_flushed_tx_id = tx_id;
+        }
     }
 
     /// Get read-only access to statistics counters

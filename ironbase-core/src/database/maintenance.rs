@@ -548,7 +548,7 @@ impl DatabaseCore<StorageEngine> {
             let mut mgr = index_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
             let flush_start = std::time::Instant::now();
-            if mgr.flush_one_btree_index(name, db_path)? {
+            if mgr.flush_one_btree_index(name, db_path, watermark)? {
                 let flush_ms = flush_start.elapsed().as_millis() as u64;
                 tracing::info!(
                     collection = %collection_name, index = %name,
@@ -732,6 +732,7 @@ impl DatabaseCore<StorageEngine> {
             storage.get_file_path().to_string()
         };
 
+        let watermark = self.watermark_tx_id();
         let mut total_flushed = 0usize;
         let index_managers = self.index_managers.read();
         for (collection_name, index_manager) in index_managers.iter() {
@@ -752,7 +753,7 @@ impl DatabaseCore<StorageEngine> {
                 let t = std::time::Instant::now();
                 let mut mgr = index_manager.write();
                 let lock_wait_ms = t.elapsed().as_millis() as u64;
-                if mgr.flush_one_btree_index(name, &db_path)? {
+                if mgr.flush_one_btree_index(name, &db_path, watermark)? {
                     let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
                     tracing::info!(
                         collection = %collection_name, index = %name,
@@ -809,7 +810,7 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
                 log_warn!("Failed to flush fuzzy indexes on drop: {}", e);
             }
             if !db_path.is_empty() {
-                if let Err(e) = manager.flush_btree_indexes(&db_path) {
+                if let Err(e) = manager.flush_btree_indexes(&db_path, watermark) {
                     log_warn!("Failed to flush btree indexes on drop: {}", e);
                 }
                 if let Err(e) = manager.flush_vector_indexes(&db_path, watermark) {

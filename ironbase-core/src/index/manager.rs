@@ -759,7 +759,7 @@ impl IndexManager {
     ///
     /// Returns the number of indexes flushed.
     /// On error, dirty flags are preserved for retry on next flush.
-    pub fn flush_btree_indexes(&mut self, db_path: &str) -> Result<usize> {
+    pub fn flush_btree_indexes(&mut self, db_path: &str, watermark: u64) -> Result<usize> {
         use crate::collection_core::persist_index_to_disk;
 
         // Collect names first to avoid borrowing issues
@@ -768,6 +768,7 @@ impl IndexManager {
 
         for name in dirty_names {
             if let Some(tree) = self.btree_indexes.get_mut(&name) {
+                tree.set_flushed_tx_id(watermark);
                 persist_index_to_disk(db_path, &name, |file| tree.save_to_file(file))?;
                 // Only remove from dirty set AFTER successful write
                 self.dirty_btree_indexes.remove(&name);
@@ -1129,13 +1130,19 @@ impl IndexManager {
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
     /// On error, the dirty flag is preserved for retry.
-    pub fn flush_one_btree_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+    pub fn flush_one_btree_index(
+        &mut self,
+        name: &str,
+        db_path: &str,
+        watermark: u64,
+    ) -> Result<bool> {
         use crate::collection_core::persist_index_to_disk;
 
         if !self.dirty_btree_indexes.contains(name) {
             return Ok(false);
         }
         if let Some(tree) = self.btree_indexes.get_mut(name) {
+            tree.set_flushed_tx_id(watermark);
             persist_index_to_disk(db_path, name, |file| tree.save_to_file(file))?;
             self.dirty_btree_indexes.remove(name);
             Ok(true)

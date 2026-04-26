@@ -14,8 +14,9 @@ use crate::document::DocumentId;
 use crate::error::Result;
 use crate::fulltext::FulltextIndex;
 use crate::index::fuzzy::FuzzyIndex;
+use crate::index::{BPlusTree, IndexKey};
 use crate::transaction::Operation;
-use crate::value_utils::get_nested_value;
+use crate::value_utils::{get_all_nested_values, get_nested_value};
 use crate::vector::HnswIndex;
 
 /// New-state document for an Operation (None for Delete).
@@ -159,6 +160,95 @@ pub fn apply_op_to_hnsw(index: &mut HnswIndex, op: &Operation, field: &str) -> R
         }
     }
     Ok(())
+}
+
+/// Apply a single WAL op to a B+ tree index.
+///
+/// Idempotency: btree `insert(key, doc_id)` is NOT idempotent (unique check
+/// errors on duplicate; non-unique would push a second entry). The replay
+/// path enforces idempotency at the helper layer with `delete(key, doc_id)`
+/// before every `insert(key, doc_id)` — `delete` is a no-op when the entry
+/// is absent, so first-time replay works and replay-twice converges to the
+/// same single-entry state.
+///
+/// Insert: extract index keys from `doc` via `tree.extract_keys()` (handles
+/// single-field, compound, and multikey/array fields). Apply sparse + null
+/// filtering matching `IndexManager::add_document_to_indexes`. For each
+/// retained key: `delete(k, doc_id)` then `insert(k, doc_id)`.
+///
+/// Update: same as Insert for `new_doc`, plus `delete(old_key, doc_id)` for
+/// every key extracted from `old_doc` (catches field-value changes).
+///
+/// Delete: `delete(old_key, doc_id)` for every key from `old_doc`.
+///
+/// The caller is responsible for marking the index dirty afterwards if the
+/// post-replay memory state must be persisted at next checkpoint
+/// (`265f0c2e` btree dirty marking rule).
+#[allow(dead_code)] // Wired up in Phase B4 (initialize_index_manager replay)
+pub fn apply_op_to_btree(tree: &mut BPlusTree, op: &Operation) -> Result<()> {
+    let doc_id = doc_id_of(op);
+
+    match op {
+        Operation::Insert { doc, .. } => {
+            let keys = extract_indexable_btree_keys(tree, doc);
+            for k in keys {
+                tree.delete(&k, doc_id)?;
+                tree.insert(k, doc_id.clone())?;
+            }
+        }
+        Operation::Update {
+            old_doc, new_doc, ..
+        } => {
+            let old_keys = extract_indexable_btree_keys(tree, old_doc);
+            let new_keys = extract_indexable_btree_keys(tree, new_doc);
+            for k in &old_keys {
+                tree.delete(k, doc_id)?;
+            }
+            for k in new_keys {
+                tree.delete(&k, doc_id)?;
+                tree.insert(k, doc_id.clone())?;
+            }
+        }
+        Operation::Delete { old_doc, .. } => {
+            let keys = extract_indexable_btree_keys(tree, old_doc);
+            for k in &keys {
+                tree.delete(k, doc_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mirror of the key-filtering logic from
+/// `IndexManager::add_document_to_indexes` (sparse + null + dedup), reused
+/// here so replay produces the same set of indexed keys as the runtime path.
+#[allow(dead_code)] // Wired up in Phase B4 (initialize_index_manager replay)
+fn extract_indexable_btree_keys(tree: &BPlusTree, doc: &Value) -> Vec<IndexKey> {
+    // Sparse compound: skip if any indexed field is absent
+    if tree.metadata.sparse
+        && tree.metadata.is_compound()
+        && tree
+            .metadata
+            .fields
+            .iter()
+            .any(|field| get_all_nested_values(doc, field).is_empty())
+    {
+        return Vec::new();
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for key in tree.extract_keys(doc) {
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let is_null = crate::index::IndexManager::is_key_all_null(&key);
+        let should_index = !is_null || (tree.metadata.unique && !tree.metadata.sparse);
+        if should_index {
+            result.push(key);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

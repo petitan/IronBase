@@ -727,6 +727,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 root_offset: 0,
                 stats: crate::index::IndexStats::default(),
                 building: false, // _id index is ready when loaded
+                last_flushed_tx_id: 0,
             };
             if let Some(loaded_tree) =
                 crate::collection_core::try_load_index_from_file(&db_path, &id_meta)

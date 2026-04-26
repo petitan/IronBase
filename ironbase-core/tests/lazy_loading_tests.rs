@@ -32,6 +32,7 @@ fn test_metadata(name: &str, field: &str) -> IndexMetadata {
         root_offset: 0,
         stats: IndexStats::default(),
         building: false,
+        last_flushed_tx_id: 0,
     }
 }
 
