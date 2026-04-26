@@ -876,6 +876,71 @@ mod tests {
         assert_eq!(collection_name, None);
     }
 
+    // ========== Task #26 btree follow-up: WAL-replay recovery ==========
+
+    /// Verify that a B+ tree index recovers correctly after an unclean
+    /// shutdown when some inserts were checkpointed and others were only
+    /// WAL-committed. After reopen, every doc must be findable via the
+    /// indexed field — proves both the persisted-and-replayed boundary and
+    /// that `apply_op_to_btree` produces the same key set as the runtime
+    /// `add_document_to_indexes` path.
+    #[test]
+    fn btree_wal_replay_after_crash() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        {
+            let db = DatabaseCore::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+
+            // Insert 10 docs, checkpoint to flush the btree (.idx) with watermark
+            for i in 0..10u32 {
+                let doc = std::collections::HashMap::from([
+                    ("_id".to_string(), json!(i)),
+                    ("score".to_string(), json!(i as i32 * 10)),
+                ]);
+                db.insert_one("docs", doc).unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Insert 5 more docs after the checkpoint — these live only in
+            // the WAL (the btree's persisted state is snapshot-at-watermark).
+            for i in 10..15u32 {
+                let doc = std::collections::HashMap::from([
+                    ("_id".to_string(), json!(i)),
+                    ("score".to_string(), json!(i as i32 * 10)),
+                ]);
+                db.insert_one("docs", doc).unwrap();
+            }
+
+            // Unclean shutdown: file lock released, on-disk clean_shutdown=false
+            db.simulate_crash_for_test();
+        }
+
+        // Reopen — recovery applies WAL ops to the btree via apply_op_to_btree
+        let db = DatabaseCore::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+
+        // Document count must be exactly 15 (10 checkpointed + 5 WAL-only)
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 15, "all 15 docs must be present after crash");
+
+        // Each indexed value must resolve through the btree (i.e., the index
+        // contains every key, both pre- and post-checkpoint).
+        for i in 0..15u32 {
+            let docs = coll.find(&json!({"score": i as i32 * 10})).unwrap();
+            assert_eq!(
+                docs.len(),
+                1,
+                "doc {} (score={}) should be findable via btree after replay",
+                i,
+                i * 10
+            );
+        }
+    }
+
     // ========== MemoryStorage Tests ==========
 
     #[test]

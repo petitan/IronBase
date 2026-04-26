@@ -12,7 +12,6 @@ mod index_replay_ops;
 mod operation_replay;
 
 pub use index_replay::{IndexOperation, IndexReplay, IndexReplayStats, RecoveredIndexChange};
-#[allow(unused_imports)] // apply_op_to_btree wired up in Phase B4
 pub(crate) use index_replay_ops::{
     apply_op_to_btree, apply_op_to_fulltext, apply_op_to_fuzzy, apply_op_to_hnsw, collection_of,
 };

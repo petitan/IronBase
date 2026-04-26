@@ -184,7 +184,6 @@ pub fn apply_op_to_hnsw(index: &mut HnswIndex, op: &Operation, field: &str) -> R
 /// The caller is responsible for marking the index dirty afterwards if the
 /// post-replay memory state must be persisted at next checkpoint
 /// (`265f0c2e` btree dirty marking rule).
-#[allow(dead_code)] // Wired up in Phase B4 (initialize_index_manager replay)
 pub fn apply_op_to_btree(tree: &mut BPlusTree, op: &Operation) -> Result<()> {
     let doc_id = doc_id_of(op);
 
@@ -222,7 +221,6 @@ pub fn apply_op_to_btree(tree: &mut BPlusTree, op: &Operation) -> Result<()> {
 /// Mirror of the key-filtering logic from
 /// `IndexManager::add_document_to_indexes` (sparse + null + dedup), reused
 /// here so replay produces the same set of indexed keys as the runtime path.
-#[allow(dead_code)] // Wired up in Phase B4 (initialize_index_manager replay)
 fn extract_indexable_btree_keys(tree: &BPlusTree, doc: &Value) -> Vec<IndexKey> {
     // Sparse compound: skip if any indexed field is absent
     if tree.metadata.sparse

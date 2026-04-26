@@ -544,12 +544,18 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///   `last_flushed_tx_id == 0`, i.e. a legacy V3/pre-watermark file; or a
     ///   helper returned an error). Caller must fall back to rebuild.
     ///
-    /// Note: this does NOT change the behavior for btree indexes — btree has
-    /// its own WAL `IndexChange` replay path in `database/mod.rs::open_with_durability`
-    /// and the existing `has_btree_without_file` logic still drives btree rebuild.
+    /// btree replay (task #26 btree follow-up) reuses the same watermark
+    /// pattern as non-btree indexes: skip if the loaded `.idx` has
+    /// `last_flushed_tx_id == 0` (legacy file → rebuild fallback). Successful
+    /// btree replay marks each index dirty (`265f0c2e` rule) so the next
+    /// checkpoint persists the post-replay state with the new watermark.
+    /// The legacy `IndexChange` apply path in `database/mod.rs` still runs
+    /// for transient correctness; btree's delete-then-insert idempotency in
+    /// `apply_op_to_btree` keeps the two paths from corrupting each other.
     fn try_wal_replay_for_collection(
         index_manager: &mut IndexManager,
         recovered_ops: &[(TransactionId, Operation)],
+        persisted_btree: &[crate::index::IndexMetadata],
         persisted_fuzzy: &[crate::index::fuzzy::FuzzyIndexMetadata],
         persisted_fulltext: &[crate::fulltext::FulltextIndexMetadata],
         persisted_vector: &[crate::vector::VectorIndexMetadata],
@@ -618,6 +624,33 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     }
                 }
             }
+        }
+
+        // B+ tree (task #26 btree follow-up)
+        for bt_meta in persisted_btree {
+            let watermark = match index_manager.get_btree_index(&bt_meta.name) {
+                Some(idx) => {
+                    // Loaded-but-non-empty btree with watermark=0 = legacy `.idx`
+                    // file (pre-task-#26 build) — we cannot tell which ops are
+                    // already reflected, so the safe path is rebuild fallback.
+                    if idx.last_flushed_tx_id() == 0 && idx.size() > 0 {
+                        return Ok(false);
+                    }
+                    idx.last_flushed_tx_id()
+                }
+                None => continue, // index wasn't loaded — rebuild path will handle it
+            };
+            if let Some(idx) = index_manager.get_btree_index_mut(&bt_meta.name) {
+                for (tx_id, op) in recovered_ops {
+                    if *tx_id > watermark {
+                        crate::recovery::apply_op_to_btree(idx, op)?;
+                    }
+                }
+            }
+            // 265f0c2e rule: any successful mutation must mark the index dirty
+            // so the next checkpoint persists the post-replay state (and the
+            // updated `last_flushed_tx_id` along with it).
+            index_manager.mark_btree_dirty(&bt_meta.name);
         }
 
         Ok(true)
@@ -927,6 +960,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             match Self::try_wal_replay_for_collection(
                 &mut index_manager,
                 &recovered_ops_for_collection,
+                &persisted_indexes,
                 &persisted_fuzzy_indexes,
                 &persisted_fulltext_indexes,
                 &persisted_vector_indexes,
