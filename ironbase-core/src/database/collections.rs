@@ -993,6 +993,48 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             false
         };
 
+        // One-time auto-migration: a v1.0.477+ binary opening a DB whose `.idx`
+        // files were written by an older binary (pre-watermark) needs to
+        // re-flush them in the new format on this clean reopen, otherwise
+        // every subsequent SIGKILL falls back to rebuild-from-catalog because
+        // `last_flushed_tx_id == 0 && size > 0` trips the safety rail in
+        // `try_wal_replay_for_collection`. We only run this on `was_clean==true`
+        // (the loaded `.idx` is trusted) and only for indexes that show the
+        // legacy signature; subsequent reopens are no-ops because the watermark
+        // is now > 0.
+        if was_clean {
+            let watermark = self.watermark_tx_id();
+            let needs_migration: Vec<String> = persisted_indexes
+                .iter()
+                .filter_map(|meta| {
+                    let was_loaded = btree_indexes_loaded_from_file.contains(&meta.name)
+                        || (meta.name == id_index_name && id_index_loaded);
+                    if !was_loaded {
+                        return None;
+                    }
+                    let idx = index_manager.get_btree_index(&meta.name)?;
+                    if idx.last_flushed_tx_id() == 0 && idx.size() > 0 {
+                        Some(meta.name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !needs_migration.is_empty() {
+                log_info!(
+                    "Collection '{}': migrating {} btree index(es) to watermark format (one-time, watermark={})",
+                    name,
+                    needs_migration.len(),
+                    watermark
+                );
+                for n in &needs_migration {
+                    index_manager.mark_btree_dirty(n);
+                }
+                index_manager.flush_btree_indexes(&db_path, watermark)?;
+            }
+        }
+
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
 
