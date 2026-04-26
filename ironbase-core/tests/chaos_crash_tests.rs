@@ -754,13 +754,13 @@ fn test_wal_recovery_mixed_operations_metadata() {
         let update_op = ironbase_core::transaction::Operation::Update {
             collection: "mixed".to_string(),
             doc_id: ironbase_core::document::DocumentId::Int(2),
-            old_doc: json!({"_id": 2, "value": 20}),
-            new_doc: json!({
+            old_doc: std::sync::Arc::new(json!({"_id": 2, "value": 20})),
+            new_doc: std::sync::Arc::new(json!({
                 "_id": 2,
                 "_collection": "mixed",
                 "value": 200,
                 "updated": true
-            }),
+            })),
         };
         let update_json = serde_json::to_string(&update_op).unwrap();
         wal.append(&WALEntry::new(
@@ -774,7 +774,7 @@ fn test_wal_recovery_mixed_operations_metadata() {
         let delete_op = ironbase_core::transaction::Operation::Delete {
             collection: "mixed".to_string(),
             doc_id: ironbase_core::document::DocumentId::Int(1),
-            old_doc: json!({"_id": 1, "value": 10}),
+            old_doc: std::sync::Arc::new(json!({"_id": 1, "value": 10})),
         };
         let delete_json = serde_json::to_string(&delete_op).unwrap();
         wal.append(&WALEntry::new(

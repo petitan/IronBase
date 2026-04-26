@@ -1381,15 +1381,27 @@ impl StorageEngine {
                     old_doc,
                     new_doc,
                 } => {
-                    let mut old_clone = old_doc.clone();
-                    let mut new_clone = new_doc.clone();
-                    inject_collection(&mut old_clone, collection);
-                    inject_collection(&mut new_clone, collection);
+                    fn maybe_inject(
+                        arc: &std::sync::Arc<serde_json::Value>,
+                        collection: &str,
+                    ) -> std::sync::Arc<serde_json::Value> {
+                        let needs = match arc.as_ref() {
+                            serde_json::Value::Object(map) => !map.contains_key("_collection"),
+                            _ => false,
+                        };
+                        if needs {
+                            let mut cloned = (**arc).clone();
+                            inject_collection(&mut cloned, collection);
+                            std::sync::Arc::new(cloned)
+                        } else {
+                            std::sync::Arc::clone(arc)
+                        }
+                    }
                     Operation::Update {
                         collection: collection.clone(),
                         doc_id: doc_id.clone(),
-                        old_doc: old_clone,
-                        new_doc: new_clone,
+                        old_doc: maybe_inject(old_doc, collection),
+                        new_doc: maybe_inject(new_doc, collection),
                     }
                 }
                 Operation::Delete {
@@ -1397,12 +1409,21 @@ impl StorageEngine {
                     doc_id,
                     old_doc,
                 } => {
-                    let mut old_clone = old_doc.clone();
-                    inject_collection(&mut old_clone, collection);
+                    let needs_inject = match old_doc.as_ref() {
+                        serde_json::Value::Object(map) => !map.contains_key("_collection"),
+                        _ => false,
+                    };
+                    let old_out = if needs_inject {
+                        let mut cloned = (**old_doc).clone();
+                        inject_collection(&mut cloned, collection);
+                        std::sync::Arc::new(cloned)
+                    } else {
+                        std::sync::Arc::clone(old_doc)
+                    };
                     Operation::Delete {
                         collection: collection.clone(),
                         doc_id: doc_id.clone(),
-                        old_doc: old_clone,
+                        old_doc: old_out,
                     }
                 }
             }
@@ -1654,7 +1675,7 @@ impl StorageEngine {
                     new_doc,
                 } => {
                     // Write new version of document (append-only) with catalog update
-                    let doc_json = serde_json::to_string(new_doc)
+                    let doc_json = serde_json::to_string(new_doc.as_ref())
                         .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                     // Use write_document_raw to properly update document_catalog
                     self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
@@ -1720,7 +1741,7 @@ impl StorageEngine {
                 let _ = self.create_collection(collection);
 
                 // Write new version with FULL metadata update
-                let doc_json = serde_json::to_string(new_doc)
+                let doc_json = serde_json::to_string(new_doc.as_ref())
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
             }

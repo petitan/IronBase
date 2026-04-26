@@ -26,8 +26,8 @@ mod property_tests {
                 Operation::Update {
                     collection: "test".to_string(),
                     doc_id: DocumentId::Int(id),
-                    old_doc: json!({"id": id, "name": old_name}),
-                    new_doc: json!({"id": id, "name": new_name}),
+                    old_doc: std::sync::Arc::new(json!({"id": id, "name": old_name})),
+                    new_doc: std::sync::Arc::new(json!({"id": id, "name": new_name})),
                 }
             }),
             // Delete operations
@@ -35,7 +35,7 @@ mod property_tests {
                 Operation::Delete {
                     collection: "test".to_string(),
                     doc_id: DocumentId::Int(id),
-                    old_doc: json!({"id": id, "name": name}),
+                    old_doc: std::sync::Arc::new(json!({"id": id, "name": name})),
                 }
             }),
         ]

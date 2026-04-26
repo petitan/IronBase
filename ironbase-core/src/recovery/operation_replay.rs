@@ -148,7 +148,7 @@ impl OperationReplay {
                 let _ = storage.create_collection(collection);
 
                 // Write updated document using raw storage
-                let doc_json = serde_json::to_string(new_doc)
+                let doc_json = serde_json::to_string(new_doc.as_ref())
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
             }
@@ -295,8 +295,8 @@ mod tests {
         let update_op = Operation::Update {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            old_doc: json!({"_id": 1, "name": "Alice"}),
-            new_doc: json!({"_id": 1, "name": "Alice Updated"}),
+            old_doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
+            new_doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice Updated"})),
         };
 
         let update_entry_data = serde_json::to_vec(&update_op).unwrap();
@@ -329,7 +329,7 @@ mod tests {
         let delete_op = Operation::Delete {
             collection: "test".to_string(),
             doc_id: DocumentId::Int(1),
-            old_doc: json!({"_id": 1, "name": "Alice"}),
+            old_doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
         };
 
         let delete_entry_data = serde_json::to_vec(&delete_op).unwrap();
@@ -361,13 +361,13 @@ mod tests {
             Operation::Update {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),
-                old_doc: json!({"_id": 1, "name": "Alice"}),
-                new_doc: json!({"_id": 1, "name": "Alice Smith"}),
+                old_doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice"})),
+                new_doc: std::sync::Arc::new(json!({"_id": 1, "name": "Alice Smith"})),
             },
             Operation::Delete {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(2),
-                old_doc: json!({"_id": 2, "name": "Bob"}),
+                old_doc: std::sync::Arc::new(json!({"_id": 2, "name": "Bob"})),
             },
         ];
 

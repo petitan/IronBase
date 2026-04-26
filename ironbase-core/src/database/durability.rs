@@ -620,8 +620,12 @@ impl DatabaseCore<StorageEngine> {
                     auto_tx.add_operation(Operation::Update {
                         collection: collection_name.to_string(),
                         doc_id,
-                        old_doc: prepared.old_doc.clone().unwrap_or(Value::Null),
-                        new_doc: prepared.new_doc.clone().unwrap_or(Value::Null),
+                        old_doc: std::sync::Arc::new(
+                            prepared.old_doc.clone().unwrap_or(Value::Null),
+                        ),
+                        new_doc: std::sync::Arc::new(
+                            prepared.new_doc.clone().unwrap_or(Value::Null),
+                        ),
                     })?;
                     auto_tx.mark_operations_applied();
 
@@ -647,8 +651,8 @@ impl DatabaseCore<StorageEngine> {
 
                 // 2. BUFFER: Store prepared data for later persist
                 let doc_id = prepared.doc_id.clone();
-                let old_doc = prepared.old_doc.clone();
-                let new_doc = prepared.new_doc.clone();
+                let old_doc = std::sync::Arc::new(prepared.old_doc.clone());
+                let new_doc = std::sync::Arc::new(prepared.new_doc.clone());
 
                 {
                     let mut doc_buffer = self.batch_doc_buffer.write();
@@ -870,7 +874,7 @@ impl DatabaseCore<StorageEngine> {
                 auto_tx.add_operation(Operation::Delete {
                     collection: collection_name.to_string(),
                     doc_id,
-                    old_doc: prepared.old_doc.clone().unwrap_or(Value::Null),
+                    old_doc: std::sync::Arc::new(prepared.old_doc.clone().unwrap_or(Value::Null)),
                 })?;
                 auto_tx.mark_operations_applied();
 
@@ -895,7 +899,7 @@ impl DatabaseCore<StorageEngine> {
 
                 // 2. BUFFER: Store prepared data for later persist
                 let doc_id = prepared.doc_id.clone();
-                let old_doc = prepared.old_doc.clone();
+                let old_doc = std::sync::Arc::new(prepared.old_doc.clone());
 
                 {
                     let mut doc_buffer = self.batch_doc_buffer.write();
@@ -1145,8 +1149,8 @@ impl DatabaseCore<StorageEngine> {
                         auto_tx.add_operation(Operation::Update {
                             collection: collection_name.to_string(),
                             doc_id: doc_id.clone(),
-                            old_doc: old_doc.clone(),
-                            new_doc: new_doc.clone(),
+                            old_doc: std::sync::Arc::new(old_doc.clone()),
+                            new_doc: std::sync::Arc::new(new_doc.clone()),
                         })?;
                     }
 
@@ -1184,12 +1188,18 @@ impl DatabaseCore<StorageEngine> {
                 let modified = prepared.modified;
 
                 if modified > 0 {
-                    // PHASE 2: Collect WAL entries before moving prepared into buffer
+                    // PHASE 2: Collect WAL entries before moving prepared into buffer.
+                    // Wrap Values in Arc so add_to_batch / flush_batch / commit only
+                    // bump refcounts instead of deep-cloning per op.
                     let wal_entries: Vec<_> = prepared
                         .wal_entries
                         .iter()
                         .map(|(doc_id, old_doc, new_doc)| {
-                            (doc_id.clone(), old_doc.clone(), new_doc.clone())
+                            (
+                                doc_id.clone(),
+                                std::sync::Arc::new(old_doc.clone()),
+                                std::sync::Arc::new(new_doc.clone()),
+                            )
                         })
                         .collect();
 
@@ -1286,7 +1296,7 @@ impl DatabaseCore<StorageEngine> {
                         auto_tx.add_operation(Operation::Delete {
                             collection: collection_name.to_string(),
                             doc_id: doc_id.clone(),
-                            old_doc: old_doc.clone(),
+                            old_doc: std::sync::Arc::new(old_doc.clone()),
                         })?;
                     }
 
@@ -1323,11 +1333,15 @@ impl DatabaseCore<StorageEngine> {
                 let deleted = prepared.deleted;
 
                 if deleted > 0 {
-                    // PHASE 2: Collect WAL entries before moving prepared into buffer
+                    // PHASE 2: Collect WAL entries before moving prepared into buffer.
+                    // Wrap old_doc in Arc so add_to_batch / flush_batch / commit only
+                    // bump refcounts instead of deep-cloning per delete op.
                     let wal_entries: Vec<_> = prepared
                         .wal_entries
                         .iter()
-                        .map(|(doc_id, old_doc)| (doc_id.clone(), old_doc.clone()))
+                        .map(|(doc_id, old_doc)| {
+                            (doc_id.clone(), std::sync::Arc::new(old_doc.clone()))
+                        })
                         .collect();
 
                     // PHASE 3: BUFFER prepared data for later persist (after WAL commit)

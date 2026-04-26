@@ -185,7 +185,7 @@ mod tests {
         Operation::Delete {
             collection: "test".to_string(),
             doc_id,
-            old_doc: json!({}),
+            old_doc: std::sync::Arc::new(json!({})),
         }
     }
 
@@ -193,8 +193,8 @@ mod tests {
         Operation::Update {
             collection: "test".to_string(),
             doc_id,
-            old_doc: json!({}),
-            new_doc,
+            old_doc: std::sync::Arc::new(json!({})),
+            new_doc: std::sync::Arc::new(new_doc),
         }
     }
 

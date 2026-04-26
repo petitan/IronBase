@@ -143,8 +143,8 @@ mod integration_tests {
         tx.add_operation(Operation::Update {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(1),
-            old_doc: json!({"name": "Item 1"}),
-            new_doc: json!({"name": "Updated Item 1"}),
+            old_doc: std::sync::Arc::new(json!({"name": "Item 1"})),
+            new_doc: std::sync::Arc::new(json!({"name": "Updated Item 1"})),
         })
         .unwrap();
 
@@ -158,7 +158,7 @@ mod integration_tests {
         tx.add_operation(Operation::Delete {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(2),
-            old_doc: json!({"name": "Item 2"}),
+            old_doc: std::sync::Arc::new(json!({"name": "Item 2"})),
         })
         .unwrap();
 
@@ -242,8 +242,8 @@ mod integration_tests {
             .add_operation(Operation::Update {
                 collection: "isolation_test".to_string(),
                 doc_id: DocumentId::Int(1),
-                old_doc: json!({"value": 100}),
-                new_doc: json!({"value": 200}),
+                old_doc: std::sync::Arc::new(json!({"value": 100})),
+                new_doc: std::sync::Arc::new(json!({"value": 200})),
             })
             .unwrap();
         db.update_transaction(tx2, tx2_obj).unwrap();
@@ -256,7 +256,7 @@ mod integration_tests {
             .add_operation(Operation::Delete {
                 collection: "isolation_test".to_string(),
                 doc_id: DocumentId::Int(1),
-                old_doc: json!({"value": 200}),
+                old_doc: std::sync::Arc::new(json!({"value": 200})),
             })
             .unwrap();
         db.update_transaction(tx3, tx3_obj).unwrap();

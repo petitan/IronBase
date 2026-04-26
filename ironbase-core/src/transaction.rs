@@ -54,14 +54,26 @@ pub enum Operation {
     Update {
         collection: String,
         doc_id: DocumentId,
-        old_doc: Value,
-        new_doc: Value,
+        #[serde(
+            serialize_with = "serialize_arc_value",
+            deserialize_with = "deserialize_arc_value"
+        )]
+        old_doc: Arc<Value>,
+        #[serde(
+            serialize_with = "serialize_arc_value",
+            deserialize_with = "deserialize_arc_value"
+        )]
+        new_doc: Arc<Value>,
     },
     /// Delete a document
     Delete {
         collection: String,
         doc_id: DocumentId,
-        old_doc: Value, // For potential rollback
+        #[serde(
+            serialize_with = "serialize_arc_value",
+            deserialize_with = "deserialize_arc_value"
+        )]
+        old_doc: Arc<Value>, // For potential rollback
     },
 }
 

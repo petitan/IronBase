@@ -183,8 +183,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             tx.add_operation(Operation::Update {
                 collection: self.name.clone(),
                 doc_id: doc_id.clone(),
-                old_doc: old_doc.clone(),
-                new_doc: new_doc_value.clone(),
+                old_doc: std::sync::Arc::new(old_doc.clone()),
+                new_doc: std::sync::Arc::new(new_doc_value.clone()),
             })?;
 
             // Track index changes for two-phase commit
@@ -258,7 +258,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             tx.add_operation(Operation::Delete {
                 collection: self.name.clone(),
                 doc_id: doc_id.clone(),
-                old_doc: old_doc.clone(),
+                old_doc: std::sync::Arc::new(old_doc.clone()),
             })?;
 
             // Track index changes for two-phase commit
