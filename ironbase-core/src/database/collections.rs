@@ -754,8 +754,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         } else {
             self.take_recovered_operations_for_collection(name)
         };
+        // Run the watermark-checking replay path on every dirty reopen, even
+        // when the WAL has no committed ops for this collection. With an
+        // empty op set the replay loops trivially complete; the value is the
+        // safety-rail check itself, which tells `wal_replay_succeeded` to
+        // trust the loaded `.idx`/`.ftidx`/`.fzidx`/`.hnsw` state and skip
+        // the rebuild path. Without this, a read-mostly DB with no pending
+        // ops can never escape rebuild-from-catalog after a SIGKILL.
         let can_try_replay = !was_clean
-            && !recovered_ops_for_collection.is_empty()
             && recovered_ops_for_collection.len() <= crate::limits::MAX_REPLAY_OPS_PER_COLLECTION;
 
         if can_try_replay {
