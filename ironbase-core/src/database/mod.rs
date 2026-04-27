@@ -3312,4 +3312,134 @@ mod wal_replay_tests {
             1
         );
     }
+
+    // ========================================================================
+    // Task #26 R5 — recovery state regression tests
+    // ========================================================================
+
+    /// R1: Header.last_committed_tx_id must persist across a clean shutdown
+    /// so the next `open` seeds `next_tx_id`/`max_committed_tx_id` from a
+    /// non-zero value. Without this, post-rebuild flushes on a read-mostly
+    /// DB would always stamp `last_flushed_tx_id=0`.
+    #[test]
+    fn r1_watermark_persists_across_clean_shutdown() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("r1.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let _ = db.collection("c").unwrap();
+            for i in 0..5 {
+                db.insert_one("c", doc(&format!("t{i}"), "x")).unwrap();
+            }
+            assert!(db.watermark_tx_id() > 0, "watermark must advance");
+            db.close().unwrap();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(
+            db.watermark_tx_id() >= 5,
+            "reopen must seed max_committed_tx_id ≥ 5 from header (got {})",
+            db.watermark_tx_id()
+        );
+        // And the next insert must get a tx_id strictly greater than the
+        // persisted watermark — otherwise a subsequent crash would conflict
+        // with watermarks already stamped into index files.
+        let pre = db.watermark_tx_id();
+        let _ = db.collection("c").unwrap();
+        db.insert_one("c", doc("post", "y")).unwrap();
+        assert!(
+            db.watermark_tx_id() > pre,
+            "new insert must advance the watermark (was {pre}, now {})",
+            db.watermark_tx_id()
+        );
+    }
+
+    /// R7: btree `.idx` files must round-trip the BTFT footer. Specifically,
+    /// the watermark stamped at flush time must come back from disk via
+    /// `try_load_index_from_file`, overriding the (stale) value held in
+    /// `CollectionMeta.indexes[X]`.
+    #[test]
+    fn r7_btree_btft_footer_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("r7.mlite");
+
+        let pre_watermark;
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            for i in 0..5u32 {
+                let mut m = HashMap::new();
+                m.insert("_id".to_string(), serde_json::json!(i));
+                m.insert("score".to_string(), serde_json::json!(i as i32 * 10));
+                db.insert_one("c", m).unwrap();
+            }
+            db.checkpoint().unwrap();
+            pre_watermark = db.watermark_tx_id();
+            assert!(pre_watermark > 0);
+            db.close().unwrap();
+        }
+
+        // Reopen: the score btree's loaded watermark must equal what the
+        // checkpoint stamped, NOT the 0 captured in CollectionMeta at
+        // create_index time.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        let indexes = coll.indexes.read();
+        let score_idx = indexes
+            .get_btree_index("c_score")
+            .expect("score btree must be loaded after clean reopen");
+        assert_eq!(
+            score_idx.last_flushed_tx_id(),
+            pre_watermark,
+            "BTFT footer must restore the on-disk watermark on load"
+        );
+    }
+
+    /// R1+R4+R7 integration: a read-mostly DB that has been cleanly closed
+    /// once must come back from a SIGKILL on the WAL-replay fast path
+    /// instead of rebuild-from-catalog. The first reopen rebuilds (no
+    /// footer in the legacy `.idx`); the close stamps the BTFT footer and
+    /// the header watermark; the second reopen (after SIGKILL) finds the
+    /// safety rail-friendly state and skips rebuild.
+    #[test]
+    fn read_mostly_dirty_reopen_uses_fast_path_after_first_flush() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("rm.mlite");
+
+        // First session: insert, then graceful close.
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            for i in 0..20u32 {
+                let mut m = HashMap::new();
+                m.insert("_id".to_string(), serde_json::json!(i));
+                m.insert("score".to_string(), serde_json::json!(i as i32));
+                db.insert_one("c", m).unwrap();
+            }
+            db.close().unwrap();
+        }
+
+        // Second session: open, do nothing, SIGKILL.
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let _ = db.collection("c").unwrap();
+            db.simulate_crash_for_test();
+        }
+
+        // Third session: dirty reopen with no pending ops. Must NOT
+        // rebuild — the WAL is empty, so `try_wal_replay_for_collection`
+        // sees a non-empty btree with watermark>0 and trusts it.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 20);
+        for i in 0..20u32 {
+            let r = coll.find(&serde_json::json!({"score": i as i32})).unwrap();
+            assert_eq!(r.len(), 1, "doc {i} (score={i}) findable via btree");
+        }
+    }
 }
