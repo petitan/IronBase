@@ -81,31 +81,27 @@ pub(crate) enum IndexLoadStrategy {
     EmptyForRebuild,
 }
 
-/// Decide how to bring a persisted **B+ tree** index online at startup.
+/// Decide how to bring a persisted index online at startup (task #26 R4).
 ///
-/// Strict — only trust on clean shutdown (`9ff48302` Stale Index Loading
-/// protection). The btree path goes through the legacy `IndexChange` WAL
-/// replay in `database/mod.rs:480-495` rather than the watermark-based
-/// `apply_op_to_btree` path, so dirty-shutdown trust would re-introduce
-/// the phantom-duplicate bug. R4 will swap this for the per-watermark
-/// check once the legacy path is folded into the unified one.
-pub(crate) fn decide_btree_load_strategy(was_clean: bool) -> IndexLoadStrategy {
-    if was_clean {
-        IndexLoadStrategy::LoadFromFile
-    } else {
-        IndexLoadStrategy::EmptyForRebuild
-    }
-}
-
-/// Decide how to bring a persisted **non-btree** (fuzzy/fulltext/HNSW)
-/// index online at startup.
-///
-/// Trust on clean shutdown OR when the watermark-based WAL replay path is
-/// viable (`can_try_replay` — bounded pending ops on a dirty reopen, the
-/// safety rail inside `try_wal_replay_for_collection` will drop the file
-/// if its watermark is missing and ops are pending). Phase A atomic flush
-/// makes the file safe to load even after a crash.
-pub(crate) fn decide_non_btree_load_strategy(
+/// Unified across all four index families (btree / fuzzy / fulltext / HNSW).
+/// Trust the persisted file on clean shutdown OR when the watermark-based
+/// WAL replay path is viable (`can_try_replay` — bounded pending ops on a
+/// dirty reopen). The `9ff48302` Stale Index Loading protection used to
+/// gate this on `was_clean` alone for btree, but two newer mechanisms
+/// supersede that strictness:
+///   1. R7 BTFT footer (`5df37968`) — every `.idx` carries its real
+///      `last_flushed_tx_id`. The safety rail inside
+///      `try_wal_replay_for_collection` drops a non-empty btree whose
+///      footer watermark is 0 *and* there are pending ops we cannot
+///      attribute, falling back to rebuild from catalog.
+///   2. `apply_op_to_btree` uses delete-then-insert idempotency, so even
+///      when the legacy `IndexChange` apply path in `database/mod.rs`
+///      runs in parallel on dirty shutdown the two writers converge to
+///      the same single-entry state instead of duplicating keys.
+/// Phase A atomic flush (`fab5d97e` / `84638dea` / `26af2ffd`) makes the
+/// `.idx` / `.ftidx` / `.fzidx` / `.hnsw` files safe to load even after
+/// a crash.
+pub(crate) fn decide_index_load_strategy(
     was_clean: bool,
     can_try_replay: bool,
 ) -> IndexLoadStrategy {
@@ -251,11 +247,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         use crate::log_debug;
         let mut loaded_from_file = std::collections::HashSet::new();
 
-        // Btree strict load — `9ff48302` Stale Index Loading. R4 will swap
-        // this for the watermark-based check once the legacy `IndexChange`
-        // apply path is folded into the unified one.
-        let _ = can_try_replay; // currently unused on btree (R4)
-        let strategy = decide_btree_load_strategy(was_clean);
+        // Unified load decision — same rule across btree and non-btree.
+        // The R7 BTFT footer carries the real watermark; the safety rail
+        // in `try_wal_replay_for_collection` catches stale legacy `.idx`
+        // files (no footer → caller's metadata watermark = 0) when ops
+        // are pending and falls back to rebuild from catalog.
+        let strategy = decide_index_load_strategy(was_clean, can_try_replay);
 
         for index_meta in persisted_indexes {
             // Skip _id index (already created)
@@ -838,11 +835,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             );
         }
 
-        // Try to load _id index from .idx file via the btree decision
+        // Try to load _id index from .idx file via the unified decision
         // helper. Empty catalog → nothing to load (the index would always
         // be empty); rebuild path is a no-op in that case.
         let id_index_loaded = if !catalog.is_empty()
-            && decide_btree_load_strategy(was_clean) == IndexLoadStrategy::LoadFromFile
+            && decide_index_load_strategy(was_clean, can_try_replay)
+                == IndexLoadStrategy::LoadFromFile
         {
             // Create a fake metadata for _id index loading
             let id_meta = crate::index::IndexMetadata {
@@ -889,7 +887,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Load persisted custom indexes (delegated to helper).
         // Strategy unified across all four index families via
-        // helpers `decide_btree_load_strategy(was_clean)` and `decide_non_btree_load_strategy(was_clean, can_try_replay)`.
+        // unified helper `decide_index_load_strategy(was_clean, can_try_replay)`.
         let btree_indexes_loaded_from_file = Self::load_persisted_indexes(
             &mut index_manager,
             &persisted_indexes,
@@ -914,7 +912,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let mut all_non_btree_loaded = true;
         for fuzzy_meta in &persisted_fuzzy_indexes {
             let mut loaded = false;
-            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+            if decide_index_load_strategy(was_clean, can_try_replay)
                 == IndexLoadStrategy::LoadFromFile
             {
                 if let Some(loaded_index) =
@@ -956,7 +954,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // ops can be applied without doing a full rebuild-from-catalog.
         for fts_meta in &persisted_fulltext_indexes {
             let mut loaded = false;
-            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+            if decide_index_load_strategy(was_clean, can_try_replay)
                 == IndexLoadStrategy::LoadFromFile
             {
                 if let Some(loaded_index) =
@@ -1001,7 +999,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // when WAL replay is viable.
         for vec_meta in &persisted_vector_indexes {
             let mut loaded = false;
-            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+            if decide_index_load_strategy(was_clean, can_try_replay)
                 == IndexLoadStrategy::LoadFromFile
             {
                 if let Some(loaded_index) =
