@@ -145,6 +145,25 @@ pub trait Storage: Send + Sync {
     /// Returns false (or always false for in-memory) if indexes must be rebuilt.
     fn was_clean_shutdown(&self) -> bool;
 
+    /// Read the persisted transaction-id watermark.
+    ///
+    /// Returns the highest committed tx_id at the previous graceful shutdown.
+    /// Used by `DatabaseCore::open` to seed the tx_id counters so post-rebuild
+    /// flushes can stamp a non-zero watermark into index files. Default no-op
+    /// returns 0 (suitable for in-memory storage). (Task #26 R1.)
+    fn last_committed_tx_id(&self) -> u64 {
+        0
+    }
+
+    /// Persist the highest committed tx_id seen this session.
+    ///
+    /// Called from the graceful shutdown path before `mark_clean_shutdown`.
+    /// Default no-op accepts any value (suitable for in-memory storage that
+    /// does not survive process exit).
+    fn set_last_committed_tx_id(&mut self, _tx_id: u64) -> Result<()> {
+        Ok(())
+    }
+
     /// Mark the database as cleanly shutting down
     ///
     /// Called during graceful shutdown to enable fast restart.

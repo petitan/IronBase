@@ -404,6 +404,22 @@ impl DatabaseCore<StorageEngine> {
         let (recovered_tx_count, recovered_index_changes, recovered_ops) =
             storage.recover_from_wal()?;
 
+        // Initial transaction-id watermark (task #26 R1):
+        //   max(persisted Header.last_committed_tx_id,
+        //       max tx_id of recovered WAL ops)
+        // is the highest committed tx_id we are sure about. `next_tx_id`
+        // starts at watermark + 1 so future inserts cannot collide with
+        // already-flushed index files; `max_committed_tx_id` starts at
+        // the watermark so post-rebuild flushes stamp a non-zero value
+        // into the index metadata even on read-mostly DBs.
+        let stored_watermark = storage.last_committed_tx_id();
+        let max_recovered = recovered_ops
+            .iter()
+            .map(|(tx_id, _)| *tx_id)
+            .max()
+            .unwrap_or(0);
+        let initial_watermark = stored_watermark.max(max_recovered);
+
         // Group recovered ops by collection once so each collection's index
         // init is O(1) lookup instead of O(N) filter, and the buckets can
         // be drained individually to free memory as we go.
@@ -442,8 +458,8 @@ impl DatabaseCore<StorageEngine> {
         let db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
             db_path: path_str,
-            next_tx_id: AtomicU64::new(1),
-            max_committed_tx_id: AtomicU64::new(0),
+            next_tx_id: AtomicU64::new(initial_watermark.saturating_add(1)),
+            max_committed_tx_id: AtomicU64::new(initial_watermark),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),

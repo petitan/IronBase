@@ -487,6 +487,7 @@ mod tests {
             metadata_size: 0,
             data_end_offset: HEADER_SIZE,
             clean_shutdown: false,
+            last_committed_tx_id: 0,
         }
     }
 

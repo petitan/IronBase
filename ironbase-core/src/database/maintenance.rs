@@ -301,8 +301,12 @@ impl DatabaseCore<StorageEngine> {
 
         // Mark as clean shutdown BEFORE releasing lock
         // This enables fast startup next time (indexes can be trusted)
+        // Persist the tx_id watermark first (task #26 R1) so a subsequent
+        // open seeds `next_tx_id` and `max_committed_tx_id` from this value
+        // instead of resetting to 0/1.
         {
             let mut storage = self.storage.write();
+            storage.set_last_committed_tx_id(self.max_committed_tx_id.load(Ordering::SeqCst))?;
             storage.mark_clean_shutdown()?;
         }
 
@@ -828,7 +832,14 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             if let Err(e) = storage.flush() {
                 log_warn!("Failed to flush storage on drop: {}", e);
             }
-            // 4. Mark as clean shutdown for fast restart
+            // 4. Persist the tx_id watermark (task #26 R1) — must happen
+            // before mark_clean_shutdown so the value is in the same
+            // metadata flush.
+            let watermark_value = self.max_committed_tx_id.load(Ordering::SeqCst);
+            if let Err(e) = storage.set_last_committed_tx_id(watermark_value) {
+                log_warn!("Failed to persist tx_id watermark on drop: {}", e);
+            }
+            // 5. Mark as clean shutdown for fast restart
             if let Err(e) = storage.mark_clean_shutdown() {
                 log_warn!("Failed to mark clean shutdown on drop: {}", e);
             }

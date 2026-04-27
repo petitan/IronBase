@@ -170,13 +170,25 @@ pub struct Header {
     // indexes can be trusted from .idx files without rebuild.
     #[serde(default)]
     pub clean_shutdown: bool,
+
+    // Persisted transaction-id watermark (version 5+, task #26 R1)
+    // Holds the highest committed transaction ID at last graceful shutdown.
+    // On reopen, `DatabaseCore::next_tx_id` is initialised to `this + 1`,
+    // and `max_committed_tx_id` to `this`, so post-rebuild flushes can
+    // stamp a non-zero watermark even on read-mostly DBs (otherwise the
+    // counter resets to 0 every reopen and the safety rail in
+    // `try_wal_replay_for_collection` keeps tripping). `#[serde(default)]`
+    // → legacy DBs (no field) read as 0; the first clean shutdown writes
+    // the new value.
+    #[serde(default)]
+    pub last_committed_tx_id: u64,
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 4, // Version 4: clean shutdown tracking
+            version: 5, // Version 5: tx_id watermark persistence (task #26 R1)
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -185,6 +197,7 @@ impl Default for Header {
             metadata_size: 0,
             data_end_offset: HEADER_SIZE, // Documents start right after header
             clean_shutdown: false,        // Will be set to true on graceful shutdown
+            last_committed_tx_id: 0,      // Persisted at clean shutdown, replaces 0-init on reopen
         }
     }
 }
@@ -1314,6 +1327,36 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Read the persisted transaction-id watermark from the header.
+    ///
+    /// Returns the highest committed transaction ID at the previous graceful
+    /// shutdown. Legacy databases (pre-version-5 / `#[serde(default)]` path)
+    /// return 0. `DatabaseCore::open` uses this to seed
+    /// `next_tx_id` (= this + 1) and `max_committed_tx_id` (= this) so a
+    /// post-rebuild flush can stamp a non-zero `last_flushed_tx_id` into
+    /// every index file. (Task #26 R1.)
+    pub fn last_committed_tx_id(&self) -> u64 {
+        self.header.last_committed_tx_id
+    }
+
+    /// Persist the highest committed transaction-id seen in this session.
+    ///
+    /// Called from the graceful shutdown path (right next to
+    /// `mark_clean_shutdown`). Monotonic — calls with a smaller value are
+    /// silently ignored so an out-of-order writer cannot rewind the
+    /// watermark on disk.
+    pub fn set_last_committed_tx_id(&mut self, tx_id: u64) -> Result<()> {
+        if tx_id <= self.header.last_committed_tx_id {
+            return Ok(());
+        }
+        if self.header.version < 5 {
+            self.header.version = 5;
+        }
+        self.header.last_committed_tx_id = tx_id;
+        self.mark_metadata_dirty()?;
+        Ok(())
+    }
+
     /// Commit a transaction (9-step atomic operation) - internal implementation
     /// This is the core of ACD guarantee
     ///
@@ -2235,6 +2278,14 @@ impl Storage for StorageEngine {
         self.was_clean_shutdown
     }
 
+    fn last_committed_tx_id(&self) -> u64 {
+        StorageEngine::last_committed_tx_id(self)
+    }
+
+    fn set_last_committed_tx_id(&mut self, tx_id: u64) -> Result<()> {
+        StorageEngine::set_last_committed_tx_id(self, tx_id)
+    }
+
     fn mark_clean_shutdown(&mut self) -> Result<()> {
         StorageEngine::mark_clean_shutdown(self)
     }
@@ -2305,7 +2356,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 4); // Version 4: clean shutdown tracking
+        assert_eq!(storage.header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -2649,7 +2700,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 4); // Version 4: clean shutdown tracking
+        assert_eq!(header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
