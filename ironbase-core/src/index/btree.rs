@@ -145,6 +145,16 @@ pub use crate::limits::NODE_PAGE_SIZE;
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
 
+/// Trailing magic bytes that mark a `.idx` file as carrying the
+/// `last_flushed_tx_id` footer (task #26 R7). Files written by older
+/// binaries lack this magic and fall through to the legacy load path,
+/// in which case the caller's `IndexMetadata.last_flushed_tx_id` (0
+/// from `CollectionMeta` or wherever) is used.
+const BTREE_FOOTER_MAGIC: &[u8; 4] = b"BTFT";
+/// Total size of the BTFT footer: 8-byte little-endian `u64` watermark
+/// followed by `BTREE_FOOTER_MAGIC`.
+const BTREE_FOOTER_LEN: u64 = 12;
+
 /// B+ Tree Node types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum BTreeNode {
@@ -2876,6 +2886,18 @@ impl BPlusTree {
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&root_offset.to_le_bytes())?;
 
+        // Append BTFT footer (task #26 R7) so the watermark survives
+        // reload regardless of CollectionMeta's stale `last_flushed_tx_id`
+        // value. Format (12 bytes total at end-of-file):
+        //   [last_flushed_tx_id (u64 LE, 8 bytes)]
+        //   [magic "BTFT" (4 bytes)]
+        // Reload checks the trailing magic; absence falls back to the
+        // legacy format (no watermark in file → reload uses caller's
+        // metadata, watermark = 0).
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&self.metadata.last_flushed_tx_id.to_le_bytes())?;
+        file.write_all(BTREE_FOOTER_MAGIC)?;
+
         Ok(root_offset)
     }
 
@@ -2979,6 +3001,24 @@ impl BPlusTree {
         let file_size = file.seek(SeekFrom::End(0))?;
         let lazy_threshold = calculate_lazy_threshold();
         let use_lazy = file_size > lazy_threshold;
+
+        // BTFT footer detection (task #26 R7). If the trailing 4 bytes are
+        // the BTFT magic, the file was written by a watermark-aware binary
+        // and the preceding 8 bytes hold `last_flushed_tx_id`. Override
+        // whatever the caller passed in `metadata.last_flushed_tx_id` —
+        // the file is authoritative. Legacy files (no footer) leave the
+        // caller's value intact.
+        if file_size >= BTREE_FOOTER_LEN {
+            file.seek(SeekFrom::End(-4))?;
+            let mut magic = [0u8; 4];
+            file.read_exact(&mut magic)?;
+            if &magic == BTREE_FOOTER_MAGIC {
+                file.seek(SeekFrom::End(-(BTREE_FOOTER_LEN as i64)))?;
+                let mut tx_id_bytes = [0u8; 8];
+                file.read_exact(&mut tx_id_bytes)?;
+                metadata.last_flushed_tx_id = u64::from_le_bytes(tx_id_bytes);
+            }
+        }
 
         // Read root offset from the file header (first 8 bytes)
         file.seek(SeekFrom::Start(0))?;
