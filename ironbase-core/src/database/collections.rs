@@ -64,6 +64,58 @@ use crate::transaction::{Operation, TransactionId};
 
 use super::DatabaseCore;
 
+/// Strategy for handling a persisted index file at startup (task #26 R2).
+///
+/// Centralises the "trust the file vs rebuild from catalog" decision that
+/// was previously scattered across `load_persisted_indexes`, the `_id`
+/// load block, and the fuzzy/fulltext/vector load blocks. R4 will extend
+/// the input set with `last_flushed_tx_id` and `recovered_ops` once the
+/// `was_clean` strict check is replaced with watermark-based reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexLoadStrategy {
+    /// Attempt to load the persisted file. Skip rebuild on success; the
+    /// loaded state is trusted as the latest committed state.
+    LoadFromFile,
+    /// Do NOT attempt to load. Create an empty in-memory index — caller
+    /// must rebuild from the document catalog.
+    EmptyForRebuild,
+}
+
+/// Decide how to bring a persisted **B+ tree** index online at startup.
+///
+/// Strict — only trust on clean shutdown (`9ff48302` Stale Index Loading
+/// protection). The btree path goes through the legacy `IndexChange` WAL
+/// replay in `database/mod.rs:480-495` rather than the watermark-based
+/// `apply_op_to_btree` path, so dirty-shutdown trust would re-introduce
+/// the phantom-duplicate bug. R4 will swap this for the per-watermark
+/// check once the legacy path is folded into the unified one.
+pub(crate) fn decide_btree_load_strategy(was_clean: bool) -> IndexLoadStrategy {
+    if was_clean {
+        IndexLoadStrategy::LoadFromFile
+    } else {
+        IndexLoadStrategy::EmptyForRebuild
+    }
+}
+
+/// Decide how to bring a persisted **non-btree** (fuzzy/fulltext/HNSW)
+/// index online at startup.
+///
+/// Trust on clean shutdown OR when the watermark-based WAL replay path is
+/// viable (`can_try_replay` — bounded pending ops on a dirty reopen, the
+/// safety rail inside `try_wal_replay_for_collection` will drop the file
+/// if its watermark is missing and ops are pending). Phase A atomic flush
+/// makes the file safe to load even after a crash.
+pub(crate) fn decide_non_btree_load_strategy(
+    was_clean: bool,
+    can_try_replay: bool,
+) -> IndexLoadStrategy {
+    if was_clean || can_try_replay {
+        IndexLoadStrategy::LoadFromFile
+    } else {
+        IndexLoadStrategy::EmptyForRebuild
+    }
+}
+
 // ============================================================================
 // COLLECTION AND INDEX MANAGEMENT (Generic Implementation)
 // ============================================================================
@@ -194,9 +246,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         id_index_name: &str,
         db_path: &str,
         was_clean: bool,
+        can_try_replay: bool,
     ) -> Result<std::collections::HashSet<String>> {
         use crate::log_debug;
         let mut loaded_from_file = std::collections::HashSet::new();
+
+        // Btree strict load — `9ff48302` Stale Index Loading. R4 will swap
+        // this for the watermark-based check once the legacy `IndexChange`
+        // apply path is folded into the unified one.
+        let _ = can_try_replay; // currently unused on btree (R4)
+        let strategy = decide_btree_load_strategy(was_clean);
 
         for index_meta in persisted_indexes {
             // Skip _id index (already created)
@@ -204,9 +263,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 continue;
             }
 
-            // Only try to load from .idx file if clean shutdown
-            // Dirty shutdown may have stale index entries for tombstoned documents
-            if was_clean {
+            if strategy == IndexLoadStrategy::LoadFromFile {
                 if let Some(loaded_tree) =
                     crate::collection_core::try_load_index_from_file(db_path, index_meta)
                 {
@@ -781,8 +838,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             );
         }
 
-        // Try to load _id index from .idx file if clean shutdown
-        let id_index_loaded = if was_clean && !catalog.is_empty() {
+        // Try to load _id index from .idx file via the btree decision
+        // helper. Empty catalog → nothing to load (the index would always
+        // be empty); rebuild path is a no-op in that case.
+        let id_index_loaded = if !catalog.is_empty()
+            && decide_btree_load_strategy(was_clean) == IndexLoadStrategy::LoadFromFile
+        {
             // Create a fake metadata for _id index loading
             let id_meta = crate::index::IndexMetadata {
                 name: id_index_name.clone(),
@@ -826,14 +887,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             )?;
         }
 
-        // Load persisted custom indexes (delegated to helper)
-        // Only load from .idx files if clean shutdown - stale files may have tombstone entries
+        // Load persisted custom indexes (delegated to helper).
+        // Strategy unified across all four index families via
+        // helpers `decide_btree_load_strategy(was_clean)` and `decide_non_btree_load_strategy(was_clean, can_try_replay)`.
         let btree_indexes_loaded_from_file = Self::load_persisted_indexes(
             &mut index_manager,
             &persisted_indexes,
             &id_index_name,
             &db_path,
             was_clean,
+            can_try_replay,
         )?;
 
         // Load or create fuzzy indexes from persisted metadata.
@@ -851,7 +914,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let mut all_non_btree_loaded = true;
         for fuzzy_meta in &persisted_fuzzy_indexes {
             let mut loaded = false;
-            if was_clean || can_try_replay {
+            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+                == IndexLoadStrategy::LoadFromFile
+            {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
                 {
@@ -891,7 +956,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // ops can be applied without doing a full rebuild-from-catalog.
         for fts_meta in &persisted_fulltext_indexes {
             let mut loaded = false;
-            if was_clean || can_try_replay {
+            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+                == IndexLoadStrategy::LoadFromFile
+            {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
                 {
@@ -934,7 +1001,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // when WAL replay is viable.
         for vec_meta in &persisted_vector_indexes {
             let mut loaded = false;
-            if was_clean || can_try_replay {
+            if decide_non_btree_load_strategy(was_clean, can_try_replay)
+                == IndexLoadStrategy::LoadFromFile
+            {
                 if let Some(loaded_index) =
                     crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
                 {
