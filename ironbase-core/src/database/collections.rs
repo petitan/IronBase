@@ -586,9 +586,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let watermark = match index_manager.get_fuzzy_index(&fz_meta.name) {
                 Some(idx) => {
                     // A loaded-but-non-empty index with watermark=0 is a legacy
-                    // V3 file — we cannot know which ops are already applied, so
-                    // the safe path is a full rebuild.
-                    if idx.last_flushed_tx_id() == 0 && idx.entry_count() > 0 {
+                    // V3 file. If the WAL has no committed ops to replay, the
+                    // file IS the latest state and we trust it. If there are
+                    // ops, we don't know which are already applied, so rebuild.
+                    if idx.last_flushed_tx_id() == 0
+                        && idx.entry_count() > 0
+                        && !recovered_ops.is_empty()
+                    {
                         return Ok(false);
                     }
                     idx.last_flushed_tx_id()
@@ -609,7 +613,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         for ft_meta in persisted_fulltext {
             let watermark = match index_manager.get_fulltext_index(&ft_meta.name) {
                 Some(idx) => {
-                    if idx.last_flushed_tx_id() == 0 && idx.doc_count() > 0 {
+                    if idx.last_flushed_tx_id() == 0
+                        && idx.doc_count() > 0
+                        && !recovered_ops.is_empty()
+                    {
                         return Ok(false);
                     }
                     idx.last_flushed_tx_id()
@@ -630,7 +637,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         for vec_meta in persisted_vector {
             let watermark = match index_manager.get_vector_index(&vec_meta.name) {
                 Some(idx) => {
-                    if idx.last_flushed_tx_id() == 0 && !idx.is_empty() {
+                    if idx.last_flushed_tx_id() == 0 && !idx.is_empty() && !recovered_ops.is_empty()
+                    {
                         return Ok(false);
                     }
                     idx.last_flushed_tx_id()
@@ -652,9 +660,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let watermark = match index_manager.get_btree_index(&bt_meta.name) {
                 Some(idx) => {
                     // Loaded-but-non-empty btree with watermark=0 = legacy `.idx`
-                    // file (pre-task-#26 build) — we cannot tell which ops are
-                    // already reflected, so the safe path is rebuild fallback.
-                    if idx.last_flushed_tx_id() == 0 && idx.size() > 0 {
+                    // (pre-task-#26 build). If the WAL has no ops to replay, the
+                    // file is the latest state and we trust it. Otherwise we
+                    // can't tell which ops are reflected, so rebuild.
+                    if idx.last_flushed_tx_id() == 0 && idx.size() > 0 && !recovered_ops.is_empty()
+                    {
                         return Ok(false);
                     }
                     idx.last_flushed_tx_id()
