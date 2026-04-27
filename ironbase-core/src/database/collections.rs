@@ -1141,11 +1141,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Determine what needs rebuilding
-        // (was_clean is already known from earlier)
-
-        // Check if any B+ tree indexes need rebuilding
-        // Skip indexes that were successfully loaded from .idx files (even if empty/sparse)
+        // Per-type "this kind of index is empty in memory and was not loaded
+        // from disk" flags. Drives the FAST PATH decision and the SLOW PATH
+        // reason logging below.
         let has_btree_without_file = persisted_indexes.iter().any(|meta| {
             // Skip indexes loaded from .idx files
             if btree_indexes_loaded_from_file.contains(&meta.name) {
@@ -1169,15 +1167,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let vector_indexes = index_manager.list_vector_indexes();
         let has_vector_without_cache = vector_indexes.iter().any(|idx| idx.is_empty());
 
-        // FAST PATH:
-        //   - clean shutdown AND no empty indexes of any type, OR
-        //   - WAL replay succeeded AND btree is OK (either loaded or no btree indexes)
-        let fast_path = (was_clean
-            && !catalog.is_empty()
-            && !has_btree_without_file
+        // Aggregate: every persisted index family has data in memory.
+        // Read as: "no rebuild needed for any index type at all".
+        let all_indexes_have_data = !has_btree_without_file
             && !has_fuzzy_without_file
             && !has_fulltext_without_file
-            && !has_vector_without_cache)
+            && !has_vector_without_cache;
+
+        // FAST PATH (skip rebuild_indexes_from_catalog) — two ways to qualify:
+        //   1. Clean shutdown of a non-empty DB with every index family ready
+        //      → trust everything as the latest committed state.
+        //   2. Dirty shutdown but `try_wal_replay_for_collection` succeeded
+        //      for the non-btree families AND btree is ready (either loaded
+        //      from `.idx` or there are no btree indexes for this collection).
+        //      The legacy `IndexChange` apply path in `database/mod.rs`
+        //      already covered btree on dirty reopen, so we only require the
+        //      non-btree side to be replay-clean here. R4 will fold the btree
+        //      branch into the unified watermark path.
+        let fast_path = (was_clean && !catalog.is_empty() && all_indexes_have_data)
             || (wal_replay_succeeded && !has_btree_without_file);
 
         if fast_path {
