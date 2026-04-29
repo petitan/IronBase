@@ -2415,7 +2415,7 @@ mod wal_replay_tests {
         {
             let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
             // Collection has NO non-btree indexes — so even with WAL ops
-            // there is nothing for `try_wal_replay_for_collection` to do.
+            // there is nothing for `try_wal_replay_non_btree` to do.
             db.collection("nofts").unwrap();
             for i in 0..3 {
                 db.insert_one("nofts", doc_with_content(i, "alpha"))
@@ -3432,14 +3432,363 @@ mod wal_replay_tests {
         }
 
         // Third session: dirty reopen with no pending ops. Must NOT
-        // rebuild — the WAL is empty, so `try_wal_replay_for_collection`
-        // sees a non-empty btree with watermark>0 and trusts it.
+        // rebuild — the WAL is empty, so `try_wal_replay_btree` sees a
+        // non-empty btree with watermark>0 and trusts it.
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         let coll = db.collection("c").unwrap();
         assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 20);
         for i in 0..20u32 {
             let r = coll.find(&serde_json::json!({"score": i as i32})).unwrap();
             assert_eq!(r.len(), 1, "doc {i} (score={i}) findable via btree");
+        }
+    }
+
+    // ========================================================================
+    // 2026-04-28 — additional crash recovery integration coverage
+    // ========================================================================
+
+    fn doc_score(id: u32, score: i32) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert("_id".to_string(), serde_json::json!(id));
+        m.insert("score".to_string(), serde_json::json!(score));
+        m
+    }
+
+    /// After `update_one` + crash, the index must reflect ONLY the new
+    /// value. Pre-R7 with a stale watermark, the post-replay btree could
+    /// hold both the old and the new key — `find(old_score)` would return
+    /// the doc, and `find(new_score)` would also return it. Tests that the
+    /// `apply_op_to_btree` delete-then-insert idempotency holds across the
+    /// crash boundary.
+    #[test]
+    fn btree_replay_with_updates_keeps_only_new_value() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("upd.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            for i in 0..3u32 {
+                db.insert_one("c", doc_score(i, 10)).unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Update one doc to 999 — the WAL records the new value but
+            // the on-disk btree still has score=10 → 3 entries until
+            // replay catches up.
+            db.update_one(
+                "c",
+                &serde_json::json!({"_id": 1u32}),
+                &serde_json::json!({"$set": {"score": 999}}),
+            )
+            .unwrap();
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        let new_hits = coll.find(&serde_json::json!({"score": 999})).unwrap();
+        assert_eq!(
+            new_hits.len(),
+            1,
+            "updated doc must be findable by new score"
+        );
+        let old_hits = coll.find(&serde_json::json!({"score": 10})).unwrap();
+        assert_eq!(
+            old_hits.len(),
+            2,
+            "old score must point to 2 docs only — stale entry not cleaned up"
+        );
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 3);
+    }
+
+    /// After `delete_one` + crash, the index must NOT return the deleted
+    /// doc. Tests that delete-only WAL ops are replayed correctly into
+    /// the btree — pre-265f0c2e this surfaced as ~3x phantom counts via
+    /// stale .idx tombstones.
+    #[test]
+    fn btree_replay_with_deletes_removes_from_index() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("del.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            for i in 0..5u32 {
+                db.insert_one("c", doc_score(i, i as i32 * 10)).unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Delete two docs after the checkpoint; only the WAL has the
+            // deletes when we crash.
+            db.delete_one("c", &serde_json::json!({"_id": 1u32}))
+                .unwrap();
+            db.delete_one("c", &serde_json::json!({"_id": 3u32}))
+                .unwrap();
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 3);
+        for missing in [10, 30] {
+            assert_eq!(
+                coll.find(&serde_json::json!({"score": missing}))
+                    .unwrap()
+                    .len(),
+                0,
+                "deleted doc with score={missing} resurfaced in btree"
+            );
+        }
+        for present in [0, 20, 40] {
+            assert_eq!(
+                coll.find(&serde_json::json!({"score": present}))
+                    .unwrap()
+                    .len(),
+                1,
+                "surviving doc with score={present} disappeared from btree"
+            );
+        }
+    }
+
+    /// Watermark must increase strictly across two independent crash
+    /// cycles. The third reopen also asserts the count is correct so we
+    /// don't satisfy the watermark check by writing nothing.
+    #[test]
+    fn watermark_strictly_advances_across_two_crashes() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("wm.mlite");
+
+        let w1 = {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let _ = db.collection("c").unwrap();
+            for i in 0..3u32 {
+                db.insert_one("c", doc_score(i, i as i32)).unwrap();
+            }
+            let w = db.watermark_tx_id();
+            db.simulate_crash_for_test();
+            w
+        };
+        assert!(w1 > 0, "watermark must advance during first session");
+
+        let w2 = {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let _ = db.collection("c").unwrap();
+            // Watermark seeded from WAL recovery must be at least w1.
+            assert!(
+                db.watermark_tx_id() >= w1,
+                "post-replay watermark {} < pre-crash watermark {}",
+                db.watermark_tx_id(),
+                w1
+            );
+            for i in 3..6u32 {
+                db.insert_one("c", doc_score(i, i as i32)).unwrap();
+            }
+            let w = db.watermark_tx_id();
+            db.simulate_crash_for_test();
+            w
+        };
+        assert!(
+            w2 > w1,
+            "second session watermark must strictly exceed first"
+        );
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert!(db.watermark_tx_id() >= w2);
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 6);
+    }
+
+    /// A unique btree index must remain a unique constraint after a
+    /// crash. If WAL replay double-applied an Insert, the second reopen's
+    /// duplicate insert would silently succeed against an inflated key set.
+    #[test]
+    fn btree_unique_index_replay_blocks_duplicate_post_recovery() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("uniq.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("email".to_string(), true, false).unwrap();
+
+            let mut a = HashMap::new();
+            a.insert("_id".to_string(), serde_json::json!(1u32));
+            a.insert("email".to_string(), serde_json::json!("a@x"));
+            db.insert_one("c", a).unwrap();
+            db.checkpoint().unwrap();
+
+            let mut b = HashMap::new();
+            b.insert("_id".to_string(), serde_json::json!(2u32));
+            b.insert("email".to_string(), serde_json::json!("b@x"));
+            db.insert_one("c", b).unwrap();
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 2);
+
+        // Inserting a third doc with email="a@x" must be rejected.
+        let mut dup = HashMap::new();
+        dup.insert("_id".to_string(), serde_json::json!(3u32));
+        dup.insert("email".to_string(), serde_json::json!("a@x"));
+        let res = db.insert_one("c", dup);
+        assert!(
+            res.is_err(),
+            "unique constraint not enforced after WAL replay: {res:?}"
+        );
+        // And no phantom doc snuck in.
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 2);
+    }
+
+    /// All three persisted index types (btree + fulltext + fuzzy) must
+    /// converge to the same end state after a single crash. Each kind has
+    /// a distinct flush path and a distinct recovery hook (rebuild for
+    /// fulltext/fuzzy, WAL replay or rebuild for btree); this test is the
+    /// integration safety net that says "regardless of which path is
+    /// taken, the public search APIs all see every committed doc".
+    ///
+    /// Regression coverage for the 2026-04-28 mixed-index dirty-recovery
+    /// fix: the btree replay now runs independently of non-btree load
+    /// outcome (`try_wal_replay_btree` decoupled from
+    /// `try_wal_replay_non_btree`). Before the fix, a single fzidx/ftidx
+    /// load failure would set `all_non_btree_loaded = false` →
+    /// `wal_replay_succeeded = false` → slow path rebuilt fulltext/fuzzy
+    /// but skipped the already-loaded btree (`size > 0` filter), leaving
+    /// the btree pre-Phase-2 with every Phase 2 WAL op silently lost.
+    #[test]
+    fn mixed_index_types_recovery_after_crash() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("mixed.mlite");
+
+        let make_doc = |id: u32, score: i32, name: &str, body: &str| {
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), serde_json::json!(id));
+            m.insert("score".to_string(), serde_json::json!(score));
+            m.insert("name".to_string(), serde_json::json!(name));
+            m.insert("body".to_string(), serde_json::json!(body));
+            m
+        };
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            coll.create_fulltext_index("body".to_string(), "english", None, None)
+                .unwrap();
+            coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+
+            for i in 0..5u32 {
+                db.insert_one(
+                    "c",
+                    make_doc(i, i as i32 * 100, &format!("alice{i}"), "alpha document"),
+                )
+                .unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 5..8u32 {
+                db.insert_one(
+                    "c",
+                    make_doc(i, i as i32 * 100, &format!("bob{i}"), "beta document"),
+                )
+                .unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 8);
+
+        // Btree path: every scored doc must be reachable by exact value.
+        for i in 0..8u32 {
+            let r = coll
+                .find(&serde_json::json!({"score": i as i32 * 100}))
+                .unwrap();
+            assert_eq!(r.len(), 1, "btree lost doc with score={}", i as i32 * 100);
+        }
+
+        // Fulltext path: both batches' tokens must be findable.
+        let alpha = coll
+            .fulltext_search("body", "alpha", Some(20), None, None, None)
+            .unwrap();
+        assert_eq!(alpha.len(), 5, "fulltext lost batch-A docs");
+        let beta = coll
+            .fulltext_search("body", "beta", Some(20), None, None, None)
+            .unwrap();
+        assert_eq!(
+            beta.len(),
+            3,
+            "fulltext lost batch-B docs (post-checkpoint)"
+        );
+
+        // Fuzzy path: querying a near-match name from each batch must hit.
+        let near_a = coll
+            .find(&serde_json::json!({"name": {"$fuzzy": "alice0"}}))
+            .unwrap();
+        assert!(!near_a.is_empty(), "fuzzy lost batch-A names");
+        let near_b = coll
+            .find(&serde_json::json!({"name": {"$fuzzy": "bob5"}}))
+            .unwrap();
+        assert!(!near_b.is_empty(), "fuzzy lost batch-B names");
+    }
+
+    /// Truncating the BTFT footer (last 12 bytes) must not crash the
+    /// reopen path. Either the safety rail trips and triggers a rebuild,
+    /// or the loader treats the file as legacy (pre-R7); both branches
+    /// must converge to the correct count and reachability via the index.
+    #[test]
+    fn btft_footer_truncated_falls_back_safely() {
+        use std::fs::OpenOptions;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("foot.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            for i in 0..6u32 {
+                db.insert_one("c", doc_score(i, i as i32)).unwrap();
+            }
+            db.checkpoint().unwrap();
+            db.close().unwrap();
+        }
+
+        // Naming scheme: `{db_stem}_{sanitized_name}_{hash:016x}.idx` —
+        // see `collection_core::index_persistence::build_btree_index_file_path`.
+        let idx_path = crate::collection_core::build_btree_index_file_path(
+            db_path.to_str().unwrap(),
+            "c_score",
+        )
+        .expect("path build must succeed");
+        assert!(idx_path.exists(), "expected btree index at {idx_path:?}");
+        let pre_len = std::fs::metadata(&idx_path).unwrap().len();
+        assert!(pre_len > 12, "index file too small to truncate footer");
+
+        // Lop off the BTFT footer.
+        let f = OpenOptions::new().write(true).open(&idx_path).unwrap();
+        f.set_len(pre_len - 12).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+
+        // Reopen must succeed and return the full 6 docs via the btree —
+        // either via a clean legacy load or via a rebuild from catalog.
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.count_documents(&serde_json::json!({})).unwrap(), 6);
+        for i in 0..6u32 {
+            let r = coll.find(&serde_json::json!({"score": i as i32})).unwrap();
+            assert_eq!(
+                r.len(),
+                1,
+                "doc score={i} unreachable via btree after footer truncation"
+            );
         }
     }
 }

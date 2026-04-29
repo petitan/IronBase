@@ -90,10 +90,10 @@ pub(crate) enum IndexLoadStrategy {
 /// gate this on `was_clean` alone for btree, but two newer mechanisms
 /// supersede that strictness:
 ///   1. R7 BTFT footer (`5df37968`) — every `.idx` carries its real
-///      `last_flushed_tx_id`. The safety rail inside
-///      `try_wal_replay_for_collection` drops a non-empty btree whose
-///      footer watermark is 0 *and* there are pending ops we cannot
-///      attribute, falling back to rebuild from catalog.
+///      `last_flushed_tx_id`. The safety rail inside `try_wal_replay_btree`
+///      drops a non-empty btree whose footer watermark is 0 *and* there
+///      are pending ops we cannot attribute, falling back to rebuild from
+///      catalog.
 ///   2. `apply_op_to_btree` uses delete-then-insert idempotency, so even
 ///      when the legacy `IndexChange` apply path in `database/mod.rs`
 ///      runs in parallel on dirty shutdown the two writers converge to
@@ -249,9 +249,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Unified load decision — same rule across btree and non-btree.
         // The R7 BTFT footer carries the real watermark; the safety rail
-        // in `try_wal_replay_for_collection` catches stale legacy `.idx`
-        // files (no footer → caller's metadata watermark = 0) when ops
-        // are pending and falls back to rebuild from catalog.
+        // in `try_wal_replay_btree` catches stale legacy `.idx` files
+        // (no footer → caller's metadata watermark = 0) when ops are
+        // pending and falls back to rebuild from catalog.
         let strategy = decide_index_load_strategy(was_clean, can_try_replay);
 
         for index_meta in persisted_indexes {
@@ -619,18 +619,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///   `last_flushed_tx_id == 0`, i.e. a legacy V3/pre-watermark file; or a
     ///   helper returned an error). Caller must fall back to rebuild.
     ///
-    /// btree replay (task #26 btree follow-up) reuses the same watermark
-    /// pattern as non-btree indexes: skip if the loaded `.idx` has
-    /// `last_flushed_tx_id == 0` (legacy file → rebuild fallback). Successful
-    /// btree replay marks each index dirty (`265f0c2e` rule) so the next
-    /// checkpoint persists the post-replay state with the new watermark.
-    /// The legacy `IndexChange` apply path in `database/mod.rs` still runs
-    /// for transient correctness; btree's delete-then-insert idempotency in
-    /// `apply_op_to_btree` keeps the two paths from corrupting each other.
-    fn try_wal_replay_for_collection(
+    /// Apply WAL ops to fuzzy, fulltext, and vector (HNSW) indexes via the
+    /// watermark pattern. Returns `Ok(false)` if any safety rail trips
+    /// (legacy V3/pre-watermark file with non-empty content + non-empty WAL),
+    /// signalling the caller to fall back to rebuild for the non-btree side.
+    fn try_wal_replay_non_btree(
         index_manager: &mut IndexManager,
         recovered_ops: &[(TransactionId, Operation)],
-        persisted_btree: &[crate::index::IndexMetadata],
         persisted_fuzzy: &[crate::index::fuzzy::FuzzyIndexMetadata],
         persisted_fulltext: &[crate::fulltext::FulltextIndexMetadata],
         persisted_vector: &[crate::vector::VectorIndexMetadata],
@@ -709,7 +704,26 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // B+ tree (task #26 btree follow-up)
+        Ok(true)
+    }
+
+    /// Apply WAL ops to B+ tree indexes only. Decoupled from non-btree replay
+    /// (`try_wal_replay_non_btree`) so a fuzzy/fulltext/vector load failure
+    /// — which would force the slow path for those families — does NOT
+    /// strand the btree at its pre-Phase-2 state. The slow-path
+    /// `rebuild_indexes_from_catalog` skips already-loaded btrees by `size > 0`,
+    /// so without this independent btree replay the btree would silently miss
+    /// every Phase 2 op when any non-btree load fails.
+    ///
+    /// Returns `Ok(false)` on a safety-rail trip (legacy `.idx` with
+    /// non-empty content + non-empty WAL); the caller must then rebuild
+    /// the btree from catalog. Successful replay marks each btree dirty
+    /// (`265f0c2e` rule) so the next checkpoint persists the new watermark.
+    fn try_wal_replay_btree(
+        index_manager: &mut IndexManager,
+        recovered_ops: &[(TransactionId, Operation)],
+        persisted_btree: &[crate::index::IndexMetadata],
+    ) -> Result<bool> {
         for bt_meta in persisted_btree {
             let watermark = match index_manager.get_btree_index(&bt_meta.name) {
                 Some(idx) => {
@@ -1043,35 +1057,75 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Task #26 phase 4b: attempt WAL replay into loaded non-btree indexes.
+        // Task #26 phase 4b: attempt WAL replay into loaded indexes.
         //
-        // Guardrails inside `try_wal_replay_for_collection` decide whether replay
-        // is safe and converges. On success, fulltext/fuzzy/vector indexes are
-        // consistent with the latest committed state and `rebuild_indexes_from_catalog`
-        // will skip them (its per-type filters already ignore non-empty indexes).
-        // btree indexes still follow the existing rebuild path when their .idx
-        // files weren't loaded (btree has no watermark yet — future follow-up).
+        // Replay is split into two independent invocations:
+        //   * `try_wal_replay_btree` — runs on every dirty reopen with bounded
+        //     ops. The slow path's `rebuild_indexes_from_catalog` SKIPS
+        //     already-loaded btrees by `size > 0`, so if the btree side were
+        //     gated on non-btree load success (as it was prior to 2026-04-28),
+        //     a single fzidx/ftidx load failure would silently strand the
+        //     btree at its pre-Phase-2 state. Independent replay is therefore
+        //     correctness-critical, not just an optimisation.
+        //   * `try_wal_replay_non_btree` — gated on `all_non_btree_loaded` so
+        //     missing fuzzy/fulltext/vector files defer to the rebuild path,
+        //     matching the established "load-or-rebuild" semantics.
         //
-        // On guardrail failure (too many ops, legacy index without watermark,
-        // helper error), the rebuild path below runs exactly as before.
+        // On guardrail failure (legacy index without watermark, helper error),
+        // the affected family's rebuild runs in the slow path below.
         if can_try_replay && !all_non_btree_loaded {
             log_warn!(
-                "Collection '{}': WAL replay skipped — some persisted non-btree index files failed to load, rebuild will rescue them",
+                "Collection '{}': non-btree WAL replay skipped — some persisted non-btree index files failed to load, rebuild will rescue them (btree replay still runs independently)",
                 name
             );
         }
-        let wal_replay_succeeded = if can_try_replay && all_non_btree_loaded {
-            match Self::try_wal_replay_for_collection(
+        let btree_replay_succeeded = if can_try_replay {
+            match Self::try_wal_replay_btree(
                 &mut index_manager,
                 &recovered_ops_for_collection,
                 &persisted_indexes,
+            ) {
+                Ok(true) => {
+                    log_debug!(
+                        "Collection '{}': btree WAL replay applied ({} ops across {} indexes)",
+                        name,
+                        recovered_ops_for_collection.len(),
+                        persisted_indexes.len()
+                    );
+                    true
+                }
+                Ok(false) => {
+                    log_warn!(
+                        "Collection '{}': btree WAL replay guardrail tripped, falling back to rebuild",
+                        name
+                    );
+                    false
+                }
+                Err(e) => {
+                    log_warn!(
+                        "Collection '{}': btree WAL replay error ({}), falling back to rebuild",
+                        name,
+                        e
+                    );
+                    false
+                }
+            }
+        } else {
+            // No replay attempt → btree side is "ok" iff shutdown was clean
+            // (loaded `.idx` already reflects every committed write).
+            was_clean
+        };
+        let non_btree_replay_succeeded = if can_try_replay && all_non_btree_loaded {
+            match Self::try_wal_replay_non_btree(
+                &mut index_manager,
+                &recovered_ops_for_collection,
                 &persisted_fuzzy_indexes,
                 &persisted_fulltext_indexes,
                 &persisted_vector_indexes,
             ) {
                 Ok(true) => {
                     log_info!(
-                        "Collection '{}': WAL replay recovery succeeded ({} ops applied across non-btree indexes, skipping rebuild)",
+                        "Collection '{}': non-btree WAL replay succeeded ({} ops applied)",
                         name,
                         recovered_ops_for_collection.len()
                     );
@@ -1079,14 +1133,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
                 Ok(false) => {
                     log_warn!(
-                        "Collection '{}': WAL replay guardrail tripped, falling back to rebuild",
+                        "Collection '{}': non-btree WAL replay guardrail tripped, falling back to rebuild",
                         name
                     );
                     false
                 }
                 Err(e) => {
                     log_warn!(
-                        "Collection '{}': WAL replay error ({}), falling back to rebuild",
+                        "Collection '{}': non-btree WAL replay error ({}), falling back to rebuild",
                         name,
                         e
                     );
@@ -1096,6 +1150,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         } else {
             false
         };
+        let wal_replay_succeeded = btree_replay_succeeded && non_btree_replay_succeeded;
 
         // (R6: removed `bfad51fa` one-time auto-migration block. R7 BTFT
         // footer + R1 watermark perzisztencia + ad753469 safety rail relax
@@ -1140,13 +1195,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // FAST PATH (skip rebuild_indexes_from_catalog) — two ways to qualify:
         //   1. Clean shutdown of a non-empty DB with every index family ready
         //      → trust everything as the latest committed state.
-        //   2. Dirty shutdown but `try_wal_replay_for_collection` succeeded
-        //      for the non-btree families AND btree is ready (either loaded
-        //      from `.idx` or there are no btree indexes for this collection).
-        //      The legacy `IndexChange` apply path in `database/mod.rs`
-        //      already covered btree on dirty reopen, so we only require the
-        //      non-btree side to be replay-clean here. R4 will fold the btree
-        //      branch into the unified watermark path.
+        //   2. Dirty shutdown where BOTH `try_wal_replay_btree` AND
+        //      `try_wal_replay_non_btree` succeeded AND btree is ready
+        //      (either loaded from `.idx` or there are no btree indexes).
+        //      The two replay phases are independent (2026-04-28 fix): a
+        //      non-btree load failure no longer strands the btree at its
+        //      pre-Phase-2 state, but it still drops us out of the fast
+        //      path so the slow path can rebuild the affected non-btree
+        //      family from catalog.
         let fast_path = (was_clean && !catalog.is_empty() && all_indexes_have_data)
             || (wal_replay_succeeded && !has_btree_without_file);
 
