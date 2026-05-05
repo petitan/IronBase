@@ -3791,4 +3791,183 @@ mod wal_replay_tests {
             );
         }
     }
+
+    /// Performance-regression guard for the task #26 R-refactor speedup.
+    ///
+    /// On the production docs.mlite (191K docs / 7.6 GB), the pre-R-refactor
+    /// SIGKILL recovery took 6:32 minutes and the post-refactor recovery
+    /// settled at ~10 seconds — a ~39× speedup driven by the WAL-replay
+    /// fast path (R1 header watermark + R7 BTFT footer) skipping
+    /// `rebuild_indexes_from_catalog` when every persisted index can be
+    /// trusted directly.
+    ///
+    /// This test reproduces the same recovery shape on a smaller scale that
+    /// fits in CI time:
+    ///   * ~3000 docs across btree + fulltext + fuzzy indexes
+    ///   * checkpoint to flush index files (and stamp BTFT watermarks)
+    ///   * Phase 2 mutations (insert + update + delete) AFTER the checkpoint
+    ///   * `simulate_crash_for_test` so reopen sees `was_clean == false`
+    ///   * timed reopen — must finish under 5 s on stock hardware (the
+    ///     hot path needs ~100-300 ms; 5 s is generous slack to absorb
+    ///     CI noise without masking a true regression to the rebuild path,
+    ///     which would push this test into the 30-60 s range)
+    ///
+    /// Beyond timing, the test asserts the post-recovery state is correct
+    /// across all three index families: doc count, btree finds for both
+    /// pre- and post-checkpoint scores, fulltext returns the expected
+    /// match counts for tokens from each batch, fuzzy resolves names from
+    /// each batch. A regression that drops back to rebuild-from-catalog
+    /// would still pass the correctness asserts but blow the 5 s budget.
+    #[test]
+    fn recovery_speed_under_5s_with_phase2_ops_full_stack() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        use std::time::Instant;
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("recovery_speed.mlite");
+
+        const PHASE1: u32 = 3000;
+        const PHASE2_INSERTS: u32 = 30;
+        const PHASE2_UPDATES: u32 = 10;
+        const PHASE2_DELETES: u32 = 10;
+
+        // Helper to build a uniform doc shape; "alpha"/"beta" tokens pick
+        // out the two batches in fulltext, "alice"/"bob" do the same for
+        // fuzzy, and `score` keys the btree.
+        let make_doc = |id: u32, batch: &str, score: i32| {
+            let (name_prefix, body_token) = match batch {
+                "a" => ("alice", "alpha"),
+                _ => ("bob", "beta"),
+            };
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), serde_json::json!(id));
+            m.insert("score".to_string(), serde_json::json!(score));
+            m.insert(
+                "name".to_string(),
+                serde_json::json!(format!("{name_prefix}{id}")),
+            );
+            m.insert(
+                "body".to_string(),
+                serde_json::json!(format!("{body_token} document number {id}")),
+            );
+            m
+        };
+
+        // Phase 1: bulk insert + create indexes + checkpoint.
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("c").unwrap();
+            coll.create_index("score".to_string(), false, false)
+                .unwrap();
+            coll.create_fulltext_index("body".to_string(), "english", None, None)
+                .unwrap();
+            coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+
+            for i in 0..PHASE1 {
+                db.insert_one("c", make_doc(i, "a", i as i32)).unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Phase 2: post-checkpoint mutations land in the WAL only.
+            for i in 0..PHASE2_INSERTS {
+                let id = PHASE1 + i;
+                db.insert_one("c", make_doc(id, "b", id as i32)).unwrap();
+            }
+            for i in 0..PHASE2_UPDATES {
+                db.update_one(
+                    "c",
+                    &serde_json::json!({"_id": i}),
+                    &serde_json::json!({"$set": {"score": 1_000_000 + i as i32}}),
+                )
+                .unwrap();
+            }
+            for i in 0..PHASE2_DELETES {
+                let victim = PHASE1 - 1 - i;
+                db.delete_one("c", &serde_json::json!({"_id": victim}))
+                    .unwrap();
+            }
+
+            db.simulate_crash_for_test();
+        }
+
+        // Reopen must complete inside the slack budget. Using `db.collection`
+        // forces `initialize_index_manager` to actually run for the
+        // collection, which is where the rebuild-vs-replay branch fires.
+        let t0 = Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        let elapsed = t0.elapsed();
+        eprintln!(
+            "recovery_speed_under_5s_with_phase2_ops_full_stack: reopen took {} ms",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "recovery took {} ms — budget is 5000 ms; likely regressed to rebuild-from-catalog",
+            elapsed.as_millis()
+        );
+
+        // Correctness asserts. Survivors: PHASE1 - DELETES + INSERTS docs.
+        let expected_total = (PHASE1 - PHASE2_DELETES + PHASE2_INSERTS) as u64;
+        assert_eq!(
+            coll.count_documents(&serde_json::json!({})).unwrap(),
+            expected_total,
+            "post-recovery doc count mismatch"
+        );
+
+        // Btree: a doc updated to score=1_000_005 must be findable at the
+        // new key (apply_op_to_btree's delete-then-insert idempotency).
+        let updated = coll
+            .find(&serde_json::json!({"score": 1_000_005i32}))
+            .unwrap();
+        assert_eq!(updated.len(), 1, "updated doc not findable via btree");
+
+        // Btree: a Phase 2-inserted doc with score = PHASE1 + 5 = 3005.
+        let phase2_inserted = coll
+            .find(&serde_json::json!({"score": (PHASE1 + 5) as i32}))
+            .unwrap();
+        assert_eq!(
+            phase2_inserted.len(),
+            1,
+            "Phase 2 inserted doc not findable via btree"
+        );
+
+        // Btree: a deleted doc must NOT be findable (PHASE1 - 1 was deleted).
+        let deleted = coll
+            .find(&serde_json::json!({"score": (PHASE1 - 1) as i32}))
+            .unwrap();
+        assert_eq!(
+            deleted.len(),
+            0,
+            "deleted doc still findable — Phase 2 delete not replayed"
+        );
+
+        // Fulltext: alpha tokens come from Phase 1, beta from Phase 2 inserts.
+        let alpha_hits = coll
+            .fulltext_search("body", "alpha", Some(5000), None, None, None)
+            .unwrap()
+            .len();
+        let beta_hits = coll
+            .fulltext_search("body", "beta", Some(5000), None, None, None)
+            .unwrap()
+            .len();
+        assert_eq!(
+            alpha_hits as u32,
+            PHASE1 - PHASE2_DELETES,
+            "fulltext lost alpha (Phase 1 minus deletes)"
+        );
+        assert_eq!(
+            beta_hits as u32, PHASE2_INSERTS,
+            "fulltext lost beta (Phase 2 inserts)"
+        );
+
+        // Fuzzy: pick a Phase 2-inserted name; it must be reachable via
+        // fuzzy match. Phase 2 inserts have `name = bob{id}` for id in
+        // [PHASE1, PHASE1+PHASE2_INSERTS), so "bob3000" must hit.
+        let fuzzy_phase2 = coll
+            .find(&serde_json::json!({"name": {"$fuzzy": format!("bob{}", PHASE1)}}))
+            .unwrap();
+        assert!(!fuzzy_phase2.is_empty(), "fuzzy lost Phase 2 names");
+    }
 }

@@ -12,7 +12,7 @@ use std::time::Instant;
 const TEST_DIR: &str = "/tmp/rust_big_backup_test";
 const DB_PATH: &str = "/tmp/rust_big_backup_test/bigtest.mlite";
 const BACKUP_DIR: &str = "/tmp/rust_big_backup_test/backups";
-const BACKUP_CLI: &str = "/home/petitan/Ironbase/target/release/ironbase-backup";
+const BACKUP_CLI: &str = "/home/petitan/MongoLite/target/release/ironbase-backup";
 
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -263,26 +263,129 @@ fn big_backup_cli_test() {
         format_speed(restored_size, elapsed_restore)
     );
 
-    // ========== PHASE 6: Verify ==========
+    // ========== PHASE 6: Verify (strict) ==========
     println!("\n{}", "=".repeat(70));
-    println!("[6] VERIFICATION");
+    println!("[6] VERIFICATION (strict)");
     println!("{}", "=".repeat(70));
 
     let mut total_docs_restored: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+    let mut docs_compared: u64 = 0;
+    let mut indexes_checked: u64 = 0;
+    let expected_per_coll = docs_per_collection + extra_docs_per_coll;
+
     {
         let db = DatabaseCore::<StorageEngine>::open(&restore_path).unwrap();
 
-        for (coll_name, _) in &collections {
+        for (coll_name, index_fields) in &collections {
             let coll = db.collection(coll_name).unwrap();
+
+            // (a) Strict per-collection count check (no tolerance)
             let count = coll.count_documents(&json!({})).unwrap();
             total_docs_restored += count;
-            println!("    {}: {} documents", coll_name, count);
+            if count != expected_per_coll {
+                errors.push(format!(
+                    "{}: count {} != expected {}",
+                    coll_name, count, expected_per_coll
+                ));
+            }
+
+            // (b) Index existence check (auto-named: "{collection}_{field}")
+            let listed = coll.list_indexes().unwrap_or_default();
+            for field in index_fields {
+                let expected_idx = format!("{}_{}", coll_name, field);
+                if listed.contains(&expected_idx) {
+                    indexes_checked += 1;
+                } else {
+                    errors.push(format!(
+                        "{}: index '{}' missing after restore (have: {:?})",
+                        coll_name, expected_idx, listed
+                    ));
+                }
+            }
+
+            // (c) Doc-level deep equality on samples
+            // Phase 1 docs: first 20, last 20 (boundary coverage)
+            let mut phase1_ids: Vec<u64> = (0..20).collect();
+            phase1_ids.extend((docs_per_collection - 20)..docs_per_collection);
+            for doc_id in &phase1_ids {
+                let id = format!("{}_{}", coll_name, doc_id);
+                let expected = json!({
+                    "_id": id,
+                    "name": format!("item_{}", doc_id),
+                    "email": format!("user{}@example.com", doc_id),
+                    "category": format!("cat_{}", doc_id % 100),
+                    "data": "x".repeat(300),
+                    "value": *doc_id as f64 * 1.5,
+                    "active": doc_id.is_multiple_of(2),
+                });
+                match coll.find_one(&json!({"_id": id.clone()})).unwrap() {
+                    Some(actual) => {
+                        if actual != expected {
+                            errors.push(format!(
+                                "{}: doc {} content mismatch\n  got:      {}\n  expected: {}",
+                                coll_name, id, actual, expected
+                            ));
+                        }
+                        docs_compared += 1;
+                    }
+                    None => errors.push(format!("{}: doc {} missing", coll_name, id)),
+                }
+            }
+
+            // Phase 3 (extra) docs: first 10
+            for i in 0..10u64 {
+                let doc_id = 10_000_000 + i;
+                let id = format!("{}_new_{}", coll_name, doc_id);
+                let expected = json!({
+                    "_id": id,
+                    "name": format!("new_item_{}", doc_id),
+                    "email": format!("new{}@example.com", doc_id),
+                    "data": "y".repeat(300),
+                    "value": doc_id as f64 * 2.0,
+                });
+                match coll.find_one(&json!({"_id": id.clone()})).unwrap() {
+                    Some(actual) => {
+                        if actual != expected {
+                            errors
+                                .push(format!("{}: extra doc {} content mismatch", coll_name, id));
+                        }
+                        docs_compared += 1;
+                    }
+                    None => errors.push(format!("{}: extra doc {} missing", coll_name, id)),
+                }
+            }
+
+            println!(
+                "    {}: count={} (ok), {} indexes verified",
+                coll_name,
+                count,
+                index_fields.len()
+            );
+        }
+
+        // (d) Indexed lookup smoke test: query via 'email' index on 'users'
+        // Verifies the custom B+ tree index actually works post-restore (not just _id catalog).
+        let users = db.collection("users").unwrap();
+        let probe_email = "user100@example.com";
+        match users.find_one(&json!({"email": probe_email})).unwrap() {
+            Some(doc) => {
+                let got_id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("");
+                if got_id != "users_100" {
+                    errors.push(format!(
+                        "indexed email lookup returned wrong _id: {} != users_100",
+                        got_id
+                    ));
+                }
+            }
+            None => errors.push(format!(
+                "indexed email lookup for {} returned None on 'users'",
+                probe_email
+            )),
         }
     }
 
-    let expected_total = (docs_per_collection + extra_docs_per_coll) * collections.len() as u64;
-    println!("\n    Total documents: {}", total_docs_restored);
-    println!("    Expected: {}", expected_total);
+    let expected_total = expected_per_coll * collections.len() as u64;
 
     // ========== SUMMARY ==========
     println!("\n{}", "=".repeat(70));
@@ -303,16 +406,28 @@ fn big_backup_cli_test() {
         elapsed_restore,
         format_speed(restored_size, elapsed_restore)
     );
+    println!();
+    println!(
+        "Total docs restored:  {} (expected {})",
+        total_docs_restored, expected_total
+    );
+    println!("Docs deep-compared:   {}", docs_compared);
+    println!("Indexes verified:     {}", indexes_checked);
     println!("{}", "=".repeat(70));
 
-    // Verify
-    assert!(
-        total_docs_restored >= expected_total - 1000,
-        "Document count mismatch: {} vs expected {}",
-        total_docs_restored,
-        expected_total
+    // Strict assert: every check must pass
+    if !errors.is_empty() {
+        eprintln!("\n✗ {} verification error(s):", errors.len());
+        for (i, e) in errors.iter().enumerate() {
+            eprintln!("  [{}] {}", i + 1, e);
+        }
+        panic!("Backup/restore round-trip failed strict verification");
+    }
+    assert_eq!(
+        total_docs_restored, expected_total,
+        "Total document count mismatch"
     );
-    println!("\n✓ All verifications passed!");
+    println!("\n✓ All strict verifications passed!");
 
     // Cleanup
     // let _ = fs::remove_dir_all(TEST_DIR);
