@@ -7,8 +7,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use super::defaults::{
-    default_chunk_mode, default_chunk_overlap, default_chunk_size, default_embedding_provider,
-    DEFAULT_RRF_K,
+    default_chunk_mode, default_chunk_overlap, default_chunk_size, DEFAULT_RRF_K,
 };
 
 /// Default value for query fields: empty object {}
@@ -784,8 +783,7 @@ pub struct RagCollectionCreateParams {
     pub embedding_field: String,
     #[serde(default = "default_text_field")]
     pub text_field: String,
-    #[serde(default = "default_embedding_provider")]
-    pub provider: String,
+    pub provider: Option<String>,
     #[serde(default = "default_rag_language")]
     pub language: String,
 }
@@ -1189,11 +1187,11 @@ mod tests {
         let params = json!({
             "collection": "docs",
             "query": "keresés",
-            "provider": "fasttext"
+            "provider": "ollama"
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert!(p.vector.is_none());
-        assert_eq!(p.provider.as_deref(), Some("fasttext"));
+        assert_eq!(p.provider.as_deref(), Some("ollama"));
     }
 
     #[test]

@@ -29,8 +29,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider (fasttext, openai, ollama, etc.)",
-                        "default": "fasttext"
+                        "description": "Embedding provider (ollama, vllm, openai). Must be configured in [embedding] section of config.toml."
                     },
                     "model": {
                         "type": "string",

@@ -259,9 +259,9 @@ mod tests {
 
     #[test]
     fn test_cache_key() {
-        let key1 = EmbeddingCache::cache_key("hello", "fasttext", "cc.hu.300");
-        let key2 = EmbeddingCache::cache_key("hello", "fasttext", "cc.hu.300");
-        let key3 = EmbeddingCache::cache_key("world", "fasttext", "cc.hu.300");
+        let key1 = EmbeddingCache::cache_key("hello", "test-provider", "test-model");
+        let key2 = EmbeddingCache::cache_key("hello", "test-provider", "test-model");
+        let key3 = EmbeddingCache::cache_key("world", "test-provider", "test-model");
 
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
@@ -289,9 +289,9 @@ mod tests {
     fn test_cache_put_get() {
         let cache = EmbeddingCache::new();
 
-        cache.put("hello", "fasttext", "model", vec![1.0, 2.0, 3.0]);
+        cache.put("hello", "test-provider", "model", vec![1.0, 2.0, 3.0]);
 
-        let result = cache.get("hello", "fasttext", "model");
+        let result = cache.get("hello", "test-provider", "model");
         assert!(result.is_some());
 
         let entry = result.unwrap();
@@ -311,9 +311,9 @@ mod tests {
     fn test_cache_stats() {
         let cache = EmbeddingCache::new();
 
-        cache.put("hello", "fasttext", "model", vec![1.0, 2.0, 3.0]);
-        let _ = cache.get("hello", "fasttext", "model"); // hit
-        let _ = cache.get("world", "fasttext", "model"); // miss
+        cache.put("hello", "test-provider", "model", vec![1.0, 2.0, 3.0]);
+        let _ = cache.get("hello", "test-provider", "model"); // hit
+        let _ = cache.get("world", "test-provider", "model"); // miss
         cache.record_miss(); // explicit miss
 
         let stats = cache.stats();
@@ -326,7 +326,7 @@ mod tests {
     fn test_cache_clear() {
         let cache = EmbeddingCache::new();
 
-        cache.put("hello", "fasttext", "model", vec![1.0, 2.0, 3.0]);
+        cache.put("hello", "test-provider", "model", vec![1.0, 2.0, 3.0]);
         assert_eq!(cache.len(), 1);
 
         cache.clear();

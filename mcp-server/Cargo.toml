@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.490"
+version = "1.0.491"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -60,7 +60,6 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 ironbase-core = { path = "../ironbase-core" }
 
 # Embedding support
-memmap2 = { workspace = true }
 ureq = { version = "2.9", features = ["json"] }
 rayon = { workspace = true }
 log = { workspace = true }

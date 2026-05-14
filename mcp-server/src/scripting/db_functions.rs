@@ -13,8 +13,7 @@ use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, I
 use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::tools::defaults::{
-    DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD,
-    MAX_INTERNAL_LIMIT,
+    DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
 };
 use crate::tools::fusion::{
     id_to_string as fusion_id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
@@ -1134,7 +1133,7 @@ fn register_vector_functions(
 // RAG Operations
 // ============================================================
 
-// RRF_K, MAX_INTERNAL_LIMIT, DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, DEFAULT_EMBEDDING_PROVIDER
+// RRF_K, MAX_INTERNAL_LIMIT, DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD
 // imported from crate::tools::defaults
 
 /// Maximum documents returned by aggregate to prevent OOM
@@ -1262,10 +1261,11 @@ fn get_rag_config(
                 .and_then(|v| v.as_str())
                 .unwrap_or(DEFAULT_TEXT_FIELD)
                 .to_string();
+            // Empty string means "not configured" — caller resolves via manager default.
             let provider = doc
                 .get("provider")
                 .and_then(|v| v.as_str())
-                .unwrap_or(DEFAULT_EMBEDDING_PROVIDER)
+                .unwrap_or("")
                 .to_string();
             let language = doc
                 .get("language")
@@ -1350,7 +1350,7 @@ fn hybrid_search_impl(
         Some(m) => m,
         None => {
             return Dynamic::from(
-                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+                "Error: Embedding manager not available. Configure an [embedding] section in config.toml.".to_string(),
             )
         }
     };
@@ -1388,7 +1388,15 @@ fn hybrid_search_impl(
         .flatten()
         .map(|c| c.provider);
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => (ef, tf, auto_provider.unwrap_or(prov)),
+        Some((ef, tf, prov, _)) => {
+            let resolved = auto_provider.unwrap_or(prov);
+            let resolved = if resolved.is_empty() {
+                manager.default_provider_name().to_string()
+            } else {
+                resolved
+            };
+            (ef, tf, resolved)
+        }
         None => (
             DEFAULT_EMBEDDING_FIELD.to_string(),
             DEFAULT_TEXT_FIELD.to_string(),
@@ -1612,7 +1620,7 @@ fn rag_import_impl(
         Some(m) => m,
         None => {
             return Dynamic::from(
-                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+                "Error: Embedding manager not available. Configure an [embedding] section in config.toml.".to_string(),
             )
         }
     };
@@ -1632,7 +1640,15 @@ fn rag_import_impl(
         .flatten()
         .map(|c| c.provider);
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => (ef, tf, auto_provider.unwrap_or(prov)),
+        Some((ef, tf, prov, _)) => {
+            let resolved = auto_provider.unwrap_or(prov);
+            let resolved = if resolved.is_empty() {
+                manager.default_provider_name().to_string()
+            } else {
+                resolved
+            };
+            (ef, tf, resolved)
+        }
         None => (
             DEFAULT_EMBEDDING_FIELD.to_string(),
             DEFAULT_TEXT_FIELD.to_string(),
@@ -1779,7 +1795,7 @@ fn rag_create_impl(
         Some(m) => m,
         None => {
             return Dynamic::from(
-                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+                "Error: Embedding manager not available. Configure an [embedding] section in config.toml.".to_string(),
             )
         }
     };

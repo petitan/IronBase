@@ -147,7 +147,7 @@ fn handle_hybrid_search(
 
                     let manager = embedding_manager.as_ref().ok_or_else(|| {
                         McpError::internal(
-                            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+                            "Embedding not available. Configure an [embedding] section in config.toml.",
                         )
                     })?;
 
@@ -844,11 +844,11 @@ mod tests {
             "rerank": true,
             "deduplicate": true,
             "mmr_lambda": 0.7,
-            "provider": "fasttext"
+            "provider": "ollama"
         });
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
-        assert_eq!(p.provider.as_deref(), Some("fasttext"));
+        assert_eq!(p.provider.as_deref(), Some("ollama"));
         assert!(p.rerank);
         assert!(p.deduplicate);
         assert!((p.mmr_lambda - 0.7).abs() < f64::EPSILON);

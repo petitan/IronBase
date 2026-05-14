@@ -8,9 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::defaults::{
-    default_chunk_mode, default_chunk_overlap, default_chunk_size, default_embedding_provider,
-};
+use super::defaults::{default_chunk_mode, default_chunk_overlap, default_chunk_size};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -49,8 +47,7 @@ pub struct EmbedDocumentParams {
     pub chunk_size: usize,
     #[serde(default = "default_chunk_overlap")]
     pub overlap: usize,
-    #[serde(default = "default_embedding_provider")]
-    pub provider: String,
+    pub provider: Option<String>,
     #[serde(default = "default_create_vector_index")]
     pub create_vector_index: bool,
 }
@@ -73,7 +70,7 @@ pub fn dispatch(
     // Check if embedding manager is available
     let manager = embedding_manager.as_ref().ok_or_else(|| {
         McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+            "Embedding not available. Configure an [embedding] section in config.toml.",
         )
     })?;
 
@@ -207,9 +204,13 @@ fn handle_embed_document(
         return Err(McpError::invalid_params("Content cannot be empty"));
     }
 
-    // Get provider
-    let provider = manager.get_provider(&p.provider).ok_or_else(|| {
-        McpError::invalid_params(format!("Provider '{}' not available", p.provider))
+    // Get provider — explicit param, else manager default
+    let provider_name = p
+        .provider
+        .as_deref()
+        .unwrap_or(manager.default_provider_name());
+    let provider = manager.get_provider(provider_name).ok_or_else(|| {
+        McpError::invalid_params(format!("Provider '{}' not available", provider_name))
     })?;
 
     // Chunk the content

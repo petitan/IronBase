@@ -140,12 +140,26 @@ fn handle_rag_collection_create(
     // Get embedding manager
     let manager = embedding_manager.as_ref().ok_or_else(|| {
         McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+            "Embedding not available. Configure an [embedding] section in config.toml.",
         )
     })?;
 
+    // Resolve provider: explicit param, else manager default
+    let provider_name = p
+        .provider
+        .as_deref()
+        .unwrap_or(manager.default_provider_name())
+        .to_string();
+
+    if provider_name.is_empty() {
+        return Err(McpError::invalid_params(
+            "No embedding provider available. Configure an [embedding] section in config.toml \
+             or pass an explicit 'provider' argument.",
+        ));
+    }
+
     // Validate provider exists
-    let provider = manager.get_provider(&p.provider).ok_or_else(|| {
+    let provider = manager.get_provider(&provider_name).ok_or_else(|| {
         let available: Vec<_> = manager
             .list_models()
             .iter()
@@ -153,7 +167,7 @@ fn handle_rag_collection_create(
             .collect();
         McpError::invalid_params(format!(
             "Provider '{}' not found. Available: {:?}",
-            p.provider, available
+            provider_name, available
         ))
     })?;
 
@@ -206,7 +220,7 @@ fn handle_rag_collection_create(
         collection: p.collection.clone(),
         embedding_field: p.embedding_field.clone(),
         text_field: p.text_field.clone(),
-        provider: p.provider.clone(),
+        provider: provider_name.clone(),
         language: p.language.clone(),
         dimension,
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -219,7 +233,7 @@ fn handle_rag_collection_create(
         "config": {
             "embedding_field": p.embedding_field,
             "text_field": p.text_field,
-            "provider": p.provider,
+            "provider": provider_name,
             "language": p.language,
             "dimension": dimension
         },
@@ -250,7 +264,7 @@ fn handle_rag_document_import(
     // Get embedding manager
     let manager = embedding_manager.as_ref().ok_or_else(|| {
         McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+            "Embedding not available. Configure an [embedding] section in config.toml.",
         )
     })?;
 
@@ -510,7 +524,7 @@ mod tests {
             collection: "test".to_string(),
             embedding_field: "embedding".to_string(),
             text_field: "content".to_string(),
-            provider: "fasttext".to_string(),
+            provider: "ollama".to_string(),
             language: "hungarian".to_string(),
             dimension: 300,
             created_at: "2026-01-27T12:00:00Z".to_string(),

@@ -4,24 +4,20 @@
 //! - Ollama (default, local LLM server — BGE-M3, nomic-embed-text, etc.)
 //! - vLLM (OpenAI-compatible local server)
 //! - OpenAI (cloud API)
-//! - FastText (legacy, offline, Hungarian support)
 //!
 //! Features:
 //! - LRU cache for embedding results (10K entries, 1 hour TTL)
 
 pub mod cache;
-mod fasttext;
 mod http_provider;
 mod presets;
 
 pub use cache::{CacheConfig, CacheStats, CachedEmbedding, EmbeddingCache};
-pub use fasttext::FastTextProvider;
 pub use http_provider::{
     AuthMethod, HttpEmbeddingProvider, HttpProviderConfig, RequestFormat, ResponseFormat,
 };
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 /// Result type for embedding operations
@@ -140,29 +136,6 @@ impl EmbeddingManager {
     /// Get cache reference (for stats/clear operations)
     pub fn cache(&self) -> Option<&Arc<EmbeddingCache>> {
         self.cache.as_ref()
-    }
-
-    /// Initialize with FastText as default provider (with cache)
-    pub fn with_fasttext(model_path: &Path) -> EmbeddingResult<Self> {
-        let mut manager = Self::with_cache(CacheConfig::default());
-
-        match FastTextProvider::load(model_path) {
-            Ok(provider) => {
-                let model_name = provider.model_name().to_string();
-                manager.register_provider("fasttext", Arc::new(provider));
-                manager.default_provider = "fasttext".to_string();
-                log::info!(
-                    "FastText provider initialized with model: {} (dim={})",
-                    model_name,
-                    manager.providers["fasttext"].dimension()
-                );
-            }
-            Err(e) => {
-                log::warn!("Failed to load FastText model: {}", e);
-            }
-        }
-
-        Ok(manager)
     }
 
     /// Register a provider
@@ -332,8 +305,7 @@ impl EmbeddingManager {
 
 /// Create an EmbeddingManager from TOML config
 ///
-/// Supports: "fasttext", "ollama", "vllm", "openai"
-/// Falls back to FastText if provider is unknown.
+/// Supports: "ollama", "vllm", "openai"
 pub fn create_from_config(
     config: &crate::http_server::EmbeddingTomlConfig,
 ) -> EmbeddingResult<EmbeddingManager> {
@@ -415,30 +387,9 @@ pub fn create_from_config(
             manager.register_provider("openai", Arc::new(provider));
             manager.default_provider = "openai".to_string();
         }
-        "fasttext" => {
-            // Use model_path from [embedding] section, or fall back to env var
-            let model_path = config
-                .model_path
-                .clone()
-                .or_else(|| std::env::var("IRONBASE_FASTTEXT_MODEL").ok());
-
-            if let Some(path) = model_path {
-                if !path.is_empty() {
-                    match FastTextProvider::load(Path::new(&path)) {
-                        Ok(provider) => {
-                            manager.register_provider("fasttext", Arc::new(provider));
-                            manager.default_provider = "fasttext".to_string();
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to load FastText model '{}': {}", path, e);
-                        }
-                    }
-                }
-            }
-        }
         other => {
             return Err(EmbeddingError::ConfigError(format!(
-                "Unknown embedding provider '{}'. Supported: fasttext, ollama, vllm, openai",
+                "Unknown embedding provider '{}'. Supported: ollama, vllm, openai",
                 other
             )));
         }

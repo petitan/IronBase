@@ -51,8 +51,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider",
-                        "default": "fasttext"
+                        "description": "Embedding provider (use embed_list_models to see configured)"
                     },
                     "create_vector_index": {
                         "type": "boolean",
@@ -66,7 +65,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "embed_text",
             "title": "Generate Text Embedding",
-            "description": "Generate an embedding vector for a single text. Default: FastText (Hungarian, offline). Auto-detects available providers from environment variables.",
+            "description": "Generate an embedding vector for a single text. Uses the provider configured in [embedding] section of config.toml. Use embed_list_models to see configured providers.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -76,8 +75,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider. Available: fasttext (default, offline), ollama (local), openai, cohere, mistral, azure-openai, voyage. Use embed_list_models to see configured providers.",
-                        "default": "fasttext"
+                        "description": "Embedding provider (use embed_list_models to see configured)"
                     }
                 },
                 "required": ["text"]
@@ -98,8 +96,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider (use embed_list_models to see available)",
-                        "default": "fasttext"
+                        "description": "Embedding provider (use embed_list_models to see configured)"
                     }
                 },
                 "required": ["texts"]

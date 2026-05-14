@@ -280,11 +280,10 @@ async fn run_http_server_internal(
         }
     }
 
-    // Initialize embedding manager
-    // Priority: [embedding] config section > IRONBASE_FASTTEXT_MODEL env > [rag].fasttext_model
+    // Initialize embedding manager from [embedding] config section.
+    // Explicit configuration is required — no implicit defaults.
     let embedding_manager: Option<Arc<crate::EmbeddingManager>> =
         if let Some(ref embedding_config) = config.embedding {
-            // New config-driven init
             match crate::create_embedding_from_config(embedding_config) {
                 Ok(manager) if manager.has_providers() => {
                     info!(
@@ -306,32 +305,8 @@ async fn run_http_server_internal(
                 }
             }
         } else {
-            // Legacy: FastText-only path
-            let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
-                .ok()
-                .or_else(|| config.fasttext_model.clone());
-            if let Some(model_path) = fasttext_path {
-                match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
-                    Ok(manager) if manager.has_providers() => {
-                        info!(
-                            "Embedding manager initialized with FastText model: {}",
-                            model_path
-                        );
-                        Some(Arc::new(manager))
-                    }
-                    Ok(_) => {
-                        warn!("FastText model configured but failed to load, embeddings disabled");
-                        None
-                    }
-                    Err(e) => {
-                        warn!("Failed to initialize embedding manager: {}", e);
-                        None
-                    }
-                }
-            } else {
-                info!("No embedding provider configured, embeddings disabled");
-                None
-            }
+            info!("No [embedding] section in config, embeddings disabled");
+            None
         };
 
     // Initialize job manager for async operations (embedding backfill, etc.)
@@ -350,7 +325,7 @@ async fn run_http_server_internal(
     );
 
     // Lock working set on Windows to prevent memory paging under pressure.
-    // Called after warm-up + FastText load so the floor captures all resident data.
+    // Called after warm-up + embedding manager init so the floor captures all resident data.
     // Always enabled on Windows — no config needed. Graceful fallback if it fails.
     if cfg!(windows) {
         let ws_result = crate::memory_lock::lock_working_set();

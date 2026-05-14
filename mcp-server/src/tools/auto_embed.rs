@@ -712,6 +712,19 @@ pub fn check_model_changes_and_reembed(
             _ => continue,
         };
 
+        // FastText support was removed. Collections still configured with provider="fasttext"
+        // must be reconfigured manually via auto_embed_enable with a current provider
+        // (ollama, vllm, openai) — re-embedding will be triggered automatically afterwards.
+        if config.provider == "fasttext" {
+            tracing::error!(
+                "Collection '{}': stored auto-embed config uses provider='fasttext', which has been removed. \
+                 Reconfigure via auto_embed_enable with a current provider (ollama, vllm, openai). \
+                 This collection will not auto-embed until reconfigured.",
+                collection
+            );
+            continue;
+        }
+
         let provider = match manager.get_provider(&config.provider) {
             Some(p) => p,
             None => {
@@ -734,7 +747,7 @@ pub fn check_model_changes_and_reembed(
         let saved_preproc = config.preprocessing_version.as_deref().unwrap_or("");
         let current_dim = provider.dimension();
 
-        // Check dimension change (e.g., FastText 300 → BGE-M3 1024)
+        // Check dimension change (e.g., 300 → BGE-M3 1024)
         let saved_dim = adapter
             .list_vector_indexes(collection)
             .ok()

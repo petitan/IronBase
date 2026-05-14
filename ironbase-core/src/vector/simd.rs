@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_large_vector_300_dim() {
-        // Test with FastText-sized vectors (300 dimensions)
+        // Test with 300-dimensional vectors
         let a: Vec<f32> = (0..300).map(|i| i as f32 * 0.01).collect();
         let b: Vec<f32> = (0..300).map(|i| (i + 1) as f32 * 0.01).collect();
 

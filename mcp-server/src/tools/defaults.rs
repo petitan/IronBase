@@ -32,22 +32,10 @@ pub fn default_chunk_mode() -> String {
 }
 
 // ============================================================================
-// Embedding Defaults
-// ============================================================================
-
-/// Default embedding provider
-pub const DEFAULT_EMBEDDING_PROVIDER: &str = "fasttext";
-
-/// Default function for serde
-pub fn default_embedding_provider() -> String {
-    DEFAULT_EMBEDDING_PROVIDER.to_string()
-}
-
-// ============================================================================
 // Batch Processing Defaults
 // ============================================================================
 
-/// Default batch size for backfill operations (FastText in-process)
+/// Default batch size for backfill operations
 pub const DEFAULT_BATCH_SIZE: usize = 100;
 
 /// Maximum batch size for embedding operations

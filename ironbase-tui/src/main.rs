@@ -3113,7 +3113,7 @@ async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
                 app.rag_state.error = None;
 
                 if let Some(ref db) = app.db {
-                    match db.embed_text(&text, "fasttext").await {
+                    match db.embed_text(&text, "ollama").await {
                         Ok(result) => {
                             app.rag_state.is_loading = false;
                             app.rag_state.embed_test_result = Some(result);
@@ -3151,7 +3151,7 @@ async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             let collection = app.rag_state.collection.clone();
             if let Some(ref db) = app.db {
                 match db
-                    .auto_embed_enable(&collection, "content", "embedding", "fasttext")
+                    .auto_embed_enable(&collection, "content", "embedding", "ollama")
                     .await
                 {
                     Ok(_) => {

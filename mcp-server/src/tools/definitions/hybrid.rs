@@ -67,7 +67,7 @@ pub fn tools() -> Vec<Value> {
                 "projection": fields::projection_simple(),
                 "provider": {
                     "type": "string",
-                    "description": "Embedding provider for auto-embed mode (uses collection RAG config if not specified). Example: 'fasttext'"
+                    "description": "Embedding provider for auto-embed mode (uses collection RAG config if not specified). Example: 'ollama'"
                 },
                 "rrf_k": {
                     "type": "number",

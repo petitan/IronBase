@@ -231,7 +231,7 @@ pub struct AutoEmbeddingConfig {
     /// Target field where embedding vector is stored (e.g., "embedding")
     #[serde(default)]
     pub target_field: String,
-    /// Embedding provider name (e.g., "fasttext", "openai", "ollama")
+    /// Embedding provider name (e.g., "ollama", "vllm", "openai")
     #[serde(default)]
     pub provider: String,
     /// Optional model override (provider-specific)

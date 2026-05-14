@@ -349,10 +349,9 @@ fn run_stdio_server(cli: &Cli) {
         elapsed.as_secs_f64()
     );
 
-    // Initialize embedding manager
-    // Priority: [embedding] config section > IRONBASE_FASTTEXT_MODEL env > [rag].fasttext_model
+    // Initialize embedding manager from [embedding] config section.
+    // Explicit configuration is required — no implicit defaults.
     let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> = {
-        // Parse config.toml for [embedding] and [rag] sections
         let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
         let config_file = std::path::Path::new(&config_path);
         let toml_table: Option<toml::Table> = if config_file.exists() {
@@ -363,13 +362,11 @@ fn run_stdio_server(cli: &Cli) {
             None
         };
 
-        // Try [embedding] section first (new config-driven path)
         let embedding_config: Option<mcp_ironbase::http_server::EmbeddingTomlConfig> = toml_table
             .as_ref()
             .and_then(|t| t.get("embedding"))
             .and_then(|v| v.clone().try_into().ok());
 
-        // Set configured batch size for backfill jobs
         if let Some(ref emb_config) = embedding_config {
             if let Some(batch_size) = emb_config.batch_size {
                 mcp_ironbase::tools::defaults::set_configured_batch_size(batch_size);
@@ -398,40 +395,8 @@ fn run_stdio_server(cli: &Cli) {
                 }
             }
         } else {
-            // Legacy: FastText-only path
-            let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL").ok().or_else(|| {
-                toml_table
-                    .as_ref()
-                    .and_then(|t| t.get("rag"))
-                    .and_then(|r| r.get("fasttext_model"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            });
-
-            if let Some(model_path) = fasttext_path {
-                match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(
-                    &model_path,
-                )) {
-                    Ok(manager) if manager.has_providers() => {
-                        eprintln!(
-                            "Embedding manager initialized with FastText model: {}",
-                            model_path
-                        );
-                        Some(Arc::new(manager))
-                    }
-                    Ok(_) => {
-                        eprintln!("Warning: FastText model configured but failed to load");
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: Failed to initialize embedding manager: {}", e);
-                        None
-                    }
-                }
-            } else {
-                eprintln!("No embedding provider configured, embeddings disabled");
-                None
-            }
+            eprintln!("No [embedding] section in config, embeddings disabled");
+            None
         }
     };
 
