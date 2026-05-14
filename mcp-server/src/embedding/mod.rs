@@ -311,7 +311,14 @@ pub fn create_from_config(
 ) -> EmbeddingResult<EmbeddingManager> {
     let mut manager = EmbeddingManager::with_cache(CacheConfig::default());
 
-    match config.provider.as_str() {
+    let provider = config.provider.as_deref().ok_or_else(|| {
+        EmbeddingError::ConfigError(
+            "Missing 'provider' in [embedding] section. Required values: ollama, vllm, openai."
+                .to_string(),
+        )
+    })?;
+
+    match provider {
         "ollama" => {
             let base_url = config
                 .base_url

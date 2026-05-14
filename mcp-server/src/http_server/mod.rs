@@ -288,14 +288,14 @@ async fn run_http_server_internal(
                 Ok(manager) if manager.has_providers() => {
                     info!(
                         "Embedding manager initialized from [embedding] config: provider={}",
-                        embedding_config.provider
+                        embedding_config.provider.as_deref().unwrap_or("?")
                     );
                     Some(Arc::new(manager))
                 }
                 Ok(_) => {
                     warn!(
                         "Embedding provider '{}' configured but no providers loaded",
-                        embedding_config.provider
+                        embedding_config.provider.as_deref().unwrap_or("?")
                     );
                     None
                 }

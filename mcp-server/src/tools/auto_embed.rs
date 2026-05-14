@@ -297,23 +297,34 @@ fn handle_auto_embed_status(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     let config = adapter.get_auto_embedding_config(&p.collection)?;
 
     match config {
-        Some(config) => Ok(json!({
-            "collection": p.collection,
-            "enabled": config.enabled,
-            "config": {
-                "source_field": config.source_field,
-                "target_field": config.target_field,
-                "provider": config.provider,
-                "model": config.model,
-                "dimension": config.dimension,
-                "skip_if_exists": config.skip_if_exists,
-                "chunking": config.chunking.map(|c| json!({
-                    "mode": c.mode,
-                    "chunk_size": c.chunk_size,
-                    "overlap": c.overlap
-                }))
+        Some(config) => {
+            let requires_reconfiguration = config.provider == "fasttext";
+            let mut response = json!({
+                "collection": p.collection,
+                "enabled": config.enabled,
+                "config": {
+                    "source_field": config.source_field,
+                    "target_field": config.target_field,
+                    "provider": config.provider,
+                    "model": config.model,
+                    "dimension": config.dimension,
+                    "skip_if_exists": config.skip_if_exists,
+                    "chunking": config.chunking.map(|c| json!({
+                        "mode": c.mode,
+                        "chunk_size": c.chunk_size,
+                        "overlap": c.overlap
+                    }))
+                }
+            });
+            if requires_reconfiguration {
+                response["requires_reconfiguration"] = json!(true);
+                response["reconfiguration_reason"] = json!(
+                    "Provider 'fasttext' has been removed. Call auto_embed_enable with a \
+                     supported provider (ollama, vllm, openai) to re-enable this collection."
+                );
             }
-        })),
+            Ok(response)
+        }
         None => Ok(json!({
             "collection": p.collection,
             "enabled": false,

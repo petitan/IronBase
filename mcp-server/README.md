@@ -432,21 +432,20 @@ See [ACL Documentation](docs/ACL.md) for details.
 
 | Tool | Description |
 |------|-------------|
-| `embed_text` | Generate single text embedding (FastText default) |
+| `embed_text` | Generate single text embedding |
 | `embed_batch` | Batch text embedding (max 100 texts) |
 | `embed_document` | Chunk document, embed chunks, store with vector index |
 | `embed_list_models` | List available embedding models and providers |
 | `embed_cache_stats` | Get embedding cache hit rate and memory usage |
 | `embed_cache_clear` | Clear all embedding cache entries |
 
-**FastText Model Formats:**
+**Supported providers** (configured via `[embedding]` section in `config.toml`):
 
-| Format | File | Subword/OOV | Size (hu 300d) |
-|--------|------|-------------|----------------|
-| v1 | `.ironbase.bin` | No — OOV words get zero vectors | ~2.3 GB |
-| **v2** | `.ironbase.v2.bin` | **Yes** — subword n-gram hashing | ~4.5 GB |
-
-The v2 format is recommended for Hungarian and other agglutinative languages where compound words and abbreviations are common. See [FastText v2 Migration Guide](docs/FASTTEXT_V2_MIGRATION.md) for upgrade instructions.
+| Provider | Type | Example model |
+|----------|------|---------------|
+| `ollama` | Local HTTP (Ollama daemon) | `bge-m3`, `nomic-embed-text` |
+| `vllm` | Local HTTP (vLLM, OpenAI-compatible) | `bge-m3` |
+| `openai` | Cloud API | `text-embedding-3-small` |
 
 ### Auto-Embedding
 

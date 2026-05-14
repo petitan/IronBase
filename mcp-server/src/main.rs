@@ -378,14 +378,14 @@ fn run_stdio_server(cli: &Cli) {
                 Ok(manager) if manager.has_providers() => {
                     eprintln!(
                         "Embedding manager initialized from [embedding] config: provider={}",
-                        emb_config.provider
+                        emb_config.provider.as_deref().unwrap_or("?")
                     );
                     Some(Arc::new(manager))
                 }
                 Ok(_) => {
                     eprintln!(
                         "Warning: Embedding provider '{}' configured but no providers loaded",
-                        emb_config.provider
+                        emb_config.provider.as_deref().unwrap_or("?")
                     );
                     None
                 }

@@ -35,7 +35,7 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | **Update Operators (7)** | `$set` `$inc` `$unset` `$push` `$pull` `$addToSet` `$pop` |
 | **Aggregation** | 8 stages + 8 accumulators with Top-K optimization |
 | **Indexes** | B+ tree, compound, case-insensitive, fuzzy, fulltext (BM25), HNSW vector |
-| **Search** | Fuzzy (Jaro-Winkler/Levenshtein/Damerau), fulltext (BM25 + stemming), RAG (FastText + HNSW), hybrid (RRF score fusion) |
+| **Search** | Fuzzy (Jaro-Winkler/Levenshtein/Damerau), fulltext (BM25 + stemming), RAG (HNSW + pluggable embedding providers), hybrid (RRF score fusion) |
 | **Durability** | ACID transactions, WAL, crash recovery, 3 durability modes |
 | **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
@@ -228,7 +228,7 @@ results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 
 ```
 hybrid_search      → RRF fusion of fulltext + vector results with reranking
-                     If 'vector' omitted → auto-embeds query (FastText/Ollama/OpenAI)
+                     If 'vector' omitted → auto-embeds query (Ollama/vLLM/OpenAI)
                      Supports flat (per-chunk) and grouped (per-document) response modes
 ```
 

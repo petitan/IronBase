@@ -738,7 +738,7 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 
 | Tool | Leírás |
 |------|--------|
-| `rag_collection_create` | Collection + FastText model |
+| `rag_collection_create` | Collection + vector + fulltext indexes |
 | `rag_document_import` | Auto-chunked import |
 | `rag_collection_stats` | Statisztikák |
 | `hybrid_search` | Unified keresés: explicit vector VAGY auto-embed |
@@ -966,7 +966,7 @@ MCP tools (hybrid_search)                    → score fusion, ranked retrieval
 ```json
 {"name": "auto_embed_enable", "arguments": {
   "collection": "articles", "source_field": "content",
-  "target_field": "content_embedding", "provider": "fasttext"
+  "target_field": "content_embedding", "provider": "ollama"
 }}
 {"name": "embed_cache_stats"}
 
@@ -976,70 +976,29 @@ MCP tools (hybrid_search)                    → score fusion, ranked retrieval
 
 Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pending→Running→Done
 
-### FastText v2 Format (2026-02-14)
+### Model & Preprocessing Change Detection
 
-**Probléma:** v1 (.ironbase.bin) a `.vec` formátumból konvertált — csak előre számított szóvektorok, subword infó nélkül. Magyar összetett szavak (fékerőmérő, lengéscsillapító) és rövidítések (PEF, SICE) zero vektort kaptak → ~30-40% query érintett.
+**Mechanizmus:** `AutoEmbeddingConfig`-ban tárolt `model` és `preprocessing_version` mezők. Startup detekció (`check_model_changes_and_reembed()`) összehasonlítja a tárolt értékeket az élő provider által visszaadottakkal — eltérés → automatikus re-embed.
 
-**Megoldás:** `.ironbase.v2` formátum 2M subword bucket vektorral.
-
-| Format | Fájl | OOV kezelés | Méret |
-|--------|------|-------------|-------|
-| v1 | `.ironbase.bin` | Zero vektor | ~2.3 GB |
-| **v2** | `.ironbase.v2.bin` | Subword n-gram átlag | ~4.5 GB |
-
-**Auto-detection:** Első 4 byte `b"IBv2"` → v2 path, egyébként v1 (backward compatible).
-
-**OOV algoritmus:** `<word>` → 5-gram-ok → FNV-1a hash → bucket_id → mmap lookup → átlag
-
-**Konverter:** `python3 models/convert_bin_to_ironbase_v2.py cc.hu.300.bin output.v2.bin`
-- Streaming architektúra: O(vocab_strings + dim) memória
-- Runtime: ~10 perc
-
-**Migráció:** `IRONBASE_FASTTEXT_MODEL=...v2.bin` + szerver újraindítás (automatikusan detektálja a modellváltást és újra-embed-eli az érintett collection-öket).
-
-**Key files:**
-- `models/convert_bin_to_ironbase_v2.py` — Python konverter (streaming)
-- `mcp-server/src/embedding/fasttext.rs` — v1/v2 loader, subword computation
-- `mcp-server/docs/FASTTEXT_V2_MIGRATION.md` — teljes migrációs útmutató
-
-### Preprocessing Version Detection (2026-02-16)
-
-**Probléma:** A FastText tokenizer lecserélése (stop words + stemming) után a meglévő dokumentumok még régi preprocessinggel generált vektorokat tartalmaztak. A modellváltás-detekció nem érzékelte, mert a modell fájl neve nem változott.
-
-**Megoldás:** `preprocessing_version` mező az `AutoEmbeddingConfig`-ban + `EmbeddingProvider` trait-ben. Startup detekció modell ÉS preprocessing verziót is összehasonlít.
-
-**Verzió konvenció:** `nlp_{lang}_v{N}` (pl. `nlp_hu_v1`). Ha a preprocessing változik → verziószám növelés.
-
-| Provider | Verzió | Tartalom |
-|----------|--------|----------|
-| FastText | `nlp_hu_v1` | Hungarian stop words + Snowball stemming, no accent folding |
-| HTTP/egyéb | `default` | Trait default, nincs preprocessing |
-
-**Startup detekció logika (`check_model_changes_and_reembed()`):**
+**Startup logika:**
 
 | Helyzet | Mi történik |
 |---------|-------------|
 | Legacy config (mindkettő üres) | Mentés, nincs re-embed |
 | Modell változott | Force re-embed |
 | Preprocessing változott | Force re-embed |
-| Mindkettő változott | Egy force re-embed |
-| Semmi sem változott | Nincs művelet |
+| Dimenzió változott | HNSW rebuild + re-embed |
 | `--force-reembed` flag | Force re-embed mindig |
 
-**CLI használat:**
+**CLI:**
 ```bash
 ./mcp-ironbase-server --force-reembed              # HTTP mód
 ./mcp-ironbase-server --stdio --force-reembed      # stdio mód
 ```
 
-**Új preprocessing verzió bevezetése:**
-1. `mcp-server/src/embedding/fasttext.rs` → `preprocessing_version()` visszatérési értékét módosítani (pl. `"nlp_hu_v2"`)
-2. Szerver újraindítás → automatikus re-embed indul minden enabled collection-re
-
 **Key files:**
 - `ironbase-core/src/storage/mod.rs` — `AutoEmbeddingConfig::preprocessing_version`
-- `mcp-server/src/embedding/mod.rs` — `EmbeddingProvider::preprocessing_version()` trait default
-- `mcp-server/src/embedding/fasttext.rs` — `preprocessing_version()` → `"nlp_hu_v1"`
+- `mcp-server/src/embedding/mod.rs` — `EmbeddingProvider::preprocessing_version()` trait default = `"default"`
 - `mcp-server/src/tools/auto_embed.rs` — `check_model_changes_and_reembed()`, `handle_auto_embed_enable()`
 
 ### $** Wildcard

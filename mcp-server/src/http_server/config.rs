@@ -217,12 +217,12 @@ struct LoggingConfig {
 
 /// Embedding provider configuration from [embedding] TOML section
 ///
-/// Supports: "ollama", "vllm", "openai"
+/// Supports: "ollama", "vllm", "openai". `provider` is required — no implicit default.
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub struct EmbeddingTomlConfig {
-    /// Provider type: "ollama" | "vllm" | "openai"
-    #[serde(default = "default_embedding_provider")]
-    pub provider: String,
+    /// Provider type: "ollama" | "vllm" | "openai". Required.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Base URL for HTTP-based providers (e.g., "http://localhost:11434")
     #[serde(default)]
     pub base_url: Option<String>,
@@ -244,10 +244,6 @@ pub struct EmbeddingTomlConfig {
     /// API key (for OpenAI/cloud providers)
     #[serde(default)]
     pub api_key: Option<String>,
-}
-
-fn default_embedding_provider() -> String {
-    "ollama".to_string()
 }
 
 fn default_embedding_timeout() -> u64 {
