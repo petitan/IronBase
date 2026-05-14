@@ -27,7 +27,7 @@ pub struct AutoEmbedEnableParams {
     pub collection: String,
     pub source_field: String,
     pub target_field: String,
-    pub provider: String,
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub dimension: Option<usize>,
     #[serde(default)]
@@ -66,9 +66,12 @@ impl AutoEmbedEnableParams {
             ));
         }
 
-        // Provider validation
-        if self.provider.is_empty() {
-            return Err(McpError::invalid_params("provider cannot be empty"));
+        // Provider validation: if explicitly set, must be non-empty.
+        // Missing/None is resolved to manager default at the handler site.
+        if let Some(ref p) = self.provider {
+            if p.is_empty() {
+                return Err(McpError::invalid_params("provider cannot be empty"));
+            }
         }
 
         // Dimension validation
@@ -169,8 +172,22 @@ fn handle_auto_embed_enable(
         McpError::internal("Embedding not available. Configure [embedding] section in config.toml.")
     })?;
 
+    // Resolve provider: explicit param, else manager default
+    let provider_name = p
+        .provider
+        .as_deref()
+        .unwrap_or(manager.default_provider_name())
+        .to_string();
+
+    if provider_name.is_empty() {
+        return Err(McpError::invalid_params(
+            "No embedding provider available. Configure an [embedding] section in config.toml \
+             or pass an explicit 'provider' argument.",
+        ));
+    }
+
     // Check if provider is available
-    let provider = manager.get_provider(&p.provider).ok_or_else(|| {
+    let provider = manager.get_provider(&provider_name).ok_or_else(|| {
         let available: Vec<_> = manager
             .list_models()
             .iter()
@@ -178,7 +195,7 @@ fn handle_auto_embed_enable(
             .collect();
         McpError::invalid_params(format!(
             "Provider '{}' not found. Available: {:?}",
-            p.provider, available
+            provider_name, available
         ))
     })?;
 
@@ -201,7 +218,7 @@ fn handle_auto_embed_enable(
         enabled: true,
         source_field: p.source_field.clone(),
         target_field: p.target_field.clone(),
-        provider: p.provider.clone(),
+        provider: provider_name,
         model: Some(model_name),
         dimension: Some(dimension),
         skip_if_exists: p.skip_if_exists,

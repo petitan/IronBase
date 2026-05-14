@@ -113,23 +113,34 @@ pub fn is_embedding_tool(name: &str) -> bool {
 fn handle_embed_text(params: Value, manager: &EmbeddingManager) -> Result<Value> {
     let p: EmbedTextParams = EmbedTextParams::parse(params)?;
 
-    let vector = manager
-        .embed(&p.text, p.provider.as_deref())
-        .map_err(|e| McpError::internal(format!("Embedding failed: {}", e)))?;
+    let provider_name = resolve_provider(p.provider.as_deref(), manager)?;
 
-    let provider_name = p
-        .provider
-        .as_deref()
-        .unwrap_or(manager.default_provider_name());
+    let vector = manager
+        .embed(&p.text, Some(&provider_name))
+        .map_err(|e| McpError::internal(format!("Embedding failed: {}", e)))?;
 
     Ok(json!({
         "vector": vector,
         "dimension": vector.len(),
         "provider": provider_name,
-        "model": manager.get_provider(provider_name)
+        "model": manager.get_provider(&provider_name)
             .map(|p| p.model_name().to_string())
             .unwrap_or_default()
     }))
+}
+
+/// Resolve provider: explicit param > manager default. Errors if neither is set.
+fn resolve_provider(explicit: Option<&str>, manager: &EmbeddingManager) -> Result<String> {
+    let name = explicit
+        .unwrap_or(manager.default_provider_name())
+        .to_string();
+    if name.is_empty() {
+        return Err(McpError::invalid_params(
+            "No embedding provider available. Configure an [embedding] section in config.toml \
+             or pass an explicit 'provider' argument.",
+        ));
+    }
+    Ok(name)
 }
 
 /// Maximum total characters allowed in a batch to prevent OOM
@@ -157,17 +168,14 @@ fn handle_embed_batch(params: Value, manager: &EmbeddingManager) -> Result<Value
         )));
     }
 
+    let provider_name = resolve_provider(p.provider.as_deref(), manager)?;
+
     // Convert Vec<String> to Vec<&str>
     let text_refs: Vec<&str> = p.texts.iter().map(|s| s.as_str()).collect();
 
     let vectors = manager
-        .embed_batch(&text_refs, p.provider.as_deref())
+        .embed_batch(&text_refs, Some(&provider_name))
         .map_err(|e| McpError::internal(format!("Batch embedding failed: {}", e)))?;
-
-    let provider_name = p
-        .provider
-        .as_deref()
-        .unwrap_or(manager.default_provider_name());
 
     let dimension = vectors.first().map(|v| v.len()).unwrap_or(0);
 
@@ -176,7 +184,7 @@ fn handle_embed_batch(params: Value, manager: &EmbeddingManager) -> Result<Value
         "count": vectors.len(),
         "dimension": dimension,
         "provider": provider_name,
-        "model": manager.get_provider(provider_name)
+        "model": manager.get_provider(&provider_name)
             .map(|p| p.model_name().to_string())
             .unwrap_or_default()
     }))
@@ -204,12 +212,9 @@ fn handle_embed_document(
         return Err(McpError::invalid_params("Content cannot be empty"));
     }
 
-    // Get provider — explicit param, else manager default
-    let provider_name = p
-        .provider
-        .as_deref()
-        .unwrap_or(manager.default_provider_name());
-    let provider = manager.get_provider(provider_name).ok_or_else(|| {
+    let provider_name = resolve_provider(p.provider.as_deref(), manager)?;
+
+    let provider = manager.get_provider(&provider_name).ok_or_else(|| {
         McpError::invalid_params(format!("Provider '{}' not available", provider_name))
     })?;
 
