@@ -256,6 +256,24 @@ pub fn strip_markdown_tables(text: &str) -> String {
     out
 }
 
+/// Build the text used to embed a chunk.
+///
+/// Combines the chunk body with its section breadcrumb so the embedding vector
+/// carries hierarchical context (e.g. `"Brakes > PEF-35 > Specs\n\n<body>"`).
+/// Markdown tables in the body are flattened to plain text for cleaner
+/// tokenization.
+///
+/// This is used ONLY for embedding — the original chunk text is stored and
+/// returned unchanged. Generic auto-embedding (auto_embed.rs / crud.rs) embeds
+/// the source field verbatim and intentionally does not call this.
+pub fn build_embed_text(body: &str, section_path: Option<&[String]>) -> String {
+    let clean = strip_markdown_tables(body);
+    match section_path {
+        Some(path) if !path.is_empty() => format!("{}\n\n{}", path.join(" > "), clean),
+        _ => clean,
+    }
+}
+
 /// Split content into chunks
 ///
 /// Uses the specified mode, or auto-detects if mode is Auto.
@@ -531,5 +549,36 @@ mod tests {
         let input = "Just plain text\nwith multiple lines";
         let result = strip_markdown_tables(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_build_embed_text_with_section_path() {
+        let path = vec!["Fékpadok".to_string(), "PEF-35".to_string()];
+        let result = build_embed_text("A műszaki adatok.", Some(&path));
+        assert_eq!(result, "Fékpadok > PEF-35\n\nA műszaki adatok.");
+    }
+
+    #[test]
+    fn test_build_embed_text_without_section_path() {
+        assert_eq!(build_embed_text("Plain body.", None), "Plain body.");
+        // Empty path behaves like None (no breadcrumb prefix)
+        let empty: Vec<String> = vec![];
+        assert_eq!(build_embed_text("Plain body.", Some(&empty)), "Plain body.");
+    }
+
+    #[test]
+    fn test_build_embed_text_flattens_table() {
+        let body = "| A | B |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(build_embed_text(body, None), "A, B\n1, 2");
+    }
+
+    #[test]
+    fn test_build_embed_text_table_with_breadcrumb() {
+        let path = vec!["Árlista".to_string()];
+        let body = "| Megnevezés | Ár |\n|---|---|\n| PEF-35 | 1750000 |";
+        assert_eq!(
+            build_embed_text(body, Some(&path)),
+            "Árlista\n\nMegnevezés, Ár\nPEF-35, 1750000"
+        );
     }
 }

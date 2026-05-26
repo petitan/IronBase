@@ -8,7 +8,7 @@
 //! Search logic lives in hybrid_search (see hybrid.rs).
 
 use crate::adapter::IronBaseAdapter;
-use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
+use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde::{Deserialize, Serialize};
@@ -330,9 +330,14 @@ fn handle_rag_document_import(
     })?;
 
     for batch in chunks.chunks(100) {
-        let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
+        // Embed breadcrumb + cleaned body; the original chunk.text is stored unchanged.
+        let texts: Vec<String> = batch
+            .iter()
+            .map(|c| build_embed_text(&c.text, c.section_path.as_deref()))
+            .collect();
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = provider
-            .embed_batch(&texts)
+            .embed_batch(&text_refs)
             .map_err(|e| McpError::internal(format!("Embedding failed: {}", e)))?;
         all_embeddings.extend(embeddings);
     }

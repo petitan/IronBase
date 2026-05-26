@@ -229,6 +229,30 @@ fn handle_auto_embed_enable(
     // Save to collection metadata
     adapter.set_auto_embedding_config(&p.collection, Some(config.clone()))?;
 
+    // Visibility: warn if this looks like a chunk-imported (RAG) collection.
+    // Generic auto-embed embeds source_field verbatim — without the section
+    // breadcrumb that rag_document_import adds — so re-embedded vectors would
+    // differ from import-time vectors. Surface this instead of degrading silently.
+    let chunk_imported = adapter
+        .find_one(
+            &p.collection,
+            json!({ "section_path": { "$exists": true } }),
+        )
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+    let verbatim_warning = if chunk_imported {
+        let msg = format!(
+            "Collection '{}' contains chunk documents (section_path present). Auto-embed embeds \
+             '{}' verbatim, without the section breadcrumb that rag_document_import adds — these \
+             vectors will differ from import-time vectors.",
+            p.collection, config.source_field
+        );
+        tracing::warn!("{}", msg);
+        Some(msg)
+    } else {
+        None
+    };
+
     // Count existing documents that need embedding (missing target_field)
     let backfill_query = json!({ &config.target_field: { "$exists": false } });
     let existing_count = adapter
@@ -273,6 +297,10 @@ fn handle_auto_embed_enable(
         response["backfill_job_id"] = json!(job_id);
         response["message"] =
             json!("Auto-embedding enabled. Backfill job started for existing documents.");
+    }
+
+    if let Some(msg) = verbatim_warning {
+        response["warning"] = json!(msg);
     }
 
     Ok(response)

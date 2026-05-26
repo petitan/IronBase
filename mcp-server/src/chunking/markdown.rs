@@ -53,16 +53,28 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
 
     let mut section_path: Vec<String> = Vec::new();
     let mut current_heading: Option<(String, u8)> = None;
+    // Tracks whether the chunk boundary falls inside a fenced code block, so a
+    // `# comment` line in code is not misdetected as a markdown heading.
+    let mut fence_open = false;
 
     // Create chunks with overlap applied
     for (index, raw_chunk) in raw_chunks.iter().enumerate() {
         let trimmed = raw_chunk.trim();
         let (start_byte, end_byte) = positions[index];
 
-        // Detect heading from raw (non-overlapped) chunk text
-        if let Some((heading, level)) = extract_heading(trimmed) {
-            update_section_path(&mut section_path, &heading, level);
-            current_heading = Some((heading, level));
+        // Detect heading from raw (non-overlapped) chunk text, but only when the
+        // chunk does not start inside a fenced code block.
+        if !fence_open {
+            if let Some((heading, level)) = extract_heading(trimmed) {
+                update_section_path(&mut section_path, &heading, level);
+                current_heading = Some((heading, level));
+            }
+        }
+
+        // Update fence state from this chunk for the next iteration: an odd
+        // number of fence markers toggles whether we end inside a code block.
+        if count_fence_lines(raw_chunk) % 2 == 1 {
+            fence_open = !fence_open;
         }
 
         // Apply overlap: extend backwards for chunks after the first
@@ -109,6 +121,19 @@ fn extract_heading(text: &str) -> Option<(String, u8)> {
     }
 
     None
+}
+
+/// Count lines that open or close a fenced code block (``` or ~~~).
+///
+/// Each such line toggles the in-code-block state; an odd count means the
+/// chunk flips the state for the following chunk.
+fn count_fence_lines(text: &str) -> usize {
+    text.lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            t.starts_with("```") || t.starts_with("~~~")
+        })
+        .count()
 }
 
 /// Update section path based on new heading
@@ -215,6 +240,41 @@ mod tests {
         // Verify total count is set correctly
         for chunk in &chunks {
             assert_eq!(chunk.total, chunks.len());
+        }
+    }
+
+    #[test]
+    fn test_count_fence_lines() {
+        assert_eq!(count_fence_lines("no fences here"), 0);
+        assert_eq!(count_fence_lines("```bash\necho hi\n```"), 2);
+        assert_eq!(count_fence_lines("text\n~~~\ncode"), 1);
+        assert_eq!(count_fence_lines("  ```rust\nfn main(){}\n  ```"), 2);
+    }
+
+    /// A `#`-prefixed line inside a fenced code block must not be treated as a
+    /// markdown heading (would pollute section_path).
+    #[test]
+    fn test_heading_not_detected_inside_code_fence() {
+        let content = "# Real Heading\n\nSome introductory text to fill space.\n\n\
+                        ```bash\n# not a heading, just a shell comment\necho hello\n```\n\n\
+                        More body text after the code block.";
+        // Small chunk size forces the code comment toward a chunk boundary.
+        let chunks = split(content, 40, 0).unwrap();
+        for chunk in &chunks {
+            if let Some(ref h) = chunk.heading {
+                assert!(
+                    !h.contains("not a heading"),
+                    "code comment misdetected as heading: {}",
+                    h
+                );
+            }
+            if let Some(ref path) = chunk.section_path {
+                assert!(
+                    !path.iter().any(|s| s.contains("not a heading")),
+                    "code comment leaked into section_path: {:?}",
+                    path
+                );
+            }
         }
     }
 }

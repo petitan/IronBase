@@ -10,7 +10,7 @@
 //! All functions include safety limits to prevent OOM attacks.
 
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
-use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
+use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::tools::defaults::{
     DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
@@ -1686,9 +1686,13 @@ fn rag_import_impl(
         return Dynamic::from(result);
     }
 
-    // Generate embeddings
-    let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-    let embeddings = match provider.embed_batch(&texts) {
+    // Generate embeddings: breadcrumb + cleaned body; stored chunk.text is unchanged.
+    let texts: Vec<String> = chunks
+        .iter()
+        .map(|c| build_embed_text(&c.text, c.section_path.as_deref()))
+        .collect();
+    let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let embeddings = match provider.embed_batch(&text_refs) {
         Ok(e) => e,
         Err(e) => return Dynamic::from(format!("Error: Embedding failed: {}", e)),
     };
@@ -1730,6 +1734,12 @@ fn rag_import_impl(
         }
         if let Some(ref heading) = chunk.heading {
             doc["section"] = json!(heading);
+        }
+        if let Some(level) = chunk.heading_level {
+            doc["heading_level"] = json!(level);
+        }
+        if let Some(ref path) = chunk.section_path {
+            doc["section_path"] = json!(path);
         }
 
         // Add custom metadata from options (with security filtering)
