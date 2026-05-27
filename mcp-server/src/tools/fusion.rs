@@ -1266,6 +1266,60 @@ mod tests {
         assert_eq!(merged_text, "AAAA BBBB CCCC DDDD EEEE FFFF GGGG");
     }
 
+    /// Regression for #64: merge must only touch the text field it is given;
+    /// other fields (e.g. `title`, identical across chunks) must stay intact.
+    /// The original bug merged a mis-resolved field (`title`), concatenating it
+    /// N times while leaving content unmerged.
+    #[test]
+    fn test_merge_leaves_other_fields_intact() {
+        let mut results = vec![
+            FusedResult {
+                id: "c0".into(),
+                doc: json!({
+                    "_id": "c0", "doc_id": "docA", "chunk_index": 0,
+                    "content": "AAAA BBBB", "title": "BKV Zrt árajánlat",
+                    "start_char": 0, "end_char": 9
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: None,
+                t_score: Some(1.0),
+            },
+            FusedResult {
+                id: "c1".into(),
+                doc: json!({
+                    "_id": "c1", "doc_id": "docA", "chunk_index": 1,
+                    "content": "BBBB CCCC", "title": "BKV Zrt árajánlat",
+                    "start_char": 5, "end_char": 14
+                }),
+                rrf_score: 0.03,
+                final_score: 0.03,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: None,
+                t_score: Some(1.0),
+            },
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 1);
+        // Content is merged across both chunks (overlap removed)...
+        assert_eq!(
+            results[0].doc["content"].as_str().unwrap(),
+            "AAAA BBBB CCCC"
+        );
+        // ...but the title is the single stored value, NOT concatenated (#64).
+        assert_eq!(
+            results[0].doc["title"].as_str().unwrap(),
+            "BKV Zrt árajánlat"
+        );
+    }
+
     #[test]
     fn test_merge_no_doc_id() {
         // Results without doc_id → untouched

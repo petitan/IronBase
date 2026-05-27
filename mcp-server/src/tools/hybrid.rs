@@ -34,6 +34,26 @@ const RRF_K: f64 = 60.0;
 
 // MAX_INTERNAL_LIMIT imported from defaults.rs
 
+/// Pick the chunk body / text field deterministically from a collection's
+/// fulltext-indexed fields when there is no RAG config.
+///
+/// Prefers `content` (the RAG convention; `rag_document_import` always creates a
+/// `content` FTS index) and otherwise falls back to the lexicographically-first
+/// field. This MUST be deterministic: the result feeds `merge_adjacent_chunks`,
+/// and `HashMap`-order nondeterminism previously let it resolve to `title`,
+/// concatenating the title across merged chunks while leaving content unmerged
+/// (issue #64).
+fn pick_text_field(mut fields: Vec<String>) -> String {
+    if fields.iter().any(|f| f == DEFAULT_TEXT_FIELD) {
+        return DEFAULT_TEXT_FIELD.to_string();
+    }
+    fields.sort();
+    fields
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string())
+}
+
 /// Apply projection and add score metadata to a fused result
 fn enrich_result(item: FusedResult, projection: &Option<HashMap<String, i32>>) -> Value {
     let mut result = if let Some(ref proj) = projection {
@@ -115,7 +135,7 @@ fn handle_hybrid_search(
                 None => adapter
                     .get_fulltext_field_names(&p.collection)
                     .ok()
-                    .and_then(|fields| fields.into_iter().next())
+                    .map(pick_text_field)
                     .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string()),
             };
 
@@ -173,7 +193,7 @@ fn handle_hybrid_search(
                             let detected_text_field = adapter
                                 .get_fulltext_field_names(&p.collection)
                                 .ok()
-                                .and_then(|fields| fields.into_iter().next())
+                                .map(pick_text_field)
                                 .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
 
                             (
@@ -597,6 +617,34 @@ fn calculate_rrf_score(v_rank: usize, t_rank: usize, v_weight: f64, t_weight: f6
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // -------------------------------------------------------------------------
+    // pick_text_field (#64 — deterministic merge field resolution)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_pick_text_field_prefers_content() {
+        // Order must not matter: content always wins (prevents merge picking title).
+        let fields = vec!["title".into(), "customer".into(), "content".into()];
+        assert_eq!(pick_text_field(fields), "content");
+        let fields = vec!["content".into(), "title".into()];
+        assert_eq!(pick_text_field(fields), "content");
+    }
+
+    #[test]
+    fn test_pick_text_field_deterministic_without_content() {
+        // No "content" field → lexicographically-first, deterministically.
+        let fields = vec!["title".into(), "body".into(), "abstract".into()];
+        assert_eq!(pick_text_field(fields), "abstract");
+        // Same set, different input order → same result.
+        let fields = vec!["body".into(), "abstract".into(), "title".into()];
+        assert_eq!(pick_text_field(fields), "abstract");
+    }
+
+    #[test]
+    fn test_pick_text_field_empty_falls_back_to_default() {
+        assert_eq!(pick_text_field(vec![]), DEFAULT_TEXT_FIELD);
+    }
 
     // -------------------------------------------------------------------------
     // RRF Score Calculation Tests
