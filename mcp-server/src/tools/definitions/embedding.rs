@@ -57,6 +57,12 @@ pub fn tools() -> Vec<Value> {
                         "type": "boolean",
                         "description": "Create a vector index on the embedding field (default: true)",
                         "default": true
+                    },
+                    "if_exists": {
+                        "type": "string",
+                        "description": "How to handle an existing doc_id. 'replace' (default): delete the old chunks and keep the new set (idempotent retry). 'skip': do nothing if the doc_id already has chunks. 'error': fail if it exists. 'append': insert alongside existing chunks (legacy, may duplicate on retry).",
+                        "enum": ["replace", "skip", "error", "append"],
+                        "default": "replace"
                     }
                 },
                 "required": ["collection", "content"]

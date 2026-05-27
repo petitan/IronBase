@@ -19,6 +19,7 @@ use crate::tools::fusion::{
     id_to_string as fusion_id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
     FusedResult,
 };
+use crate::tools::helpers::{insert_chunks_idempotent, IfExists};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -1629,6 +1630,7 @@ fn rag_import_impl(
     let title = get_string_option(&options, "title").unwrap_or_default();
     let doc_id =
         get_string_option(&options, "doc_id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
     let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
     let overlap = get_int_option_or(&options, "overlap", 100) as usize;
     let mode_str = get_string_option_or(&options, "mode", "auto");
@@ -1770,13 +1772,25 @@ fn rag_import_impl(
         documents.push(doc);
     }
 
-    // Insert documents
-    match adapter.insert_many(collection, documents) {
-        Ok(ids) => {
+    // Insert documents (idempotent w.r.t. doc_id — see issue #67)
+    match insert_chunks_idempotent(adapter, collection, &doc_id, documents, if_exists) {
+        Ok(outcome) => {
             let mut result = Map::new();
             result.insert("success".into(), Dynamic::from(true));
             result.insert("doc_id".into(), Dynamic::from(doc_id));
-            result.insert("chunks_created".into(), Dynamic::from(ids.len() as i64));
+            if outcome.skipped {
+                result.insert("chunks_created".into(), Dynamic::from(0_i64));
+                result.insert("skipped".into(), Dynamic::from(true));
+                return Dynamic::from(result);
+            }
+            result.insert(
+                "chunks_created".into(),
+                Dynamic::from(outcome.inserted_ids.len() as i64),
+            );
+            result.insert(
+                "chunks_replaced".into(),
+                Dynamic::from(outcome.replaced as i64),
+            );
             result.insert(
                 "dimension".into(),
                 Dynamic::from(provider.dimension() as i64),

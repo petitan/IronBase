@@ -803,6 +803,8 @@ pub struct RagDocumentImportParams {
     #[serde(default = "default_chunk_mode")]
     pub mode: String,
     pub provider: Option<String>,
+    #[serde(default = "crate::tools::helpers::default_if_exists")]
+    pub if_exists: String,
 }
 
 /// Parameters for `rag_collection_stats` tool

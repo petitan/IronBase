@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD};
-use super::helpers::validate_collection_name;
+use super::helpers::{insert_chunks_idempotent, validate_collection_name, IfExists};
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
 };
@@ -432,14 +432,28 @@ fn handle_rag_document_import(
         }
     }
 
-    // Insert documents
-    let inserted_ids = adapter.insert_many(&p.collection, documents)?;
+    // Insert documents (idempotent w.r.t. doc_id — see issue #67)
+    let if_exists = IfExists::parse(&p.if_exists);
+    let result =
+        insert_chunks_idempotent(adapter, &p.collection, &parent_id, documents, if_exists)?;
+
+    if result.skipped {
+        return Ok(json!({
+            "success": true,
+            "collection": p.collection,
+            "doc_id": parent_id,
+            "chunks_created": 0,
+            "skipped": true,
+            "message": "doc_id already exists; skipped (if_exists=skip)"
+        }));
+    }
 
     Ok(json!({
         "success": true,
         "collection": p.collection,
         "doc_id": parent_id,
-        "chunks_created": inserted_ids.len(),
+        "chunks_created": result.inserted_ids.len(),
+        "chunks_replaced": result.replaced,
         "dimension": provider.dimension(),
         "provider": provider_name
     }))

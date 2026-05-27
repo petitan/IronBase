@@ -1,7 +1,8 @@
 //! Common helper functions for MCP tool handlers
 
-use crate::error::{McpError, Result};
-use serde_json::Value;
+use crate::adapter::{FindOptions, IronBaseAdapter};
+use crate::error::{ErrorCode, McpError, Result};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// Default limit for queries when no ScriptLimits provided
@@ -428,6 +429,132 @@ pub fn parse_transaction_id_str(tx_id: &str) -> Result<u64> {
 }
 
 // ============================================================================
+// Idempotent chunk import (shared by rag_document_import, embed_document,
+// Rhai db_rag_import — see issue #67)
+// ============================================================================
+
+/// Policy for an existing `doc_id` when importing chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IfExists {
+    /// Delete the previously-existing chunks for this doc_id, keep the new set (default).
+    Replace,
+    /// If chunks already exist for this doc_id, do nothing.
+    Skip,
+    /// If chunks already exist for this doc_id, return an error.
+    Error,
+    /// Always insert, leaving any existing chunks in place (legacy behavior).
+    Append,
+}
+
+impl IfExists {
+    /// Parse from the `if_exists` parameter. Unknown/missing → `Replace` (idempotent default).
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "skip" => Self::Skip,
+            "error" => Self::Error,
+            "append" => Self::Append,
+            _ => Self::Replace,
+        }
+    }
+}
+
+/// Default for serde-derived params.
+pub fn default_if_exists() -> String {
+    "replace".to_string()
+}
+
+/// Outcome of an idempotent chunk insert.
+pub struct IdempotentInsert {
+    /// Newly inserted chunk ids (empty when skipped).
+    pub inserted_ids: Vec<String>,
+    /// Number of previously-existing chunks removed (Replace only).
+    pub replaced: u64,
+    /// True when the Skip policy short-circuited because chunks already existed.
+    pub skipped: bool,
+}
+
+/// Insert chunk documents for `doc_id` with an idempotency policy.
+///
+/// Safe ordering (issue #67): the previously-existing chunk ids are captured
+/// first (projection: `_id` only, so embeddings are never loaded), then the new
+/// chunks are inserted, and only afterwards are the old chunks deleted. A failure
+/// during insert leaves the old chunks intact (no data loss); a failure during
+/// the final delete leaves a temporary duplicate that the next import self-heals.
+///
+/// `documents` must be non-empty (callers guard the empty-chunk case earlier).
+pub fn insert_chunks_idempotent(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    doc_id: &str,
+    documents: Vec<Value>,
+    if_exists: IfExists,
+) -> Result<IdempotentInsert> {
+    // Capture existing chunk ids for this doc_id (skip the lookup for Append).
+    let existing_ids: Vec<Value> = if if_exists == IfExists::Append {
+        Vec::new()
+    } else {
+        // Project only `_id` so the (potentially large) embedding fields are never loaded.
+        let opts = FindOptions {
+            projection: Some(json!({ "_id": 1 })),
+            sort: None,
+            limit: None,
+            skip: None,
+            include_total: false,
+            max_response_bytes: None,
+            cancel_flag: None,
+        };
+        match adapter.find(collection, json!({ "doc_id": doc_id }), opts) {
+            Ok(res) => res
+                .documents
+                .into_iter()
+                .filter_map(|mut d| d.get_mut("_id").map(std::mem::take))
+                .collect(),
+            // A missing collection simply means there is nothing to replace yet;
+            // insert_many below will create it. Any other error propagates.
+            Err(e) if e.code == ErrorCode::CollectionNotFound => Vec::new(),
+            Err(e) => return Err(e),
+        }
+    };
+
+    if !existing_ids.is_empty() {
+        match if_exists {
+            IfExists::Error => {
+                return Err(McpError::invalid_params(format!(
+                    "doc_id '{}' already exists ({} chunks). Use if_exists=replace to overwrite, \
+                     or if_exists=append to add alongside.",
+                    doc_id,
+                    existing_ids.len()
+                )));
+            }
+            IfExists::Skip => {
+                return Ok(IdempotentInsert {
+                    inserted_ids: Vec::new(),
+                    replaced: 0,
+                    skipped: true,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Insert the new chunks first — old chunks stay intact if this fails.
+    let inserted_ids = adapter.insert_many(collection, documents)?;
+
+    // Replace: remove the previously-existing chunks now that the new set is in.
+    let replaced = if if_exists == IfExists::Replace && !existing_ids.is_empty() {
+        adapter.delete_many(collection, json!({ "_id": { "$in": existing_ids } }))?
+    } else {
+        0
+    };
+
+    Ok(IdempotentInsert {
+        inserted_ids,
+        replaced,
+        skipped: false,
+    })
+}
+
+// ============================================================================
 // Document/Filter Validation (centralized)
 // ============================================================================
 
@@ -453,4 +580,117 @@ pub fn validate_update(update: &Value) -> Result<()> {
         return Err(McpError::invalid_params("update must be a JSON object"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn temp_adapter() -> (IronBaseAdapter, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("idem.mlite");
+        let adapter = IronBaseAdapter::new(path.to_string_lossy().to_string()).unwrap();
+        (adapter, dir)
+    }
+
+    fn seed(adapter: &IronBaseAdapter, doc_id: &str, n: usize) {
+        let docs: Vec<Value> = (0..n)
+            .map(|i| json!({ "doc_id": doc_id, "chunk_index": i, "content": format!("c{i}") }))
+            .collect();
+        adapter.insert_many("rdocs", docs).unwrap();
+    }
+
+    fn new_chunks(doc_id: &str, n: usize) -> Vec<Value> {
+        (0..n)
+            .map(|i| json!({ "doc_id": doc_id, "chunk_index": i, "content": format!("new{i}") }))
+            .collect()
+    }
+
+    fn count(adapter: &IronBaseAdapter, doc_id: &str) -> u64 {
+        adapter
+            .count_documents("rdocs", json!({ "doc_id": doc_id }))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_if_exists_parse_default_replace() {
+        assert_eq!(IfExists::parse("replace"), IfExists::Replace);
+        assert_eq!(IfExists::parse("SKIP"), IfExists::Skip);
+        assert_eq!(IfExists::parse("error"), IfExists::Error);
+        assert_eq!(IfExists::parse("append"), IfExists::Append);
+        assert_eq!(IfExists::parse("nonsense"), IfExists::Replace);
+        assert_eq!(IfExists::parse(""), IfExists::Replace);
+    }
+
+    #[test]
+    fn test_replace_is_idempotent() {
+        let (adapter, _d) = temp_adapter();
+        seed(&adapter, "A", 3);
+        // Re-import the same doc_id with a fresh 2-chunk set.
+        let out = insert_chunks_idempotent(
+            &adapter,
+            "rdocs",
+            "A",
+            new_chunks("A", 2),
+            IfExists::Replace,
+        )
+        .unwrap();
+        assert_eq!(out.inserted_ids.len(), 2);
+        assert_eq!(out.replaced, 3);
+        assert!(!out.skipped);
+        // Only the new set remains — no duplication (issue #67).
+        assert_eq!(count(&adapter, "A"), 2);
+    }
+
+    #[test]
+    fn test_replace_on_fresh_doc_id_just_inserts() {
+        let (adapter, _d) = temp_adapter();
+        let out = insert_chunks_idempotent(
+            &adapter,
+            "rdocs",
+            "B",
+            new_chunks("B", 4),
+            IfExists::Replace,
+        )
+        .unwrap();
+        assert_eq!(out.inserted_ids.len(), 4);
+        assert_eq!(out.replaced, 0);
+        assert_eq!(count(&adapter, "B"), 4);
+    }
+
+    #[test]
+    fn test_skip_leaves_existing_untouched() {
+        let (adapter, _d) = temp_adapter();
+        seed(&adapter, "A", 3);
+        let out =
+            insert_chunks_idempotent(&adapter, "rdocs", "A", new_chunks("A", 2), IfExists::Skip)
+                .unwrap();
+        assert!(out.skipped);
+        assert_eq!(out.inserted_ids.len(), 0);
+        assert_eq!(count(&adapter, "A"), 3);
+    }
+
+    #[test]
+    fn test_error_when_exists() {
+        let (adapter, _d) = temp_adapter();
+        seed(&adapter, "A", 3);
+        let res =
+            insert_chunks_idempotent(&adapter, "rdocs", "A", new_chunks("A", 2), IfExists::Error);
+        assert!(res.is_err());
+        assert_eq!(count(&adapter, "A"), 3);
+    }
+
+    #[test]
+    fn test_append_adds_alongside() {
+        let (adapter, _d) = temp_adapter();
+        seed(&adapter, "A", 3);
+        let out =
+            insert_chunks_idempotent(&adapter, "rdocs", "A", new_chunks("A", 2), IfExists::Append)
+                .unwrap();
+        assert_eq!(out.inserted_ids.len(), 2);
+        assert_eq!(out.replaced, 0);
+        // Legacy behavior: old + new coexist.
+        assert_eq!(count(&adapter, "A"), 5);
+    }
 }
