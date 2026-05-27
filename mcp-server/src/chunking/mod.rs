@@ -27,6 +27,11 @@ pub struct Chunk {
     pub heading_level: Option<u8>,
     /// Section path (e.g., ["Chapter 1", "Section 1.1"])
     pub section_path: Option<Vec<String>>,
+    /// For a chunk that continues a table without its own header, the table's
+    /// "<header>\n<separator>" block that was prepended to `text` (#63). The
+    /// adjacent-chunk merge uses this to strip the duplicate exactly (no
+    /// re-derivation / string-guessing). `None` for header-bearing or non-table chunks.
+    pub table_header: Option<String>,
 }
 
 impl Chunk {
@@ -47,6 +52,7 @@ impl Chunk {
             heading: None,
             heading_level: None,
             section_path: None,
+            table_header: None,
         }
     }
 
@@ -60,6 +66,12 @@ impl Chunk {
     /// Add section path
     pub fn with_section_path(mut self, path: Vec<String>) -> Self {
         self.section_path = Some(path);
+        self
+    }
+
+    /// Record the propagated table header (the block prepended to `text`).
+    pub fn with_table_header(mut self, header: String) -> Self {
+        self.table_header = Some(header);
         self
     }
 }
@@ -230,11 +242,9 @@ pub fn strip_markdown_tables(text: &str) -> String {
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('|') {
-            // Separator row: only pipes, dashes, colons, spaces → skip
-            let is_separator = trimmed
-                .chars()
-                .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
-            if is_separator {
+            // Separator row (e.g. `|---|:--:|`) → skip. Shared predicate so this
+            // and the table-header detection classify rows identically (#65 review).
+            if is_table_separator(line) {
                 continue;
             }
             // Data/header row: split by pipe, trim cells, join with ", "
@@ -254,6 +264,38 @@ pub fn strip_markdown_tables(text: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// True if a line is a markdown table row (starts with `|`).
+pub(crate) fn is_table_row(line: &str) -> bool {
+    line.trim_start().starts_with('|')
+}
+
+/// True if a line is a markdown table separator row (e.g. `|---|:--:|`).
+pub(crate) fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// Find a table header block (header row + separator row) anywhere in `text`,
+/// returning `"<header>\n<separator>"` using the original line text. Returns the
+/// last such block found (the one a following chunk most likely continues).
+///
+/// Used for table header propagation (#63): a chunk that continues a table but
+/// holds no separator of its own gets this block prepended, so the values stay
+/// interpretable; the adjacent-chunk merge strips the duplicate.
+pub(crate) fn find_table_header(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found = None;
+    for i in 1..lines.len() {
+        if is_table_separator(lines[i])
+            && is_table_row(lines[i - 1])
+            && !is_table_separator(lines[i - 1])
+        {
+            found = Some(format!("{}\n{}", lines[i - 1], lines[i]));
+        }
+    }
+    found
 }
 
 /// Build the text used to embed a chunk.

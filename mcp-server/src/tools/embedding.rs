@@ -339,6 +339,9 @@ fn handle_embed_document(
         if let Some(ref path) = chunk.section_path {
             doc["section_path"] = json!(path);
         }
+        if let Some(ref th) = chunk.table_header {
+            doc["table_header"] = json!(th);
+        }
 
         if let Some(ref metadata) = p.metadata {
             if let Some(obj) = metadata.as_object() {

@@ -1762,6 +1762,9 @@ fn rag_import_impl(
         if let Some(ref path) = chunk.section_path {
             doc["section_path"] = json!(path);
         }
+        if let Some(ref th) = chunk.table_header {
+            doc["table_header"] = json!(th);
+        }
 
         // Add custom metadata from options (with security filtering)
         if let Some(metadata) = options.get("metadata") {

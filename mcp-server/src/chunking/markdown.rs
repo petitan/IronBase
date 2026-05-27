@@ -56,6 +56,9 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
     // Tracks whether the chunk boundary falls inside a fenced code block, so a
     // `# comment` line in code is not misdetected as a markdown heading.
     let mut fence_open = false;
+    // Tracks the current table's "<header>\n<separator>" block so a chunk that
+    // continues a table without its own separator gets the header prepended (#63).
+    let mut current_table_header: Option<String> = None;
 
     // Create chunks with overlap applied
     for (index, raw_chunk) in raw_chunks.iter().enumerate() {
@@ -68,6 +71,9 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
             if let Some((heading, level)) = extract_heading(trimmed) {
                 update_section_path(&mut section_path, &heading, level);
                 current_heading = Some((heading, level));
+                // A new section starts a fresh table context, so a later table's
+                // data rows never inherit a previous table's header.
+                current_table_header = None;
             }
         }
 
@@ -88,7 +94,36 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
         let start_char = byte_to_char_offset(content, overlap_start);
         let end_char = byte_to_char_offset(content, end_byte);
 
-        let mut chunk = Chunk::new(index, total, chunk_text.to_string(), start_char, end_char);
+        // Table header propagation (#63): keep table chunks self-interpretable.
+        // Detect on the RAW (non-overlap) slice — the prepended overlap text would
+        // otherwise hide that this chunk starts with table rows.
+        let raw_slice = &content[start_byte..end_byte];
+        let (final_text, propagated_header) =
+            if let Some(header) = super::find_table_header(raw_slice) {
+                // Chunk carries its own header → it becomes the current table header.
+                current_table_header = Some(header);
+                (chunk_text.to_string(), None)
+            } else if raw_slice
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| super::is_table_row(l) && !super::is_table_separator(l))
+                .unwrap_or(false)
+            {
+                // Chunk starts with table data rows but has no separator → continuation:
+                // prepend the tracked header and record it so the merge strips it exactly.
+                match current_table_header.clone() {
+                    Some(header) => (format!("{}\n{}", header, chunk_text), Some(header)),
+                    None => (chunk_text.to_string(), None),
+                }
+            } else {
+                // Non-table content ends the current table context.
+                if !raw_slice.lines().any(super::is_table_row) {
+                    current_table_header = None;
+                }
+                (chunk_text.to_string(), None)
+            };
+
+        let mut chunk = Chunk::new(index, total, final_text, start_char, end_char);
 
         // Add heading metadata
         if let Some((ref heading, level)) = current_heading {
@@ -97,6 +132,10 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
 
         if !section_path.is_empty() {
             chunk = chunk.with_section_path(section_path.clone());
+        }
+
+        if let Some(header) = propagated_header {
+            chunk = chunk.with_table_header(header);
         }
 
         chunks.push(chunk);
@@ -228,6 +267,61 @@ mod tests {
                 "Empty chunk at index {}",
                 chunk.index
             );
+        }
+    }
+
+    /// #63: a spurious blank line inside a markdown table (common in
+    /// PDF-converted docs) must not strand the data rows in a chunk separate
+    /// from their header/separator. With a chunk_size that comfortably fits the
+    /// whole table, it should stay in a single chunk.
+    #[test]
+    fn test_table_blank_line_not_fragmented_issue63() {
+        let content = "# Árlista\n\n\
+            | Megnevezés | Ár |\n\
+            |---|---|\n\
+            | PEF-35 | 1750000 |\n\
+            \n\
+            | PEF-50 | 2100000 |\n\
+            | PEF-70 | 2500000 |\n";
+        // Forcing chunk_size so the table is split: every chunk that carries
+        // table data rows must still expose the column header (separator row),
+        // otherwise the values are uninterpretable in isolation. Tested with
+        // BOTH overlap=0 and overlap>0 — the latter is the production default and
+        // the case the first implementation silently failed (review finding).
+        for overlap in [0usize, 20] {
+            let chunks = split(content, 50, overlap).unwrap();
+            for c in &chunks {
+                if c.text.contains("PEF-") {
+                    assert!(
+                        c.text.contains("---") && c.text.contains("Megnevezés"),
+                        "overlap={overlap}: table data chunk lacks its header:\n{}",
+                        c.text
+                    );
+                }
+            }
+        }
+    }
+
+    /// #63 review: a later table under a new heading must not inherit the
+    /// previous table's header (stale-header propagation would mislabel columns).
+    #[test]
+    fn test_table_header_not_stale_across_sections() {
+        let content = "# T1\n\n\
+            | A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n\
+            # T2\n\n\
+            | C | D |\n|---|---|\n| 5 | 6 |\n| 7 | 8 |\n";
+        for overlap in [0usize, 15] {
+            let chunks = split(content, 40, overlap).unwrap();
+            for c in &chunks {
+                // Any chunk carrying table-2 data must never expose table-1's header.
+                if c.text.contains("| 7 | 8 |") || c.text.contains("| 5 | 6 |") {
+                    assert!(
+                        !c.text.contains("| A | B |"),
+                        "overlap={overlap}: table-2 chunk wrongly carries table-1 header:\n{}",
+                        c.text
+                    );
+                }
+            }
         }
     }
 

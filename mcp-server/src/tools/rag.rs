@@ -417,6 +417,9 @@ fn handle_rag_document_import(
         if let Some(ref path) = chunk.section_path {
             doc["section_path"] = json!(path);
         }
+        if let Some(ref th) = chunk.table_header {
+            doc["table_header"] = json!(th);
+        }
         // Add custom metadata (with security filtering)
         if let Some(ref metadata) = p.metadata {
             if let Some(meta_obj) = metadata.as_object() {

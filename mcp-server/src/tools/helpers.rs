@@ -18,6 +18,7 @@ pub const RESERVED_METADATA_KEYS: &[&str] = &[
     "chunk_total",
     "start_char",
     "end_char",
+    "table_header",
 ];
 
 /// Check if the current request has been cancelled

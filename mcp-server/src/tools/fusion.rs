@@ -270,7 +270,23 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
 
                 for (i, &(_, res_idx)) in run.iter().enumerate() {
                     let doc = &results[res_idx].doc;
-                    let chunk_text = doc.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
+                    let raw_text = doc.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
+                    // Table header propagation (#63) prepends the table's header to each
+                    // continuation chunk; when merging, that header would repeat. Strip it
+                    // from chunks after the first, using the EXACT header recorded at chunk
+                    // time (the `table_header` field) — no re-derivation, so it matches
+                    // byte-for-byte (CRLF/whitespace safe). Stripping first also restores
+                    // the original data text so the overlap offsets below line up.
+                    let chunk_text = if i > 0 {
+                        match doc.get("table_header").and_then(|v| v.as_str()) {
+                            Some(h) => raw_text
+                                .strip_prefix(format!("{}\n", h).as_str())
+                                .unwrap_or(raw_text),
+                            None => raw_text,
+                        }
+                    } else {
+                        raw_text
+                    };
 
                     if i == 0 {
                         merged_text.push_str(chunk_text);
@@ -1317,6 +1333,59 @@ mod tests {
         assert_eq!(
             results[0].doc["title"].as_str().unwrap(),
             "BKV Zrt árajánlat"
+        );
+    }
+
+    /// #63: when adjacent table chunks (each carrying the propagated header) are
+    /// merged, the header must appear exactly once in the merged text.
+    #[test]
+    fn test_merge_dedups_propagated_table_header() {
+        let header = "| Megnevezés | Ár |\n|---|---|";
+        let mut results = vec![
+            FusedResult {
+                id: "c0".into(),
+                doc: json!({
+                    "_id": "c0", "doc_id": "docA", "chunk_index": 0,
+                    "content": format!("{}\n| PEF-35 | 1750000 |", header),
+                    "start_char": 0, "end_char": 10
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: None,
+                t_score: Some(1.0),
+            },
+            FusedResult {
+                id: "c1".into(),
+                doc: json!({
+                    // Continuation chunk: header prepended by propagation, recorded
+                    // in the table_header field so the merge strips it exactly.
+                    "_id": "c1", "doc_id": "docA", "chunk_index": 1,
+                    "content": format!("{}\n| PEF-50 | 2100000 |", header),
+                    "table_header": header,
+                    "start_char": 10, "end_char": 20
+                }),
+                rrf_score: 0.03,
+                final_score: 0.03,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: None,
+                t_score: Some(1.0),
+            },
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 1);
+        let merged = results[0].doc["content"].as_str().unwrap();
+        // Header (separator) appears exactly once; both data rows survive.
+        assert_eq!(merged.matches("|---|---|").count(), 1, "merged: {merged}");
+        assert!(
+            merged.contains("PEF-35") && merged.contains("PEF-50"),
+            "merged: {merged}"
         );
     }
 
