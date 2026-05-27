@@ -26,6 +26,11 @@ pub fn tools() -> Vec<Value> {
                         "description": "Field containing text content (default: 'content')",
                         "default": "content"
                     },
+                    "text_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and hybrid_search then defaults to searching all of them — no manual index_create_fulltext needed."
+                    },
                     "provider": {
                         "type": "string",
                         "description": "Embedding provider (ollama, vllm, openai). Defaults to the provider configured in [embedding] section of config.toml."
@@ -100,6 +105,11 @@ pub fn tools() -> Vec<Value> {
                         "description": "Fulltext language for the auto-created index, enabling stemming (e.g. 'hungarian' collapses fékpadon/fékpadot/fékpad). Only applies when no fulltext index exists yet. Default 'none' (no stemming). For an existing collection, set the language via rag_collection_create.",
                         "enum": ["none", "hungarian", "english", "german"],
                         "default": "none"
+                    },
+                    "text_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extra metadata text fields to fulltext-index (besides content), e.g. [\"title\", \"customer\"]. Only applies when auto-creating the collection (no RAG config yet)."
                     }
                 },
                 "required": ["collection", "content"]

@@ -1242,11 +1242,12 @@ fn register_rag_functions(
 // ============================================================
 
 /// Get RAG config for a collection from _system.rag
+#[allow(clippy::type_complexity)] // internal tuple mirroring RagConfig fields
 fn get_rag_config(
     adapter: &IronBaseAdapter,
     collection: &str,
-) -> Option<(String, String, String, String)> {
-    // (embedding_field, text_field, provider, language)
+) -> Option<(String, String, Vec<String>, String, String)> {
+    // (embedding_field, text_field, text_fields, provider, language)
     let result = adapter.find_one(RAG_CONFIG_COLLECTION, json!({"collection": collection}));
 
     match result {
@@ -1261,6 +1262,17 @@ fn get_rag_config(
                 .and_then(|v| v.as_str())
                 .unwrap_or(DEFAULT_TEXT_FIELD)
                 .to_string();
+            // All fulltext fields (#66); legacy configs lack it → fall back to [text_field].
+            let text_fields: Vec<String> = doc
+                .get("text_fields")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .filter(|v: &Vec<String>| !v.is_empty())
+                .unwrap_or_else(|| vec![text_field.clone()]);
             // Empty string means "not configured" — caller resolves via manager default.
             let provider = doc
                 .get("provider")
@@ -1272,18 +1284,20 @@ fn get_rag_config(
                 .and_then(|v| v.as_str())
                 .unwrap_or("none")
                 .to_string();
-            Some((embedding_field, text_field, provider, language))
+            Some((embedding_field, text_field, text_fields, provider, language))
         }
         _ => None,
     }
 }
 
 /// Save RAG config to _system.rag collection
+#[allow(clippy::too_many_arguments)] // internal config writer; fields are self-explaining
 fn save_rag_config(
     adapter: &IronBaseAdapter,
     collection: &str,
     embedding_field: &str,
     text_field: &str,
+    text_fields: &[String],
     provider: &str,
     language: &str,
     dimension: usize,
@@ -1298,6 +1312,7 @@ fn save_rag_config(
         "collection": collection,
         "embedding_field": embedding_field,
         "text_field": text_field,
+        "text_fields": text_fields,
         "provider": provider,
         "language": language,
         "dimension": dimension,
@@ -1387,22 +1402,35 @@ fn hybrid_search_impl(
         .ok()
         .flatten()
         .map(|c| c.provider);
-    let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => {
-            let resolved = auto_provider.unwrap_or(prov);
-            let resolved = if resolved.is_empty() {
-                manager.default_provider_name().to_string()
-            } else {
-                resolved
-            };
-            (ef, tf, resolved)
-        }
-        None => (
-            DEFAULT_EMBEDDING_FIELD.to_string(),
-            DEFAULT_TEXT_FIELD.to_string(),
-            auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
-        ),
-    };
+    let (embedding_field, text_field, config_text_fields, provider_name) =
+        match get_rag_config(adapter, collection) {
+            Some((ef, tf, cfg_tf, prov, _)) => {
+                let resolved = auto_provider.unwrap_or(prov);
+                let resolved = if resolved.is_empty() {
+                    manager.default_provider_name().to_string()
+                } else {
+                    resolved
+                };
+                (ef, tf, cfg_tf, resolved)
+            }
+            None => (
+                DEFAULT_EMBEDDING_FIELD.to_string(),
+                DEFAULT_TEXT_FIELD.to_string(),
+                Vec::new(),
+                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
+            ),
+        };
+
+    // Default to the collection's configured multi-field set when the caller did
+    // not pass text_fields (#66), consistent with the MCP hybrid_search tool.
+    let indexed = adapter
+        .get_fulltext_field_names(collection)
+        .unwrap_or_default();
+    let text_fields_opt = crate::tools::rag::resolve_search_text_fields(
+        text_fields_opt,
+        config_text_fields,
+        &indexed,
+    );
 
     // Embed query
     let query_vector = match manager.embed_query(query, Some(&provider_name)) {
@@ -1633,6 +1661,7 @@ fn rag_import_impl(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
     let language = get_string_option_or(&options, "language", "none");
+    let text_fields_opt = get_string_array_option(&options, "text_fields");
     let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
     let overlap = get_int_option_or(&options, "overlap", 100) as usize;
     let mode_str = get_string_option_or(&options, "mode", "auto");
@@ -1643,8 +1672,10 @@ fn rag_import_impl(
         .ok()
         .flatten()
         .map(|c| c.provider);
-    let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => {
+    let existing_rag = get_rag_config(adapter, collection);
+    let config_exists = existing_rag.is_some();
+    let (embedding_field, text_field, provider_name) = match existing_rag {
+        Some((ef, tf, _cfg_text_fields, prov, _)) => {
             let resolved = auto_provider.unwrap_or(prov);
             let resolved = if resolved.is_empty() {
                 manager.default_provider_name().to_string()
@@ -1732,7 +1763,24 @@ fn rag_import_impl(
         100,
         50,
     );
-    let _ = adapter.create_fulltext_index(collection, &text_field, &language, Some(2), Some(true));
+    // Fulltext index on every requested field (#66); persist a RAG config when
+    // none exists yet so later searches default to multi-field consistently.
+    let fulltext_fields = crate::tools::rag::resolve_fulltext_fields(&text_field, &text_fields_opt);
+    for field in &fulltext_fields {
+        let _ = adapter.create_fulltext_index(collection, field, &language, Some(2), Some(true));
+    }
+    if !config_exists {
+        let _ = save_rag_config(
+            adapter,
+            collection,
+            &embedding_field,
+            &text_field,
+            &fulltext_fields,
+            &provider_name,
+            &language,
+            provider.dimension(),
+        );
+    }
 
     // Build and insert documents
     let mut documents: Vec<serde_json::Value> = Vec::with_capacity(chunks.len());
@@ -1851,6 +1899,8 @@ fn rag_create_impl(
     let language = get_string_option_or(&opts, "language", "none");
     let embedding_field = get_string_option_or(&opts, "embedding_field", DEFAULT_EMBEDDING_FIELD);
     let text_field = get_string_option_or(&opts, "text_field", DEFAULT_TEXT_FIELD);
+    let text_fields_opt = get_string_array_option(&opts, "text_fields");
+    let fulltext_fields = crate::tools::rag::resolve_fulltext_fields(&text_field, &text_fields_opt);
     let provider_name = get_string_option_or(&opts, "provider", manager.default_provider_name());
 
     // Get provider
@@ -1888,10 +1938,16 @@ fn rag_create_impl(
         )
         .is_ok();
 
-    // Create fulltext index
-    let fulltext_created = adapter
-        .create_fulltext_index(collection, &text_field, &language, Some(2), Some(true))
-        .is_ok();
+    // Create a fulltext index on every requested field (#66)
+    let mut fulltext_created = 0i64;
+    for field in &fulltext_fields {
+        if adapter
+            .create_fulltext_index(collection, field, &language, Some(2), Some(true))
+            .is_ok()
+        {
+            fulltext_created += 1;
+        }
+    }
 
     // Save RAG config
     if let Err(e) = save_rag_config(
@@ -1899,6 +1955,7 @@ fn rag_create_impl(
         collection,
         &embedding_field,
         &text_field,
+        &fulltext_fields,
         &provider_name,
         &language,
         dimension,
@@ -1913,6 +1970,16 @@ fn rag_create_impl(
     let mut config = Map::new();
     config.insert("embedding_field".into(), Dynamic::from(embedding_field));
     config.insert("text_field".into(), Dynamic::from(text_field));
+    config.insert(
+        "text_fields".into(),
+        Dynamic::from(
+            fulltext_fields
+                .iter()
+                .cloned()
+                .map(Dynamic::from)
+                .collect::<rhai::Array>(),
+        ),
+    );
     config.insert("provider".into(), Dynamic::from(provider_name));
     config.insert("language".into(), Dynamic::from(language));
     config.insert("dimension".into(), Dynamic::from(dimension as i64));
@@ -1965,10 +2032,19 @@ fn rag_stats_impl(
     result.insert("collection".into(), Dynamic::from(collection.to_string()));
     result.insert("rag_enabled".into(), Dynamic::from(rag_config.is_some()));
 
-    if let Some((ef, tf, prov, lang)) = rag_config {
+    if let Some((ef, tf, cfg_text_fields, prov, lang)) = rag_config {
         let mut config = Map::new();
         config.insert("embedding_field".into(), Dynamic::from(ef));
         config.insert("text_field".into(), Dynamic::from(tf));
+        config.insert(
+            "text_fields".into(),
+            Dynamic::from(
+                cfg_text_fields
+                    .into_iter()
+                    .map(Dynamic::from)
+                    .collect::<rhai::Array>(),
+            ),
+        );
         config.insert("provider".into(), Dynamic::from(prov.clone()));
         config.insert("language".into(), Dynamic::from(lang));
         result.insert("config".into(), Dynamic::from(config));

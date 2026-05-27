@@ -234,11 +234,29 @@ fn handle_hybrid_search(
     let internal_multiplier = if p.group_by_document { 20 } else { 3 };
     let internal_limit = (p.limit * internal_multiplier).min(MAX_INTERNAL_LIMIT);
 
+    // Effective fulltext fields: the caller's explicit text_fields, else the
+    // collection's configured multi-field set (#66) so search defaults match how
+    // the collection was set up. Single-field collections stay on effective_text_field.
+    //
+    // The config-derived default is intersected with the fields that ACTUALLY have
+    // a fulltext index — a field whose index failed to build or was later dropped
+    // must not reach fulltext_search_multi (it would hard-error the whole search).
+    let config_fields = get_rag_config(adapter, &p.collection)
+        .ok()
+        .flatten()
+        .map(|c| c.effective_text_fields())
+        .unwrap_or_default();
+    let indexed = adapter
+        .get_fulltext_field_names(&p.collection)
+        .unwrap_or_default();
+    let effective_text_fields =
+        super::rag::resolve_search_text_fields(p.text_fields.clone(), config_fields, &indexed);
+
     // ========================================================================
     // STEP 1.5: Document-level AND qualification (match_scope="document")
     //           Uses shared orchestration from fusion.rs
     // ========================================================================
-    let qual_fields: Vec<&str> = if let Some(ref fields) = p.text_fields {
+    let qual_fields: Vec<&str> = if let Some(ref fields) = effective_text_fields {
         fields.iter().map(|s| s.as_str()).collect()
     } else {
         vec![&effective_text_field]
@@ -307,7 +325,7 @@ fn handle_hybrid_search(
     };
 
     // Multi-field search if `text_fields` is provided, otherwise single-field
-    let text_results = if let Some(ref fields) = p.text_fields {
+    let text_results = if let Some(ref fields) = effective_text_fields {
         let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
         adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, text_options)?
     } else {
@@ -507,7 +525,7 @@ fn handle_hybrid_search(
             target_doc_ids: Some(target_doc_id_set),
         };
 
-        let phase2_results = if let Some(ref fields) = p.text_fields {
+        let phase2_results = if let Some(ref fields) = effective_text_fields {
             let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
             adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, phase2_options)?
         } else {

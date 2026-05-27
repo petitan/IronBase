@@ -789,6 +789,10 @@ pub struct RagCollectionCreateParams {
     pub embedding_field: String,
     #[serde(default = "default_text_field")]
     pub text_field: String,
+    /// Extra text fields to fulltext-index (besides `text_field`), e.g.
+    /// ["title", "customer"]. When set, hybrid_search defaults to searching all
+    /// of them. Omitted → single `text_field` (backward compatible).
+    pub text_fields: Option<Vec<String>>,
     pub provider: Option<String>,
     #[serde(default = "default_rag_language")]
     pub language: String,
@@ -815,6 +819,10 @@ pub struct RagDocumentImportParams {
     /// Only applies when no fulltext index exists yet; default "none" (no stemming).
     #[serde(default = "default_rag_language")]
     pub language: String,
+    /// Extra text fields to fulltext-index on the auto-created collection
+    /// (besides `content`), e.g. ["title", "customer"]. Only applies when the
+    /// collection has no RAG config yet. Omitted → single content index.
+    pub text_fields: Option<Vec<String>>,
 }
 
 /// Parameters for `rag_collection_stats` tool

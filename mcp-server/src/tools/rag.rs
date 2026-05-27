@@ -37,10 +37,27 @@ pub struct RagConfig {
     pub collection: String,
     pub embedding_field: String,
     pub text_field: String,
+    /// All fulltext-indexed text fields (primary + extras). Empty on legacy
+    /// configs → callers fall back to `[text_field]`. Lets hybrid_search default
+    /// to multi-field search consistently with how the collection was set up (#66).
+    #[serde(default)]
+    pub text_fields: Vec<String>,
     pub provider: String,
     pub language: String,
     pub dimension: usize,
     pub created_at: String,
+}
+
+impl RagConfig {
+    /// The effective list of fulltext fields, falling back to the single
+    /// `text_field` for legacy configs that predate `text_fields`.
+    pub fn effective_text_fields(&self) -> Vec<String> {
+        if self.text_fields.is_empty() {
+            vec![self.text_field.clone()]
+        } else {
+            self.text_fields.clone()
+        }
+    }
 }
 
 /// Get RAG config for a collection from _system.rag
@@ -193,26 +210,27 @@ fn handle_rag_collection_create(
         }
     };
 
-    // 3. Create fulltext index
-    let fulltext_index_created = match adapter.create_fulltext_index(
-        &p.collection,
-        &p.text_field,
-        &p.language,
-        Some(2),    // min_word_length
-        Some(true), // accent_folding
-    ) {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::debug!("Fulltext index creation: {} (may already exist)", e);
-            false
+    // 3. Create a fulltext index on every requested text field (the primary
+    //    text_field is always included), so multi-field hybrid_search works
+    //    without manual index_create_fulltext calls (#66).
+    let fulltext_fields = resolve_fulltext_fields(&p.text_field, &p.text_fields);
+    let mut fulltext_created = 0usize;
+    for field in &fulltext_fields {
+        match adapter.create_fulltext_index(&p.collection, field, &p.language, Some(2), Some(true))
+        {
+            Ok(_) => fulltext_created += 1,
+            Err(e) => {
+                tracing::debug!("Fulltext index on '{}': {} (may already exist)", field, e)
+            }
         }
-    };
+    }
 
     // 4. Save RAG config
     let config = RagConfig {
         collection: p.collection.clone(),
         embedding_field: p.embedding_field.clone(),
         text_field: p.text_field.clone(),
+        text_fields: fulltext_fields.clone(),
         provider: provider_name.clone(),
         language: p.language.clone(),
         dimension,
@@ -226,6 +244,7 @@ fn handle_rag_collection_create(
         "config": {
             "embedding_field": p.embedding_field,
             "text_field": p.text_field,
+            "text_fields": fulltext_fields,
             "provider": provider_name,
             "language": p.language,
             "dimension": dimension
@@ -233,9 +252,58 @@ fn handle_rag_collection_create(
         "indexes": {
             "collection_created": collection_created,
             "vector_created": vector_index_created,
-            "fulltext_created": fulltext_index_created
+            "fulltext_created": fulltext_created
         }
     }))
+}
+
+/// Resolve which fulltext fields a hybrid_search should query (#66).
+///
+/// - An explicit, non-empty `explicit` list (the caller's `text_fields`) wins.
+/// - Otherwise fall back to the collection's configured `config_fields`,
+///   intersected with the fields that ACTUALLY have a fulltext index — a
+///   configured-but-unindexed field (failed creation / later `index_drop`) must
+///   never reach `fulltext_search_multi`, which hard-errors on a missing index.
+/// - Returns `None` for a single (or empty) field set → callers use single-field
+///   search on the primary text field.
+pub(crate) fn resolve_search_text_fields(
+    explicit: Option<Vec<String>>,
+    config_fields: Vec<String>,
+    indexed: &[String],
+) -> Option<Vec<String>> {
+    if let Some(tf) = explicit {
+        if !tf.is_empty() {
+            return Some(tf);
+        }
+    }
+    let resolved: Vec<String> = config_fields
+        .into_iter()
+        .filter(|f| indexed.iter().any(|i| i == f))
+        .collect();
+    if resolved.len() > 1 {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
+/// Resolve the full set of fulltext fields to index: the explicit `text_fields`
+/// list if given, always with the primary `text_field` included, deduplicated
+/// in order. Omitted/empty → just `[text_field]`.
+pub(crate) fn resolve_fulltext_fields(
+    text_field: &str,
+    text_fields: &Option<Vec<String>>,
+) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    fields.push(text_field.to_string());
+    if let Some(extra) = text_fields {
+        for f in extra {
+            if !f.is_empty() && !fields.iter().any(|e| e == f) {
+                fields.push(f.clone());
+            }
+        }
+    }
+    fields
 }
 
 // ============================================================================
@@ -365,24 +433,57 @@ fn handle_rag_document_import(
             100,
             50,
         );
-        let _ = adapter.create_fulltext_index(
-            &p.collection,
-            &text_field,
-            &p.language,
-            Some(2),
-            Some(true),
-        );
-    } else if p.language != "none" {
-        // The fulltext index already exists (from rag_collection_create); the
-        // `language` param cannot change it here. Surface this instead of dropping
-        // it silently — the caller may expect stemming that won't be applied.
-        tracing::warn!(
-            "rag_document_import: 'language={}' ignored — collection '{}' already has a \
-             fulltext index. Set the language via rag_collection_create.",
-            p.language,
-            p.collection
-        );
-        language_ignored = true;
+        // Fulltext index on every requested field (#66), and persist a RAG config
+        // so later hybrid_search defaults to multi-field search consistently.
+        let fulltext_fields = resolve_fulltext_fields(&text_field, &p.text_fields);
+        for field in &fulltext_fields {
+            let _ = adapter.create_fulltext_index(
+                &p.collection,
+                field,
+                &p.language,
+                Some(2),
+                Some(true),
+            );
+        }
+        let config = RagConfig {
+            collection: p.collection.clone(),
+            embedding_field: embedding_field.clone(),
+            text_field: text_field.clone(),
+            text_fields: fulltext_fields,
+            provider: provider_name.clone(),
+            language: p.language.clone(),
+            dimension: provider.dimension(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        save_rag_config(adapter, &config)?;
+    } else if let Some(ref cfg) = rag_config {
+        // The collection already has indexes/config; index-shaping params here are
+        // no-ops. Only warn when the request actually DIFFERS from the stored
+        // config (avoids a false positive on repeated imports with the same args).
+        if p.language != "none" && p.language != cfg.language {
+            tracing::warn!(
+                "rag_document_import: 'language={}' ignored — collection '{}' already has a \
+                 fulltext index ('{}'). Set the language via rag_collection_create.",
+                p.language,
+                p.collection,
+                cfg.language
+            );
+            language_ignored = true;
+        }
+        if let Some(ref requested) = p.text_fields {
+            let missing: Vec<&String> = requested
+                .iter()
+                .filter(|f| !cfg.effective_text_fields().iter().any(|e| e == *f))
+                .collect();
+            if !missing.is_empty() {
+                tracing::warn!(
+                    "rag_document_import: 'text_fields' {:?} ignored — collection '{}' already \
+                     has a RAG config. Set text_fields via rag_collection_create.",
+                    missing,
+                    p.collection
+                );
+            }
+        }
     }
 
     // Generate parent doc_id
@@ -544,6 +645,7 @@ fn handle_rag_collection_stats(
         "config": rag_config.map(|c| json!({
             "embedding_field": c.embedding_field,
             "text_field": c.text_field,
+            "text_fields": c.effective_text_fields(),
             "provider": c.provider,
             "language": c.language,
             "dimension": c.dimension,
@@ -573,6 +675,7 @@ mod tests {
             collection: "test".to_string(),
             embedding_field: "embedding".to_string(),
             text_field: "content".to_string(),
+            text_fields: vec!["content".to_string(), "title".to_string()],
             provider: "ollama".to_string(),
             language: "hungarian".to_string(),
             dimension: 300,
@@ -582,5 +685,76 @@ mod tests {
         let parsed: RagConfig = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.collection, "test");
         assert_eq!(parsed.dimension, 300);
+        assert_eq!(parsed.text_fields, vec!["content", "title"]);
+    }
+
+    #[test]
+    fn test_legacy_config_without_text_fields_falls_back() {
+        // A pre-#66 stored config has no text_fields → deserializes to empty,
+        // and effective_text_fields falls back to [text_field].
+        let json = json!({
+            "collection": "c", "embedding_field": "embedding", "text_field": "content",
+            "provider": "ollama", "language": "none", "dimension": 384, "created_at": "x"
+        });
+        let cfg: RagConfig = serde_json::from_value(json).unwrap();
+        assert!(cfg.text_fields.is_empty());
+        assert_eq!(cfg.effective_text_fields(), vec!["content"]);
+    }
+
+    #[test]
+    fn test_resolve_search_text_fields() {
+        let indexed = vec!["content".to_string(), "title".to_string()];
+        // Explicit non-empty wins (even if not all indexed — caller's choice).
+        assert_eq!(
+            resolve_search_text_fields(Some(vec!["a".into(), "b".into()]), vec![], &indexed),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        // Explicit empty → fall back to config.
+        assert_eq!(
+            resolve_search_text_fields(
+                Some(vec![]),
+                vec!["content".into(), "title".into()],
+                &indexed
+            ),
+            Some(vec!["content".to_string(), "title".to_string()])
+        );
+        // Config field WITHOUT an index is dropped (would hard-error multi-search).
+        assert_eq!(
+            resolve_search_text_fields(
+                None,
+                vec!["content".into(), "title".into(), "customer".into()],
+                &indexed
+            ),
+            Some(vec!["content".to_string(), "title".to_string()])
+        );
+        // After intersection only one field remains → None (single-field search).
+        assert_eq!(
+            resolve_search_text_fields(None, vec!["content".into(), "ghost".into()], &indexed),
+            None
+        );
+        // No config → None.
+        assert_eq!(resolve_search_text_fields(None, vec![], &indexed), None);
+    }
+
+    #[test]
+    fn test_resolve_fulltext_fields() {
+        let tf = "content".to_string();
+        // No extras → just the primary.
+        assert_eq!(resolve_fulltext_fields(&tf, &None), vec!["content"]);
+        // Extras → primary first, then extras, deduplicated.
+        assert_eq!(
+            resolve_fulltext_fields(&tf, &Some(vec!["title".into(), "customer".into()])),
+            vec!["content", "title", "customer"]
+        );
+        // Primary already in the list → not duplicated.
+        assert_eq!(
+            resolve_fulltext_fields(&tf, &Some(vec!["content".into(), "title".into()])),
+            vec!["content", "title"]
+        );
+        // Empty strings skipped.
+        assert_eq!(
+            resolve_fulltext_fields(&tf, &Some(vec!["".into(), "title".into()])),
+            vec!["content", "title"]
+        );
     }
 }
