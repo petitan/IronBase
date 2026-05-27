@@ -1631,6 +1631,7 @@ fn rag_import_impl(
     let doc_id =
         get_string_option(&options, "doc_id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
+    let language = get_string_option_or(&options, "language", "none");
     let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
     let overlap = get_int_option_or(&options, "overlap", 100) as usize;
     let mode_str = get_string_option_or(&options, "mode", "auto");
@@ -1713,7 +1714,7 @@ fn rag_import_impl(
         100,
         50,
     );
-    let _ = adapter.create_fulltext_index(collection, &text_field, "none", Some(2), Some(true));
+    let _ = adapter.create_fulltext_index(collection, &text_field, &language, Some(2), Some(true));
 
     // Build and insert documents
     let mut documents: Vec<serde_json::Value> = Vec::with_capacity(chunks.len());

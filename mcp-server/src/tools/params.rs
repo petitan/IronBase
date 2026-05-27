@@ -280,6 +280,12 @@ pub struct FulltextAnalyzeParams {
     pub accent_folding: bool,
     /// Minimum word length (default: 2)
     pub min_word_length: Option<usize>,
+    /// Optional: inherit the real tokenization config of an existing fulltext index.
+    /// When both `collection` and `field` are given, the index's stored language /
+    /// accent_folding / min_word_length override the explicit params above, so the
+    /// debugger reflects exactly how that index tokenizes.
+    pub collection: Option<String>,
+    pub field: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -805,6 +811,10 @@ pub struct RagDocumentImportParams {
     pub provider: Option<String>,
     #[serde(default = "crate::tools::helpers::default_if_exists")]
     pub if_exists: String,
+    /// Fulltext language for the auto-created index (hungarian/english/german/none).
+    /// Only applies when no fulltext index exists yet; default "none" (no stemming).
+    #[serde(default = "default_rag_language")]
+    pub language: String,
 }
 
 /// Parameters for `rag_collection_stats` tool

@@ -1779,6 +1779,18 @@ impl IronBaseAdapter {
         Ok(coll.fulltext_tokenize_query(field, query)?)
     }
 
+    /// Get the stored tokenization options (language, accent_folding, min_word_length)
+    /// of an existing fulltext index for a field.
+    pub fn get_fulltext_index_options(
+        &self,
+        collection: &str,
+        field: &str,
+    ) -> Result<ironbase_core::fulltext::FtsOptions> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.get_fulltext_index_options(field)?)
+    }
+
     /// Get posting list sizes for each token (for rarity-based ordering).
     pub fn fulltext_token_posting_counts(
         &self,

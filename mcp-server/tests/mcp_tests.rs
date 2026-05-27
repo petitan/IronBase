@@ -888,3 +888,61 @@ fn test_concurrent_inserts() {
     );
     assert_eq!(result["count"], 10);
 }
+
+/// #65: fulltext_analyze must inherit an index's real language (here: hungarian),
+/// so its tokenization output reflects how that index actually stems — rather than
+/// silently defaulting to "none" and reporting unstemmed tokens.
+#[test]
+fn test_fulltext_analyze_inherits_index_language_issue65() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection": "docs", "document": {"content": "fékpad"}}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "docs", "field": "content", "language": "hungarian"}),
+    );
+
+    // No explicit language → inherits the index's hungarian config.
+    let res = dispatch_ok(
+        &adapter,
+        "fulltext_analyze",
+        json!({
+            "text": "fékpadon fékpadot fékpad",
+            "collection": "docs",
+            "field": "content"
+        }),
+    );
+
+    assert_eq!(res["inherited_from_index"], json!(true));
+    assert_eq!(res["language"], json!("Hungarian"));
+
+    // Hungarian stemming collapses the inflected forms to a single common stem.
+    let tokens = res["tokens"].as_array().expect("tokens array");
+    let stems: std::collections::HashSet<&str> = tokens
+        .iter()
+        .filter_map(|t| t["stemmed"].as_str())
+        .collect();
+    assert_eq!(
+        stems.len(),
+        1,
+        "inflected forms should share one stem, got {:?}",
+        stems
+    );
+}
+
+/// #65: collection without field (or vice versa) is rejected — no silent fallback.
+#[test]
+fn test_fulltext_analyze_collection_without_field_errors() {
+    let (adapter, _tmp) = create_test_adapter();
+    let err = dispatch_err(
+        &adapter,
+        "fulltext_analyze",
+        json!({"text": "fékpad", "collection": "docs"}),
+    );
+    assert!(err.to_string().contains("collection") || err.to_string().contains("field"));
+}

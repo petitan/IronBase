@@ -355,8 +355,13 @@ fn handle_rag_document_import(
             100,
             50,
         );
-        let _ =
-            adapter.create_fulltext_index(&p.collection, &text_field, "none", Some(2), Some(true));
+        let _ = adapter.create_fulltext_index(
+            &p.collection,
+            &text_field,
+            &p.language,
+            Some(2),
+            Some(true),
+        );
     }
 
     // Generate parent doc_id

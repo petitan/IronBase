@@ -94,6 +94,12 @@ pub fn tools() -> Vec<Value> {
                         "description": "How to handle an existing doc_id. 'replace' (default): delete the old chunks and keep the new set (idempotent retry). 'skip': do nothing if the doc_id already has chunks. 'error': fail if it exists. 'append': insert alongside existing chunks (legacy, may duplicate on retry).",
                         "enum": ["replace", "skip", "error", "append"],
                         "default": "replace"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Fulltext language for the auto-created index, enabling stemming (e.g. 'hungarian' collapses fékpadon/fékpadot/fékpad). Only applies when no fulltext index exists yet. Default 'none' (no stemming). For an existing collection, set the language via rag_collection_create.",
+                        "enum": ["none", "hungarian", "english", "german"],
+                        "default": "none"
                     }
                 },
                 "required": ["collection", "content"]

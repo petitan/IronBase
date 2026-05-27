@@ -117,14 +117,22 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fulltext_analyze",
             "title": "Analyze Text Tokenization",
-            "description": "Debug tool showing how text is tokenized: original words, normalized form, stemmed form, and which tokens are kept. Useful for understanding why searches match or don't match.",
+            "description": "Debug tool showing how text is tokenized: original words, normalized form, stemmed form, and which tokens are kept. Useful for understanding why searches match or don't match. Pass 'collection' AND 'field' to inherit that index's real language/accent_folding/min_word_length (so the output matches how that index tokenizes); otherwise the explicit 'language' param is used (default 'none').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": fields::text_to_analyze(),
                     "language": fields::fulltext_language(),
                     "accent_folding": fields::accent_folding(),
-                    "min_word_length": fields::min_word_length()
+                    "min_word_length": fields::min_word_length(),
+                    "collection": {
+                        "type": "string",
+                        "description": "Optional: inherit tokenization config from this collection's fulltext index (requires 'field')."
+                    },
+                    "field": {
+                        "type": "string",
+                        "description": "Optional: the fulltext-indexed field whose language/options to inherit (requires 'collection')."
+                    }
                 },
                 "required": ["text"]
             }

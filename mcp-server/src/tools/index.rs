@@ -30,7 +30,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "index_stats" => handle_index_stats(params, adapter),
         "fuzzy_search" => handle_fuzzy_search(params, adapter),
         "fulltext_search" => handle_fulltext_search(params, adapter),
-        "fulltext_analyze" => handle_fulltext_analyze(params),
+        "fulltext_analyze" => handle_fulltext_analyze(params, adapter),
         "explain" => handle_explain(params, adapter),
         "find_with_hint" => handle_find_with_hint(params, adapter),
         _ => Err(McpError::invalid_params(format!(
@@ -316,27 +316,48 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 }
 
 /// Handle fulltext_analyze - debug tokenization process
-fn handle_fulltext_analyze(params: Value) -> Result<Value> {
+fn handle_fulltext_analyze(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     use ironbase_core::fulltext::{analyze_text, FtsLanguage, FtsOptions};
 
     let p: FulltextAnalyzeParams = FulltextAnalyzeParams::parse(params)?;
 
-    // Parse language
-    let language = match p.language.to_lowercase().as_str() {
-        "hungarian" | "hu" => FtsLanguage::Hungarian,
-        "english" | "en" => FtsLanguage::English,
-        "german" | "de" => FtsLanguage::German,
-        _ => FtsLanguage::None,
-    };
-
-    let options = FtsOptions {
-        language,
-        min_word_length: p.min_word_length.unwrap_or(2),
-        accent_folding: p.accent_folding,
+    // If a collection+field is given, inherit that index's real tokenization config
+    // so the debugger reflects exactly how that index processes text (#65). Otherwise
+    // build options from the explicit params (pure tokenizer test).
+    let (options, inherited) = match (p.collection.as_deref(), p.field.as_deref()) {
+        (Some(collection), Some(field)) => {
+            let opts = adapter.get_fulltext_index_options(collection, field)?;
+            (opts, true)
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(McpError::invalid_params(
+                "fulltext_analyze: 'collection' and 'field' must be provided together",
+            ));
+        }
+        (None, None) => {
+            let language = match p.language.to_lowercase().as_str() {
+                "hungarian" | "hu" => FtsLanguage::Hungarian,
+                "english" | "en" => FtsLanguage::English,
+                "german" | "de" => FtsLanguage::German,
+                _ => FtsLanguage::None,
+            };
+            (
+                FtsOptions {
+                    language,
+                    min_word_length: p.min_word_length.unwrap_or(2),
+                    accent_folding: p.accent_folding,
+                },
+                false,
+            )
+        }
     };
 
     let result = analyze_text(&p.text, &options);
-    Ok(json!(result))
+    let mut out = json!(result);
+    if let Value::Object(ref mut obj) = out {
+        obj.insert("inherited_from_index".to_string(), json!(inherited));
+    }
+    Ok(out)
 }
 
 fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
