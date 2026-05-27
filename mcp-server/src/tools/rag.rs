@@ -16,23 +16,16 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD};
-use super::helpers::{insert_chunks_idempotent, validate_collection_name, IfExists};
+use super::helpers::{
+    insert_chunks_idempotent, should_skip_before_embedding, validate_collection_name, IfExists,
+    RESERVED_METADATA_KEYS,
+};
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
 };
 
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
-
-/// Reserved metadata keys that cannot be overwritten by user input (security)
-const RESERVED_METADATA_KEYS: &[&str] = &[
-    "_id",
-    "doc_id",
-    "chunk_index",
-    "chunk_total",
-    "start_char",
-    "end_char",
-];
 
 // ============================================================================
 // RAG Config Storage
@@ -319,6 +312,22 @@ fn handle_rag_document_import(
         }));
     }
 
+    // Pre-check before the expensive embedding step: skip/error short-circuit if
+    // an explicit doc_id already has chunks (auto-generated ids never collide).
+    let if_exists = IfExists::parse(&p.if_exists);
+    if let Some(ref doc_id) = p.doc_id {
+        if should_skip_before_embedding(adapter, &p.collection, doc_id, if_exists)? {
+            return Ok(json!({
+                "success": true,
+                "collection": p.collection,
+                "doc_id": doc_id,
+                "chunks_created": 0,
+                "skipped": true,
+                "message": "doc_id already exists; skipped (if_exists=skip)"
+            }));
+        }
+    }
+
     // Generate embeddings in batches (OOM protection)
     let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
     all_embeddings.try_reserve(chunks.len()).map_err(|e| {
@@ -343,6 +352,7 @@ fn handle_rag_document_import(
     }
 
     // Ensure collection and indexes exist if no RAG config (idempotent)
+    let mut language_ignored = false;
     if rag_config.is_none() {
         let _ = adapter.create_collection(&p.collection);
         let _ = adapter.create_vector_index(
@@ -362,6 +372,17 @@ fn handle_rag_document_import(
             Some(2),
             Some(true),
         );
+    } else if p.language != "none" {
+        // The fulltext index already exists (from rag_collection_create); the
+        // `language` param cannot change it here. Surface this instead of dropping
+        // it silently — the caller may expect stemming that won't be applied.
+        tracing::warn!(
+            "rag_document_import: 'language={}' ignored — collection '{}' already has a \
+             fulltext index. Set the language via rag_collection_create.",
+            p.language,
+            p.collection
+        );
+        language_ignored = true;
     }
 
     // Generate parent doc_id
@@ -437,8 +458,8 @@ fn handle_rag_document_import(
         }
     }
 
-    // Insert documents (idempotent w.r.t. doc_id — see issue #67)
-    let if_exists = IfExists::parse(&p.if_exists);
+    // Insert documents (idempotent w.r.t. doc_id — see issue #67).
+    // if_exists was parsed before embedding (skip/error already short-circuited).
     let result =
         insert_chunks_idempotent(adapter, &p.collection, &parent_id, documents, if_exists)?;
 
@@ -460,7 +481,8 @@ fn handle_rag_document_import(
         "chunks_created": result.inserted_ids.len(),
         "chunks_replaced": result.replaced,
         "dimension": provider.dimension(),
-        "provider": provider_name
+        "provider": provider_name,
+        "language_ignored": language_ignored
     }))
 }
 

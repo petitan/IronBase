@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{default_chunk_mode, default_chunk_overlap, default_chunk_size};
-use super::helpers::{insert_chunks_idempotent, IfExists};
+use super::helpers::{
+    insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
+};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -240,6 +242,22 @@ fn handle_embed_document(
         }));
     }
 
+    // Pre-check before the expensive embedding step: skip/error short-circuit if
+    // an explicit doc_id already has chunks (auto-generated ids never collide).
+    let if_exists = IfExists::parse(&p.if_exists);
+    if let Some(ref doc_id) = p.doc_id {
+        if should_skip_before_embedding(adapter, &p.collection, doc_id, if_exists)? {
+            return Ok(json!({
+                "success": true,
+                "collection": p.collection,
+                "doc_id": doc_id,
+                "chunks_created": 0,
+                "skipped": true,
+                "message": "doc_id already exists; skipped (if_exists=skip)"
+            }));
+        }
+    }
+
     // Generate embeddings in batch (process in chunks of 100)
     let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
     // Pre-allocate to avoid OOM on large documents
@@ -326,6 +344,18 @@ fn handle_embed_document(
             if let Some(obj) = metadata.as_object() {
                 if let Some(doc_obj) = doc.as_object_mut() {
                     for (key, value) in obj {
+                        // SECURITY/idempotency: never let metadata overwrite chunk-tracking
+                        // fields (e.g. doc_id, which drives replace) or the content/embedding.
+                        if RESERVED_METADATA_KEYS.contains(&key.as_str())
+                            || key == "content"
+                            || key == "embedding"
+                        {
+                            tracing::warn!(
+                                "Ignoring protected field '{}' in embed_document metadata",
+                                key
+                            );
+                            continue;
+                        }
                         doc_obj.insert(key.clone(), value.clone());
                     }
                 }
@@ -335,8 +365,8 @@ fn handle_embed_document(
         documents.push(doc);
     }
 
-    // Insert all documents (idempotent w.r.t. doc_id — see issue #67)
-    let if_exists = IfExists::parse(&p.if_exists);
+    // Insert all documents (idempotent w.r.t. doc_id — see issue #67).
+    // if_exists was parsed before embedding (skip/error already short-circuited).
     let result =
         insert_chunks_idempotent(adapter, &p.collection, &parent_id, documents, if_exists)?;
 

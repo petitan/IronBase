@@ -19,7 +19,9 @@ use crate::tools::fusion::{
     id_to_string as fusion_id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
     FusedResult,
 };
-use crate::tools::helpers::{insert_chunks_idempotent, IfExists};
+use crate::tools::helpers::{
+    insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
+};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -1143,9 +1145,6 @@ const MAX_AGGREGATE_DOCUMENTS: usize = 10_000;
 /// Maximum unique values from distinct to prevent OOM
 const MAX_DISTINCT_VALUES: usize = 10_000;
 
-/// Reserved metadata keys that cannot be overwritten by user input
-const RESERVED_METADATA_KEYS: &[&str] = &["_id", "doc_id", "chunk_index", "chunk_total"];
-
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
 
@@ -1628,8 +1627,10 @@ fn rag_import_impl(
 
     // Parse options using helper functions
     let title = get_string_option(&options, "title").unwrap_or_default();
-    let doc_id =
-        get_string_option(&options, "doc_id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let explicit_doc_id = get_string_option(&options, "doc_id");
+    let doc_id = explicit_doc_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
     let language = get_string_option_or(&options, "language", "none");
     let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
@@ -1687,6 +1688,23 @@ fn rag_import_impl(
             Dynamic::from("No chunks generated from content".to_string()),
         );
         return Dynamic::from(result);
+    }
+
+    // Pre-check before embedding: skip/error short-circuit if an explicit doc_id
+    // already has chunks (auto-generated ids never collide).
+    if let Some(ref did) = explicit_doc_id {
+        match should_skip_before_embedding(adapter, collection, did, if_exists) {
+            Ok(true) => {
+                let mut result = Map::new();
+                result.insert("success".into(), Dynamic::from(true));
+                result.insert("doc_id".into(), Dynamic::from(doc_id.clone()));
+                result.insert("chunks_created".into(), Dynamic::from(0_i64));
+                result.insert("skipped".into(), Dynamic::from(true));
+                return Dynamic::from(result);
+            }
+            Ok(false) => {}
+            Err(e) => return Dynamic::from(format!("Error: {}", e)),
+        }
     }
 
     // Generate embeddings: breadcrumb + cleaned body; stored chunk.text is unchanged.

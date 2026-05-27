@@ -8,6 +8,18 @@ use std::collections::HashMap;
 /// Default limit for queries when no ScriptLimits provided
 pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 
+/// Chunk-tracking fields that user-supplied metadata must never overwrite
+/// (security + idempotency: `doc_id` drives replace, `chunk_index`/`*_char` the layout).
+/// Single source of truth shared by rag_document_import, embed_document, db_rag_import.
+pub const RESERVED_METADATA_KEYS: &[&str] = &[
+    "_id",
+    "doc_id",
+    "chunk_index",
+    "chunk_total",
+    "start_char",
+    "end_char",
+];
+
 /// Check if the current request has been cancelled
 ///
 /// Call this at the beginning of potentially long operations
@@ -473,6 +485,42 @@ pub struct IdempotentInsert {
     pub skipped: bool,
 }
 
+/// Cheap pre-check to run BEFORE the expensive embedding step.
+///
+/// For `Skip`/`Error` policies, detects whether `doc_id` already has chunks so the
+/// caller can short-circuit without paying for embeddings it would then discard.
+/// - `Replace`/`Append` → `Ok(false)` (always proceed; work happens in `insert_chunks_idempotent`).
+/// - `Skip` + exists → `Ok(true)` (stop, nothing to do).
+/// - `Error` + exists → `Err`.
+///
+/// A missing collection counts as "does not exist".
+pub fn should_skip_before_embedding(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    doc_id: &str,
+    if_exists: IfExists,
+) -> Result<bool> {
+    if matches!(if_exists, IfExists::Replace | IfExists::Append) {
+        return Ok(false);
+    }
+    let exists = match adapter.count_documents(collection, json!({ "doc_id": doc_id })) {
+        Ok(n) => n > 0,
+        Err(e) if e.code == ErrorCode::CollectionNotFound => false,
+        Err(e) => return Err(e),
+    };
+    if !exists {
+        return Ok(false);
+    }
+    match if_exists {
+        IfExists::Error => Err(McpError::invalid_params(format!(
+            "doc_id '{}' already exists. Use if_exists=replace to overwrite, \
+             or if_exists=append to add alongside.",
+            doc_id
+        ))),
+        _ => Ok(true), // Skip
+    }
+}
+
 /// Insert chunk documents for `doc_id` with an idempotency policy.
 ///
 /// Safe ordering (issue #67): the previously-existing chunk ids are captured
@@ -679,6 +727,27 @@ mod tests {
             insert_chunks_idempotent(&adapter, "rdocs", "A", new_chunks("A", 2), IfExists::Error);
         assert!(res.is_err());
         assert_eq!(count(&adapter, "A"), 3);
+    }
+
+    #[test]
+    fn test_should_skip_before_embedding() {
+        let (adapter, _d) = temp_adapter();
+        seed(&adapter, "A", 3);
+
+        // Replace/Append always proceed (never skip), even when chunks exist.
+        assert!(!should_skip_before_embedding(&adapter, "rdocs", "A", IfExists::Replace).unwrap());
+        assert!(!should_skip_before_embedding(&adapter, "rdocs", "A", IfExists::Append).unwrap());
+
+        // Skip: existing → true (stop), non-existing → false (proceed).
+        assert!(should_skip_before_embedding(&adapter, "rdocs", "A", IfExists::Skip).unwrap());
+        assert!(!should_skip_before_embedding(&adapter, "rdocs", "Z", IfExists::Skip).unwrap());
+
+        // Error: existing → Err, non-existing → Ok(false).
+        assert!(should_skip_before_embedding(&adapter, "rdocs", "A", IfExists::Error).is_err());
+        assert!(!should_skip_before_embedding(&adapter, "rdocs", "Z", IfExists::Error).unwrap());
+
+        // Missing collection counts as "does not exist".
+        assert!(!should_skip_before_embedding(&adapter, "nope", "A", IfExists::Skip).unwrap());
     }
 
     #[test]
