@@ -147,25 +147,59 @@ pub(crate) fn lift_common_fields(chunks: &mut [Value]) -> serde_json::Map<String
     lifted
 }
 
+/// Score-only snapshot of a `FusedResult`. Used to enrich grouped-mode Phase 2
+/// chunks with the same score shape as flat mode without cloning `doc: Value`.
+#[derive(Debug, Clone, Copy)]
+struct FusedScoreInfo {
+    rrf_score: f64,
+    final_score: f64,
+    rerank_boost: f64,
+    v_rank: usize,
+    t_rank: usize,
+    v_score: Option<f32>,
+    t_score: Option<f64>,
+}
+
+impl From<&FusedResult> for FusedScoreInfo {
+    fn from(item: &FusedResult) -> Self {
+        Self {
+            rrf_score: item.rrf_score,
+            final_score: item.final_score,
+            rerank_boost: item.rerank_boost,
+            v_rank: item.v_rank,
+            t_rank: item.t_rank,
+            v_score: item.v_score,
+            t_score: item.t_score,
+        }
+    }
+}
+
+/// Single source of truth for the chunk-level score shape, shared by flat
+/// `enrich_result` and grouped-mode Phase 2 chunk enrichment.
+fn apply_score_fields(obj: &mut serde_json::Map<String, Value>, info: &FusedScoreInfo) {
+    obj.insert("_rrf_score".to_string(), json!(info.rrf_score));
+    obj.insert("_final_score".to_string(), json!(info.final_score));
+    obj.insert("_rerank_boost".to_string(), json!(info.rerank_boost));
+    obj.insert("_vector_rank".to_string(), json!(info.v_rank));
+    obj.insert("_text_rank".to_string(), json!(info.t_rank));
+    if let Some(vs) = info.v_score {
+        obj.insert("_vector_score".to_string(), json!(vs));
+    }
+    if let Some(ts) = info.t_score {
+        obj.insert("_text_score".to_string(), json!(ts));
+    }
+}
+
 /// Apply projection and add score metadata to a fused result
 fn enrich_result(item: FusedResult, projection: &Option<HashMap<String, i32>>) -> Value {
+    let info = FusedScoreInfo::from(&item);
     let mut result = if let Some(ref proj) = projection {
         apply_projection(&item.doc, proj)
     } else {
         item.doc
     };
     if let Value::Object(ref mut obj) = result {
-        obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-        obj.insert("_final_score".to_string(), json!(item.final_score));
-        obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-        obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-        obj.insert("_text_rank".to_string(), json!(item.t_rank));
-        if let Some(vs) = item.v_score {
-            obj.insert("_vector_score".to_string(), json!(vs));
-        }
-        if let Some(ts) = item.t_score {
-            obj.insert("_text_score".to_string(), json!(ts));
-        }
+        apply_score_fields(obj, &info);
     }
     result
 }
@@ -574,9 +608,12 @@ fn handle_hybrid_search(
         // uses OR (any word in chunk) — exactly what the user expects.
         // ----------------------------------------------------------------
 
-        // Phase 1: Extract top N unique doc_ids from fused results
+        // Phase 1: Extract top N unique doc_ids from fused results AND record
+        // per-chunk score info so Phase 2 can re-enrich chunks that survived
+        // the fused ranking (others get only _text_score from Phase 2).
         let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
         let mut doc_order: Vec<String> = Vec::new();
+        let mut phase1_chunk_info: HashMap<String, FusedScoreInfo> = HashMap::new();
 
         for item in &fused {
             let doc_id = item
@@ -590,6 +627,10 @@ fn handle_hybrid_search(
                         .and_then(id_to_string)
                         .unwrap_or_else(|| item.id.clone())
                 });
+
+            if let Some(chunk_id) = item.doc.get("_id").and_then(id_to_string) {
+                phase1_chunk_info.insert(chunk_id, FusedScoreInfo::from(item));
+            }
 
             if !doc_best_scores.contains_key(&doc_id) {
                 doc_best_scores.insert(doc_id.clone(), item.final_score);
@@ -644,13 +685,25 @@ fn handle_hybrid_search(
                 }
             };
 
+            let chunk_id = res.document.get("_id").and_then(id_to_string);
             let mut chunk = if let Some(ref proj) = projection {
                 apply_projection(&res.document, proj)
             } else {
                 res.document
             };
             if let Value::Object(ref mut obj) = chunk {
-                obj.insert("_text_score".to_string(), json!(res.score));
+                if let Some(ref id) = chunk_id {
+                    if let Some(info) = phase1_chunk_info.get(id) {
+                        // Phase 1-ranked chunk: full score shape (matches flat mode)
+                        apply_score_fields(obj, info);
+                    } else {
+                        // Phase 2-only chunk: only _text_score available, other
+                        // ranking fields legitimately missing (was never fused)
+                        obj.insert("_text_score".to_string(), json!(res.score));
+                    }
+                } else {
+                    obj.insert("_text_score".to_string(), json!(res.score));
+                }
             }
 
             doc_groups.entry(doc_id).or_default().push(chunk);
@@ -666,15 +719,23 @@ fn handle_hybrid_search(
                 e
             ))
         })?;
+        let max_chunks = p.max_chunks_per_doc;
         grouped_results.extend(doc_order.into_iter().filter_map(|doc_id| {
             let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
             let mut chunks = doc_groups.remove(&doc_id).unwrap_or_default();
             if chunks.is_empty() {
                 return None;
             }
-            total_chunks += chunks.len();
 
+            // Lift BEFORE cap so doc-level fields are determined from the full
+            // Phase 2 set (otherwise `max_chunks_per_doc=1` would skip lifting
+            // entirely, leaving every doc field stuck inside the surviving chunk).
             let lifted = lift_common_fields(&mut chunks);
+
+            if let Some(cap) = max_chunks {
+                chunks.truncate(cap);
+            }
+            total_chunks += chunks.len();
 
             let mut group = serde_json::Map::new();
             group.insert("doc_id".to_string(), json!(doc_id));
@@ -1030,11 +1091,24 @@ mod tests {
         assert!(!p.deduplicate); // default: false
         assert!((p.mmr_lambda - 0.7).abs() < f64::EPSILON); // default
         assert!(!p.group_by_document); // default: false
+        assert!(p.max_chunks_per_doc.is_none()); // default: no cap
         assert!(p.provider.is_none()); // no provider → use collection config
         assert!(p.filter.is_none()); // default: no filter
         assert!(p.mode.is_none()); // default: None (= "and")
         assert!(p.text_fields.is_none()); // default: None (= single text_field)
         assert!(p.vector.is_some()); // explicit vector provided
+    }
+
+    #[test]
+    fn test_params_with_max_chunks_per_doc() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "max_chunks_per_doc": 3
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.max_chunks_per_doc, Some(3));
     }
 
     #[test]

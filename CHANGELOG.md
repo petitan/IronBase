@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Hardening (mcp-server v1.0.502) — `hybrid_search group_by_document=true` chunk-shape (#71)
+
+- **Grouped-mode chunks now carry the same chunk-level engine score-fields as flat mode** for chunks that survived the Phase 1 RRF+rerank pipeline: `_rrf_score`, `_final_score`, `_rerank_boost`, `_vector_rank`, `_text_rank`, `_vector_score`, `_text_score`. A Phase 2-only chunk (pulled in by the doc-extension fulltext OR search but never fused in Phase 1) carries only `_text_score`; the absence of `_final_score` etc. is itself the signal that the chunk was not globally ranked. Single source of truth: `apply_score_fields` is now shared by `enrich_result` (flat) and the grouped Phase 2 builder. Before v1.0.502 the grouped builder injected only `_text_score`, so any client that aggregated per-chunk `_final_score` to re-rank documents grouped-mode-side got a degenerated rank that ignored the rerank-boost (empirical Q22/Q23 regression in PeTitanWeb).
+- **`max_chunks_per_doc` parameter (grouped mode only in this release)** — caps the length of each group's `chunks[]` array. Applied **after** `lift_common_fields` (so doc-level field promotion sees the full Phase 2 chunk set even when `max_chunks_per_doc=1`) and **before** `total_chunks` accounting (so the response field reflects what the client actually receives). Default `null` = no cap (backward-compatible). The matching flat-mode cap arrives in a follow-up PR (#72); both share one parameter name for a unified client API.
+
 ### RAG Pipeline (mcp-server v1.0.494 – v1.0.501)
 
 Comprehensive engineering overview: [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md).

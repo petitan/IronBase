@@ -126,6 +126,11 @@ pub fn tools() -> Vec<Value> {
                     "type": "boolean",
                     "description": "Group results by source document (default: false). When true, results are grouped by doc_id with all matching chunks per document returned together. Limit applies to document count, not chunk count. Useful for seeing all relevant chunks from the same document together.",
                     "default": false
+                },
+                "max_chunks_per_doc": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum chunks per source document. In flat mode: caps how many chunks from the same doc_id enter the global top-K (applied after reranking, before merge_chunks/MMR). In grouped mode: caps the length of each group's chunks[] array. Omit for no cap."
                 }
             },
             "required": ["collection", "query"]

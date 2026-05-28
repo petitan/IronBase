@@ -672,6 +672,13 @@ pub struct HybridSearchParams {
     /// Limit applies to document count (not chunk count).
     #[serde(default = "default_group_by_document")]
     pub group_by_document: bool,
+
+    /// Maximum chunks per source document.
+    /// In flat mode: caps how many chunks from the same `doc_id` enter the global top-K
+    /// (applied AFTER reranking, BEFORE merge_chunks/MMR).
+    /// In grouped mode: caps the length of each group's `chunks[]` array.
+    /// None = no cap (current behavior).
+    pub max_chunks_per_doc: Option<usize>,
 }
 
 fn default_merge_chunks() -> bool {

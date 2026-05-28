@@ -989,3 +989,295 @@ fn test_fulltext_search_flat_shape_issue68() {
     assert!(hit["_score"].as_f64().unwrap() > 0.0);
     assert!(hit["_matched_tokens"].is_array());
 }
+
+/// #71: `hybrid_search group_by_document=true` carries the same chunk-level
+/// engine score fields as flat mode for chunks that survived Phase 1 fusion.
+/// Before v1.0.502 only `_text_score` was emitted on grouped chunks, so any
+/// client aggregating `_final_score` per doc lost the rerank-boost (which is
+/// what produced the empirical PeTitanWeb Q22/Q23 regression).
+#[test]
+fn test_hybrid_grouped_chunk_score_fields_issue71() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    // Two docs, two chunks each. The chunk content carries the query token so
+    // every chunk qualifies for the fulltext side; doc_id varies so grouped
+    // mode produces 2 groups.
+    let docs = vec![
+        (
+            "alpha",
+            0,
+            "fékpad PEF-35 leírás",
+            vec![0.9_f64, 0.1, 0.0, 0.0],
+        ),
+        ("alpha", 1, "fékpad PEF-35 ár", vec![0.8, 0.2, 0.0, 0.0]),
+        (
+            "beta",
+            0,
+            "fékpad PEF-35 specifikáció",
+            vec![0.1, 0.9, 0.0, 0.0],
+        ),
+        (
+            "beta",
+            1,
+            "fékpad PEF-35 garancia",
+            vec![0.0, 0.8, 0.2, 0.0],
+        ),
+    ];
+    for (doc_id, idx, content, emb) in &docs {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection": "kb", "document": {
+                "doc_id": doc_id, "chunk_index": idx,
+                "content": content, "title": format!("{} title", doc_id),
+                "embedding": emb,
+            }}),
+        );
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+
+    // Explicit query vector — biases the vector side toward "alpha" so we can
+    // also assert non-trivial _vector_rank presence.
+    let res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({
+            "collection": "kb",
+            "query": "PEF-35",
+            "vector": [0.9, 0.1, 0.0, 0.0],
+            "group_by_document": true,
+            "limit": 5,
+        }),
+    );
+
+    assert_eq!(res["group_by_document"], json!(true));
+    let groups = res["results"].as_array().expect("results array");
+    assert!(!groups.is_empty(), "expected at least one group: {res}");
+
+    // At least one chunk across the groups must carry the full Phase 1 score
+    // shape (not just _text_score). Before #71 ZERO chunks would.
+    let mut phase1_chunk_seen = false;
+    for g in groups {
+        let chunks = g["chunks"].as_array().expect("chunks array");
+        assert!(!chunks.is_empty(), "group has no chunks: {g}");
+        for c in chunks {
+            if c.get("_final_score").is_some() {
+                phase1_chunk_seen = true;
+                // Full Phase 1 shape must be present together (single helper).
+                assert!(c["_rrf_score"].is_number(), "missing _rrf_score: {c}");
+                assert!(c["_rerank_boost"].is_number(), "missing _rerank_boost: {c}");
+                assert!(c["_text_rank"].is_number(), "missing _text_rank: {c}");
+                assert!(c["_vector_rank"].is_number(), "missing _vector_rank: {c}");
+                assert!(c["_text_score"].is_number(), "missing _text_score: {c}");
+            }
+        }
+    }
+    assert!(
+        phase1_chunk_seen,
+        "no chunk carried _final_score — Phase 1 enrichment did not run: {res}"
+    );
+}
+
+/// #71: `max_chunks_per_doc` caps `chunks[]` length in grouped mode while
+/// keeping doc-level field lifting intact (lift runs BEFORE the cap).
+#[test]
+fn test_hybrid_grouped_max_chunks_per_doc_issue71() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    for idx in 0..4 {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection": "kb", "document": {
+                "doc_id": "alpha", "chunk_index": idx,
+                "content": format!("fékpad PEF-35 chunk {}", idx),
+                "title": "alpha title",  // identical across chunks → must lift
+                "embedding": [0.9, 0.1, 0.0, 0.0],
+            }}),
+        );
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+
+    let res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({
+            "collection": "kb",
+            "query": "PEF-35",
+            "vector": [0.9, 0.1, 0.0, 0.0],
+            "group_by_document": true,
+            "limit": 5,
+            "max_chunks_per_doc": 2,
+        }),
+    );
+
+    let groups = res["results"].as_array().expect("results array");
+    assert_eq!(groups.len(), 1, "expected single doc group: {res}");
+    let g = &groups[0];
+    let chunks = g["chunks"].as_array().expect("chunks array");
+    assert!(chunks.len() <= 2, "cap violated: {}", chunks.len());
+    assert_eq!(
+        g["chunk_count"],
+        json!(chunks.len()),
+        "chunk_count must reflect post-cap length"
+    );
+    // Lift must run on the FULL Phase 2 set (4 chunks), then cap → title at root.
+    assert_eq!(
+        g["title"],
+        json!("alpha title"),
+        "title not lifted; cap must run AFTER lift_common_fields: {g}"
+    );
+    for c in chunks {
+        assert!(
+            c.get("title").is_none(),
+            "lifted field leaked back into chunk: {c}"
+        );
+    }
+    // total_chunks counts post-cap (what the client actually receives).
+    assert_eq!(res["total_chunks"], json!(chunks.len()));
+}
+
+/// #71 AC2: flat-mode top-K doc-order and grouped-mode doc-order must agree
+/// when the query and inputs are identical. Before v1.0.502 grouped chunks
+/// lacked rerank-boost (only `_text_score` was emitted), so any client that
+/// rebuilt doc rank from grouped chunks diverged from flat. The fix means
+/// `best_score = max(_final_score)` per doc, so the orderings align.
+#[test]
+fn test_hybrid_flat_grouped_doc_order_agreement_issue71_ac2() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    // Construct content so the rerank-boost actually moves things around:
+    // - Doc "alpha" has the exact query phrase in title (+title boost) and
+    //   the phrase verbatim in one chunk (+phrase-match boost).
+    // - Doc "beta"  has the phrase split across chunks (no phrase boost).
+    // - Doc "gamma" has only one query token (weakest).
+    // Vector side: a neutral query vector that scores similarly across docs.
+    let inserts = vec![
+        (
+            "alpha",
+            0,
+            "fékpad PEF-35 ajánlat",
+            "alpha cikk PEF-35",
+            vec![0.7_f64, 0.3, 0.0, 0.0],
+        ),
+        (
+            "alpha",
+            1,
+            "fékpad PEF-35 ár 4.2M Ft",
+            "alpha cikk PEF-35",
+            vec![0.6, 0.4, 0.0, 0.0],
+        ),
+        (
+            "beta",
+            0,
+            "fékpad telepítés helyszínen",
+            "beta cikk",
+            vec![0.4, 0.6, 0.0, 0.0],
+        ),
+        (
+            "beta",
+            1,
+            "PEF-35 leírás külön",
+            "beta cikk",
+            vec![0.3, 0.7, 0.0, 0.0],
+        ),
+        (
+            "gamma",
+            0,
+            "fékpad általános leírás",
+            "gamma cikk",
+            vec![0.2, 0.8, 0.0, 0.0],
+        ),
+    ];
+    for (doc_id, idx, content, title, emb) in &inserts {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection": "kb", "document": {
+                "doc_id": doc_id, "chunk_index": idx,
+                "content": content, "title": title,
+                "embedding": emb,
+            }}),
+        );
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "title"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+
+    let common = json!({
+        "collection": "kb",
+        "query": "PEF-35 fékpad",
+        "vector": [0.5, 0.5, 0.0, 0.0],
+        "title_field": "title",
+        "limit": 5,
+    });
+
+    // Flat
+    let mut flat_args = common.as_object().unwrap().clone();
+    let flat_res = dispatch_ok(&adapter, "hybrid_search", Value::Object(flat_args.clone()));
+    let flat_chunks = flat_res["results"].as_array().expect("flat results");
+    let mut flat_doc_order: Vec<String> = Vec::new();
+    for c in flat_chunks {
+        if let Some(did) = c["doc_id"].as_str() {
+            if !flat_doc_order.contains(&did.to_string()) {
+                flat_doc_order.push(did.to_string());
+            }
+        }
+    }
+
+    // Grouped
+    flat_args.insert("group_by_document".into(), json!(true));
+    let grouped_res = dispatch_ok(&adapter, "hybrid_search", Value::Object(flat_args));
+    let groups = grouped_res["results"].as_array().expect("grouped results");
+    let grouped_doc_order: Vec<String> = groups
+        .iter()
+        .filter_map(|g| g["doc_id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    assert!(
+        !flat_doc_order.is_empty(),
+        "flat returned no results: {flat_res}"
+    );
+    assert!(
+        !grouped_doc_order.is_empty(),
+        "grouped returned no groups: {grouped_res}"
+    );
+
+    // Compare prefix up to min length — flat may have more docs (with limit=5
+    // it gathers top-5 chunks across all docs; grouped limits doc count).
+    let n = flat_doc_order.len().min(grouped_doc_order.len());
+    assert_eq!(
+        &flat_doc_order[..n], &grouped_doc_order[..n],
+        "flat vs grouped doc order diverges. flat={flat_doc_order:?} grouped={grouped_doc_order:?}\nflat_res={flat_res}\ngrouped_res={grouped_res}"
+    );
+}
