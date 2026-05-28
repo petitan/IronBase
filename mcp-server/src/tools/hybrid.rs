@@ -536,6 +536,37 @@ fn handle_hybrid_search(
     }
 
     // ========================================================================
+    // STEP 5.4: Per-doc chunk cap in flat mode (#72)
+    //
+    // Applied AFTER rerank, BEFORE merge_chunks — so the cap is enforced on
+    // the raw chunk-top-K and the subsequent adjacent-merge counts a merge-run
+    // as a single result (issue #72 acceptance criterion 3). Grouped mode caps
+    // the chunks[] array later, in the grouped builder (already implemented
+    // for #71).
+    // ========================================================================
+    if let Some(cap) = p.max_chunks_per_doc {
+        if !p.group_by_document {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            fused.retain(|item| {
+                let doc_id = item
+                    .doc
+                    .get("doc_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        item.doc
+                            .get("_id")
+                            .and_then(id_to_string)
+                            .unwrap_or_else(|| item.id.clone())
+                    });
+                let c = counts.entry(doc_id).or_insert(0);
+                *c += 1;
+                *c <= cap
+            });
+        }
+    }
+
+    // ========================================================================
     // STEP 5.5: Merge adjacent chunks from same document (overlap dedup)
     // ========================================================================
     let chunks_merged = if p.merge_chunks {

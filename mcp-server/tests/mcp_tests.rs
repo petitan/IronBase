@@ -1281,3 +1281,114 @@ fn test_hybrid_flat_grouped_doc_order_agreement_issue71_ac2() {
         "flat vs grouped doc order diverges. flat={flat_doc_order:?} grouped={grouped_doc_order:?}\nflat_res={flat_res}\ngrouped_res={grouped_res}"
     );
 }
+
+/// #72: flat-mode `max_chunks_per_doc` caps per-doc chunk count in the global
+/// top-K. With cap=2 and 4 chunks per doc, no doc_id may appear more than 2
+/// times in the results array.
+#[test]
+fn test_hybrid_flat_max_chunks_per_doc_issue72() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    // 2 docs × 4 chunks each = 8 candidates; cap=2 → max 4 results possible.
+    for doc_id in &["alpha", "beta"] {
+        for idx in 0..4 {
+            dispatch_ok(
+                &adapter,
+                "insert_one",
+                json!({"collection": "kb", "document": {
+                    "doc_id": doc_id, "chunk_index": idx,
+                    "content": format!("PEF-35 fékpad chunk {}-{}", doc_id, idx),
+                    "embedding": [0.5, 0.5, 0.0, 0.0],
+                }}),
+            );
+        }
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+
+    let res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({
+            "collection": "kb",
+            "query": "PEF-35",
+            "vector": [0.5, 0.5, 0.0, 0.0],
+            "limit": 50,
+            "max_chunks_per_doc": 2,
+            "merge_chunks": false, // disable merge so we count raw chunks
+        }),
+    );
+
+    let results = res["results"].as_array().expect("results array");
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for hit in results {
+        let doc_id = hit["doc_id"].as_str().expect("hit has doc_id").to_string();
+        *counts.entry(doc_id).or_insert(0) += 1;
+    }
+    for (doc_id, cnt) in &counts {
+        assert!(*cnt <= 2, "doc {doc_id} exceeded cap: {cnt} > 2");
+    }
+    // Both docs should be represented (cap doesn't fully exclude either).
+    assert!(counts.contains_key("alpha"), "alpha missing: {counts:?}");
+    assert!(counts.contains_key("beta"), "beta missing: {counts:?}");
+}
+
+/// #72 AC2: `max_chunks_per_doc=null` (default) keeps the v1.0.501 selection
+/// behaviour — no per-doc cap, all chunks compete for the limit slot.
+#[test]
+fn test_hybrid_flat_max_chunks_per_doc_default_is_backward_compatible_issue72() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    // 1 doc, 4 chunks → without a cap, up to 4 chunks may enter top-K.
+    for idx in 0..4 {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection": "kb", "document": {
+                "doc_id": "alpha", "chunk_index": idx,
+                "content": format!("PEF-35 fékpad chunk alpha-{}", idx),
+                "embedding": [0.5, 0.5, 0.0, 0.0],
+            }}),
+        );
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+
+    let res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({
+            "collection": "kb",
+            "query": "PEF-35",
+            "vector": [0.5, 0.5, 0.0, 0.0],
+            "limit": 50,
+            "merge_chunks": false,
+        }),
+    );
+
+    let results = res["results"].as_array().expect("results");
+    let alpha_count = results
+        .iter()
+        .filter(|h| h["doc_id"].as_str() == Some("alpha"))
+        .count();
+    assert_eq!(
+        alpha_count, 4,
+        "expected all 4 alpha chunks without cap, got {alpha_count}: {res}"
+    );
+}

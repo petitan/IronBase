@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Hardening (mcp-server v1.0.503) — `hybrid_search` flat-mode `max_chunks_per_doc` (#72)
+
+- **Flat mode now honors `max_chunks_per_doc`** — caps how many chunks from the same `doc_id` survive into the global top-K. The cap is applied AFTER reranking and BEFORE `merge_chunks` / MMR, so an adjacent-merge run counts as a single result (issue #72 AC3): merging an N-chunk overlap-cluster does not silently bypass the cap. Combined with the grouped-mode cap introduced in v1.0.502, one parameter name now means the same thing in both modes — clients no longer need to over-fetch with `limit=500, merge_chunks=False` to ensure cross-doc coverage; `limit=50, max_chunks_per_doc=5` guarantees at least 10 distinct docs in the top-K.
+
 ### Hardening (mcp-server v1.0.502) — `hybrid_search group_by_document=true` chunk-shape (#71)
 
 - **Grouped-mode chunks now carry the same chunk-level engine score-fields as flat mode** for chunks that survived the Phase 1 RRF+rerank pipeline: `_rrf_score`, `_final_score`, `_rerank_boost`, `_vector_rank`, `_text_rank`, `_vector_score`, `_text_score`. A Phase 2-only chunk (pulled in by the doc-extension fulltext OR search but never fused in Phase 1) carries only `_text_score`; the absence of `_final_score` etc. is itself the signal that the chunk was not globally ranked. Single source of truth: `apply_score_fields` is now shared by `enrich_result` (flat) and the grouped Phase 2 builder. Before v1.0.502 the grouped builder injected only `_text_score`, so any client that aggregated per-chunk `_final_score` to re-rank documents grouped-mode-side got a degenerated rank that ignored the rerank-boost (empirical Q22/Q23 regression in PeTitanWeb).
