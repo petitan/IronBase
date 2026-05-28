@@ -7,21 +7,24 @@
 //!
 //! Search logic lives in hybrid_search (see hybrid.rs).
 
-use crate::adapter::IronBaseAdapter;
+use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD};
+use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
+use super::fusion::{apply_projection, merge_adjacent_chunks, FusedResult};
 use super::helpers::{
-    insert_chunks_idempotent, should_skip_before_embedding, validate_collection_name, IfExists,
-    RESERVED_METADATA_KEYS,
+    insert_chunks_idempotent, parse_projection_value, should_skip_before_embedding,
+    validate_collection_name, IfExists, RESERVED_METADATA_KEYS,
 };
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
+    RagLoadAllChunksParams,
 };
 
 /// System collection for RAG configs
@@ -128,11 +131,167 @@ pub fn dispatch(
         "rag_collection_create" => handle_rag_collection_create(params, adapter, embedding_manager),
         "rag_document_import" => handle_rag_document_import(params, adapter, embedding_manager),
         "rag_collection_stats" => handle_rag_collection_stats(params, adapter, embedding_manager),
+        "rag_load_all_chunks" => handle_rag_load_all_chunks(params, adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown RAG tool: {}",
             name
         ))),
     }
+}
+
+// ============================================================================
+// rag_load_all_chunks Handler (#73)
+// ============================================================================
+
+/// Load every chunk for the given `doc_ids`. Optional `query` adds `_text_score`
+/// via fulltext OR-search; without a query the load is unscored. Adjacent chunks
+/// are merged by default (same algorithm as hybrid_search).
+fn handle_rag_load_all_chunks(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let p: RagLoadAllChunksParams = RagLoadAllChunksParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+
+    // Empty doc_ids → empty results (NOT an error, per #73 AC4)
+    if p.doc_ids.is_empty() {
+        return Ok(json!({
+            "results": [],
+            "count": 0,
+            "chunks_merged": 0,
+            "scored": p.query.is_some(),
+        }));
+    }
+
+    let projection = parse_projection_value(p.projection)?;
+    let scored = p.query.is_some();
+
+    // Fetch raw chunks: scored path uses fulltext OR-search; pure-load uses find.
+    let raw: Vec<(Value, Option<f64>)> = if let Some(ref query) = p.query {
+        let target: HashSet<String> = p.doc_ids.iter().cloned().collect();
+        let options = FulltextSearchOptions {
+            limit: Some(MAX_INTERNAL_LIMIT),
+            skip: None,
+            min_score: None,
+            projection: None, // apply later, after merge
+            filter: None,
+            and_mode: false, // OR — return any chunk that contains any token
+            highlight: false,
+            highlight_context: None,
+            highlight_max_snippets: None,
+            target_doc_ids: Some(target),
+        };
+        let results = adapter.fulltext_search(&p.collection, &p.text_field, query, options)?;
+        results
+            .into_iter()
+            .map(|r| (r.document, Some(r.score)))
+            .collect()
+    } else {
+        let filter = json!({"doc_id": {"$in": p.doc_ids.clone()}});
+        let options = FindOptions {
+            sort: Some(vec![("doc_id".into(), 1), ("chunk_index".into(), 1)]),
+            limit: Some(MAX_INTERNAL_LIMIT),
+            ..Default::default()
+        };
+        let find_result = adapter.find(&p.collection, filter, options)?;
+        find_result
+            .documents
+            .into_iter()
+            .map(|d| (d, None))
+            .collect()
+    };
+
+    // Wrap as FusedResult so we can reuse merge_adjacent_chunks (and its
+    // table-header dedup + overlap-aware joining) instead of re-implementing.
+    let mut fused: Vec<FusedResult> = raw
+        .into_iter()
+        .enumerate()
+        .map(|(i, (doc, score))| FusedResult {
+            id: format!("load_{}", i),
+            doc,
+            rrf_score: 0.0,
+            final_score: score.unwrap_or(0.0),
+            rerank_boost: 1.0,
+            v_rank: 0,
+            t_rank: 0,
+            v_score: None,
+            t_score: score,
+        })
+        .collect();
+
+    let chunks_merged = if p.merge_chunks {
+        merge_adjacent_chunks(&mut fused, &p.text_field)
+    } else {
+        0
+    };
+
+    // Sort BEFORE the cap so the cap keeps the highest-relevance / first
+    // chunks per doc (not whatever order the index returned).
+    if scored {
+        // Scored load: by _score DESC, ties broken by doc_id+chunk_index for stability
+        fused.sort_by(|a, b| {
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let did_a = a.doc.get("doc_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let did_b = b.doc.get("doc_id").and_then(|v| v.as_str()).unwrap_or("");
+                    did_a.cmp(did_b)
+                })
+        });
+    } else {
+        // Pure load: by (doc_id ASC, chunk_index ASC) — matches AC1
+        fused.sort_by(|a, b| {
+            let did_a = a.doc.get("doc_id").and_then(|v| v.as_str()).unwrap_or("");
+            let did_b = b.doc.get("doc_id").and_then(|v| v.as_str()).unwrap_or("");
+            let ci_a = a
+                .doc
+                .get("chunk_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let ci_b = b
+                .doc
+                .get("chunk_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            did_a.cmp(did_b).then(ci_a.cmp(&ci_b))
+        });
+    }
+
+    if let Some(cap) = p.max_chunks_per_doc {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        fused.retain(|item| {
+            let doc_id = item
+                .doc
+                .get("doc_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let c = counts.entry(doc_id).or_insert(0);
+            *c += 1;
+            *c <= cap
+        });
+    }
+
+    let mut results: Vec<Value> = Vec::with_capacity(fused.len());
+    for item in fused {
+        let mut doc = if let Some(ref proj) = projection {
+            apply_projection(&item.doc, proj)
+        } else {
+            item.doc
+        };
+        if scored {
+            if let Value::Object(ref mut obj) = doc {
+                obj.insert("_score".to_string(), json!(item.final_score));
+            }
+        }
+        results.push(doc);
+    }
+
+    let count = results.len();
+    Ok(json!({
+        "results": results,
+        "count": count,
+        "chunks_merged": chunks_merged,
+        "scored": scored,
+    }))
 }
 
 // ============================================================================

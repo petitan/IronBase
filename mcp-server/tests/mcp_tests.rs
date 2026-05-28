@@ -1392,3 +1392,225 @@ fn test_hybrid_flat_max_chunks_per_doc_default_is_backward_compatible_issue72() 
         "expected all 4 alpha chunks without cap, got {alpha_count}: {res}"
     );
 }
+
+// ============================================================================
+// rag_load_all_chunks tests (#73)
+// ============================================================================
+
+/// Helper: seed a RAG-style collection with 2 docs × 3 chunks each.
+fn seed_rag_kb(adapter: &Arc<IronBaseAdapter>) {
+    for doc_id in &["alpha", "beta"] {
+        for idx in 0..3 {
+            dispatch_ok(
+                adapter,
+                "insert_one",
+                json!({"collection": "kb", "document": {
+                    "doc_id": doc_id,
+                    "chunk_index": idx,
+                    "chunk_total": 3,
+                    "content": format!("PEF-35 fékpad chunk {}-{}", doc_id, idx),
+                    "title": format!("{} title", doc_id),
+                }}),
+            );
+        }
+    }
+    dispatch_ok(
+        adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+}
+
+/// #73 AC1: pure load (no query) — chunks sorted by (doc_id, chunk_index) ASC,
+/// no _score / _matched_tokens / _highlights on hits.
+#[test]
+fn test_rag_load_all_chunks_pure_load_issue73_ac1() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": ["alpha", "beta"],
+            "merge_chunks": false,
+        }),
+    );
+
+    assert_eq!(res["scored"], json!(false));
+    let results = res["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 6, "expected 6 chunks (2 docs × 3): {res}");
+
+    // Order: alpha chunks 0,1,2 then beta chunks 0,1,2
+    let expected_order = [
+        ("alpha", 0),
+        ("alpha", 1),
+        ("alpha", 2),
+        ("beta", 0),
+        ("beta", 1),
+        ("beta", 2),
+    ];
+    for (i, (did, ci)) in expected_order.iter().enumerate() {
+        assert_eq!(
+            results[i]["doc_id"].as_str(),
+            Some(*did),
+            "chunk {i} doc_id mismatch: {res}"
+        );
+        assert_eq!(
+            results[i]["chunk_index"].as_u64(),
+            Some(*ci as u64),
+            "chunk {i} chunk_index mismatch: {res}"
+        );
+    }
+
+    // No scoring metadata on pure-load hits
+    for hit in results {
+        assert!(
+            hit.get("_score").is_none(),
+            "pure load leaked _score: {hit}"
+        );
+        assert!(
+            hit.get("_matched_tokens").is_none(),
+            "pure load leaked _matched_tokens: {hit}"
+        );
+        assert!(
+            hit.get("_highlights").is_none(),
+            "pure load leaked _highlights: {hit}"
+        );
+    }
+}
+
+/// #73 AC2: scored load — every hit carries `_score` and chunks come back
+/// sorted by `_score` DESC.
+#[test]
+fn test_rag_load_all_chunks_scored_load_issue73_ac2() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": ["alpha", "beta"],
+            "query": "PEF-35",
+            "merge_chunks": false,
+        }),
+    );
+
+    assert_eq!(res["scored"], json!(true));
+    let results = res["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "expected scored hits: {res}");
+
+    // Every hit must have _score, and scores must be DESC
+    let mut prev_score = f64::INFINITY;
+    for hit in results {
+        let s = hit["_score"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("missing _score: {hit}"));
+        assert!(
+            s <= prev_score,
+            "scores not DESC: prev={prev_score} curr={s} hit={hit}"
+        );
+        prev_score = s;
+    }
+}
+
+/// #73 AC4: empty `doc_ids` returns empty `results`, not an error.
+#[test]
+fn test_rag_load_all_chunks_empty_doc_ids_issue73_ac4() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": [],
+        }),
+    );
+    assert_eq!(res["count"], json!(0));
+    assert_eq!(res["results"].as_array().map(|a| a.len()), Some(0));
+}
+
+/// #73 AC5: missing doc_ids (not in the collection) are silently skipped.
+#[test]
+fn test_rag_load_all_chunks_missing_doc_ids_silent_skip_issue73_ac5() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": ["alpha", "nonexistent-doc"],
+            "merge_chunks": false,
+        }),
+    );
+    let results = res["results"].as_array().expect("results");
+    assert_eq!(
+        results.len(),
+        3,
+        "only alpha's 3 chunks should return: {res}"
+    );
+    for hit in results {
+        assert_eq!(hit["doc_id"].as_str(), Some("alpha"));
+    }
+}
+
+/// #73 AC3: `merge_chunks=true` triggers adjacent-merge and emits
+/// `chunks_in_merge` on the merged hits.
+#[test]
+fn test_rag_load_all_chunks_merge_chunks_issue73_ac3() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": ["alpha"],
+            "merge_chunks": true,
+        }),
+    );
+    // 3 chunks of "alpha" with chunk_index 0,1,2 → consecutive → merged to 1
+    let results = res["results"].as_array().expect("results");
+    assert_eq!(results.len(), 1, "expected one merged hit: {res}");
+    assert_eq!(results[0]["chunk_merged"], json!(true));
+    assert_eq!(results[0]["chunks_in_merge"], json!(3));
+    assert_eq!(res["chunks_merged"], json!(2)); // 2 chunks removed (3 merged into 1)
+}
+
+/// `max_chunks_per_doc` cap on rag_load_all_chunks — keeps the first N
+/// chunks per doc (post-sort).
+#[test]
+fn test_rag_load_all_chunks_max_chunks_per_doc() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_rag_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "rag_load_all_chunks",
+        json!({
+            "collection": "kb",
+            "doc_ids": ["alpha", "beta"],
+            "merge_chunks": false,
+            "max_chunks_per_doc": 2,
+        }),
+    );
+    let results = res["results"].as_array().expect("results");
+    let alpha = results
+        .iter()
+        .filter(|h| h["doc_id"].as_str() == Some("alpha"))
+        .count();
+    let beta = results
+        .iter()
+        .filter(|h| h["doc_id"].as_str() == Some("beta"))
+        .count();
+    assert_eq!(alpha, 2, "alpha cap violated: {res}");
+    assert_eq!(beta, 2, "beta cap violated: {res}");
+}

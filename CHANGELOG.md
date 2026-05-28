@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (mcp-server v1.0.503) — `rag_load_all_chunks` tool (#73)
+
+- **New MCP tool `rag_load_all_chunks`** loads every chunk for a given list of `doc_ids` from a RAG collection. Two modes:
+  - **Pure load** (`query` omitted): results sorted by `(doc_id, chunk_index)` ASC, no scoring fields on hits. Intended use: UI doc-detail-view, where the client just wants the whole document with overlap-merge applied.
+  - **Scored load** (`query` provided): chunks scored via fulltext OR-search filtered to the requested `doc_ids`, sorted by `_score` DESC, every hit carries `_score`. Intended use: RAG context-expansion after `hybrid_search` — the top-K doc_ids come from hybrid, and this tool returns ALL the relevant chunks per doc with `_text_score` so the client can pick its own context budget.
+- **Adjacent-chunk merge by default** (`merge_chunks=true`): same algorithm and code path as `hybrid_search` (`fusion::merge_adjacent_chunks`) — overlap removal, table-header dedup (#63), `chunk_merged`/`chunks_in_merge` metadata.
+- **`max_chunks_per_doc` parameter** — cap per source document, applied AFTER merge so a merged run counts as one chunk.
+- **Empty `doc_ids` returns empty results, not an error** (issue #73 AC4); missing doc_ids in the collection are silently skipped (AC5).
+- **Rhai equivalent `db_rag_load_all_chunks(collection, doc_ids)` / `db_rag_load_all_chunks(collection, doc_ids, options)`** — feature parity with the MCP tool, delegating to `tools::rag::dispatch` so the merge/cap/sorting logic stays single-source.
+
 ### Hardening (mcp-server v1.0.503) — `hybrid_search` flat-mode `max_chunks_per_doc` (#72)
 
 - **Flat mode now honors `max_chunks_per_doc`** — caps how many chunks from the same `doc_id` survive into the global top-K. The cap is applied AFTER reranking and BEFORE `merge_chunks` / MMR, so an adjacent-merge run counts as a single result (issue #72 AC3): merging an N-chunk overlap-cluster does not silently bypass the cap. Combined with the grouped-mode cap introduced in v1.0.502, one parameter name now means the same thing in both modes — clients no longer need to over-fetch with `limit=500, merge_chunks=False` to ensure cross-doc coverage; `limit=50, max_chunks_per_doc=5` guarantees at least 10 distinct docs in the top-K.

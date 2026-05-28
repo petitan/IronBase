@@ -23,7 +23,7 @@ use crate::tools::helpers::{
     insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
 };
 use rhai::{Dynamic, Engine, Map};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -1255,11 +1255,29 @@ fn register_rag_functions(
     );
 
     // db_rag_stats(collection) -> #{chunk_count, source_document_count, ...}
-    let adapter_st = adapter;
-    let emb_mgr7 = embedding_manager;
+    let adapter_st = adapter.clone();
+    let emb_mgr7 = embedding_manager.clone();
     engine.register_fn("db_rag_stats", move |collection: &str| -> Dynamic {
         rag_stats_impl(&adapter_st, &emb_mgr7, collection)
     });
+
+    // db_rag_load_all_chunks(collection, doc_ids) -> #{results, count, chunks_merged, scored}
+    let adapter_la1 = adapter.clone();
+    engine.register_fn(
+        "db_rag_load_all_chunks",
+        move |collection: &str, doc_ids: rhai::Array| -> Dynamic {
+            rag_load_all_chunks_impl(&adapter_la1, collection, doc_ids, None)
+        },
+    );
+
+    // db_rag_load_all_chunks(collection, doc_ids, options) -> ...
+    let adapter_la2 = adapter;
+    engine.register_fn(
+        "db_rag_load_all_chunks",
+        move |collection: &str, doc_ids: rhai::Array, options: Map| -> Dynamic {
+            rag_load_all_chunks_impl(&adapter_la2, collection, doc_ids, Some(options))
+        },
+    );
 }
 
 // ============================================================
@@ -2233,4 +2251,40 @@ fn rag_stats_impl(
     result.insert("stats".into(), Dynamic::from(stats));
 
     Dynamic::from(result)
+}
+
+/// db_rag_load_all_chunks Rhai bridge — delegates to the MCP dispatch path so
+/// the impl stays single-source (no duplicate merge/cap logic on the Rhai side).
+fn rag_load_all_chunks_impl(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    doc_ids: rhai::Array,
+    options: Option<Map>,
+) -> Dynamic {
+    if collection.is_empty() {
+        return Dynamic::from("Error: collection name cannot be empty".to_string());
+    }
+
+    // Rhai Array → JSON Array (strings only; other types are converted via
+    // dynamic_to_json and end up as their JSON representation)
+    let doc_ids_json: Vec<Value> = doc_ids.iter().map(dynamic_to_json).collect();
+
+    // Build params object, starting from options (so client-supplied keys carry
+    // through) and then forcing collection + doc_ids.
+    let mut params = if let Some(opts) = options {
+        match map_to_json(&opts) {
+            Value::Object(obj) => obj,
+            _ => serde_json::Map::new(),
+        }
+    } else {
+        serde_json::Map::new()
+    };
+    params.insert("collection".to_string(), json!(collection));
+    params.insert("doc_ids".to_string(), Value::Array(doc_ids_json));
+    let params_value = Value::Object(params);
+
+    match crate::tools::rag::dispatch("rag_load_all_chunks", params_value, adapter, &None) {
+        Ok(result) => json_to_dynamic(&result),
+        Err(e) => Dynamic::from(format!("Error: {}", e)),
+    }
 }

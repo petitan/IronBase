@@ -253,6 +253,49 @@ mod tests {
         assert_eq!(result.result, json!(1));
     }
 
+    /// #73: Rhai `db_rag_load_all_chunks` ekvivalens — feature parity with
+    /// the MCP rag_load_all_chunks tool.
+    #[test]
+    fn test_rhai_db_rag_load_all_chunks_pure_load() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter, None);
+
+        let result = engine
+            .run(
+                r#"
+            for i in 0..3 {
+                db_insert_one("kb", #{
+                    doc_id: "alpha",
+                    chunk_index: i,
+                    content: "PEF-35 chunk " + i
+                });
+            }
+            let r = db_rag_load_all_chunks("kb", ["alpha"], #{ merge_chunks: false });
+            r.count
+        "#,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.result, json!(3));
+    }
+
+    #[test]
+    fn test_rhai_db_rag_load_all_chunks_empty_doc_ids() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter, None);
+
+        let result = engine
+            .run(
+                r#"
+            let r = db_rag_load_all_chunks("kb", []);
+            r.count
+        "#,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.result, json!(0));
+    }
+
     #[test]
     fn test_rhai_db_find_with_limit() {
         let (adapter, _temp) = create_test_adapter();

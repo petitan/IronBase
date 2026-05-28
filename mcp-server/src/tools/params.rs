@@ -838,6 +838,42 @@ pub struct RagCollectionStatsParams {
     pub collection: String,
 }
 
+/// Parameters for `rag_load_all_chunks` tool (#73).
+///
+/// Loads every chunk for the given `doc_ids` from a RAG collection. Two modes:
+/// - `query=None`: pure load, results sorted by `(doc_id, chunk_index)` ASC, no scoring
+/// - `query=Some(...)`: scored load via fulltext OR-search filtered to `doc_ids`,
+///   results sorted by `_score` DESC
+///
+/// In both modes adjacent chunks from the same document are merged by default
+/// (`merge_chunks=true`), with table-header dedup and overlap removal — the same
+/// pipeline `hybrid_search` uses.
+#[derive(Debug, Deserialize)]
+pub struct RagLoadAllChunksParams {
+    pub collection: String,
+    /// Document IDs to load chunks for. Empty list returns an empty result set
+    /// (NOT an error). Missing doc_ids in the collection are silently skipped.
+    pub doc_ids: Vec<String>,
+    /// Optional query text. When provided, chunks are scored via fulltext OR-
+    /// search and the `_score` field is added to every hit. When omitted, this
+    /// is a pure load with no scoring.
+    pub query: Option<String>,
+    /// Text field used for the fulltext search (when `query` is set) and for
+    /// merge-adjacent-chunks overlap removal. Default: "content".
+    #[serde(default = "default_text_field")]
+    pub text_field: String,
+    /// MongoDB projection (optional)
+    pub projection: Option<Value>,
+    /// Merge adjacent chunks from the same source document (default: true).
+    /// Same algorithm as `hybrid_search`: removes overlap-induced duplication
+    /// and dedups table headers (#63).
+    #[serde(default = "default_merge_chunks")]
+    pub merge_chunks: bool,
+    /// Cap chunks returned per source document. Applied AFTER merge so that
+    /// a merged run counts as one chunk. Default null = no cap.
+    pub max_chunks_per_doc: Option<usize>,
+}
+
 // ============================================================================
 // Helper trait for param parsing
 // ============================================================================
