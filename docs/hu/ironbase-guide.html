@@ -1615,9 +1615,9 @@ cd mcp-server && cargo build --release
         <div class="code-block">
           <pre><code class="language-json">{
   "results": [
-    {"doc": {"_id": "...", "name": "Kovács János"}, "score": 0.95},
-    {"doc": {"_id": "...", "name": "Kováts János"}, "score": 0.87},
-    {"doc": {"_id": "...", "name": "Kovács Janos"}, "score": 0.85}
+    {"_id": "...", "name": "Kovács János", "_score": 0.95, "_matched_value": "Kovács János"},
+    {"_id": "...", "name": "Kováts János", "_score": 0.87, "_matched_value": "Kováts János"},
+    {"_id": "...", "name": "Kovács Janos", "_score": 0.85, "_matched_value": "Kovács Janos"}
   ]
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -1651,9 +1651,10 @@ cd mcp-server && cargo build --release
           <pre><code class="language-json">{
   "results": [
     {
-      "doc": {"_id": "...", "title": "Adatbázis alapok"},
-      "score": 0.85,
-      "matched_tokens": ["adatbázis", "kezelés"]
+      "_id": "...",
+      "title": "Adatbázis alapok",
+      "_score": 0.85,
+      "_matched_tokens": ["adatbázis", "kezelés"]
     }
   ]
 }</code></pre>

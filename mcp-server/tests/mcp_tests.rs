@@ -946,3 +946,46 @@ fn test_fulltext_analyze_collection_without_field_errors() {
     );
     assert!(err.to_string().contains("collection") || err.to_string().contains("field"));
 }
+
+/// #68: fulltext_search hit shape is now flat (consistent with hybrid_search):
+/// document fields at the top level, engine metadata under `_`-prefix.
+#[test]
+fn test_fulltext_search_flat_shape_issue68() {
+    let (adapter, _tmp) = create_test_adapter();
+
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection":"docs","document":{
+            "title":"BKV Zrt árajánlat","year":2026,"content":"fékpad PEF-35"
+        }}),
+    );
+    dispatch_ok(
+        &adapter,
+        "index_create_fulltext",
+        json!({"collection":"docs","field":"content"}),
+    );
+
+    let res = dispatch_ok(
+        &adapter,
+        "fulltext_search",
+        json!({"collection":"docs","field":"content","query":"PEF-35"}),
+    );
+
+    let results = res["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    let hit = &results[0];
+
+    // Document fields at the TOP level — no nested {"document": {...}}.
+    assert!(
+        hit.get("document").is_none(),
+        "old nested shape leaked: {hit}"
+    );
+    assert_eq!(hit["title"], json!("BKV Zrt árajánlat"));
+    assert_eq!(hit["year"], json!(2026));
+    assert!(hit["content"].as_str().unwrap().contains("PEF-35"));
+
+    // Engine metadata under `_`-prefix.
+    assert!(hit["_score"].as_f64().unwrap() > 0.0);
+    assert!(hit["_matched_tokens"].is_array());
+}

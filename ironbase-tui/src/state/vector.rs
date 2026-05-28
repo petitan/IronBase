@@ -93,8 +93,12 @@ impl VectorIndexInfo {
 /// Vector search result
 #[derive(Debug, Clone)]
 pub struct VectorSearchResult {
+    /// Flat result Value (doc fields at the top level, `_score` from the engine).
     pub document: Value,
-    pub distance: f64,
+    /// Similarity score from `_score` (cosine/L2/IP per the index metric). Higher
+    /// is more similar for cosine/dot-product; the field is named score (not
+    /// distance) to match what `vector_search` actually returns.
+    pub score: f64,
 }
 
 /// Vector search state
@@ -204,13 +208,14 @@ impl VectorSearchState {
         }
     }
 
-    /// Update search results
+    /// Update search results (flat shape, v1.0.501+ #68 follow-up): each hit is
+    /// a Value::Object with the doc's fields plus `_score`.
     pub fn update_results(&mut self, results: Vec<Value>) {
         self.results = results
             .into_iter()
-            .map(|v| VectorSearchResult {
-                document: v.get("document").cloned().unwrap_or(Value::Null),
-                distance: v.get("distance").and_then(|d| d.as_f64()).unwrap_or(0.0),
+            .map(|v| {
+                let score = v.get("_score").and_then(|s| s.as_f64()).unwrap_or(0.0);
+                VectorSearchResult { document: v, score }
             })
             .collect();
         self.selected_result = 0;

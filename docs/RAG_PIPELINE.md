@@ -413,6 +413,6 @@ Explicit `text_fields` átadása csak akkor kell, ha el akarsz térni.
 
 ## 9. Nyitott pontok
 
-- **#68 / #69** — API-alak konzisztencia (`fulltext_search` ≠ `hybrid_search` hit-shape; `group_by_document` doc-szintű mező-emelés). Még nyitott.
+- ~~**#68 / #69** — API-alak konzisztencia~~ **LEZÁRVA (v1.0.501)**: `fulltext_search` lapos shape (doc-mezők top szinten, `_`-prefix metadata, mint `hybrid_search`); `group_by_document=true` automatikusan csoport-szintre emeli a chunkok közt azonos értékű mezőket (`lift_common_fields`, `hybrid.rs`). Mindkettő **breaking** — részletek a CHANGELOG `[Unreleased] > Breaking (v1.0.501)` szakaszban.
 - **`test_write_lock_timeout` flake** (`ironbase-core/src/database/mod.rs:1260`) — szűk <200ms felső korlát terhelt macOS CI-n túllő. NEM RAG-munka okozta; lazítandó. Részletek: `memory/todo-flaky-write-lock-timeout-test.md`.
 - **`rag_document_import` text_fields létező collection-ön**: jelenleg `tracing::warn!` + ignorálva. Ha valódi szükség mutatkozik, későbbi feature: meglévő collection FTS-bővítése a `text_fields` mezőkkel (jelenleg `index_create_fulltext` + manual `RagConfig` patch szükséges).

@@ -1464,9 +1464,9 @@ cd mcp-server && cargo build --release
         <div class="code-block">
           <pre><code class="language-json">{
   "results": [
-    {"doc": {"_id": "...", "name": "John Smith"}, "score": 0.95},
-    {"doc": {"_id": "...", "name": "Jon Smith"}, "score": 0.87},
-    {"doc": {"_id": "...", "name": "John Smyth"}, "score": 0.85}
+    {"_id": "...", "name": "John Smith", "_score": 0.95, "_matched_value": "John Smith"},
+    {"_id": "...", "name": "Jon Smith",  "_score": 0.87, "_matched_value": "Jon Smith"},
+    {"_id": "...", "name": "John Smyth", "_score": 0.85, "_matched_value": "John Smyth"}
   ]
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>

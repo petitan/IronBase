@@ -214,17 +214,18 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     let results = adapter.fuzzy_search_ext(&p.collection, &p.field, &p.query, options)?;
 
     // Format results
+    // Flat shape, consistent with fulltext_search and hybrid_search (#68 follow-up,
+    // v1.0.501): document fields at the top level + `_`-prefixed engine metadata.
     let documents: Vec<Value> = results
         .into_iter()
         .map(|r| {
-            let mut result = json!({
-                "document": r.document,
-                "score": r.score,
-                "matched_value": r.matched_value
-            });
-            // Add highlight if present
-            if let Some(highlight) = r.highlight {
-                result["highlight"] = json!(highlight);
+            let mut result = r.document;
+            if let Value::Object(ref mut obj) = result {
+                obj.insert("_score".to_string(), json!(r.score));
+                obj.insert("_matched_value".to_string(), json!(r.matched_value));
+                if let Some(highlight) = r.highlight {
+                    obj.insert("_highlight".to_string(), json!(highlight));
+                }
             }
             result
         })
@@ -281,18 +282,19 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         adapter.fulltext_search(&p.collection, &p.field, &p.query, options)?
     };
 
-    // Format results with scores, matched tokens, and optional highlights
+    // Flat shape, consistent with hybrid_search (#68, v1.0.501): document fields
+    // at the top level, engine metadata with `_`-prefix to avoid colliding with
+    // a user field named e.g. "score". Clients write one parser for both tools.
     let documents: Vec<Value> = results
         .into_iter()
         .map(|res| {
-            let mut result = json!({
-                "document": res.document,
-                "score": res.score,
-                "matched_tokens": res.matched_tokens
-            });
-            // Add highlights if present
-            if let Some(highlights) = res.highlights {
-                result["highlights"] = json!(highlights);
+            let mut result = res.document;
+            if let Value::Object(ref mut obj) = result {
+                obj.insert("_score".to_string(), json!(res.score));
+                obj.insert("_matched_tokens".to_string(), json!(res.matched_tokens));
+                if let Some(highlights) = res.highlights {
+                    obj.insert("_highlights".to_string(), json!(highlights));
+                }
             }
             result
         })

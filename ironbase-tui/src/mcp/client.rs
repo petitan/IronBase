@@ -1021,7 +1021,8 @@ impl McpClient {
             args["limit"] = serde_json::json!(l);
         }
         let result = self.call_tool("fulltext_search", args).await?;
-        // Result is {"results": [{"document": {...}, "score": 0.5, "matched_tokens": [...]}]}
+        // Result is {"results": [{<doc fields>, "_score": 0.5, "_matched_tokens": [...]}]}
+        // (flat shape, v1.0.501+, #68)
         let results: Vec<Value> = result
             .get("results")
             .and_then(|v| serde_json::from_value(v.clone()).ok())

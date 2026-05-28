@@ -176,7 +176,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
                 Style::default().fg(theme.fg)
             };
 
-            // Format: distance + document preview
+            // Format: similarity score + document preview
             let doc_preview = match &r.document {
                 serde_json::Value::Object(obj) => {
                     let id = obj
@@ -188,7 +188,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
                 _ => "?".to_string(),
             };
 
-            let text = format!("  {:.4}  {}", r.distance, doc_preview);
+            let text = format!("  {:.4}  {}", r.score, doc_preview);
             ListItem::new(text).style(style)
         })
         .collect();

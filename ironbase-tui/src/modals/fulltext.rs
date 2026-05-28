@@ -162,11 +162,10 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
                 Style::default().fg(theme.fg)
             };
 
-            // Extract score and document preview
-            let score = result.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-            let doc = result.get("document").cloned().unwrap_or_default();
-            let preview = format_doc_preview(&doc, 60);
+            // Flat fulltext_search response (v1.0.501+): doc fields are at the top
+            // level, engine metadata is `_`-prefixed.
+            let score = result.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let preview = format_doc_preview(result, 60);
 
             let text = format!(" {:.2}  {}", score, preview);
             ListItem::new(text).style(style)
@@ -181,10 +180,11 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
 fn format_doc_preview(doc: &serde_json::Value, max_len: usize) -> String {
     // Try to get a meaningful preview
     let preview = if let Some(obj) = doc.as_object() {
-        // Skip _id, show first few fields
+        // Skip _id and engine-metadata (`_`-prefixed e.g. _score, _matched_tokens),
+        // show first few doc fields (post-#68 flat shape, v1.0.501).
         let fields: Vec<String> = obj
             .iter()
-            .filter(|(k, _)| *k != "_id")
+            .filter(|(k, _)| !k.starts_with('_'))
             .take(3)
             .map(|(k, v)| {
                 let val_str = match v {

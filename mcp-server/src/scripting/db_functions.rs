@@ -741,7 +741,8 @@ fn register_search_functions(
         },
     );
 
-    // db_fuzzy_search(collection, field, query, threshold) -> array of {document, score}
+    // db_fuzzy_search(collection, field, query, threshold) -> array of flat hits:
+    //   {<doc fields>, _score}  (v1.0.501+ flat shape, #68 follow-up)
     let adapter_fzsrch = adapter.clone();
     engine.register_fn(
         "db_fuzzy_search",
@@ -752,9 +753,15 @@ fn register_search_functions(
                     let result: Vec<Dynamic> = results
                         .into_iter()
                         .map(|(doc, score)| {
+                            // Flat shape, consistent with MCP fuzzy_search (v1.0.501+):
+                            // doc fields at the top + `_score` engine metadata.
                             let mut map = Map::new();
-                            map.insert("document".into(), json_to_dynamic(&doc));
-                            map.insert("score".into(), Dynamic::from(score));
+                            if let Some(obj) = doc.as_object() {
+                                for (k, v) in obj {
+                                    map.insert(k.clone().into(), json_to_dynamic(v));
+                                }
+                            }
+                            map.insert("_score".into(), Dynamic::from(score));
                             Dynamic::from(map)
                         })
                         .collect();
@@ -777,7 +784,8 @@ fn register_search_functions(
         },
     );
 
-    // db_fulltext_search(collection, field, query, options) -> array of {document, score, matched_tokens, highlights?}
+    // db_fulltext_search(collection, field, query, options) -> array of flat hits:
+    //   {<doc fields>, _score, _matched_tokens, _highlights?}  (v1.0.501+ flat shape, #68)
     let max_find_documents = limits.max_find_documents;
     let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
     let adapter_ftsrch = adapter;
@@ -904,13 +912,18 @@ fn register_search_functions(
                     let result: Vec<Dynamic> = results
                         .into_iter()
                         .map(|res| {
+                            // Flat shape, consistent with MCP fulltext_search (#68, v1.0.501):
+                            // document fields at the top level + `_`-prefixed engine metadata.
                             let mut map = Map::new();
-                            map.insert("document".into(), json_to_dynamic(&res.document));
-                            map.insert("score".into(), Dynamic::from(res.score));
+                            if let Some(obj) = res.document.as_object() {
+                                for (k, v) in obj {
+                                    map.insert(k.clone().into(), json_to_dynamic(v));
+                                }
+                            }
+                            map.insert("_score".into(), Dynamic::from(res.score));
                             let token_dyn: Vec<Dynamic> =
                                 res.matched_tokens.into_iter().map(Dynamic::from).collect();
-                            map.insert("matched_tokens".into(), Dynamic::from(token_dyn));
-                            // Add highlights if available
+                            map.insert("_matched_tokens".into(), Dynamic::from(token_dyn));
                             if let Some(ref highlights) = res.highlights {
                                 let hl_dyn: Vec<Dynamic> = highlights
                                     .iter()
@@ -929,7 +942,7 @@ fn register_search_functions(
                                         Dynamic::from(hl_map)
                                     })
                                     .collect();
-                                map.insert("highlights".into(), Dynamic::from(hl_dyn));
+                                map.insert("_highlights".into(), Dynamic::from(hl_dyn));
                             }
                             Dynamic::from(map)
                         })
@@ -1044,7 +1057,8 @@ fn register_vector_functions(
         },
     );
 
-    // db_vector_search(collection, field, query_vector, limit) -> array of {document, score}
+    // db_vector_search(collection, field, query_vector, limit) -> array of flat hits:
+    //   {<doc fields>, _score}  (v1.0.501+ flat shape, #68 follow-up)
     let max_find_documents = limits.max_find_documents;
     let adapter_vsrch = adapter.clone();
     engine.register_fn(
@@ -1069,9 +1083,14 @@ fn register_vector_functions(
                     let result: Vec<Dynamic> = results
                         .into_iter()
                         .map(|(doc, score)| {
+                            // Flat shape, consistent with MCP vector_search (v1.0.501+).
                             let mut map = Map::new();
-                            map.insert("document".into(), json_to_dynamic(&doc));
-                            map.insert("score".into(), Dynamic::from(score as f64));
+                            if let Some(obj) = doc.as_object() {
+                                for (k, v) in obj {
+                                    map.insert(k.clone().into(), json_to_dynamic(v));
+                                }
+                            }
+                            map.insert("_score".into(), Dynamic::from(score as f64));
                             Dynamic::from(map)
                         })
                         .collect();
@@ -1082,7 +1101,8 @@ fn register_vector_functions(
         },
     );
 
-    // db_vector_search_filter(collection, field, query_vector, filter, limit) -> array of {document, score}
+    // db_vector_search_filter(collection, field, query_vector, filter, limit) -> array of flat hits:
+    //   {<doc fields>, _score}  (v1.0.501+ flat shape, #68 follow-up)
     let adapter_vsrchf = adapter;
     engine.register_fn(
         "db_vector_search_filter",
@@ -1118,9 +1138,14 @@ fn register_vector_functions(
                     let result: Vec<Dynamic> = results
                         .into_iter()
                         .map(|(doc, score)| {
+                            // Flat shape, consistent with MCP vector_search (v1.0.501+).
                             let mut map = Map::new();
-                            map.insert("document".into(), json_to_dynamic(&doc));
-                            map.insert("score".into(), Dynamic::from(score as f64));
+                            if let Some(obj) = doc.as_object() {
+                                for (k, v) in obj {
+                                    map.insert(k.clone().into(), json_to_dynamic(v));
+                                }
+                            }
+                            map.insert("_score".into(), Dynamic::from(score as f64));
                             Dynamic::from(map)
                         })
                         .collect();
@@ -1383,6 +1408,8 @@ fn hybrid_search_impl(
     let filter_val = get_json_option(&opts, "filter");
     let search_mode = get_string_option(&opts, "search_mode");
     let text_fields_opt: Option<Vec<String>> = get_string_array_option(&opts, "text_fields");
+    let group_by_document = get_bool_option_or(&opts, "group_by_document", false);
+    let match_scope = get_string_option(&opts, "match_scope");
 
     // Reject removed parameter with explicit error
     if opts.contains_key("dedup_threshold") {
@@ -1438,8 +1465,29 @@ fn hybrid_search_impl(
         Err(e) => return Dynamic::from(format!("Error: Query embedding failed: {}", e)),
     };
 
-    // Internal limit for better fusion coverage (capped for OOM protection)
-    let internal_limit = (limit * 3).min(MAX_INTERNAL_LIMIT);
+    // Internal limit: higher when grouping to capture enough chunks per document.
+    let internal_multiplier = if group_by_document { 20 } else { 3 };
+    let internal_limit = (limit * internal_multiplier).min(MAX_INTERNAL_LIMIT);
+
+    // STEP 1.5 — Document-level AND qualification (match_scope="document"),
+    // consistent with the MCP hybrid_search tool.
+    let qual_fields: Vec<&str> = if let Some(ref fields) = text_fields_opt {
+        fields.iter().map(|s| s.as_str()).collect()
+    } else {
+        vec![text_field.as_str()]
+    };
+    let qual = match crate::tools::fusion::apply_document_qualification(
+        adapter,
+        collection,
+        &qual_fields,
+        query,
+        mode.as_deref(),
+        match_scope.as_deref(),
+        filter_val.clone(),
+    ) {
+        Ok(q) => q,
+        Err(e) => return Dynamic::from(format!("Error: qualification failed: {}", e)),
+    };
 
     // ================================================================
     // Vector search (with optional filter)
@@ -1481,8 +1529,8 @@ fn hybrid_search_impl(
         skip: None,
         min_score: None,
         projection: None,
-        filter: filter_val.clone(),
-        and_mode: mode.as_deref() != Some("or"),
+        filter: qual.effective_filter.clone(),
+        and_mode: qual.effective_and_mode,
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
@@ -1591,16 +1639,117 @@ fn hybrid_search_impl(
 
     // ================================================================
     // MMR diversity reranking via fusion::mmr_reorder
+    // When grouping by document, skip truncation here — the document-level
+    // limit is applied in the grouped builder below.
     // ================================================================
-    if deduplicate {
+    if deduplicate && !group_by_document {
         mmr_reorder(&mut fused, &embedding_field, mmr_lambda, limit);
-    } else {
+    } else if !group_by_document {
         fused.truncate(limit);
     }
 
     // ================================================================
-    // Response — Dynamic conversion
+    // Response — branches on group_by_document, consistent with MCP hybrid_search.
     // ================================================================
+    if group_by_document {
+        // Phase 1: top N unique doc_ids from fused results (best-score order).
+        let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
+        let mut doc_order: Vec<String> = Vec::new();
+        for item in &fused {
+            let doc_id = item
+                .doc
+                .get("doc_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    item.doc
+                        .get("_id")
+                        .and_then(fusion_id_to_string)
+                        .unwrap_or_else(|| item.id.clone())
+                });
+            if !doc_best_scores.contains_key(&doc_id) {
+                doc_best_scores.insert(doc_id.clone(), item.final_score);
+                doc_order.push(doc_id);
+                if doc_order.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        // Phase 2: single fulltext OR search filtered to those doc_ids.
+        let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
+        let phase2_limit = (limit * 100).min(MAX_INTERNAL_LIMIT);
+        let phase2_options = FulltextSearchOptions {
+            limit: Some(phase2_limit),
+            skip: None,
+            min_score: None,
+            projection: None,
+            filter: filter_val.clone(),
+            and_mode: false, // OR retrieval — qualification handled Phase 1 via doc_id filter
+            highlight: false,
+            highlight_context: None,
+            highlight_max_snippets: None,
+            target_doc_ids: Some(target_doc_id_set),
+        };
+
+        let phase2_results = if let Some(ref fields) = text_fields_opt {
+            let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+            match adapter.fulltext_search_multi(collection, &field_refs, query, phase2_options) {
+                Ok(r) => r,
+                Err(e) => return Dynamic::from(format!("Error: Phase 2 fulltext failed: {}", e)),
+            }
+        } else {
+            match adapter.fulltext_search(collection, &text_field, query, phase2_options) {
+                Ok(r) => r,
+                Err(e) => return Dynamic::from(format!("Error: Phase 2 fulltext failed: {}", e)),
+            }
+        };
+
+        // Group chunks by doc_id (annotated with _text_score).
+        let mut doc_groups: HashMap<String, Vec<serde_json::Value>> =
+            HashMap::with_capacity(doc_order.len());
+        for res in phase2_results {
+            let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
+                Some(did) => did.to_string(),
+                None => {
+                    tracing::warn!(
+                        "db_hybrid_search Phase 2 chunk without doc_id, skipping: {:?}",
+                        res.document.get("_id")
+                    );
+                    continue;
+                }
+            };
+            let mut chunk = res.document;
+            if let serde_json::Value::Object(ref mut obj) = chunk {
+                obj.insert("_text_score".to_string(), json!(res.score));
+            }
+            doc_groups.entry(doc_id).or_default().push(chunk);
+        }
+
+        // Build grouped Rhai response in doc_order, lifting doc-level fields.
+        let mut grouped: Vec<Dynamic> = Vec::new();
+        for doc_id in doc_order {
+            let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
+            let mut chunks = doc_groups.remove(&doc_id).unwrap_or_default();
+            if chunks.is_empty() {
+                continue;
+            }
+            let lifted = crate::tools::hybrid::lift_common_fields(&mut chunks);
+            let mut group = Map::new();
+            group.insert("doc_id".into(), Dynamic::from(doc_id));
+            group.insert("best_score".into(), Dynamic::from(best_score));
+            group.insert("chunk_count".into(), Dynamic::from(chunks.len() as i64));
+            for (k, v) in lifted {
+                group.insert(k.into(), json_to_dynamic(&v));
+            }
+            let chunks_dyn: Vec<Dynamic> = chunks.iter().map(json_to_dynamic).collect();
+            group.insert("chunks".into(), Dynamic::from(chunks_dyn));
+            grouped.push(Dynamic::from(group));
+        }
+        return Dynamic::from(grouped);
+    }
+
+    // Flat path (default): list of chunks ordered by fused/rerank/MMR score.
     let results: Vec<Dynamic> = fused
         .into_iter()
         .map(|item| {

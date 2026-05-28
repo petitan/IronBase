@@ -314,13 +314,13 @@ Pre-computed index for high-performance searches. Returns similarity scores.
 }}
 ```
 
-**Response includes similarity scores:**
+**Response includes similarity scores (flat shape, v1.0.501+):**
 ```json
 {{
   "results": [
-    {{"document": {{"_id": 1, "{field}": "John"}}, "score": 0.95}},
-    {{"document": {{"_id": 2, "{field}": "Jon"}}, "score": 0.87}},
-    {{"document": {{"_id": 3, "{field}": "Johnny"}}, "score": 0.82}}
+    {{"_id": 1, "{field}": "John",   "_score": 0.95, "_matched_value": "John"}},
+    {{"_id": 2, "{field}": "Jon",    "_score": 0.87, "_matched_value": "Jon"}},
+    {{"_id": 3, "{field}": "Johnny", "_score": 0.82, "_matched_value": "Johnny"}}
   ],
   "count": 3
 }}
@@ -493,13 +493,18 @@ Optional parameters:
 
 ### Response Format
 
+Flat shape (v1.0.501+, consistent with `hybrid_search`): document fields are at
+the top level of each hit; engine metadata is `_`-prefixed.
+
 ```json
 {{
   "results": [
     {{
-      "document": {{"_id": "...", "title": "...", "content": "..."}},
-      "score": 2.847,
-      "matched_tokens": ["databas", "optim"]
+      "_id": "...",
+      "title": "...",
+      "content": "...",
+      "_score": 2.847,
+      "_matched_tokens": ["databas", "optim"]
     }}
   ],
   "count": 1
@@ -617,7 +622,7 @@ db_create_fulltext_index("articles", "content", "{language}");
 // Search
 let results = db_fulltext_search("articles", "content", "query", #{{limit: 10}});
 for r in results {{
-    print(r.document.title + " (score: " + r.score + ")");
+    print(r.title + " (score: " + r._score + ")");
 }}
 ```
 
