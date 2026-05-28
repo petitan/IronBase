@@ -691,6 +691,14 @@ coll.update_one_with_options(&filter, &update, opts)?;
 **Korlátozások:** `update_many` NEM támogatja · Auto-embed OK upsert-nél
 </details>
 
+### RAG Pipeline — mérnöki áttekintés
+
+**Egységes referencia:** [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md) — chunkolás,
+contextual embedding, idempotens import, multi-field FTS, hibrid keresés,
+adjacent-chunk merge, konzisztencia/visszamenőleges kompatibilitás, operatív
+ajánlások, verzió-szerinti hozzájárulások (v1.0.494–v1.0.500). Az #67/#64/#65/#63/#66
+issue-k lezárva, részletek a doksiban + a CHANGELOG `[Unreleased]` szekcióban.
+
 ### Keresés
 
 | Típus | API | Megjegyzés |

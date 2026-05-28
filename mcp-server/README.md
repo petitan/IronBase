@@ -467,9 +467,13 @@ See [ACL Documentation](docs/ACL.md) for details.
 
 | Tool | Description |
 |------|-------------|
-| `rag_collection_create` | Create RAG-optimized collection (auto: vector + fulltext indexes) |
-| `rag_document_import` | Import document with auto-chunking and embedding |
-| `rag_collection_stats` | Get RAG collection statistics (chunks, sources, indexes) |
+| `rag_collection_create` | Create RAG-optimized collection (auto: vector + fulltext indexes). New: `text_fields` (multi-field FTS, #66) + `language` (stemmer). |
+| `rag_document_import` | Import document with auto-chunking and embedding. New: `if_exists` (idempotent retry, #67), `language` (#65), `text_fields` (#66). |
+| `rag_collection_stats` | Get RAG collection statistics (chunks, sources, indexes, configured `text_fields`). |
+
+**Engineering reference for the full pipeline:** [`docs/RAG_PIPELINE.md`](../docs/RAG_PIPELINE.md) — chunking, contextual embedding, idempotent import, multi-field FTS, hybrid search defaults, adjacent-chunk merge with table-header dedup, backward compatibility, operational recipes.
+
+Recent issue closures: #67 (idempotent retry), #64 (deterministic merge field), #65 (configurable fulltext language + `fulltext_analyze` index inheritance), #63 (markdown table fragmentation — automatic), #66 (multi-field FTS).
 
 ---
 
