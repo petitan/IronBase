@@ -27,6 +27,7 @@ mod index;
 mod jobs;
 mod listener;
 mod rag;
+mod retrieval;
 mod schema;
 mod script;
 mod transaction;
@@ -76,6 +77,9 @@ pub fn get_all_tools_json() -> Value {
 
     // Hybrid Search (RRF fusion)
     tools.extend(hybrid::tools());
+
+    // Intent-shaped retrieval (Stage A redesign)
+    tools.extend(retrieval::tools());
 
     // Embedding Generation
     tools.extend(embedding::tools());
@@ -129,8 +133,8 @@ mod tests {
         // Verify we have the expected number of tools
         // Database: 4, Collection: 3, Document: 11, Index: 13, Schema: 2,
         // Script: 12, Transaction: 7, Admin: 8, ACL: 5, Listener: 6,
-        // Vector: 5, Hybrid: 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 4 = 93 total
-        assert_eq!(tools.len(), 93, "Expected 93 tools, got {}", tools.len());
+        // Vector: 5, Hybrid: 1, Retrieval(search): 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 4 = 94 total
+        assert_eq!(tools.len(), 94, "Expected 94 tools, got {}", tools.len());
     }
 
     #[test]

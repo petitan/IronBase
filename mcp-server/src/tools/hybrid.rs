@@ -43,7 +43,7 @@ const RRF_K: f64 = 60.0;
 /// and `HashMap`-order nondeterminism previously let it resolve to `title`,
 /// concatenating the title across merged chunks while leaving content unmerged
 /// (issue #64).
-fn pick_text_field(mut fields: Vec<String>) -> String {
+pub(crate) fn pick_text_field(mut fields: Vec<String>) -> String {
     if fields.iter().any(|f| f == DEFAULT_TEXT_FIELD) {
         return DEFAULT_TEXT_FIELD.to_string();
     }
@@ -220,24 +220,32 @@ pub fn dispatch(
     }
 }
 
-/// Handle hybrid_search - RRF fusion of vector and fulltext search
-///
-/// Two modes:
-/// - **Explicit mode**: `vector` is provided → use it directly (client-embedded)
-/// - **Auto-embed mode**: `vector` is omitted → embed query using RAG config or provider param
-fn handle_hybrid_search(
-    params: Value,
+/// Output of the shared retrieve+fuse pipeline (STEP 1–6): the fused, reranked,
+/// merged result set plus the resolution/qualification context the response
+/// builders need. Shared by `hybrid_search` (flat + grouped) and the `search`
+/// tool, so both run identical retrieval with no duplication or JSON round-trip.
+pub(crate) struct FusionOutcome {
+    pub fused: Vec<FusedResult>,
+    pub effective_text_field: String,
+    pub effective_text_fields: Option<Vec<String>>,
+    pub vector_weight: f64,
+    pub fulltext_weight: f64,
+    pub auto_embedded: bool,
+    pub provider_name: Option<String>,
+    pub chunks_merged: usize,
+    pub dedup_removed: usize,
+    pub qual: super::fusion::QualificationOutcome,
+}
+
+/// Shared retrieve+fuse pipeline (STEP 1–6): resolve fields/provider, document
+/// qualification, vector + fulltext retrieval, RRF fusion, rerank, per-doc cap
+/// (flat), adjacent-chunk merge, and MMR (flat). Behaviour-preserving extraction
+/// of the former inline prefix of `handle_hybrid_search`.
+pub(crate) fn retrieve_and_fuse(
+    p: &HybridSearchParams,
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
-) -> Result<Value> {
-    if params.get("dedup_threshold").is_some() {
-        return Err(McpError::invalid_params(
-            "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
-        ));
-    }
-    let p: HybridSearchParams = HybridSearchParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
+) -> Result<FusionOutcome> {
     // Resolve weights: explicit overrides > search_mode preset > balanced default
     let (vector_weight, fulltext_weight) =
         resolve_weights(p.search_mode.as_deref(), p.vector_weight, p.fulltext_weight)?;
@@ -274,8 +282,8 @@ fn handle_hybrid_search(
 
             (vec![], p.vector_field.clone(), eff_tf, false, None)
         } else {
-            match p.vector {
-                Some(ref v) => {
+            match &p.vector {
+                Some(v) => {
                     // Explicit mode: client provided the vector
                     let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
                     (
@@ -590,6 +598,52 @@ fn handle_hybrid_search(
         0
     };
 
+    Ok(FusionOutcome {
+        fused,
+        effective_text_field,
+        effective_text_fields,
+        vector_weight,
+        fulltext_weight,
+        auto_embedded,
+        provider_name,
+        chunks_merged,
+        dedup_removed,
+        qual,
+    })
+}
+
+/// Handle hybrid_search - RRF fusion of vector and fulltext search
+///
+/// Two modes:
+/// - **Explicit mode**: `vector` is provided → use it directly (client-embedded)
+/// - **Auto-embed mode**: `vector` is omitted → embed query using RAG config or provider param
+fn handle_hybrid_search(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
+    if params.get("dedup_threshold").is_some() {
+        return Err(McpError::invalid_params(
+            "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
+        ));
+    }
+    let p: HybridSearchParams = HybridSearchParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+
+    // Shared retrieve+fuse pipeline (STEP 1–6).
+    let FusionOutcome {
+        fused,
+        effective_text_field,
+        effective_text_fields,
+        vector_weight,
+        fulltext_weight,
+        auto_embedded,
+        provider_name,
+        chunks_merged,
+        dedup_removed,
+        qual,
+    } = retrieve_and_fuse(&p, adapter, embedding_manager)?;
+
     // ========================================================================
     // STEP 7: Projection + response
     // ========================================================================
@@ -639,145 +693,39 @@ fn handle_hybrid_search(
         // uses OR (any word in chunk) — exactly what the user expects.
         // ----------------------------------------------------------------
 
-        // Phase 1: Extract top N unique doc_ids from fused results AND record
-        // per-chunk score info so Phase 2 can re-enrich chunks that survived
-        // the fused ranking (others get only _text_score from Phase 2).
-        let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
-        let mut doc_order: Vec<String> = Vec::new();
-        let mut phase1_chunk_info: HashMap<String, FusedScoreInfo> = HashMap::new();
+        let (groups, total_chunks) = build_doc_groups(
+            &fused,
+            adapter,
+            &p.collection,
+            &p.query,
+            p.limit,
+            &p.filter,
+            p.max_chunks_per_doc,
+            &projection,
+            &effective_text_field,
+            &effective_text_fields,
+        )?;
 
-        for item in &fused {
-            let doc_id = item
-                .doc
-                .get("doc_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    item.doc
-                        .get("_id")
-                        .and_then(id_to_string)
-                        .unwrap_or_else(|| item.id.clone())
-                });
-
-            if let Some(chunk_id) = item.doc.get("_id").and_then(id_to_string) {
-                phase1_chunk_info.insert(chunk_id, FusedScoreInfo::from(item));
-            }
-
-            if !doc_best_scores.contains_key(&doc_id) {
-                doc_best_scores.insert(doc_id.clone(), item.final_score);
-                doc_order.push(doc_id);
-                if doc_order.len() >= p.limit {
-                    break;
-                }
-            }
-        }
-
-        // Phase 2: Single fulltext OR search for top doc_ids' chunks
-        // Use target_doc_ids for in-memory pre-filtering (no disk I/O for irrelevant chunks)
-        let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
-
-        let phase2_limit = (p.limit * 100).min(MAX_INTERNAL_LIMIT);
-        let phase2_options = FulltextSearchOptions {
-            limit: Some(phase2_limit), // Scale with requested doc count
-            skip: None,
-            min_score: None,
-            projection: None,
-            filter: p.filter.clone(), // Only user filter, doc_id filtering via target_doc_ids
-            and_mode: false,          // OR mode: any query word → relevant chunk
-            highlight: false,
-            highlight_context: None,
-            highlight_max_snippets: None,
-            target_doc_ids: Some(target_doc_id_set),
-        };
-
-        let phase2_results = if let Some(ref fields) = effective_text_fields {
-            let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-            adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, phase2_options)?
-        } else {
-            adapter.fulltext_search(
-                &p.collection,
-                &effective_text_field,
-                &p.query,
-                phase2_options,
-            )?
-        };
-
-        // Group Phase 2 chunks by doc_id
-        let mut doc_groups: HashMap<String, Vec<Value>> = HashMap::with_capacity(doc_order.len());
-        for res in phase2_results {
-            let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
-                Some(did) => did.to_string(),
-                None => {
-                    tracing::warn!(
-                        "Phase 2 chunk without doc_id, skipping: {:?}",
-                        res.document.get("_id")
-                    );
-                    continue;
-                }
-            };
-
-            let chunk_id = res.document.get("_id").and_then(id_to_string);
-            let mut chunk = if let Some(ref proj) = projection {
-                apply_projection(&res.document, proj)
-            } else {
-                res.document
-            };
-            if let Value::Object(ref mut obj) = chunk {
-                if let Some(ref id) = chunk_id {
-                    if let Some(info) = phase1_chunk_info.get(id) {
-                        // Phase 1-ranked chunk: full score shape (matches flat mode)
-                        apply_score_fields(obj, info);
-                    } else {
-                        // Phase 2-only chunk: only _text_score available, other
-                        // ranking fields legitimately missing (was never fused)
-                        obj.insert("_text_score".to_string(), json!(res.score));
-                    }
-                } else {
-                    obj.insert("_text_score".to_string(), json!(res.score));
-                }
-            }
-
-            doc_groups.entry(doc_id).or_default().push(chunk);
-        }
-
-        // Build grouped response in doc_order (best score first)
-        let mut total_chunks: usize = 0;
+        // Map DocGroup → the existing grouped JSON shape (unchanged contract).
         let mut grouped_results: Vec<Value> = Vec::new();
-        grouped_results.try_reserve(doc_order.len()).map_err(|e| {
+        grouped_results.try_reserve(groups.len()).map_err(|e| {
             McpError::internal(format!(
                 "OOM: cannot allocate {} grouped results: {}",
-                doc_order.len(),
+                groups.len(),
                 e
             ))
         })?;
-        let max_chunks = p.max_chunks_per_doc;
-        grouped_results.extend(doc_order.into_iter().filter_map(|doc_id| {
-            let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
-            let mut chunks = doc_groups.remove(&doc_id).unwrap_or_default();
-            if chunks.is_empty() {
-                return None;
-            }
-
-            // Lift BEFORE cap so doc-level fields are determined from the full
-            // Phase 2 set (otherwise `max_chunks_per_doc=1` would skip lifting
-            // entirely, leaving every doc field stuck inside the surviving chunk).
-            let lifted = lift_common_fields(&mut chunks);
-
-            if let Some(cap) = max_chunks {
-                chunks.truncate(cap);
-            }
-            total_chunks += chunks.len();
-
+        for g in groups {
             let mut group = serde_json::Map::new();
-            group.insert("doc_id".to_string(), json!(doc_id));
-            group.insert("best_score".to_string(), json!(best_score));
-            group.insert("chunk_count".to_string(), json!(chunks.len()));
-            for (k, v) in lifted {
+            group.insert("doc_id".to_string(), json!(g.doc_id));
+            group.insert("best_score".to_string(), json!(g.best_score));
+            group.insert("chunk_count".to_string(), json!(g.chunks.len()));
+            for (k, v) in g.lifted {
                 group.insert(k, v);
             }
-            group.insert("chunks".to_string(), json!(chunks));
-            Some(Value::Object(group))
-        }));
+            group.insert("chunks".to_string(), json!(g.chunks));
+            grouped_results.push(Value::Object(group));
+        }
 
         let doc_count = grouped_results.len();
         response.insert("results".into(), json!(grouped_results));
@@ -807,6 +755,170 @@ fn handle_hybrid_search(
     }
 
     Ok(Value::Object(response))
+}
+
+/// One grouped document: its id, best fused score, doc-level fields lifted from
+/// its chunks (generic, via `lift_common_fields`), and its (post-cap, merged)
+/// chunks. Internal structured form consumed by the `hybrid_search` grouped JSON
+/// builder and (Stage A) by the `search` compact contract — so the two-phase
+/// grouping logic lives in exactly one place.
+pub(crate) struct DocGroup {
+    pub doc_id: String,
+    pub best_score: f64,
+    pub lifted: serde_json::Map<String, Value>,
+    /// Merged chunks (full Values, carrying score fields). The old grouped
+    /// response emits these as `chunks`; the new contract maps them to passages.
+    pub chunks: Vec<Value>,
+}
+
+/// Two-phase document grouping over an already-fused, sorted result set.
+///
+/// Phase 1: top-N unique doc_ids from `fused` (first occurrence = best score),
+/// recording per-chunk Phase-1 score info. Phase 2: one fulltext OR search
+/// filtered to those doc_ids → all relevant chunks; Phase-1 chunks are re-enriched
+/// with the full score shape, Phase-2-only chunks carry just `_text_score` (#71).
+/// Adjacent-merge `lift_common_fields` runs before `max_chunks_per_doc` truncation
+/// so doc-level fields are derived from the full set.
+///
+/// Returns the groups in best-score order and the total (post-cap) chunk count.
+/// Behaviour-preserving extraction of the former inline grouped builder.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_doc_groups(
+    fused: &[FusedResult],
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    query: &str,
+    limit: usize,
+    filter: &Option<Value>,
+    max_chunks_per_doc: Option<usize>,
+    projection: &Option<HashMap<String, i32>>,
+    effective_text_field: &str,
+    effective_text_fields: &Option<Vec<String>>,
+) -> Result<(Vec<DocGroup>, usize)> {
+    // Phase 1: top N unique doc_ids + per-chunk score info
+    let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
+    let mut doc_order: Vec<String> = Vec::new();
+    let mut phase1_chunk_info: HashMap<String, FusedScoreInfo> = HashMap::new();
+
+    for item in fused {
+        let doc_id = item
+            .doc
+            .get("doc_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                item.doc
+                    .get("_id")
+                    .and_then(id_to_string)
+                    .unwrap_or_else(|| item.id.clone())
+            });
+
+        if let Some(chunk_id) = item.doc.get("_id").and_then(id_to_string) {
+            phase1_chunk_info.insert(chunk_id, FusedScoreInfo::from(item));
+        }
+
+        if !doc_best_scores.contains_key(&doc_id) {
+            doc_best_scores.insert(doc_id.clone(), item.final_score);
+            doc_order.push(doc_id);
+            if doc_order.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    // Phase 2: single fulltext OR search for the top doc_ids' chunks
+    let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
+
+    let phase2_limit = (limit * 100).min(MAX_INTERNAL_LIMIT);
+    let phase2_options = FulltextSearchOptions {
+        limit: Some(phase2_limit),
+        skip: None,
+        min_score: None,
+        projection: None,
+        filter: filter.clone(),
+        and_mode: false, // OR mode: any query word → relevant chunk
+        highlight: false,
+        highlight_context: None,
+        highlight_max_snippets: None,
+        target_doc_ids: Some(target_doc_id_set),
+    };
+
+    let phase2_results = if let Some(ref fields) = effective_text_fields {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        adapter.fulltext_search_multi(collection, &field_refs, query, phase2_options)?
+    } else {
+        adapter.fulltext_search(collection, effective_text_field, query, phase2_options)?
+    };
+
+    // Group Phase 2 chunks by doc_id
+    let mut doc_groups: HashMap<String, Vec<Value>> = HashMap::with_capacity(doc_order.len());
+    for res in phase2_results {
+        let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
+            Some(did) => did.to_string(),
+            None => {
+                tracing::warn!(
+                    "Phase 2 chunk without doc_id, skipping: {:?}",
+                    res.document.get("_id")
+                );
+                continue;
+            }
+        };
+
+        let chunk_id = res.document.get("_id").and_then(id_to_string);
+        let mut chunk = if let Some(ref proj) = projection {
+            apply_projection(&res.document, proj)
+        } else {
+            res.document
+        };
+        if let Value::Object(ref mut obj) = chunk {
+            if let Some(ref id) = chunk_id {
+                if let Some(info) = phase1_chunk_info.get(id) {
+                    apply_score_fields(obj, info);
+                } else {
+                    obj.insert("_text_score".to_string(), json!(res.score));
+                }
+            } else {
+                obj.insert("_text_score".to_string(), json!(res.score));
+            }
+        }
+
+        doc_groups.entry(doc_id).or_default().push(chunk);
+    }
+
+    // Assemble groups in doc_order (best score first)
+    let mut total_chunks: usize = 0;
+    let mut groups: Vec<DocGroup> = Vec::new();
+    groups.try_reserve(doc_order.len()).map_err(|e| {
+        McpError::internal(format!(
+            "OOM: cannot allocate {} grouped results: {}",
+            doc_order.len(),
+            e
+        ))
+    })?;
+    for doc_id in doc_order {
+        let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
+        let mut chunks = match doc_groups.remove(&doc_id) {
+            Some(c) if !c.is_empty() => c,
+            _ => continue,
+        };
+
+        // Lift BEFORE cap so doc-level fields are determined from the full set.
+        let lifted = lift_common_fields(&mut chunks);
+
+        if let Some(cap) = max_chunks_per_doc {
+            chunks.truncate(cap);
+        }
+        total_chunks += chunks.len();
+
+        groups.push(DocGroup {
+            doc_id,
+            best_score,
+            lifted,
+            chunks,
+        });
+    }
+
+    Ok((groups, total_chunks))
 }
 
 // qualify_documents moved to fusion.rs (shared between hybrid and fulltext search)

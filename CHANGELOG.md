@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tooling — retrieval evaluation harness (redesign §12; no runtime change)
+
+- **`mcp-server/tests/retrieval_eval.rs`** — the measurement foundation that gates
+  every staged retrieval change (the "no heuristics → must measure" enforcement,
+  P3). Provides correct, **hand-computed-unit-tested** metric implementations
+  (nDCG@k, Recall@k, abstention precision/recall), a `LabeledQuery` data format,
+  and a **no-regression gate**: `search` must not score below the `hybrid_search`
+  baseline on a labeled set. Real per-corpus labels (rdocs + the long manual) are a
+  separate data step; the synthetic seed proves the harness and guards regressions.
+- **Design-doc ordering correction (`docs/HYBRID_RETRIEVAL_REDESIGN.md` v3.1)**:
+  Stage B ("`max` fusion") was wrongly listed as implementable right after Stage A.
+  `max(P_v, P_t)` consumes **calibrated** probabilities (Stage C); on raw cosine +
+  raw BM25 it is meaningless. RRF (rank-based, scale-free) stays as the fusion
+  through Stage A and until calibration ships. Stage B is reordered to depend on
+  Stage C, with the eval harness as the shared gate.
+
+### Added (mcp-server v1.0.504) — `search` tool: intent-shaped hybrid retrieval (redesign Stage A)
+
+First stage of the hybrid-retrieval redesign (`docs/HYBRID_RETRIEVAL_REDESIGN.md`,
+`docs/STAGE_A_IMPLEMENTATION_PLAN.md`). **Additive and low-risk: `hybrid_search` is
+unchanged and still available.** The new `search` tool is an intent-shaped façade
+built over the *existing* RRF fusion — no new retrieval primitive.
+
+- **New MCP tool `search(collection, query, filter?, limit?, format?, debug?)`** —
+  an intent-only surface (~4 effective params vs `hybrid_search`'s 23). Retrieval
+  mechanism (weights, `rrf_k`, `match_scope`, merge, caps, …) is server-owned;
+  passing such a param is **rejected with a pointer to the config**, never silently
+  ignored (P6).
+- **Document-anchored compact contract** (small-model optimized): ranked source
+  documents, each with overlap-merged **passages** carrying *only* text — **no
+  `embedding` arrays, no `_`-prefixed engine metadata, no chunk-tracking fields**.
+  The headline token-economy win for a small local consumer (qwen3.5:9b); a
+  regression test asserts the `search` payload is smaller than the equivalent
+  `hybrid_search` response.
+- **`format: "context_block"`** returns a citation-marked text block ready to paste
+  into a prompt; `"structured"` (default) returns documents+passages.
+- **Token budget**: trimmed to a configured character budget (least-relevant
+  passages dropped) with a surfaced `trimmed` flag.
+- **Honest verdict**: Stage A makes no absolute-relevance/abstention claims →
+  `verdict` is always `"unknown"` (four-state contract, redesign §9; calibration is
+  the gated Stage C–E track).
+- **Graceful degradation (P7)**: with no embedding provider, `search` falls back to
+  BM25-only and **surfaces it** (`degraded` field), never silently.
+- Internals: the shared retrieve+fuse pipeline (STEP 1–6) is extracted into
+  `hybrid::retrieve_and_fuse` and the two-phase grouped builder into
+  `hybrid::build_doc_groups` (both `pub(crate)`, behavior-preserving). `search`
+  calls these **directly** — no JSON round-trip into `hybrid_search` and no
+  re-parse of its response shape; `contract::assemble` consumes `DocGroup`s.
+  New `tools/retrieval/` module (`mod.rs` façade + `contract.rs`), schema in
+  `definitions/retrieval.rs`.
+- Code-review hardening (folded in): hard token budget that always keeps ≥1
+  passage and surfaces over-budget via `trimmed`; multi-chunk doc-field assembly
+  excludes the resolved text field (no body duplication for non-`content`
+  fields); mechanism-param rejection targets a **known** key set (benign/protocol
+  fields tolerated like every other tool) rather than deny-all-unknown;
+  non-object arguments get a clear error; a surfaced `dropped_empty_documents`
+  count when a qualified doc carries no body text under the resolved field
+  (no silent shrink, P6).
+- Tests: 6 new integration tests (compact contract / no-internals, mechanism-param
+  rejection, benign-unknown-key tolerance, `context_block`, doc-order equivalence
+  vs `hybrid_search` grouped, payload-size win). 307 lib + 44 integration + 5
+  schema green.
+
 ### Added (mcp-server v1.0.503) — `rag_load_all_chunks` tool (#73)
 
 - **New MCP tool `rag_load_all_chunks`** loads every chunk for a given list of `doc_ids` from a RAG collection. Two modes:

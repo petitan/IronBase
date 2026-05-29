@@ -1614,3 +1614,261 @@ fn test_rag_load_all_chunks_max_chunks_per_doc() {
     assert_eq!(alpha, 2, "alpha cap violated: {res}");
     assert_eq!(beta, 2, "beta cap violated: {res}");
 }
+
+// ============================================================================
+// `search` tool — Stage A (passage-anchored unit + compact contract)
+// ============================================================================
+
+/// Seed a RAG-style collection with 2 docs × 2 chunks + fulltext + vector index,
+/// so `search` (auto-embed via hybrid) has both modalities available.
+fn seed_search_kb(adapter: &Arc<IronBaseAdapter>) {
+    // Both docs share the token "berendezés" so a single-token query qualifies
+    // both under doc-scope AND (used by the equivalence test).
+    let docs = vec![
+        (
+            "alpha",
+            0,
+            "fékpad PEF-35 berendezés leírás és specifikáció",
+            vec![0.9_f64, 0.1, 0.0, 0.0],
+        ),
+        (
+            "alpha",
+            1,
+            "fékpad PEF-35 ár 4 280 000 Ft",
+            vec![0.8, 0.2, 0.0, 0.0],
+        ),
+        (
+            "beta",
+            0,
+            "kombinált vizsgasori berendezés árajánlat",
+            vec![0.1, 0.9, 0.0, 0.0],
+        ),
+        (
+            "beta",
+            1,
+            "vizsgasori garancia és telepítés",
+            vec![0.0, 0.8, 0.2, 0.0],
+        ),
+    ];
+    for (doc_id, idx, content, emb) in &docs {
+        dispatch_ok(
+            adapter,
+            "insert_one",
+            json!({"collection": "kb", "document": {
+                "doc_id": doc_id, "chunk_index": idx,
+                "content": content, "title": format!("{} címe", doc_id),
+                "embedding": emb,
+            }}),
+        );
+    }
+    dispatch_ok(
+        adapter,
+        "index_create_fulltext",
+        json!({"collection": "kb", "field": "content"}),
+    );
+    dispatch_ok(
+        adapter,
+        "index_create_vector",
+        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+    );
+}
+
+/// Stage A: `search` is listed and returns the compact document/passage shape
+/// with NO embedding, NO `_`-prefixed engine metadata, and verdict "unknown".
+#[test]
+fn test_search_compact_contract_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    // Listed in tools/list
+    let tools = get_tools_list();
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(names.contains(&"search"), "`search` not listed");
+
+    // No embedding provider in the test harness → search degrades to BM25-only
+    // (P7), surfaced via the `degraded` field (P6). The contract is unchanged.
+    let res = dispatch_ok(
+        &adapter,
+        "search",
+        json!({"collection": "kb", "query": "PEF-35 fékpad"}),
+    );
+
+    assert_eq!(
+        res["verdict"],
+        json!("unknown"),
+        "Stage A verdict must be unknown"
+    );
+    assert!(
+        res.get("degraded").is_some(),
+        "BM25-only degradation must be surfaced (P6)"
+    );
+    let docs = res["documents"].as_array().expect("documents array");
+    assert!(!docs.is_empty(), "expected documents: {res}");
+
+    for d in docs {
+        assert!(d.get("doc_id").is_some(), "doc missing doc_id: {d}");
+        assert!(d.get("relevance").is_some(), "doc missing relevance: {d}");
+        let passages = d["passages"].as_array().expect("passages array");
+        assert!(!passages.is_empty(), "doc has no passages: {d}");
+        // Document level: no embedding, no engine metadata leaked.
+        let obj = d.as_object().unwrap();
+        for k in obj.keys() {
+            assert!(
+                !k.starts_with('_'),
+                "engine metadata leaked at doc level: {k}"
+            );
+            assert_ne!(k, "embedding", "embedding leaked at doc level");
+            assert_ne!(k, "chunks", "raw chunks leaked at doc level");
+        }
+        for p in passages {
+            let po = p.as_object().expect("passage object");
+            // Passage carries ONLY text — no embedding, no scores, no chunk_index.
+            for k in po.keys() {
+                assert_eq!(k, "text", "passage leaked non-text key: {k}");
+            }
+            assert!(p["text"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+        }
+    }
+}
+
+/// Stage A: mechanism parameters are rejected (P6 — not silently ignored).
+#[test]
+fn test_search_rejects_mechanism_params_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    for bad in [
+        "rrf_k",
+        "vector_weight",
+        "match_scope",
+        "merge_chunks",
+        "group_by_document",
+    ] {
+        let err = dispatch_err(
+            &adapter,
+            "search",
+            json!({"collection": "kb", "query": "x", bad: 1}),
+        );
+        assert!(
+            err.to_string().contains(bad) || err.to_string().contains("intent-only"),
+            "param '{bad}' should be rejected with a pointer, got: {err}"
+        );
+    }
+}
+
+/// Stage A (review #2): a benign/unknown key (NOT a mechanism param) is tolerated,
+/// not hard-rejected — matching every other tool's serde-ignores-unknowns behavior,
+/// so protocol- or client-injected extras don't break `search`.
+#[test]
+fn test_search_tolerates_benign_unknown_key_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    // `_meta`-style extra and an arbitrary unknown key must NOT be rejected.
+    let res = dispatch_ok(
+        &adapter,
+        "search",
+        json!({"collection": "kb", "query": "PEF-35 fékpad", "_meta": {"x": 1}, "foo": "bar"}),
+    );
+    assert_eq!(res["verdict"], json!("unknown"));
+}
+
+/// Stage A: `format: context_block` returns a citation-marked text block.
+#[test]
+fn test_search_context_block_format_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    let res = dispatch_ok(
+        &adapter,
+        "search",
+        json!({"collection": "kb", "query": "PEF-35 fékpad", "format": "context_block"}),
+    );
+    assert_eq!(res["verdict"], json!("unknown"));
+    let ctx = res["context"].as_str().expect("context string");
+    assert!(
+        ctx.contains('['),
+        "context block should carry citation markers: {ctx}"
+    );
+    assert!(
+        res.get("documents").is_none(),
+        "context_block must not also emit documents"
+    );
+}
+
+/// Stage A acceptance gate (redesign §12): the document order from `search`
+/// equals `hybrid_search group_by_document=true` for the same query — same fusion
+/// underneath, no retrieval-quality regression.
+#[test]
+fn test_search_doc_order_matches_hybrid_grouped_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    // Single shared token → both docs qualify, so the ordering is non-trivial.
+    let q = "berendezés";
+
+    let search_res = dispatch_ok(&adapter, "search", json!({"collection": "kb", "query": q}));
+    let search_order: Vec<String> = search_res["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["doc_id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    // Match search's degraded BM25-only mode (no embedding provider in harness).
+    let hybrid_res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({"collection": "kb", "query": q, "group_by_document": true,
+               "vector_weight": 0.0, "fulltext_weight": 1.0}),
+    );
+    let hybrid_order: Vec<String> = hybrid_res["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g["doc_id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    assert!(
+        !search_order.is_empty(),
+        "search returned nothing: {search_res}"
+    );
+    let n = search_order.len().min(hybrid_order.len());
+    assert_eq!(
+        &search_order[..n],
+        &hybrid_order[..n],
+        "search vs hybrid_grouped doc order diverges (same fusion expected). \
+         search={search_order:?} hybrid={hybrid_order:?}"
+    );
+}
+
+/// Stage A token economy (redesign §12 metric 5): the `search` payload is
+/// materially smaller than `hybrid_search` for the same query — the headline
+/// small-model win (embeddings + engine metadata dropped).
+#[test]
+fn test_search_payload_smaller_than_hybrid_stage_a() {
+    let (adapter, _tmp) = create_test_adapter();
+    seed_search_kb(&adapter);
+
+    let q = "PEF-35 fékpad";
+    let search_res = dispatch_ok(&adapter, "search", json!({"collection": "kb", "query": q}));
+    let hybrid_res = dispatch_ok(
+        &adapter,
+        "hybrid_search",
+        json!({"collection": "kb", "query": q, "group_by_document": true,
+               "vector_weight": 0.0, "fulltext_weight": 1.0}),
+    );
+
+    let search_size = serde_json::to_string(&search_res).unwrap().len();
+    let hybrid_size = serde_json::to_string(&hybrid_res).unwrap().len();
+    assert!(
+        search_size < hybrid_size,
+        "search payload ({search_size}) should be smaller than hybrid ({hybrid_size}) \
+         — embeddings + metadata dropped"
+    );
+}

@@ -28,6 +28,7 @@ pub mod listener;
 pub mod params;
 pub mod preprocessing;
 pub mod rag;
+pub mod retrieval;
 pub mod script;
 pub mod transaction;
 pub mod vector;
@@ -385,6 +386,9 @@ fn dispatch_tool_inner(
 
         // Hybrid search (RRF fusion of vector + fulltext, with optional auto-embedding)
         "hybrid_search" => hybrid::dispatch(name, params, adapter, embedding_manager),
+
+        // Intent-shaped retrieval (Stage A redesign — see docs/HYBRID_RETRIEVAL_REDESIGN.md)
+        "search" => retrieval::dispatch(name, params, adapter, embedding_manager),
 
         // Embedding operations
         "embed_text" | "embed_batch" | "embed_list_models" | "embed_document"
