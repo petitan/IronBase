@@ -12,11 +12,13 @@
 //! Real per-corpus labels (rdocs + the long manual) are a separate data step;
 //! the synthetic seed here proves the harness and serves as a regression guard.
 
-use mcp_ironbase::{dispatch_tool, IronBaseAdapter};
-use serde_json::{json, Value};
+use mcp_ironbase::IronBaseAdapter;
+use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+mod common;
+use common::{create_test_adapter, dispatch_ok};
 
 // ============================================================================
 // Metric implementations (pure — unit-tested below against hand-computed values)
@@ -148,20 +150,8 @@ fn test_abstention_metrics_hand_computed() {
 }
 
 // ============================================================================
-// Test harness plumbing
+// Test harness plumbing — adapter/dispatch helpers live in tests/common/mod.rs
 // ============================================================================
-
-fn create_test_adapter() -> (Arc<IronBaseAdapter>, TempDir) {
-    let temp_dir = TempDir::new().expect("tempdir");
-    let db_path = temp_dir.path().join("eval.mlite");
-    let adapter = IronBaseAdapter::new(db_path.to_string_lossy().to_string()).expect("adapter");
-    (Arc::new(adapter), temp_dir)
-}
-
-fn dispatch_ok(adapter: &Arc<IronBaseAdapter>, name: &str, params: Value) -> Value {
-    dispatch_tool(name, params, adapter, None, None, None, None, &None, &None)
-        .unwrap_or_else(|e| panic!("Tool '{}' should succeed: {:?}", name, e))
-}
 
 /// A labeled query for the eval set: which documents are relevant, and whether
 /// the corpus can answer it at all (the abstention target for Stage D).

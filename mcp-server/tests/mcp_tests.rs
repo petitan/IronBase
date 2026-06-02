@@ -4,36 +4,11 @@
 //! Response format uses snake_case: inserted_id, matched_count, deleted_count, etc.
 
 use mcp_ironbase::{dispatch_tool, get_tools_list, IronBaseAdapter};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
-use tempfile::TempDir;
 
-/// Create a test adapter with a temporary database
-fn create_test_adapter() -> (Arc<IronBaseAdapter>, TempDir) {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let db_path = temp_dir.path().join("test.mlite");
-    let adapter = IronBaseAdapter::new(db_path.to_string_lossy().to_string())
-        .expect("Failed to create adapter");
-    (Arc::new(adapter), temp_dir)
-}
-
-/// Helper to dispatch a tool and expect success
-fn dispatch_ok(adapter: &Arc<IronBaseAdapter>, name: &str, params: Value) -> Value {
-    dispatch_tool(name, params, adapter, None, None, None, None, &None, &None)
-        .unwrap_or_else(|e| panic!("Tool '{}' should succeed: {:?}", name, e))
-}
-
-/// Helper to dispatch a tool and expect error
-fn dispatch_err(
-    adapter: &Arc<IronBaseAdapter>,
-    name: &str,
-    params: Value,
-) -> mcp_ironbase::McpError {
-    match dispatch_tool(name, params, adapter, None, None, None, None, &None, &None) {
-        Ok(_) => panic!("Tool '{}' should fail", name),
-        Err(e) => e,
-    }
-}
+mod common;
+use common::{create_test_adapter, dispatch_err, dispatch_ok};
 
 // ============================================================================
 // Tools List Tests

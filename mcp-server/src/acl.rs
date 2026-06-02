@@ -667,8 +667,15 @@ pub struct ToolPolicy {
     pub system_collection: Option<&'static str>,
     /// Tool may only be invoked from localhost (loopback).
     pub localhost: bool,
-    /// Tool additionally requires a valid IRONBASE_ADMIN_KEY.
+    /// Tool additionally requires a valid IRONBASE_ADMIN_KEY. Enforced in
+    /// `dispatch_tool` (not `engine.rs`) ON PURPOSE: the stdio transport calls
+    /// `dispatch_tool` directly and bypasses `execute_tool`'s ACL/localhost gates,
+    /// so admin-key enforcement must live on the shared dispatch path to cover
+    /// both transports. Do not "consolidate" it into `check_acl`.
     pub admin_key: bool,
+    /// Tool mutates the persisted ACL config (`_system.acl`), so the live
+    /// in-memory `AclConfig` must be reloaded after a successful call.
+    pub mutates_acl: bool,
 }
 
 impl ToolPolicy {
@@ -679,6 +686,7 @@ impl ToolPolicy {
             system_collection: None,
             localhost: false,
             admin_key: false,
+            mutates_acl: false,
         }
     }
     /// Mark an implicit `_system.*` target (tool has no `collection` argument).
@@ -694,6 +702,12 @@ impl ToolPolicy {
     /// Require IRONBASE_ADMIN_KEY (gated centrally in `dispatch_tool`).
     fn admin_key(mut self) -> Self {
         self.admin_key = true;
+        self
+    }
+    /// Mark as mutating `_system.acl` → triggers a live `AclConfig` reload
+    /// after the call (driven from `execute_tool`, not a separate name-list).
+    fn mutates_acl(mut self) -> Self {
+        self.mutates_acl = true;
         self
     }
 }
@@ -754,10 +768,13 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
 
         // ---- ACL management (_system.acl) ----
         "acl_list" | "acl_get" => ToolPolicy::new(Read).scope(SYSTEM_ACL_COLLECTION),
-        "acl_set" | "acl_delete" => ToolPolicy::new(Admin).scope(SYSTEM_ACL_COLLECTION).local(),
+        "acl_set" | "acl_delete" => ToolPolicy::new(Admin)
+            .scope(SYSTEM_ACL_COLLECTION)
+            .local()
+            .mutates_acl(),
         // acl_cleanup keeps its historical profile (loopback-only, no ACL scope) for
         // behavior parity — unlike acl_set/delete it carries no `_system.acl` scope.
-        "acl_cleanup" => ToolPolicy::new(Read).local(),
+        "acl_cleanup" => ToolPolicy::new(Read).local().mutates_acl(),
 
         // ---- Listener management (_system.listeners) ----
         "listener_list" | "listener_get" => {
@@ -1072,6 +1089,25 @@ mod tests {
             "unknown_tool",
         ] {
             assert!(!tool_policy(t).admin_key, "{t} must NOT require admin key");
+        }
+    }
+
+    #[test]
+    fn test_tool_policy_mutates_acl_axis() {
+        // Exactly the ACL-write tools mutate _system.acl → drive the live reload.
+        for t in ["acl_set", "acl_delete", "acl_cleanup"] {
+            assert!(tool_policy(t).mutates_acl, "{t} must mark mutates_acl");
+        }
+        // Read-only ACL tools and everything else do not.
+        for t in [
+            "acl_list",
+            "acl_get",
+            "admin_apikey_create",
+            "db_compact",
+            "find",
+            "unknown_tool",
+        ] {
+            assert!(!tool_policy(t).mutates_acl, "{t} must NOT mark mutates_acl");
         }
     }
 }

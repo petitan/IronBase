@@ -547,8 +547,12 @@ pub(crate) fn retrieve_and_fuse(
     // ========================================================================
     // STEP 5.5: Merge adjacent chunks from same document (overlap dedup)
     // ========================================================================
-    // Mutates `fused` in place; the merge count is no longer surfaced.
-    if p.merge_chunks {
+    // Flat mode only: in group_by_document mode `build_doc_groups` re-fetches
+    // every chunk via its own Phase-2 search and never reads these merged
+    // bodies, so merging here would be wasted O(n) work. (Doc ordering is
+    // unaffected: merge preserves each doc's max score.) Mutates `fused` in
+    // place; the merge count is no longer surfaced.
+    if p.merge_chunks && !p.group_by_document {
         merge_adjacent_chunks(&mut fused, &effective_text_field);
     }
 

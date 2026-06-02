@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — internal cleanup from code review (mcp-server v1.0.507; no API change)
+
+Altitude/cleanup follow-ups to the v1.0.505–506 work; no user-visible behavior change.
+
+- **ACL reload is policy-table-driven**: the post-call live `AclConfig` reload no
+  longer keys off a hardcoded `matches!(name, "acl_set"|...)` name-list in
+  `engine.rs` (the scattered-list anti-pattern the `tool_policy()` table removed).
+  `ToolPolicy` gains a `mutates_acl` axis; `engine.rs` reloads when
+  `tool_policy(name).mutates_acl`. A future ACL-mutating tool gets the reload for
+  free from its policy entry. Parity test: `test_tool_policy_mutates_acl_axis`.
+- **Documented the deliberate admin-key enforcement split**: `admin_key` is gated
+  in `dispatch_tool` (not `engine.rs`) because the stdio transport bypasses
+  `execute_tool`; the `ToolPolicy::admin_key` doc now states this so it is not
+  "consolidated" into `check_acl` (which would drop the gate on stdio).
+- **Rhai `db_hybrid_search` params**: replaced the ~15 hand-copied option inserts
+  with `map_to_json(&opts)` bulk-passthrough + injection of the Rhai-specific
+  defaults; the Rhai surface now tracks new `HybridSearchParams` fields
+  automatically instead of drifting.
+- **Grouped hybrid search skips the wasted adjacent-chunk merge**: in
+  `group_by_document` mode `build_doc_groups` re-fetches chunks via its own Phase-2
+  search, so `retrieve_and_fuse` no longer runs `merge_adjacent_chunks` there
+  (doc ordering is unaffected — merge preserves each doc's max score).
+- **De-duplicated integration-test plumbing**: `create_test_adapter`/`dispatch_ok`/
+  `dispatch_err` moved to `tests/common/mod.rs` (shared by `mcp_tests.rs` and
+  `retrieval_eval.rs`).
+
 ### Fixed (mcp-server v1.0.506) — multi-field non-RAG document qualification
 
 - **Multi-field document-scope queries returned 0 results on non-RAG collections.**

@@ -9,7 +9,7 @@
 
 use crate::acl::{
     get_collection_from_args, get_required_permission, get_system_collection_for_tool,
-    requires_localhost, AclManager, CallerContext, InterfaceType,
+    requires_localhost, tool_policy, AclManager, CallerContext, InterfaceType,
 };
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
@@ -260,12 +260,9 @@ impl IronBaseService {
         // reload the new rule only takes effect after a restart (the handler still
         // reports success → silent "change not applied" bug). Reload here, at the
         // layer that owns the manager, so the change is active on the next request.
-        if result.is_success()
-            && matches!(
-                request.name.as_str(),
-                "acl_set" | "acl_delete" | "acl_cleanup"
-            )
-        {
+        // The "which tools mutate ACL" knowledge lives on the declarative
+        // tool-policy table (`mutates_acl`), not a second scattered name-list.
+        if result.is_success() && tool_policy(&request.name).mutates_acl {
             if let Err(e) = self.acl_manager.reload() {
                 tracing::error!(
                     tool = %request.name,

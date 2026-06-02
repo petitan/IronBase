@@ -100,16 +100,6 @@ fn get_int_option_or(options: &Map, key: &str, default: i64) -> i64 {
     get_int_option(options, key).unwrap_or(default)
 }
 
-/// Extract float option from Map
-fn get_float_option(options: &Map, key: &str) -> Option<f64> {
-    options.get(key).and_then(|v| v.as_float().ok())
-}
-
-/// Extract float option with default value
-fn get_float_option_or(options: &Map, key: &str, default: f64) -> f64 {
-    get_float_option(options, key).unwrap_or(default)
-}
-
 /// Extract bool option from Map
 fn get_bool_option(options: &Map, key: &str) -> Option<bool> {
     options.get(key).and_then(|v| v.as_bool().ok())
@@ -118,18 +108,6 @@ fn get_bool_option(options: &Map, key: &str) -> Option<bool> {
 /// Extract bool option with default value
 fn get_bool_option_or(options: &Map, key: &str, default: bool) -> bool {
     get_bool_option(options, key).unwrap_or(default)
-}
-
-/// Extract JSON Value option from Map (returns None if key missing or value is null)
-fn get_json_option(options: &Map, key: &str) -> Option<serde_json::Value> {
-    options.get(key).and_then(|v| {
-        let json = dynamic_to_json(v);
-        if json.is_null() {
-            None
-        } else {
-            Some(json)
-        }
-    })
 }
 
 /// Extract string array option from Map
@@ -1403,61 +1381,27 @@ fn hybrid_search_impl(
     let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
     let group_by_document = get_bool_option_or(&opts, "group_by_document", false);
 
-    // Build the same params the `search`/hybrid pipeline consumes, preserving the
-    // historical Rhai defaults (deduplicate/merge_chunks = true, mmr_lambda = 0.5).
-    let mut params = serde_json::Map::new();
+    // Bulk-passthrough every Rhai option to the shared params (HybridSearchParams
+    // ignores unknown fields — it has no deny_unknown_fields), then force the
+    // call-level fields and inject the historical Rhai defaults (which differ from
+    // the MCP-tool defaults) only when the caller did not set them. This keeps the
+    // Rhai surface in lock-step with the `search` tool: a newly added
+    // HybridSearchParams field is honored from Rhai automatically, with no hand-
+    // maintained per-field copy to drift out of sync.
+    let mut params = match map_to_json(&opts) {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
     params.insert("collection".into(), json!(collection));
     params.insert("query".into(), json!(query));
-    params.insert("limit".into(), json!(limit));
-    params.insert("group_by_document".into(), json!(group_by_document));
-    params.insert(
-        "rrf_k".into(),
-        json!(get_float_option_or(&opts, "rrf_k", DEFAULT_RRF_K)),
-    );
-    params.insert(
-        "rerank".into(),
-        json!(get_bool_option_or(&opts, "rerank", true)),
-    );
-    params.insert(
-        "deduplicate".into(),
-        json!(get_bool_option_or(&opts, "deduplicate", true)),
-    );
-    params.insert(
-        "mmr_lambda".into(),
-        json!(get_float_option_or(&opts, "mmr_lambda", 0.5)),
-    );
-    params.insert(
-        "merge_chunks".into(),
-        json!(get_bool_option_or(&opts, "merge_chunks", true)),
-    );
-    if let Some(v) = get_string_option(&opts, "title_field") {
-        params.insert("title_field".into(), json!(v));
-    }
-    if let Some(v) = get_string_option(&opts, "mode") {
-        params.insert("mode".into(), json!(v));
-    }
-    if let Some(v) = get_string_option(&opts, "match_scope") {
-        params.insert("match_scope".into(), json!(v));
-    }
-    if let Some(v) = get_string_option(&opts, "search_mode") {
-        params.insert("search_mode".into(), json!(v));
-    }
-    if let Some(v) = get_json_option(&opts, "filter") {
-        params.insert("filter".into(), v);
-    }
-    if let Some(v) = get_string_array_option(&opts, "text_fields") {
-        params.insert("text_fields".into(), json!(v));
-    }
-    // Explicit weights override the search_mode preset (resolve_weights priority).
-    if let Some(vw) = get_float_option(&opts, "vector_weight") {
-        params.insert("vector_weight".into(), json!(vw));
-    }
-    if let Some(fw) = get_float_option(&opts, "fulltext_weight") {
-        params.insert("fulltext_weight".into(), json!(fw));
-    }
-    if let Some(mc) = get_int_option(&opts, "max_chunks_per_doc") {
-        params.insert("max_chunks_per_doc".into(), json!(mc));
-    }
+    params.insert("limit".into(), json!(limit)); // capped at max_find_documents
+    params
+        .entry("rrf_k")
+        .or_insert_with(|| json!(DEFAULT_RRF_K));
+    params.entry("rerank").or_insert_with(|| json!(true));
+    params.entry("deduplicate").or_insert_with(|| json!(true));
+    params.entry("mmr_lambda").or_insert_with(|| json!(0.5));
+    params.entry("merge_chunks").or_insert_with(|| json!(true));
 
     let p = match HybridSearchParams::parse(serde_json::Value::Object(params)) {
         Ok(p) => p,
