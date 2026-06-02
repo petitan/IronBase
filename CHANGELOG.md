@@ -7,15 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed / BREAKING (mcp-server v1.0.505) — deprecated tools + dead code cleanup
+
+- **`hybrid_search` MCP tool removed** (superseded by `search`; tool count 94 → 92).
+  This supersedes the v1.0.504 note below that `hybrid_search` is "still available".
+  The shared RRF pipeline (`hybrid::retrieve_and_fuse` + `build_doc_groups`) is
+  retained — `search` and the Rhai `db_hybrid_search` use it. The tool's #68/#71/#72
+  regression tests are ported in-crate (`hybrid::pipeline_integration_tests`).
+- **`vector_search_filter` MCP tool removed.** `adapter.vector_search_with_filter`
+  is retained (used by the `search`/hybrid pipeline and Rhai `db_vector_search_filter`).
+- **Rhai `db_hybrid_search` consolidated**: was a ~380-line parallel reimplementation
+  of the fusion pipeline (and its own provider resolution); rewritten as thin glue
+  delegating to the shared `retrieve_and_fuse` + `build_doc_groups`. One fusion path now.
+- **Deprecated Rust items removed**: `commit_transaction_with_indexes`,
+  `adapter.find_with_hint`, and the legacy `GroupStage::execute` /
+  `Accumulator::update` / `update_with_limits` cluster (tests migrated to
+  `execute_streaming`).
+
+### Fixed (mcp-server v1.0.505)
+
+- **ACL changes now take effect immediately**: `acl_set`/`acl_delete`/`acl_cleanup`
+  reload the live in-memory `AclConfig` in `execute_tool` (previously the persisted
+  rule only applied after a server restart — verified on production).
+- **`db_stats`/`db_compact`/`db_checkpoint` fail-open closed**: these were marked
+  Admin but had no system-collection scope and no localhost gate, so the ACL check
+  was skipped entirely (`db_stats` leaked the full collection catalog to an Internal
+  caller). They are now loopback-only, consistent with `db_open`.
+- **`fulltext_search match_scope="document"` returned 0 on non-RAG collections**:
+  `qualify_documents` now intersects posting lists on the native `_id` for
+  collections without a parent `doc_id` field.
+
+### Changed (mcp-server v1.0.505)
+
+- **ACL authorization is table-driven**: a single declarative `tool_policy()` table
+  is the source of truth for all four axes (permission, system collection, localhost,
+  admin key); `get_required_permission` / `get_system_collection_for_tool` /
+  `requires_localhost` are thin projections and the admin-key gate is centralized in
+  `dispatch_tool`.
+
 ### Tooling — retrieval evaluation harness (redesign §12; no runtime change)
 
 - **`mcp-server/tests/retrieval_eval.rs`** — the measurement foundation that gates
   every staged retrieval change (the "no heuristics → must measure" enforcement,
   P3). Provides correct, **hand-computed-unit-tested** metric implementations
   (nDCG@k, Recall@k, abstention precision/recall), a `LabeledQuery` data format,
-  and a **no-regression gate**: `search` must not score below the `hybrid_search`
-  baseline on a labeled set. Real per-corpus labels (rdocs + the long manual) are a
-  separate data step; the synthetic seed proves the harness and guards regressions.
+  and a quality gate on a labeled set. (In v1.0.505 the `hybrid_search` baseline was
+  dropped with that tool; the gate became a self-contained absolute nDCG/Recall floor.)
+  Real per-corpus labels (rdocs + the long manual) are a separate data step; the
+  synthetic seed proves the harness and guards regressions.
 - **Design-doc ordering correction (`docs/HYBRID_RETRIEVAL_REDESIGN.md` v3.1)**:
   Stage B ("`max` fusion") was wrongly listed as implementable right after Stage A.
   `max(P_v, P_t)` consumes **calibrated** probabilities (Stage C); on raw cosine +
@@ -26,9 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (mcp-server v1.0.504) — `search` tool: intent-shaped hybrid retrieval (redesign Stage A)
 
 First stage of the hybrid-retrieval redesign (`docs/HYBRID_RETRIEVAL_REDESIGN.md`,
-`docs/STAGE_A_IMPLEMENTATION_PLAN.md`). **Additive and low-risk: `hybrid_search` is
-unchanged and still available.** The new `search` tool is an intent-shaped façade
-built over the *existing* RRF fusion — no new retrieval primitive.
+`docs/STAGE_A_IMPLEMENTATION_PLAN.md`). At the time, additive and low-risk —
+`hybrid_search` was unchanged and still available. **(Superseded in v1.0.505:
+`hybrid_search` is removed; `search` is the sole retrieval tool.)** The `search`
+tool is an intent-shaped façade built over the *existing* RRF fusion — no new
+retrieval primitive.
 
 - **New MCP tool `search(collection, query, filter?, limit?, format?, debug?)`** —
   an intent-only surface (~4 effective params vs `hybrid_search`'s 23). Retrieval
