@@ -1654,4 +1654,71 @@ mod pipeline_integration_tests {
             "expected all 4 alpha chunks without cap: {counts:?}"
         );
     }
+
+    /// Regression: multi-field document-scope qualification on a NON-RAG
+    /// collection. The fulltext index carries no parent doc_id field, so
+    /// `qualify_documents` keys the filter on `_id`; the multi-field union must
+    /// honor that key. It previously hardcoded `doc_id`, zeroing out every
+    /// multi-field document-scope query on non-RAG data (the single-field fix
+    /// did not cover the union path).
+    #[test]
+    fn multi_field_non_rag_document_scope_qualifies() {
+        let (a, _t) = adapter();
+        // Non-RAG: plain documents, two fulltext-indexed fields, no vector index.
+        ok(
+            &a,
+            "insert_one",
+            json!({"collection":"kb","document":{
+            "content":"fékpad PEF-35 berendezés leírás", "title":"alpha"}}),
+        );
+        ok(
+            &a,
+            "insert_one",
+            json!({"collection":"kb","document":{
+            "content":"csak fékpad egyedül", "title":"beta"}}),
+        );
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"title"}),
+        );
+
+        // BM25-only (vector_weight=0 → skip embedding), multi-field, default
+        // match_scope="document". Doc 1 has ALL query tokens; doc 2 has only one
+        // and must be excluded by document-level AND qualification.
+        let (_p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"fékpad PEF-35",
+                "text_fields":["content","title"], "vector_weight":0.0,
+                "fulltext_weight":1.0, "limit":10}),
+        );
+
+        assert!(
+            !fo.fused.is_empty(),
+            "multi-field non-RAG document-scope qualification returned nothing"
+        );
+        let contents: Vec<String> = fo
+            .fused
+            .iter()
+            .filter_map(|i| {
+                i.doc
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .collect();
+        assert!(
+            contents.iter().any(|c| c.contains("PEF-35")),
+            "qualifying doc (both tokens) missing: {contents:?}"
+        );
+        assert!(
+            contents.iter().all(|c| !c.starts_with("csak fékpad")),
+            "non-qualifying doc (one token) must be excluded by doc-scope AND: {contents:?}"
+        );
+    }
 }

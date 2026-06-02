@@ -748,14 +748,18 @@ pub(crate) fn apply_document_qualification(
         });
     }
 
-    // Multi-field qualification: qualify on each field, union the doc_ids.
+    // Multi-field qualification: qualify on each field, union the ids.
     // A document qualifies if ALL query tokens appear across its chunks in ANY of the fields.
     let doc_qualification_filter = if fields.len() == 1 {
         // Single field: direct qualification
         qualify_documents(adapter, collection, fields[0], query)?
     } else {
-        // Multi-field: union of qualified doc_ids across all fields
-        let mut union_doc_ids: HashSet<String> = HashSet::new();
+        // Multi-field: union of qualified ids across all fields. Each field's
+        // filter keys on `doc_id` (RAG) or `_id` (non-RAG) — consistent within a
+        // collection. Preserve that key and the native id Values so non-RAG
+        // collections (whose docs carry no `doc_id`) qualify correctly.
+        let mut union: HashMap<String, Value> = HashMap::new();
+        let mut id_key: Option<String> = None;
         let mut any_field_had_restriction = false;
 
         for field in fields {
@@ -771,14 +775,13 @@ pub(crate) fn apply_document_qualification(
                 }
                 Some(filter) => {
                     any_field_had_restriction = true;
-                    if let Some(ids) = filter
-                        .get("doc_id")
-                        .and_then(|v| v.get("$in"))
-                        .and_then(|v| v.as_array())
-                    {
-                        for id in ids {
-                            if let Some(s) = id.as_str() {
-                                union_doc_ids.insert(s.to_string());
+                    if let Some((key, inner)) = filter.as_object().and_then(|o| o.iter().next()) {
+                        id_key.get_or_insert_with(|| key.clone());
+                        if let Some(ids) = inner.get("$in").and_then(|v| v.as_array()) {
+                            for id in ids {
+                                if let Some(s) = id_to_string(id) {
+                                    union.entry(s).or_insert_with(|| id.clone());
+                                }
                             }
                         }
                     }
@@ -787,15 +790,21 @@ pub(crate) fn apply_document_qualification(
         }
 
         if any_field_had_restriction {
-            let qualified_vec: Vec<Value> = union_doc_ids.into_iter().map(|s| json!(s)).collect();
-            Some(json!({"doc_id": {"$in": qualified_vec}}))
+            let key = id_key.unwrap_or_else(|| "doc_id".to_string());
+            let qualified_vec: Vec<Value> = union.into_values().collect();
+            let mut m = serde_json::Map::new();
+            m.insert(key, json!({ "$in": qualified_vec }));
+            Some(Value::Object(m))
         } else {
             None
         }
     };
 
+    // Count the qualified ids regardless of whether the filter keys on `doc_id`
+    // (RAG) or `_id` (non-RAG) — read the single key's `$in` array length.
     let qualified_doc_count = doc_qualification_filter.as_ref().and_then(|f| {
-        f.get("doc_id")
+        f.as_object()
+            .and_then(|o| o.values().next())
             .and_then(|v| v.get("$in"))
             .and_then(|v| v.as_array())
             .map(|a| a.len())

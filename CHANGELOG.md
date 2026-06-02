@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (mcp-server v1.0.506) — multi-field non-RAG document qualification
+
+- **Multi-field document-scope queries returned 0 results on non-RAG collections.**
+  The v1.0.505 non-RAG fix (`qualify_documents` keying the filter on `_id` instead
+  of a `doc_id` the documents don't carry) covered only the single-field path. The
+  multi-field union in `apply_document_qualification` (and `qualified_doc_count`)
+  still hardcoded `doc_id`, so a non-RAG collection with 2+ fulltext-indexed fields
+  + a multi-word `match_scope="document"` query qualified an empty set → 0 hits.
+  The union is now key-agnostic (honors `_id` or `doc_id`) and preserves native id
+  Values. Regression test: `hybrid::pipeline_integration_tests::multi_field_non_rag_document_scope_qualifies`.
+
 ### Removed / BREAKING (mcp-server v1.0.505) — deprecated tools + dead code cleanup
 
 - **`hybrid_search` MCP tool removed** (superseded by `search`; tool count 94 → 92).
