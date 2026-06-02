@@ -11,7 +11,6 @@ use crate::ServerInfo;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::verify_admin_key_opt;
 use super::params::{
     AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminCollectionParams, AdminFlagsParams,
     AdminKeyParams, DbOpenParams, ParseParams,
@@ -182,8 +181,7 @@ fn handle_admin_list_all_collections(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
-    let p: AdminKeyParams = AdminKeyParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
+    AdminKeyParams::parse(params)?; // validate params; admin key gated centrally
     let collections = adapter.list_all_collections();
     Ok(json!({"collections": collections, "count": collections.len()}))
 }
@@ -193,7 +191,6 @@ fn handle_admin_create_system_collection(
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
     let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
     adapter.create_system_collection(&p.collection)?;
     Ok(
         json!({"success": true, "collection": p.collection, "flags": {"is_system": true, "protected": true, "hidden": false}}),
@@ -205,7 +202,6 @@ fn handle_admin_set_collection_flags(
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
     let p: AdminFlagsParams = AdminFlagsParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
     adapter.set_collection_flags(&p.collection, p.is_system, p.protected, p.hidden)?;
     Ok(
         json!({"success": true, "collection": p.collection, "flags": {"is_system": p.is_system, "protected": p.protected, "hidden": p.hidden}}),
@@ -214,7 +210,6 @@ fn handle_admin_set_collection_flags(
 
 fn handle_admin_drop_protected(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
     adapter.force_drop_collection(&p.collection)?;
     Ok(json!({"success": true, "dropped": p.collection}))
 }
@@ -225,7 +220,6 @@ fn handle_admin_apikey_create(
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
     let p: AdminApiKeyCreateParams = AdminApiKeyCreateParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -251,8 +245,7 @@ fn handle_admin_apikey_create(
 }
 
 fn handle_admin_apikey_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: AdminKeyParams = AdminKeyParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
+    AdminKeyParams::parse(params)?; // validate params; admin key gated centrally
     match crate::api_keys::list_api_keys(adapter) {
         Ok(keys) => Ok(json!({
             "success": true,
@@ -269,7 +262,6 @@ fn handle_admin_apikey_revoke(
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
     let p: AdminApiKeyIdParams = AdminApiKeyIdParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -294,7 +286,6 @@ fn handle_admin_apikey_delete(
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
     let p: AdminApiKeyIdParams = AdminApiKeyIdParams::parse(params)?;
-    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;

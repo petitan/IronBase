@@ -1458,19 +1458,6 @@ impl IronBaseAdapter {
         Ok(plan)
     }
 
-    /// Find documents with index hint (uses get_collection - no implicit creation)
-    #[deprecated(
-        since = "1.0.199",
-        note = "Use find_with_hint_ext for sort/skip/limit/projection support"
-    )]
-    pub fn find_with_hint(&self, collection: &str, query: Value, hint: &str) -> Result<Vec<Value>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        #[allow(deprecated)]
-        let documents = coll.find_with_hint(&query, hint)?;
-        Ok(documents)
-    }
-
     /// Find documents with index hint and full options support
     ///
     /// Extended version that supports sort, skip, limit, projection, and OOM protection.
@@ -1838,6 +1825,14 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         Ok(coll.fulltext_has_chunk_doc_mapping(field)?)
+    }
+
+    /// Check if the fulltext index tracks a parent doc_id field (RAG-style).
+    /// `false` → non-RAG collection: the chunk `_id` is the document identity.
+    pub fn fulltext_has_parent_doc_id_field(&self, collection: &str, field: &str) -> Result<bool> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_has_parent_doc_id_field(field)?)
     }
 
     /// Qualify documents for document-level AND mode using in-memory chunk→doc_id mapping.

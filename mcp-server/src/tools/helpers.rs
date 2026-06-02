@@ -85,24 +85,6 @@ pub fn verify_admin_key(params: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Verify admin key from typed Option<String> param
-/// SECURITY FIX: Use generic error message to prevent enumeration attacks.
-pub fn verify_admin_key_opt(admin_key: Option<&str>) -> Result<()> {
-    const ADMIN_AUTH_ERROR: &str = "Admin authentication failed";
-
-    let expected = match std::env::var("IRONBASE_ADMIN_KEY") {
-        Ok(key) if !key.is_empty() => key,
-        _ => return Err(McpError::invalid_params(ADMIN_AUTH_ERROR)),
-    };
-
-    let provided = admin_key.unwrap_or("");
-
-    if provided.is_empty() || !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
-        return Err(McpError::invalid_params(ADMIN_AUTH_ERROR));
-    }
-    Ok(())
-}
-
 /// Validate and parse limit, capping at the provided max
 pub fn parse_limit_with_max(params: &Value, max_limit: usize) -> Option<usize> {
     params

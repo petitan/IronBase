@@ -12,19 +12,14 @@
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
-use crate::tools::defaults::{
-    DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
-};
-use crate::tools::fusion::{
-    id_to_string as fusion_id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
-    FusedResult,
-};
+use crate::tools::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD};
 use crate::tools::helpers::{
     insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
 };
+use crate::tools::params::{HybridSearchParams, ParseParams};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
@@ -153,22 +148,6 @@ fn get_string_array_option(options: &Map, key: &str) -> Option<Vec<String>> {
                 .collect()
         })
     })
-}
-
-/// Resolve weights from search_mode preset or explicit overrides
-///
-/// Priority: explicit weights > search_mode preset > balanced default
-fn resolve_search_mode_weights(opts: &Map, search_mode: Option<&str>) -> (f64, f64) {
-    let explicit_vw = get_float_option(opts, "vector_weight");
-    let explicit_fw = get_float_option(opts, "fulltext_weight");
-    if explicit_vw.is_some() || explicit_fw.is_some() {
-        return (explicit_vw.unwrap_or(0.5), explicit_fw.unwrap_or(0.5));
-    }
-    match search_mode {
-        Some("semantic") => (0.8, 0.2),
-        Some("keyword") => (0.2, 0.8),
-        _ => (0.5, 0.5),
-    }
 }
 
 /// Register all database functions into a Rhai engine.
@@ -1383,10 +1362,13 @@ fn save_rag_config(
         .map_err(|e| format!("Failed to insert RAG config: {}", e))
 }
 
-/// Hybrid search implementation (RRF fusion with reranking, chunk merge, MMR)
+/// Hybrid search implementation for Rhai scripts.
 ///
-/// Delegates to fusion.rs for reranking, chunk merge, and MMR diversity reranking.
-/// Consistent with the MCP `hybrid_search` tool (hybrid.rs + fusion.rs).
+/// Thin glue over the SHARED retrieval pipeline (`hybrid::retrieve_and_fuse` +
+/// `build_doc_groups`) — the exact path the `search` MCP tool uses. This replaced
+/// a ~380-line parallel reimplementation of the same fusion/qualification/grouping
+/// (and its own provider resolution), so there is now ONE fusion code path. Only
+/// the Rhai I/O glue lives here: options → `HybridSearchParams`, results → `Dynamic`.
 fn hybrid_search_impl(
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
@@ -1395,7 +1377,6 @@ fn hybrid_search_impl(
     options: Option<Map>,
     max_find_documents: usize,
 ) -> Dynamic {
-    // Validate inputs
     if collection.is_empty() {
         return Dynamic::from("Error: collection name cannot be empty".to_string());
     }
@@ -1403,33 +1384,15 @@ fn hybrid_search_impl(
         return Dynamic::from("Error: query cannot be empty".to_string());
     }
 
-    // Get embedding manager
-    let manager = match embedding_manager {
-        Some(m) => m,
-        None => {
-            return Dynamic::from(
-                "Error: Embedding manager not available. Configure an [embedding] section in config.toml.".to_string(),
-            )
-        }
-    };
+    // Embedding manager is required (auto-embed of the query) — same precondition
+    // as before; the shared pipeline resolves the provider (RAG/auto-embed) itself.
+    if embedding_manager.is_none() {
+        return Dynamic::from(
+            "Error: Embedding manager not available. Configure an [embedding] section in config.toml.".to_string(),
+        );
+    }
 
-    // Parse options
     let opts = options.unwrap_or_default();
-    let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
-    let rrf_k = get_float_option_or(&opts, "rrf_k", DEFAULT_RRF_K);
-    let rerank = get_bool_option_or(&opts, "rerank", true);
-    let deduplicate = get_bool_option_or(&opts, "deduplicate", true);
-    let mmr_lambda = get_float_option_or(&opts, "mmr_lambda", 0.5);
-    let merge_chunks = get_bool_option_or(&opts, "merge_chunks", true);
-    let title_field = get_string_option(&opts, "title_field");
-    let mode = get_string_option(&opts, "mode");
-    let filter_val = get_json_option(&opts, "filter");
-    let search_mode = get_string_option(&opts, "search_mode");
-    let text_fields_opt: Option<Vec<String>> = get_string_array_option(&opts, "text_fields");
-    let group_by_document = get_bool_option_or(&opts, "group_by_document", false);
-    let match_scope = get_string_option(&opts, "match_scope");
-
-    // Reject removed parameter with explicit error
     if opts.contains_key("dedup_threshold") {
         return Dynamic::from(
             "Error: Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead."
@@ -1437,338 +1400,115 @@ fn hybrid_search_impl(
         );
     }
 
-    // Resolve weights: explicit > search_mode preset > balanced default
-    let (vector_weight, fulltext_weight) =
-        resolve_search_mode_weights(&opts, search_mode.as_deref());
+    let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
+    let group_by_document = get_bool_option_or(&opts, "group_by_document", false);
 
-    // Get RAG config or use defaults
-    let auto_provider = adapter
-        .get_auto_embedding_config(collection)
-        .ok()
-        .flatten()
-        .map(|c| c.provider);
-    let (embedding_field, text_field, config_text_fields, provider_name) =
-        match get_rag_config(adapter, collection) {
-            Some((ef, tf, cfg_tf, prov, _)) => {
-                let resolved = auto_provider.unwrap_or(prov);
-                let resolved = if resolved.is_empty() {
-                    manager.default_provider_name().to_string()
-                } else {
-                    resolved
-                };
-                (ef, tf, cfg_tf, resolved)
-            }
-            None => (
-                DEFAULT_EMBEDDING_FIELD.to_string(),
-                DEFAULT_TEXT_FIELD.to_string(),
-                Vec::new(),
-                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
-            ),
-        };
-
-    // Default to the collection's configured multi-field set when the caller did
-    // not pass text_fields (#66), consistent with the MCP hybrid_search tool.
-    let indexed = adapter
-        .get_fulltext_field_names(collection)
-        .unwrap_or_default();
-    let text_fields_opt = crate::tools::rag::resolve_search_text_fields(
-        text_fields_opt,
-        config_text_fields,
-        &indexed,
+    // Build the same params the `search`/hybrid pipeline consumes, preserving the
+    // historical Rhai defaults (deduplicate/merge_chunks = true, mmr_lambda = 0.5).
+    let mut params = serde_json::Map::new();
+    params.insert("collection".into(), json!(collection));
+    params.insert("query".into(), json!(query));
+    params.insert("limit".into(), json!(limit));
+    params.insert("group_by_document".into(), json!(group_by_document));
+    params.insert(
+        "rrf_k".into(),
+        json!(get_float_option_or(&opts, "rrf_k", DEFAULT_RRF_K)),
     );
-
-    // Embed query
-    let query_vector = match manager.embed_query(query, Some(&provider_name)) {
-        Ok(v) => v,
-        Err(e) => return Dynamic::from(format!("Error: Query embedding failed: {}", e)),
-    };
-
-    // Internal limit: higher when grouping to capture enough chunks per document.
-    let internal_multiplier = if group_by_document { 20 } else { 3 };
-    let internal_limit = (limit * internal_multiplier).min(MAX_INTERNAL_LIMIT);
-
-    // STEP 1.5 — Document-level AND qualification (match_scope="document"),
-    // consistent with the MCP hybrid_search tool.
-    let qual_fields: Vec<&str> = if let Some(ref fields) = text_fields_opt {
-        fields.iter().map(|s| s.as_str()).collect()
-    } else {
-        vec![text_field.as_str()]
-    };
-    let qual = match crate::tools::fusion::apply_document_qualification(
-        adapter,
-        collection,
-        &qual_fields,
-        query,
-        mode.as_deref(),
-        match_scope.as_deref(),
-        filter_val.clone(),
-    ) {
-        Ok(q) => q,
-        Err(e) => return Dynamic::from(format!("Error: qualification failed: {}", e)),
-    };
-
-    // ================================================================
-    // Vector search (with optional filter)
-    // ================================================================
-    let vector_results = if let Some(ref filter) = filter_val {
-        match adapter.vector_search_with_filter(
-            collection,
-            &embedding_field,
-            &query_vector,
-            filter,
-            internal_limit,
-        ) {
-            Ok(r) => r,
-            Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
-        }
-    } else {
-        match adapter.vector_search(collection, &embedding_field, &query_vector, internal_limit) {
-            Ok(r) => r,
-            Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
-        }
-    };
-
-    // Build vector rank map (1-indexed)
-    let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
-    let mut vector_docs: HashMap<String, (serde_json::Value, f32)> =
-        HashMap::with_capacity(vector_results.len());
-    for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
-        if let Some(id) = doc.get("_id").and_then(fusion_id_to_string) {
-            vector_ranks.insert(id.clone(), rank + 1);
-            vector_docs.insert(id, (doc, score));
-        }
+    params.insert(
+        "rerank".into(),
+        json!(get_bool_option_or(&opts, "rerank", true)),
+    );
+    params.insert(
+        "deduplicate".into(),
+        json!(get_bool_option_or(&opts, "deduplicate", true)),
+    );
+    params.insert(
+        "mmr_lambda".into(),
+        json!(get_float_option_or(&opts, "mmr_lambda", 0.5)),
+    );
+    params.insert(
+        "merge_chunks".into(),
+        json!(get_bool_option_or(&opts, "merge_chunks", true)),
+    );
+    if let Some(v) = get_string_option(&opts, "title_field") {
+        params.insert("title_field".into(), json!(v));
+    }
+    if let Some(v) = get_string_option(&opts, "mode") {
+        params.insert("mode".into(), json!(v));
+    }
+    if let Some(v) = get_string_option(&opts, "match_scope") {
+        params.insert("match_scope".into(), json!(v));
+    }
+    if let Some(v) = get_string_option(&opts, "search_mode") {
+        params.insert("search_mode".into(), json!(v));
+    }
+    if let Some(v) = get_json_option(&opts, "filter") {
+        params.insert("filter".into(), v);
+    }
+    if let Some(v) = get_string_array_option(&opts, "text_fields") {
+        params.insert("text_fields".into(), json!(v));
+    }
+    // Explicit weights override the search_mode preset (resolve_weights priority).
+    if let Some(vw) = get_float_option(&opts, "vector_weight") {
+        params.insert("vector_weight".into(), json!(vw));
+    }
+    if let Some(fw) = get_float_option(&opts, "fulltext_weight") {
+        params.insert("fulltext_weight".into(), json!(fw));
+    }
+    if let Some(mc) = get_int_option(&opts, "max_chunks_per_doc") {
+        params.insert("max_chunks_per_doc".into(), json!(mc));
     }
 
-    // ================================================================
-    // Fulltext search (with filter + and_mode + multi-field support)
-    // ================================================================
-    let text_options = FulltextSearchOptions {
-        limit: Some(internal_limit),
-        skip: None,
-        min_score: None,
-        projection: None,
-        filter: qual.effective_filter.clone(),
-        and_mode: qual.effective_and_mode,
-        highlight: false,
-        highlight_context: None,
-        highlight_max_snippets: None,
-        target_doc_ids: None,
+    let p = match HybridSearchParams::parse(serde_json::Value::Object(params)) {
+        Ok(p) => p,
+        Err(e) => return Dynamic::from(format!("Error: {}", e)),
     };
 
-    let text_results = if let Some(ref fields) = text_fields_opt {
-        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-        match adapter.fulltext_search_multi(collection, &field_refs, query, text_options) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(
-                    "hybrid_search: fulltext multi-field not available: {}. Using vector-only.",
-                    e
-                );
-                Vec::new()
-            }
-        }
-    } else {
-        match adapter.fulltext_search(collection, &text_field, query, text_options) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(
-                    "hybrid_search: fulltext index not available for '{}.{}': {}. Using vector-only search.",
-                    collection, text_field, e
-                );
-                Vec::new()
-            }
-        }
+    let fo = match crate::tools::hybrid::retrieve_and_fuse(&p, adapter, embedding_manager) {
+        Ok(fo) => fo,
+        Err(e) => return Dynamic::from(format!("Error: {}", e)),
     };
 
-    // Build fulltext rank map (1-indexed)
-    let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
-    let mut text_docs: HashMap<String, (serde_json::Value, f64)> =
-        HashMap::with_capacity(text_results.len());
-    for (rank, res) in text_results.into_iter().enumerate() {
-        if let Some(id) = res.document.get("_id").and_then(fusion_id_to_string) {
-            text_ranks.insert(id.clone(), rank + 1);
-            text_docs.insert(id, (res.document, res.score));
-        }
-    }
-
-    // ================================================================
-    // RRF Fusion (using fusion::FusedResult)
-    // ================================================================
-    let mut all_ids: HashSet<String> =
-        HashSet::with_capacity(vector_ranks.len() + text_ranks.len());
-    all_ids.extend(vector_ranks.keys().cloned());
-    all_ids.extend(text_ranks.keys().cloned());
-
-    let default_rank = internal_limit + 1;
-
-    let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
-    for id in all_ids.iter() {
-        let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
-        let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
-
-        let rrf_score = vector_weight * (1.0 / (rrf_k + v_rank as f64))
-            + fulltext_weight * (1.0 / (rrf_k + t_rank as f64));
-
-        let v_score = vector_docs.get(id).map(|(_, s)| *s);
-        let t_score = text_docs.get(id).map(|(_, s)| *s);
-
-        let doc = match vector_docs
-            .get(id)
-            .map(|(d, _)| d.clone())
-            .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))
-        {
-            Some(d) => d,
-            None => continue,
-        };
-
-        fused.push(FusedResult {
-            id: id.clone(),
-            doc,
-            rrf_score,
-            final_score: rrf_score,
-            rerank_boost: 1.0,
-            v_rank,
-            t_rank,
-            v_score,
-            t_score,
-        });
-    }
-
-    // Sort by RRF score
-    fused.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // ================================================================
-    // Reranking via fusion::rerank_results
-    // ================================================================
-    if rerank {
-        rerank_results(&mut fused, query, &text_field, title_field.as_deref());
-    }
-
-    // ================================================================
-    // Adjacent chunk merge via fusion::merge_adjacent_chunks
-    // ================================================================
-    if merge_chunks {
-        merge_adjacent_chunks(&mut fused, &text_field);
-    }
-
-    // ================================================================
-    // MMR diversity reranking via fusion::mmr_reorder
-    // When grouping by document, skip truncation here — the document-level
-    // limit is applied in the grouped builder below.
-    // ================================================================
-    if deduplicate && !group_by_document {
-        mmr_reorder(&mut fused, &embedding_field, mmr_lambda, limit);
-    } else if !group_by_document {
-        fused.truncate(limit);
-    }
-
-    // ================================================================
-    // Response — branches on group_by_document, consistent with MCP hybrid_search.
-    // ================================================================
     if group_by_document {
-        // Phase 1: top N unique doc_ids from fused results (best-score order).
-        let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
-        let mut doc_order: Vec<String> = Vec::new();
-        for item in &fused {
-            let doc_id = item
-                .doc
-                .get("doc_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    item.doc
-                        .get("_id")
-                        .and_then(fusion_id_to_string)
-                        .unwrap_or_else(|| item.id.clone())
-                });
-            if !doc_best_scores.contains_key(&doc_id) {
-                doc_best_scores.insert(doc_id.clone(), item.final_score);
-                doc_order.push(doc_id);
-                if doc_order.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        // Phase 2: single fulltext OR search filtered to those doc_ids.
-        let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
-        let phase2_limit = (limit * 100).min(MAX_INTERNAL_LIMIT);
-        let phase2_options = FulltextSearchOptions {
-            limit: Some(phase2_limit),
-            skip: None,
-            min_score: None,
-            projection: None,
-            filter: filter_val.clone(),
-            and_mode: false, // OR retrieval — qualification handled Phase 1 via doc_id filter
-            highlight: false,
-            highlight_context: None,
-            highlight_max_snippets: None,
-            target_doc_ids: Some(target_doc_id_set),
+        // No projection — Rhai callers get the full chunk documents.
+        let (groups, _total) = match crate::tools::hybrid::build_doc_groups(
+            &fo.fused,
+            adapter,
+            &p.collection,
+            &p.query,
+            p.limit,
+            &p.filter,
+            p.max_chunks_per_doc,
+            &None,
+            &fo.effective_text_field,
+            &fo.effective_text_fields,
+        ) {
+            Ok(g) => g,
+            Err(e) => return Dynamic::from(format!("Error: {}", e)),
         };
 
-        let phase2_results = if let Some(ref fields) = text_fields_opt {
-            let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-            match adapter.fulltext_search_multi(collection, &field_refs, query, phase2_options) {
-                Ok(r) => r,
-                Err(e) => return Dynamic::from(format!("Error: Phase 2 fulltext failed: {}", e)),
-            }
-        } else {
-            match adapter.fulltext_search(collection, &text_field, query, phase2_options) {
-                Ok(r) => r,
-                Err(e) => return Dynamic::from(format!("Error: Phase 2 fulltext failed: {}", e)),
-            }
-        };
-
-        // Group chunks by doc_id (annotated with _text_score).
-        let mut doc_groups: HashMap<String, Vec<serde_json::Value>> =
-            HashMap::with_capacity(doc_order.len());
-        for res in phase2_results {
-            let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
-                Some(did) => did.to_string(),
-                None => {
-                    tracing::warn!(
-                        "db_hybrid_search Phase 2 chunk without doc_id, skipping: {:?}",
-                        res.document.get("_id")
-                    );
-                    continue;
+        let grouped: Vec<Dynamic> = groups
+            .into_iter()
+            .map(|g| {
+                let mut map = Map::new();
+                map.insert("doc_id".into(), Dynamic::from(g.doc_id));
+                map.insert("best_score".into(), Dynamic::from(g.best_score));
+                map.insert("chunk_count".into(), Dynamic::from(g.chunks.len() as i64));
+                for (k, v) in g.lifted {
+                    map.insert(k.into(), json_to_dynamic(&v));
                 }
-            };
-            let mut chunk = res.document;
-            if let serde_json::Value::Object(ref mut obj) = chunk {
-                obj.insert("_text_score".to_string(), json!(res.score));
-            }
-            doc_groups.entry(doc_id).or_default().push(chunk);
-        }
-
-        // Build grouped Rhai response in doc_order, lifting doc-level fields.
-        let mut grouped: Vec<Dynamic> = Vec::new();
-        for doc_id in doc_order {
-            let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
-            let mut chunks = doc_groups.remove(&doc_id).unwrap_or_default();
-            if chunks.is_empty() {
-                continue;
-            }
-            let lifted = crate::tools::hybrid::lift_common_fields(&mut chunks);
-            let mut group = Map::new();
-            group.insert("doc_id".into(), Dynamic::from(doc_id));
-            group.insert("best_score".into(), Dynamic::from(best_score));
-            group.insert("chunk_count".into(), Dynamic::from(chunks.len() as i64));
-            for (k, v) in lifted {
-                group.insert(k.into(), json_to_dynamic(&v));
-            }
-            let chunks_dyn: Vec<Dynamic> = chunks.iter().map(json_to_dynamic).collect();
-            group.insert("chunks".into(), Dynamic::from(chunks_dyn));
-            grouped.push(Dynamic::from(group));
-        }
+                let chunks_dyn: Vec<Dynamic> = g.chunks.iter().map(json_to_dynamic).collect();
+                map.insert("chunks".into(), Dynamic::from(chunks_dyn));
+                Dynamic::from(map)
+            })
+            .collect();
         return Dynamic::from(grouped);
     }
 
-    // Flat path (default): list of chunks ordered by fused/rerank/MMR score.
-    let results: Vec<Dynamic> = fused
+    // Flat path (default): chunks ordered by fused/rerank/MMR score, with the
+    // engine score metadata under `_`-prefixed keys.
+    let results: Vec<Dynamic> = fo
+        .fused
         .into_iter()
         .map(|item| {
             let result = json_to_dynamic(&item.doc);

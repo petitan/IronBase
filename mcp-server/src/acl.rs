@@ -599,38 +599,13 @@ impl AclManager {
         Ok(())
     }
 
-    /// Set ACL for a collection
-    pub fn set_acl(&self, collection: &str, rules: Vec<AclRule>) -> Result<()> {
-        let acl = CollectionAcl {
-            collection: collection.to_string(),
-            rules,
-        };
-
-        let doc = serde_json::to_value(&acl)?;
-
-        // Upsert into _system.acl
-        let filter = json!({ "collection": collection });
-        let existing = self
-            .adapter
-            .find_one(SYSTEM_ACL_COLLECTION, filter.clone())?;
-
-        if existing.is_some() {
-            self.adapter
-                .update_one(SYSTEM_ACL_COLLECTION, filter, json!({ "$set": doc }))?;
-        } else {
-            self.adapter.insert_one(SYSTEM_ACL_COLLECTION, doc)?;
-        }
-
-        // Reload config
-        self.reload()
-    }
-
-    /// Delete ACL for a collection (reverts to default)
-    pub fn delete_acl(&self, collection: &str) -> Result<()> {
-        let filter = json!({ "collection": collection });
-        self.adapter.delete_one(SYSTEM_ACL_COLLECTION, filter)?;
-        self.reload()
-    }
+    // NOTE: ACL writes (set/delete/cleanup) go through the tool handlers in
+    // `tools/acl.rs`, which persist into `_system.acl` via the adapter. The live
+    // in-memory config is then refreshed by `IronBaseService::execute_tool`,
+    // which calls `reload()` after any successful ACL-mutating tool. There is
+    // deliberately ONE write path and ONE reload point — the former duplicate
+    // `set_acl`/`delete_acl` helpers (which re-implemented the upsert + reload)
+    // had no callers and were removed to keep a single source of truth.
 
     /// List all ACLs
     /// SECURITY FIX: Handle poisoned RwLock gracefully
@@ -661,10 +636,75 @@ impl AclManager {
 // Tool permission mapping
 // ============================================================================
 
-/// Get required permission for a tool
-pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
+// ----------------------------------------------------------------------------
+// Declarative tool authorization policy — SINGLE SOURCE OF TRUTH
+// ----------------------------------------------------------------------------
+//
+// Every tool's authorization profile is declared once in `tool_policy`, across
+// four axes:
+//   * permission        — ACL level checked against the target collection
+//   * system_collection — implicit `_system.*` target for tools that have no
+//                         `collection` argument (drives `check_acl`)
+//   * localhost         — restrict invocation to loopback callers
+//   * admin_key         — additionally require a valid IRONBASE_ADMIN_KEY
+//
+// The public `get_required_permission` / `get_system_collection_for_tool` /
+// `requires_localhost` helpers and the central admin-key gate in
+// `dispatch_tool` are all thin projections of this one table, so the four
+// previously hand-synchronized lists can no longer drift apart.
+
+/// System collection for scripts
+const SYSTEM_SCRIPTS_COLLECTION: &str = "_system.scripts";
+/// System collection for API keys
+const SYSTEM_APIKEYS_COLLECTION: &str = "_system.api_keys";
+
+/// Authorization policy for a single tool. See the table comment above.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolPolicy {
+    /// ACL permission level required on the target collection.
+    pub permission: RequiredPermission,
+    /// Implicit `_system.*` collection for tools without a `collection` arg.
+    pub system_collection: Option<&'static str>,
+    /// Tool may only be invoked from localhost (loopback).
+    pub localhost: bool,
+    /// Tool additionally requires a valid IRONBASE_ADMIN_KEY.
+    pub admin_key: bool,
+}
+
+impl ToolPolicy {
+    /// Base policy: ACL permission only (no system scope / localhost / admin key).
+    fn new(permission: RequiredPermission) -> Self {
+        Self {
+            permission,
+            system_collection: None,
+            localhost: false,
+            admin_key: false,
+        }
+    }
+    /// Mark an implicit `_system.*` target (tool has no `collection` argument).
+    fn scope(mut self, collection: &'static str) -> Self {
+        self.system_collection = Some(collection);
+        self
+    }
+    /// Restrict to loopback callers.
+    fn local(mut self) -> Self {
+        self.localhost = true;
+        self
+    }
+    /// Require IRONBASE_ADMIN_KEY (gated centrally in `dispatch_tool`).
+    fn admin_key(mut self) -> Self {
+        self.admin_key = true;
+        self
+    }
+}
+
+/// The single authorization table. Unknown tools fall back to the conservative
+/// historical default (Read, no system scope, no localhost, no admin key).
+pub fn tool_policy(tool_name: &str) -> ToolPolicy {
+    use RequiredPermission::{Admin, Read, Write};
+
     match tool_name {
-        // Read operations
+        // ---- Data read ----
         "find"
         | "find_one"
         | "count_documents"
@@ -675,66 +715,94 @@ pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
         | "index_list_fulltext"
         | "schema_get"
         | "collection_list"
-        | "db_stats"
-        | "db_open"
         | "find_with_hint"
         | "transaction_status"
         | "fulltext_search"
-        | "fuzzy_search" => RequiredPermission::Read,
+        | "fuzzy_search" => ToolPolicy::new(Read),
 
-        // Write operations
-        "insert_one" | "insert_many" | "update_one" | "update_many" | "delete_one"
-        | "delete_many" => RequiredPermission::Write,
+        // ---- Data write ----
+        "insert_one"
+        | "insert_many"
+        | "update_one"
+        | "update_many"
+        | "delete_one"
+        | "delete_many"
+        | "begin_transaction"
+        | "commit_transaction"
+        | "rollback_transaction"
+        | "insert_one_tx"
+        | "update_one_tx"
+        | "delete_one_tx" => ToolPolicy::new(Write),
 
-        // Admin operations (structure changes)
+        // ---- Structure admin (gated by ACL on the `collection` argument) ----
         "collection_create"
         | "collection_drop"
         | "index_create"
         | "index_drop"
         | "index_create_fulltext"
         | "index_create_fuzzy"
-        | "schema_set"
-        | "db_compact"
-        | "db_checkpoint" => RequiredPermission::Admin,
+        | "schema_set" => ToolPolicy::new(Admin),
 
-        // Transaction operations (write)
-        "begin_transaction"
-        | "commit_transaction"
-        | "rollback_transaction"
-        | "insert_one_tx"
-        | "update_one_tx"
-        | "delete_one_tx" => RequiredPermission::Write,
+        // ---- Database admin ----
+        // db_open was already loopback-only. db_stats/db_compact/db_checkpoint were
+        // marked Admin/Read but had NO system collection and NO localhost gate, so
+        // `check_acl` was skipped entirely (verified fail-open: db_stats leaked the
+        // full collection catalog to an Internal caller). They take no `collection`
+        // argument, so — consistent with db_open — they are now loopback-only.
+        "db_open" | "db_stats" => ToolPolicy::new(Read).local(),
+        "db_compact" | "db_checkpoint" => ToolPolicy::new(Admin).local(),
 
-        // ACL operations
-        "acl_list" | "acl_get" => RequiredPermission::Read,
-        "acl_set" | "acl_delete" => RequiredPermission::Admin,
+        // ---- ACL management (_system.acl) ----
+        "acl_list" | "acl_get" => ToolPolicy::new(Read).scope(SYSTEM_ACL_COLLECTION),
+        "acl_set" | "acl_delete" => ToolPolicy::new(Admin).scope(SYSTEM_ACL_COLLECTION).local(),
+        // acl_cleanup keeps its historical profile (loopback-only, no ACL scope) for
+        // behavior parity — unlike acl_set/delete it carries no `_system.acl` scope.
+        "acl_cleanup" => ToolPolicy::new(Read).local(),
 
-        // Listener operations
-        "listener_list" | "listener_get" => RequiredPermission::Read,
+        // ---- Listener management (_system.listeners) ----
+        "listener_list" | "listener_get" => {
+            ToolPolicy::new(Read).scope(crate::listener::SYSTEM_LISTENERS_COLLECTION)
+        }
         "listener_add" | "listener_delete" | "listener_enable" | "listener_disable" => {
-            RequiredPermission::Admin
+            ToolPolicy::new(Admin)
+                .scope(crate::listener::SYSTEM_LISTENERS_COLLECTION)
+                .local()
         }
 
-        // Script operations - creation/modification requires Admin
-        "script_save" | "script_delete" | "script_rollback" | "script_tags_add"
-        | "script_tags_remove" => RequiredPermission::Admin,
-        // Script execution and reading requires only Read permission
+        // ---- Script management (_system.scripts) ----
         "script_run" | "script_exec" | "script_list" | "script_get" | "script_history"
-        | "script_stats" | "script_version_get" => RequiredPermission::Read,
+        | "script_stats" | "script_version_get" => {
+            ToolPolicy::new(Read).scope(SYSTEM_SCRIPTS_COLLECTION)
+        }
+        "script_save" | "script_delete" | "script_rollback" | "script_tags_add"
+        | "script_tags_remove" => ToolPolicy::new(Admin)
+            .scope(SYSTEM_SCRIPTS_COLLECTION)
+            .local(),
 
-        // Admin tools (localhost only, all require Admin permission)
+        // ---- Admin tools (loopback + admin key) ----
         "admin_list_all_collections"
         | "admin_create_system_collection"
         | "admin_set_collection_flags"
-        | "admin_drop_protected"
-        | "admin_apikey_create"
+        | "admin_drop_protected" => ToolPolicy::new(Admin)
+            .scope(SYSTEM_ACL_COLLECTION)
+            .local()
+            .admin_key(),
+        "admin_apikey_create"
         | "admin_apikey_list"
         | "admin_apikey_revoke"
-        | "admin_apikey_delete" => RequiredPermission::Admin,
+        | "admin_apikey_delete" => ToolPolicy::new(Admin)
+            .scope(SYSTEM_APIKEYS_COLLECTION)
+            .local()
+            .admin_key(),
 
-        // Default to read for unknown tools
-        _ => RequiredPermission::Read,
+        // ---- Unknown: conservative historical default ----
+        _ => ToolPolicy::new(Read),
     }
+}
+
+/// Get required permission for a tool (projection of [`tool_policy`]).
+pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
+    tool_policy(tool_name).permission
 }
 
 /// Extract collection name from tool arguments
@@ -744,70 +812,16 @@ pub fn get_collection_from_args(args: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Get the system collection for admin tools that don't have a collection argument
-/// Returns the _system.* collection that the tool operates on
-/// System collection for scripts
-const SYSTEM_SCRIPTS_COLLECTION: &str = "_system.scripts";
-/// System collection for API keys
-const SYSTEM_APIKEYS_COLLECTION: &str = "_system.api_keys";
-
+/// Get the implicit system collection for a tool (projection of [`tool_policy`]).
+/// Used for tools that have no `collection` argument (acl_*, script_*, admin_*).
 pub fn get_system_collection_for_tool(tool_name: &str) -> Option<&'static str> {
-    match tool_name {
-        "acl_list" | "acl_get" | "acl_set" | "acl_delete" => Some(SYSTEM_ACL_COLLECTION),
-        "listener_list" | "listener_get" | "listener_add" | "listener_delete"
-        | "listener_enable" | "listener_disable" => {
-            Some(crate::listener::SYSTEM_LISTENERS_COLLECTION)
-        }
-        // Script operations use _system.scripts
-        "script_save" | "script_get" | "script_list" | "script_delete" | "script_run"
-        | "script_exec" | "script_history" | "script_rollback" | "script_tags_add"
-        | "script_tags_remove" | "script_stats" | "script_version_get" => {
-            Some(SYSTEM_SCRIPTS_COLLECTION)
-        }
-        // API key operations use _system.api_keys
-        "admin_apikey_create"
-        | "admin_apikey_list"
-        | "admin_apikey_revoke"
-        | "admin_apikey_delete" => Some(SYSTEM_APIKEYS_COLLECTION),
-        // Other admin operations use _system.acl (system config)
-        "admin_list_all_collections"
-        | "admin_create_system_collection"
-        | "admin_set_collection_flags"
-        | "admin_drop_protected" => Some(SYSTEM_ACL_COLLECTION),
-        _ => None,
-    }
+    tool_policy(tool_name).system_collection
 }
 
-/// Check if a tool requires localhost access (system administration tools)
-/// These tools modify _system.* collections and are restricted to localhost
+/// Check if a tool requires localhost access (projection of [`tool_policy`]).
+/// These tools administer `_system.*` state and are restricted to loopback.
 pub fn requires_localhost(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        // ACL management
-        "acl_set" | "acl_delete" | "acl_cleanup"
-            // Listener management
-            | "listener_add"
-            | "listener_delete"
-            | "listener_enable"
-            | "listener_disable"
-            // Script management (modify operations)
-            | "script_save"
-            | "script_delete"
-            | "script_rollback"
-            | "script_tags_add"
-            | "script_tags_remove"
-            // Database management (localhost only)
-            | "db_open"
-            // Admin tools (all require localhost)
-            | "admin_list_all_collections"
-            | "admin_create_system_collection"
-            | "admin_set_collection_flags"
-            | "admin_drop_protected"
-            | "admin_apikey_create"
-            | "admin_apikey_list"
-            | "admin_apikey_revoke"
-            | "admin_apikey_delete"
-    )
+    tool_policy(tool_name).localhost
 }
 
 #[cfg(test)]
@@ -906,5 +920,158 @@ mod tests {
             rules: vec![],
         };
         assert!(acl_all.matches_collection("anything"));
+    }
+
+    // ------------------------------------------------------------------
+    // Declarative tool-policy table: parity with the historical 4 lists
+    // plus the db_stats/db_compact/db_checkpoint fail-open fix.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_tool_policy_permission_parity() {
+        use RequiredPermission::*;
+        // Read
+        for t in [
+            "find",
+            "find_one",
+            "count_documents",
+            "distinct",
+            "aggregate",
+            "explain",
+            "index_list",
+            "schema_get",
+            "collection_list",
+            "db_stats",
+            "db_open",
+            "fulltext_search",
+            "fuzzy_search",
+            "acl_list",
+            "acl_get",
+            "listener_list",
+            "script_run",
+            "script_list",
+        ] {
+            assert_eq!(get_required_permission(t), Read, "{t} should be Read");
+        }
+        // Write
+        for t in [
+            "insert_one",
+            "update_many",
+            "delete_one",
+            "begin_transaction",
+            "insert_one_tx",
+        ] {
+            assert_eq!(get_required_permission(t), Write, "{t} should be Write");
+        }
+        // Admin
+        for t in [
+            "collection_create",
+            "index_drop",
+            "schema_set",
+            "db_compact",
+            "db_checkpoint",
+            "acl_set",
+            "acl_delete",
+            "listener_add",
+            "script_save",
+            "admin_drop_protected",
+            "admin_apikey_create",
+        ] {
+            assert_eq!(get_required_permission(t), Admin, "{t} should be Admin");
+        }
+        // Unknown → conservative default Read
+        assert_eq!(get_required_permission("totally_unknown_tool"), Read);
+    }
+
+    #[test]
+    fn test_tool_policy_system_collection_parity() {
+        assert_eq!(
+            get_system_collection_for_tool("acl_set"),
+            Some(SYSTEM_ACL_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("acl_get"),
+            Some(SYSTEM_ACL_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("script_save"),
+            Some(SYSTEM_SCRIPTS_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("script_run"),
+            Some(SYSTEM_SCRIPTS_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("admin_apikey_create"),
+            Some(SYSTEM_APIKEYS_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("admin_drop_protected"),
+            Some(SYSTEM_ACL_COLLECTION)
+        );
+        assert_eq!(
+            get_system_collection_for_tool("listener_add"),
+            Some(crate::listener::SYSTEM_LISTENERS_COLLECTION)
+        );
+        // No implicit scope (acted on via `collection` arg, or none)
+        assert_eq!(get_system_collection_for_tool("find"), None);
+        assert_eq!(get_system_collection_for_tool("acl_cleanup"), None);
+        assert_eq!(get_system_collection_for_tool("db_stats"), None);
+    }
+
+    #[test]
+    fn test_tool_policy_localhost_parity_and_failopen_fix() {
+        // Historically loopback-only
+        for t in [
+            "acl_set",
+            "acl_delete",
+            "acl_cleanup",
+            "listener_add",
+            "script_save",
+            "db_open",
+            "admin_list_all_collections",
+            "admin_apikey_create",
+        ] {
+            assert!(requires_localhost(t), "{t} should require localhost");
+        }
+        // FAIL-OPEN FIX: these had no ACL scope and no localhost gate → check skipped.
+        for t in ["db_stats", "db_compact", "db_checkpoint"] {
+            assert!(
+                requires_localhost(t),
+                "{t} must now be loopback-only (fail-open fix)"
+            );
+        }
+        // Unrestricted data ops
+        for t in ["find", "insert_one", "fulltext_search", "acl_list"] {
+            assert!(!requires_localhost(t), "{t} must not require localhost");
+        }
+    }
+
+    #[test]
+    fn test_tool_policy_admin_key_axis() {
+        // Exactly the 8 admin_* tools require the admin key.
+        for t in [
+            "admin_list_all_collections",
+            "admin_create_system_collection",
+            "admin_set_collection_flags",
+            "admin_drop_protected",
+            "admin_apikey_create",
+            "admin_apikey_list",
+            "admin_apikey_revoke",
+            "admin_apikey_delete",
+        ] {
+            assert!(tool_policy(t).admin_key, "{t} must require admin key");
+        }
+        // Nothing else does (incl. loopback-only system tools).
+        for t in [
+            "acl_set",
+            "db_compact",
+            "db_open",
+            "script_save",
+            "find",
+            "unknown_tool",
+        ] {
+            assert!(!tool_policy(t).admin_key, "{t} must NOT require admin key");
+        }
     }
 }

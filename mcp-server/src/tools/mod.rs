@@ -128,6 +128,13 @@ pub fn dispatch_tool(
         return Err(e);
     }
 
+    // Centralized admin-key gate, driven by the single tool-policy table.
+    // Runs on BOTH the HTTP (execute_tool) and stdio (main.rs) paths, so the
+    // requirement no longer lives scattered across individual admin handlers.
+    if crate::acl::tool_policy(name).admin_key {
+        helpers::verify_admin_key(&params)?;
+    }
+
     // Wrap the actual dispatch in catch_unwind
     // Note: We use AssertUnwindSafe because our handlers should not panic,
     // but if they do, we want to catch it gracefully
@@ -378,16 +385,12 @@ fn dispatch_tool_inner(
         ),
 
         // Vector operations (similarity search)
-        "index_create_vector"
-        | "index_list_vector"
-        | "index_drop_vector"
-        | "vector_search"
-        | "vector_search_filter" => vector::dispatch(name, params, adapter),
-
-        // Hybrid search (RRF fusion of vector + fulltext, with optional auto-embedding)
-        "hybrid_search" => hybrid::dispatch(name, params, adapter, embedding_manager),
+        "index_create_vector" | "index_list_vector" | "index_drop_vector" | "vector_search" => {
+            vector::dispatch(name, params, adapter)
+        }
 
         // Intent-shaped retrieval (Stage A redesign — see docs/HYBRID_RETRIEVAL_REDESIGN.md)
+        // (supersedes the removed `hybrid_search` tool; shared RRF fusion lives in `hybrid`)
         "search" => retrieval::dispatch(name, params, adapter, embedding_manager),
 
         // Embedding operations

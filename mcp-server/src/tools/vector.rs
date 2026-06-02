@@ -77,22 +77,6 @@ pub struct VectorSearchParams {
     pub projection: Option<Value>,
 }
 
-/// Parameters for `vector_search_filter` tool
-///
-/// Field default matches RAG schema: "embedding"
-#[derive(Debug, Deserialize)]
-pub struct VectorSearchFilterParams {
-    pub collection: String,
-    /// Field with vector index (default: "embedding")
-    #[serde(default = "default_embedding_field")]
-    pub field: String,
-    pub vector: Vec<f64>,
-    pub filter: Value,
-    #[serde(default = "default_vector_limit")]
-    pub limit: usize,
-    pub projection: Option<Value>,
-}
-
 // ============================================================================
 // Dispatch
 // ============================================================================
@@ -104,7 +88,6 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "index_list_vector" => handle_index_list_vector(params, adapter),
         "index_drop_vector" => handle_index_drop_vector(params, adapter),
         "vector_search" => handle_vector_search(params, adapter),
-        "vector_search_filter" => handle_vector_search_filter(params, adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown vector tool: {}",
             name
@@ -176,35 +159,6 @@ fn handle_vector_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
 
     let projection = parse_projection_value(p.projection)?;
     let results = adapter.vector_search(&p.collection, &p.field, &query_vector, p.limit)?;
-
-    // Apply projection if specified, or convert to simple format
-    let results_json: Vec<Value> = if let Some(proj) = projection {
-        apply_projection_to_results(results, &proj)
-    } else {
-        results_to_json(results)
-    };
-
-    Ok(json!({
-        "results": results_json,
-        "count": results_json.len()
-    }))
-}
-
-fn handle_vector_search_filter(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: VectorSearchFilterParams = VectorSearchFilterParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
-    // Convert f64 to f32
-    let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
-
-    let projection = parse_projection_value(p.projection)?;
-    let results = adapter.vector_search_with_filter(
-        &p.collection,
-        &p.field,
-        &query_vector,
-        &p.filter,
-        p.limit,
-    )?;
 
     // Apply projection if specified, or convert to simple format
     let results_json: Vec<Value> = if let Some(proj) = projection {

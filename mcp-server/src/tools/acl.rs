@@ -116,7 +116,7 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
         "success": true,
         "collection": p.collection,
         "rules_count": parsed_rules.len(),
-        "note": "ACL updated. Changes take effect on next request."
+        "note": "ACL updated and live config reloaded. Changes are active immediately."
     }))
 }
 
@@ -138,7 +138,7 @@ fn handle_acl_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
         "collection": p.collection,
         "deleted": deleted > 0,
         "note": if deleted > 0 {
-            "ACL deleted. Default rules now apply."
+            "ACL deleted and live config reloaded. Default rules now apply."
         } else {
             "No custom ACL found for this collection."
         }

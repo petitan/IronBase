@@ -11,7 +11,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "rag_collection_create",
             "title": "Create RAG Collection",
-            "description": "Creates a collection optimized for RAG (Retrieval-Augmented Generation). Automatically creates vector index (HNSW) and fulltext index for hybrid search. Stores RAG configuration for use by hybrid_search and rag_document_import.",
+            "description": "Creates a collection optimized for RAG (Retrieval-Augmented Generation). Automatically creates vector index (HNSW) and fulltext index for hybrid search. Stores RAG configuration for use by the `search` tool and rag_document_import.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -29,7 +29,7 @@ pub fn tools() -> Vec<Value> {
                     "text_fields": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and hybrid_search then defaults to searching all of them — no manual index_create_fulltext needed."
+                        "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and the `search` tool then defaults to searching all of them — no manual index_create_fulltext needed."
                     },
                     "provider": {
                         "type": "string",
@@ -132,7 +132,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "rag_load_all_chunks",
             "title": "Load All Chunks for Document IDs",
-            "description": "Loads every chunk for the given doc_ids from a RAG collection. Two modes: (1) pure load when `query` is omitted — chunks sorted by (doc_id, chunk_index) ASC, no scoring; (2) scored load when `query` is provided — chunks scored via fulltext OR-search, sorted by _score DESC, every hit carries `_score`. In both modes adjacent chunks from the same document are merged by default (same algorithm as hybrid_search: removes overlap-induced duplication, dedups table headers). Use for UI doc-detail-view (pure load) or RAG context expansion after hybrid_search (scored load). Empty doc_ids returns an empty result (not an error); missing doc_ids are silently skipped.",
+            "description": "Loads every chunk for the given doc_ids from a RAG collection. Two modes: (1) pure load when `query` is omitted — chunks sorted by (doc_id, chunk_index) ASC, no scoring; (2) scored load when `query` is provided — chunks scored via fulltext OR-search, sorted by _score DESC, every hit carries `_score`. In both modes adjacent chunks from the same document are merged by default (same algorithm as the `search` tool: removes overlap-induced duplication, dedups table headers). Use for UI doc-detail-view (pure load) or RAG context expansion after a `search` query (scored load). Empty doc_ids returns an empty result (not an error); missing doc_ids are silently skipped.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

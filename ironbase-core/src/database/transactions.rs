@@ -82,21 +82,6 @@ impl DatabaseCore<StorageEngine> {
         result
     }
 
-    /// Commit transaction with index operations - StorageEngine-specific
-    ///
-    /// Automatically releases the write lock on completion (success or failure).
-    ///
-    /// **Deprecated:** This method is identical to `commit_transaction()`. The name
-    /// suggests separate index handling, but no such logic was ever implemented.
-    /// Use `commit_transaction()` directly instead.
-    #[deprecated(
-        since = "0.3.200",
-        note = "Identical to commit_transaction(). Use commit_transaction() instead."
-    )]
-    pub fn commit_transaction_with_indexes(&self, tx_id: TransactionId) -> Result<()> {
-        self.commit_transaction(tx_id)
-    }
-
     // ========== Two-Phase Commit Helper Methods (StorageEngine-specific) ==========
 
     /// Construct index file path for a collection's index

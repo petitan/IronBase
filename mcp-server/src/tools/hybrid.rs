@@ -23,8 +23,7 @@ use super::fusion::{
     apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
     mmr_reorder, rerank_results, FusedResult,
 };
-use super::helpers::{parse_projection_value, validate_collection_name};
-use super::params::{resolve_weights, HybridSearchParams, ParseParams};
+use super::params::{resolve_weights, HybridSearchParams};
 use super::rag::get_rag_config;
 
 /// RRF default constant - empirically optimal value (Cormack et al., 2009)
@@ -190,36 +189,6 @@ fn apply_score_fields(obj: &mut serde_json::Map<String, Value>, info: &FusedScor
     }
 }
 
-/// Apply projection and add score metadata to a fused result
-fn enrich_result(item: FusedResult, projection: &Option<HashMap<String, i32>>) -> Value {
-    let info = FusedScoreInfo::from(&item);
-    let mut result = if let Some(ref proj) = projection {
-        apply_projection(&item.doc, proj)
-    } else {
-        item.doc
-    };
-    if let Value::Object(ref mut obj) = result {
-        apply_score_fields(obj, &info);
-    }
-    result
-}
-
-/// Dispatch hybrid tool calls
-pub fn dispatch(
-    name: &str,
-    params: Value,
-    adapter: &Arc<IronBaseAdapter>,
-    embedding_manager: &Option<Arc<EmbeddingManager>>,
-) -> Result<Value> {
-    match name {
-        "hybrid_search" => handle_hybrid_search(params, adapter, embedding_manager),
-        _ => Err(McpError::invalid_params(format!(
-            "Unknown hybrid tool: {}",
-            name
-        ))),
-    }
-}
-
 /// Output of the shared retrieve+fuse pipeline (STEP 1–6): the fused, reranked,
 /// merged result set plus the resolution/qualification context the response
 /// builders need. Shared by `hybrid_search` (flat + grouped) and the `search`
@@ -228,12 +197,6 @@ pub(crate) struct FusionOutcome {
     pub fused: Vec<FusedResult>,
     pub effective_text_field: String,
     pub effective_text_fields: Option<Vec<String>>,
-    pub vector_weight: f64,
-    pub fulltext_weight: f64,
-    pub auto_embedded: bool,
-    pub provider_name: Option<String>,
-    pub chunks_merged: usize,
-    pub dedup_removed: usize,
     pub qual: super::fusion::QualificationOutcome,
 }
 
@@ -257,113 +220,116 @@ pub(crate) fn retrieve_and_fuse(
     // ========================================================================
     let skip_vector = vector_weight == 0.0 && p.vector.is_none();
 
-    let (query_vector, effective_vector_field, effective_text_field, auto_embedded, provider_name) =
-        if skip_vector {
-            // BM25-only mode: resolve text field without requiring embedding
-            if p.query.is_empty() {
-                return Err(McpError::invalid_params("Query cannot be empty"));
-            }
+    let (
+        query_vector,
+        effective_vector_field,
+        effective_text_field,
+        _auto_embedded,
+        _provider_name,
+    ) = if skip_vector {
+        // BM25-only mode: resolve text field without requiring embedding
+        if p.query.is_empty() {
+            return Err(McpError::invalid_params("Query cannot be empty"));
+        }
 
-            let rag_config = get_rag_config(adapter, &p.collection)?;
-            let txt_field = match &rag_config {
-                Some(cfg) => cfg.text_field.clone(),
-                None => adapter
-                    .get_fulltext_field_names(&p.collection)
-                    .ok()
-                    .map(pick_text_field)
-                    .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string()),
-            };
+        let rag_config = get_rag_config(adapter, &p.collection)?;
+        let txt_field = match &rag_config {
+            Some(cfg) => cfg.text_field.clone(),
+            None => adapter
+                .get_fulltext_field_names(&p.collection)
+                .ok()
+                .map(pick_text_field)
+                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string()),
+        };
 
-            let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
-                p.text_field.clone()
-            } else {
-                txt_field
-            };
-
-            (vec![], p.vector_field.clone(), eff_tf, false, None)
+        let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
+            p.text_field.clone()
         } else {
-            match &p.vector {
-                Some(v) => {
-                    // Explicit mode: client provided the vector
-                    let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
-                    (
-                        qv,
-                        p.vector_field.clone(),
-                        p.text_field.clone(),
-                        false,
-                        None,
-                    )
+            txt_field
+        };
+
+        (vec![], p.vector_field.clone(), eff_tf, false, None)
+    } else {
+        match &p.vector {
+            Some(v) => {
+                // Explicit mode: client provided the vector
+                let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+                (
+                    qv,
+                    p.vector_field.clone(),
+                    p.text_field.clone(),
+                    false,
+                    None,
+                )
+            }
+            None => {
+                // Auto-embed mode: server embeds the query
+                if p.query.is_empty() {
+                    return Err(McpError::invalid_params("Query cannot be empty"));
                 }
-                None => {
-                    // Auto-embed mode: server embeds the query
-                    if p.query.is_empty() {
-                        return Err(McpError::invalid_params("Query cannot be empty"));
-                    }
 
-                    let manager = embedding_manager.as_ref().ok_or_else(|| {
-                        McpError::internal(
-                            "Embedding not available. Configure an [embedding] section in config.toml.",
-                        )
-                    })?;
+                let manager = embedding_manager.as_ref().ok_or_else(|| {
+                    McpError::internal(
+                        "Embedding not available. Configure an [embedding] section in config.toml.",
+                    )
+                })?;
 
-                    // Resolve provider: user explicit > AutoEmbeddingConfig > RAG config > manager default
-                    // Single DB lookup for auto config (no duplication across match arms)
-                    let auto_provider = adapter
-                        .get_auto_embedding_config(&p.collection)
-                        .ok()
-                        .flatten()
-                        .map(|c| c.provider);
+                // Resolve provider: user explicit > AutoEmbeddingConfig > RAG config > manager default
+                // Single DB lookup for auto config (no duplication across match arms)
+                let auto_provider = adapter
+                    .get_auto_embedding_config(&p.collection)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.provider);
 
-                    let rag_config = get_rag_config(adapter, &p.collection)?;
-                    let (emb_field, txt_field, prov_name) = match &rag_config {
-                        Some(cfg) => (
-                            cfg.embedding_field.clone(),
-                            cfg.text_field.clone(),
+                let rag_config = get_rag_config(adapter, &p.collection)?;
+                let (emb_field, txt_field, prov_name) = match &rag_config {
+                    Some(cfg) => (
+                        cfg.embedding_field.clone(),
+                        cfg.text_field.clone(),
+                        p.provider
+                            .clone()
+                            .or(auto_provider)
+                            .unwrap_or_else(|| cfg.provider.clone()),
+                    ),
+                    None => {
+                        let detected_text_field = adapter
+                            .get_fulltext_field_names(&p.collection)
+                            .ok()
+                            .map(pick_text_field)
+                            .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+
+                        (
+                            DEFAULT_EMBEDDING_FIELD.to_string(),
+                            detected_text_field,
                             p.provider
                                 .clone()
                                 .or(auto_provider)
-                                .unwrap_or_else(|| cfg.provider.clone()),
-                        ),
-                        None => {
-                            let detected_text_field = adapter
-                                .get_fulltext_field_names(&p.collection)
-                                .ok()
-                                .map(pick_text_field)
-                                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+                                .unwrap_or_else(|| manager.default_provider_name().to_string()),
+                        )
+                    }
+                };
 
-                            (
-                                DEFAULT_EMBEDDING_FIELD.to_string(),
-                                detected_text_field,
-                                p.provider
-                                    .clone()
-                                    .or(auto_provider)
-                                    .unwrap_or_else(|| manager.default_provider_name().to_string()),
-                            )
-                        }
-                    };
+                // Embed the query
+                let qv = manager
+                    .embed_query(&p.query, Some(&prov_name))
+                    .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
 
-                    // Embed the query
-                    let qv = manager
-                        .embed_query(&p.query, Some(&prov_name))
-                        .map_err(|e| {
-                            McpError::internal(format!("Query embedding failed: {}", e))
-                        })?;
+                let eff_vf = if p.vector_field != DEFAULT_EMBEDDING_FIELD {
+                    p.vector_field.clone()
+                } else {
+                    emb_field
+                };
+                let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
+                    p.text_field.clone()
+                } else {
+                    txt_field
+                };
 
-                    let eff_vf = if p.vector_field != DEFAULT_EMBEDDING_FIELD {
-                        p.vector_field.clone()
-                    } else {
-                        emb_field
-                    };
-                    let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
-                        p.text_field.clone()
-                    } else {
-                        txt_field
-                    };
-
-                    (qv, eff_vf, eff_tf, true, Some(prov_name))
-                }
+                (qv, eff_vf, eff_tf, true, Some(prov_name))
             }
-        };
+        }
+    };
 
     // Internal limit: higher when grouping to capture enough chunks per document
     let internal_multiplier = if p.group_by_document { 20 } else { 3 };
@@ -524,11 +490,15 @@ pub(crate) fn retrieve_and_fuse(
         });
     }
 
-    // Sort by RRF score initially
+    // Sort by RRF score initially. Tie-break on the stable chunk id so equal
+    // scores resolve deterministically — otherwise the HashMap-drain input order
+    // leaks through the (stable) sort and the same query can return different
+    // tied docs run-to-run (reproducibility + eval-gate correctness).
     fused.sort_by(|a, b| {
         b.rrf_score
             .partial_cmp(&a.rrf_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
     });
 
     // ========================================================================
@@ -577,184 +547,29 @@ pub(crate) fn retrieve_and_fuse(
     // ========================================================================
     // STEP 5.5: Merge adjacent chunks from same document (overlap dedup)
     // ========================================================================
-    let chunks_merged = if p.merge_chunks {
-        merge_adjacent_chunks(&mut fused, &effective_text_field)
-    } else {
-        0
-    };
+    // Mutates `fused` in place; the merge count is no longer surfaced.
+    if p.merge_chunks {
+        merge_adjacent_chunks(&mut fused, &effective_text_field);
+    }
 
     // ========================================================================
     // STEP 6: MMR diversity reranking (skipped when grouping — limit applies
     //         at document level in STEP 7)
     // ========================================================================
-    let dedup_removed = if p.deduplicate && !p.group_by_document {
-        mmr_reorder(&mut fused, &effective_vector_field, p.mmr_lambda, p.limit)
+    if p.deduplicate && !p.group_by_document {
+        mmr_reorder(&mut fused, &effective_vector_field, p.mmr_lambda, p.limit);
     } else if !p.group_by_document {
         // Flat mode: truncate to limit here
         fused.truncate(p.limit);
-        0
-    } else {
-        // group_by_document: no truncation, limit applied at doc level in STEP 7
-        0
-    };
+    }
+    // group_by_document: no truncation, limit applied at doc level in STEP 7
 
     Ok(FusionOutcome {
         fused,
         effective_text_field,
         effective_text_fields,
-        vector_weight,
-        fulltext_weight,
-        auto_embedded,
-        provider_name,
-        chunks_merged,
-        dedup_removed,
         qual,
     })
-}
-
-/// Handle hybrid_search - RRF fusion of vector and fulltext search
-///
-/// Two modes:
-/// - **Explicit mode**: `vector` is provided → use it directly (client-embedded)
-/// - **Auto-embed mode**: `vector` is omitted → embed query using RAG config or provider param
-fn handle_hybrid_search(
-    params: Value,
-    adapter: &Arc<IronBaseAdapter>,
-    embedding_manager: &Option<Arc<EmbeddingManager>>,
-) -> Result<Value> {
-    if params.get("dedup_threshold").is_some() {
-        return Err(McpError::invalid_params(
-            "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
-        ));
-    }
-    let p: HybridSearchParams = HybridSearchParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
-    // Shared retrieve+fuse pipeline (STEP 1–6).
-    let FusionOutcome {
-        fused,
-        effective_text_field,
-        effective_text_fields,
-        vector_weight,
-        fulltext_weight,
-        auto_embedded,
-        provider_name,
-        chunks_merged,
-        dedup_removed,
-        qual,
-    } = retrieve_and_fuse(&p, adapter, embedding_manager)?;
-
-    // ========================================================================
-    // STEP 7: Projection + response
-    // ========================================================================
-    let projection = parse_projection_value(p.projection)?;
-    let match_scope = if qual.is_doc_scope {
-        "document"
-    } else {
-        "chunk"
-    };
-
-    // Common response metadata (shared between flat and grouped modes)
-    let mut response = serde_json::Map::new();
-    response.insert("algorithm".into(), json!("rrf"));
-    response.insert("rrf_k".into(), json!(p.rrf_k));
-    response.insert(
-        "weights".into(),
-        json!({
-            "vector": vector_weight,
-            "fulltext": fulltext_weight
-        }),
-    );
-    response.insert(
-        "search_mode".into(),
-        json!(p.search_mode.as_deref().unwrap_or("balanced")),
-    );
-    response.insert("query".into(), json!(p.query));
-    response.insert("auto_embedded".into(), json!(auto_embedded));
-    response.insert("provider".into(), json!(provider_name));
-    response.insert("dedup_removed".into(), json!(dedup_removed));
-    response.insert("chunks_merged".into(), json!(chunks_merged));
-    response.insert("match_scope".into(), json!(match_scope));
-    if let Some(count) = qual.qualified_doc_count {
-        response.insert("qualified_doc_ids".into(), json!(count));
-    }
-
-    if p.group_by_document {
-        // ----------------------------------------------------------------
-        // Grouped response: two-phase document grouping
-        //
-        // Phase 1: From fused results, identify top N unique doc_ids
-        //          (fused is sorted by score → first occurrence = best score)
-        // Phase 2: Single fulltext OR search filtered to those N doc_ids
-        //          → fetches ALL relevant chunks from the top documents
-        //
-        // This is O(1) extra search (not O(limit) like per-doc search).
-        // Document selection uses AND (all words in doc), chunk retrieval
-        // uses OR (any word in chunk) — exactly what the user expects.
-        // ----------------------------------------------------------------
-
-        let (groups, total_chunks) = build_doc_groups(
-            &fused,
-            adapter,
-            &p.collection,
-            &p.query,
-            p.limit,
-            &p.filter,
-            p.max_chunks_per_doc,
-            &projection,
-            &effective_text_field,
-            &effective_text_fields,
-        )?;
-
-        // Map DocGroup → the existing grouped JSON shape (unchanged contract).
-        let mut grouped_results: Vec<Value> = Vec::new();
-        grouped_results.try_reserve(groups.len()).map_err(|e| {
-            McpError::internal(format!(
-                "OOM: cannot allocate {} grouped results: {}",
-                groups.len(),
-                e
-            ))
-        })?;
-        for g in groups {
-            let mut group = serde_json::Map::new();
-            group.insert("doc_id".to_string(), json!(g.doc_id));
-            group.insert("best_score".to_string(), json!(g.best_score));
-            group.insert("chunk_count".to_string(), json!(g.chunks.len()));
-            for (k, v) in g.lifted {
-                group.insert(k, v);
-            }
-            group.insert("chunks".to_string(), json!(g.chunks));
-            grouped_results.push(Value::Object(group));
-        }
-
-        let doc_count = grouped_results.len();
-        response.insert("results".into(), json!(grouped_results));
-        response.insert("count".into(), json!(doc_count));
-        response.insert("total_chunks".into(), json!(total_chunks));
-        response.insert("group_by_document".into(), json!(true));
-    } else {
-        // ----------------------------------------------------------------
-        // Flat response (default): list of chunks ordered by score
-        // ----------------------------------------------------------------
-        let mut results: Vec<Value> = Vec::new();
-        results.try_reserve(fused.len()).map_err(|e| {
-            McpError::internal(format!(
-                "OOM: cannot allocate {} results: {}",
-                fused.len(),
-                e
-            ))
-        })?;
-
-        for item in fused {
-            results.push(enrich_result(item, &projection));
-        }
-
-        let count = results.len();
-        response.insert("results".into(), json!(results));
-        response.insert("count".into(), json!(count));
-    }
-
-    Ok(Value::Object(response))
 }
 
 /// One grouped document: its id, best fused score, doc-level fields lifted from
@@ -937,6 +752,7 @@ fn calculate_rrf_score(v_rank: usize, t_rank: usize, v_weight: f64, t_weight: f6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::params::ParseParams;
     use serde_json::json;
 
     // -------------------------------------------------------------------------
@@ -1480,5 +1296,362 @@ mod tests {
 
         // K=20 spread should be significantly wider than K=60
         assert!(k20_spread > k60_spread * 5.0);
+    }
+}
+
+// ============================================================================
+// Pipeline integration tests (ported from the removed `hybrid_search` MCP tool)
+//
+// When the deprecated `hybrid_search` tool was removed, its #68/#71/#72
+// regression tests moved here so they exercise the RETAINED shared pipeline
+// (`retrieve_and_fuse` + `build_doc_groups`) directly — identical coverage with
+// no public mechanism surface. The former tool's flat/grouped JSON wrapper is
+// reproduced by asserting on `FusionOutcome::fused` (flat) and `DocGroup`
+// (grouped), exactly what `handle_hybrid_search` built its response from.
+// ============================================================================
+#[cfg(test)]
+mod pipeline_integration_tests {
+    use super::{build_doc_groups, retrieve_and_fuse, DocGroup, FusedResult, FusionOutcome};
+    use crate::adapter::IronBaseAdapter;
+    use crate::tools::dispatch_tool;
+    use crate::tools::helpers::parse_projection_value;
+    use crate::tools::params::{HybridSearchParams, ParseParams};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn adapter() -> (Arc<IronBaseAdapter>, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("test.mlite");
+        let a = IronBaseAdapter::new(path.to_string_lossy().to_string()).expect("adapter");
+        (Arc::new(a), tmp)
+    }
+
+    fn ok(a: &Arc<IronBaseAdapter>, name: &str, params: Value) -> Value {
+        dispatch_tool(name, params, a, None, None, None, None, &None, &None)
+            .unwrap_or_else(|e| panic!("tool '{name}' should succeed: {e:?}"))
+    }
+
+    /// Run the shared retrieve+fuse pipeline (what `handle_hybrid_search` used to do).
+    fn fuse(a: &Arc<IronBaseAdapter>, params: Value) -> (HybridSearchParams, FusionOutcome) {
+        let p = HybridSearchParams::parse(params).expect("parse params");
+        let fo = retrieve_and_fuse(&p, a, &None).expect("retrieve_and_fuse");
+        (p, fo)
+    }
+
+    /// Grouped builder over a fused set — the kept logic the tool used in grouped mode.
+    fn group(
+        a: &Arc<IronBaseAdapter>,
+        p: &HybridSearchParams,
+        fo: &FusionOutcome,
+    ) -> (Vec<DocGroup>, usize) {
+        let proj = parse_projection_value(p.projection.clone()).expect("projection");
+        build_doc_groups(
+            &fo.fused,
+            a,
+            &p.collection,
+            &p.query,
+            p.limit,
+            &p.filter,
+            p.max_chunks_per_doc,
+            &proj,
+            &fo.effective_text_field,
+            &fo.effective_text_fields,
+        )
+        .expect("build_doc_groups")
+    }
+
+    fn count_by_doc(fused: &[FusedResult]) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        for item in fused {
+            if let Some(d) = item.doc.get("doc_id").and_then(|v| v.as_str()) {
+                *counts.entry(d.to_string()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// #71: grouped chunks carry the full Phase-1 engine score shape (not just _text_score).
+    #[test]
+    fn grouped_chunk_score_fields_issue71() {
+        let (a, _t) = adapter();
+        let docs = [
+            ("alpha", 0, "fékpad PEF-35 leírás", [0.9, 0.1, 0.0, 0.0]),
+            ("alpha", 1, "fékpad PEF-35 ár", [0.8, 0.2, 0.0, 0.0]),
+            (
+                "beta",
+                0,
+                "fékpad PEF-35 specifikáció",
+                [0.1, 0.9, 0.0, 0.0],
+            ),
+            ("beta", 1, "fékpad PEF-35 garancia", [0.0, 0.8, 0.2, 0.0]),
+        ];
+        for (id, idx, content, emb) in docs {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id": id, "chunk_index": idx, "content": content,
+                "title": format!("{id} title"), "embedding": emb }}),
+            );
+        }
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_vector",
+            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"PEF-35",
+            "vector":[0.9,0.1,0.0,0.0],"group_by_document":true,"limit":5}),
+        );
+        let (groups, _total) = group(&a, &p, &fo);
+        assert!(!groups.is_empty());
+        let mut phase1_seen = false;
+        for g in &groups {
+            assert!(!g.chunks.is_empty());
+            for c in &g.chunks {
+                if c.get("_final_score").is_some() {
+                    phase1_seen = true;
+                    assert!(c["_rrf_score"].is_number(), "missing _rrf_score: {c}");
+                    assert!(c["_rerank_boost"].is_number(), "missing _rerank_boost: {c}");
+                    assert!(c["_text_rank"].is_number(), "missing _text_rank: {c}");
+                    assert!(c["_vector_rank"].is_number(), "missing _vector_rank: {c}");
+                    assert!(c["_text_score"].is_number(), "missing _text_score: {c}");
+                }
+            }
+        }
+        assert!(
+            phase1_seen,
+            "no chunk carried _final_score — Phase 1 enrichment did not run"
+        );
+    }
+
+    /// #71: max_chunks_per_doc caps grouped chunks; lift runs BEFORE the cap.
+    #[test]
+    fn grouped_max_chunks_per_doc_issue71() {
+        let (a, _t) = adapter();
+        for idx in 0..4 {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id":"alpha","chunk_index":idx,
+                "content": format!("fékpad PEF-35 chunk {idx}"),
+                "title":"alpha title","embedding":[0.9,0.1,0.0,0.0]}}),
+            );
+        }
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_vector",
+            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"PEF-35",
+            "vector":[0.9,0.1,0.0,0.0],"group_by_document":true,"limit":5,"max_chunks_per_doc":2}),
+        );
+        let (groups, total) = group(&a, &p, &fo);
+        assert_eq!(groups.len(), 1, "expected single doc group");
+        let g = &groups[0];
+        assert!(g.chunks.len() <= 2, "cap violated: {}", g.chunks.len());
+        // Lift runs on the full Phase-2 set then cap → title lifted to group level.
+        assert_eq!(
+            g.lifted.get("title"),
+            Some(&json!("alpha title")),
+            "title not lifted; cap must run AFTER lift_common_fields"
+        );
+        for c in &g.chunks {
+            assert!(
+                c.get("title").is_none(),
+                "lifted field leaked back into chunk: {c}"
+            );
+        }
+        assert_eq!(total, g.chunks.len(), "total counts post-cap chunks");
+    }
+
+    /// #71 AC2: flat-mode and grouped-mode doc order agree for identical inputs.
+    #[test]
+    fn flat_grouped_doc_order_agreement_issue71_ac2() {
+        let (a, _t) = adapter();
+        let inserts = [
+            (
+                "alpha",
+                0,
+                "fékpad PEF-35 ajánlat",
+                "alpha cikk PEF-35",
+                [0.7, 0.3, 0.0, 0.0],
+            ),
+            (
+                "alpha",
+                1,
+                "fékpad PEF-35 ár 4.2M Ft",
+                "alpha cikk PEF-35",
+                [0.6, 0.4, 0.0, 0.0],
+            ),
+            (
+                "beta",
+                0,
+                "fékpad telepítés helyszínen",
+                "beta cikk",
+                [0.4, 0.6, 0.0, 0.0],
+            ),
+            (
+                "beta",
+                1,
+                "PEF-35 leírás külön",
+                "beta cikk",
+                [0.3, 0.7, 0.0, 0.0],
+            ),
+            (
+                "gamma",
+                0,
+                "fékpad általános leírás",
+                "gamma cikk",
+                [0.2, 0.8, 0.0, 0.0],
+            ),
+        ];
+        for (id, idx, content, title, emb) in inserts {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id": id, "chunk_index": idx, "content": content, "title": title, "embedding": emb }}),
+            );
+        }
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"title"}),
+        );
+        ok(
+            &a,
+            "index_create_vector",
+            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let common = json!({"collection":"kb","query":"PEF-35 fékpad",
+            "vector":[0.5,0.5,0.0,0.0],"title_field":"title","limit":5});
+
+        let (_pf, fo_flat) = fuse(&a, common.clone());
+        let mut flat_order: Vec<String> = Vec::new();
+        for item in &fo_flat.fused {
+            if let Some(d) = item.doc.get("doc_id").and_then(|v| v.as_str()) {
+                if !flat_order.contains(&d.to_string()) {
+                    flat_order.push(d.to_string());
+                }
+            }
+        }
+
+        let mut grouped_params = common.as_object().unwrap().clone();
+        grouped_params.insert("group_by_document".into(), json!(true));
+        let (pg, fo_g) = fuse(&a, Value::Object(grouped_params));
+        let (groups, _) = group(&a, &pg, &fo_g);
+        let grouped_order: Vec<String> = groups.iter().map(|g| g.doc_id.clone()).collect();
+
+        assert!(!flat_order.is_empty(), "flat returned no results");
+        assert!(!grouped_order.is_empty(), "grouped returned no groups");
+        let n = flat_order.len().min(grouped_order.len());
+        assert_eq!(
+            &flat_order[..n],
+            &grouped_order[..n],
+            "flat vs grouped doc order diverges. flat={flat_order:?} grouped={grouped_order:?}"
+        );
+    }
+
+    /// #72: flat-mode max_chunks_per_doc caps per-doc chunk count in the global top-K.
+    #[test]
+    fn flat_max_chunks_per_doc_issue72() {
+        let (a, _t) = adapter();
+        for doc_id in ["alpha", "beta"] {
+            for idx in 0..4 {
+                ok(
+                    &a,
+                    "insert_one",
+                    json!({"collection":"kb","document":{
+                    "doc_id": doc_id, "chunk_index": idx,
+                    "content": format!("PEF-35 fékpad chunk {doc_id}-{idx}"),
+                    "embedding": [0.5, 0.5, 0.0, 0.0]}}),
+                );
+            }
+        }
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_vector",
+            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (_p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"PEF-35",
+            "vector":[0.5,0.5,0.0,0.0],"limit":50,"max_chunks_per_doc":2,"merge_chunks":false}),
+        );
+        let counts = count_by_doc(&fo.fused);
+        for (doc_id, cnt) in &counts {
+            assert!(*cnt <= 2, "doc {doc_id} exceeded cap: {cnt} > 2");
+        }
+        assert!(counts.contains_key("alpha"), "alpha missing: {counts:?}");
+        assert!(counts.contains_key("beta"), "beta missing: {counts:?}");
+    }
+
+    /// #72 AC2: no cap (default) keeps all chunks competing for the limit slot.
+    #[test]
+    fn flat_max_chunks_per_doc_default_backward_compatible_issue72() {
+        let (a, _t) = adapter();
+        for idx in 0..4 {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id":"alpha","chunk_index":idx,
+                "content": format!("PEF-35 fékpad chunk alpha-{idx}"),
+                "embedding":[0.5,0.5,0.0,0.0]}}),
+            );
+        }
+        ok(
+            &a,
+            "index_create_fulltext",
+            json!({"collection":"kb","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create_vector",
+            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (_p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"PEF-35",
+            "vector":[0.5,0.5,0.0,0.0],"limit":50,"merge_chunks":false}),
+        );
+        let counts = count_by_doc(&fo.fused);
+        assert_eq!(
+            counts.get("alpha").copied(),
+            Some(4),
+            "expected all 4 alpha chunks without cap: {counts:?}"
+        );
     }
 }

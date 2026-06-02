@@ -3444,6 +3444,13 @@ impl FulltextIndex {
         self.parent_doc_id_field.as_deref().unwrap_or("doc_id")
     }
 
+    /// Whether this index tracks a parent doc_id field (RAG-style chunked index).
+    /// `false` → non-RAG: each indexed document is its own identity (`_id`),
+    /// so document-level qualification must intersect on `_id`, not `doc_id`.
+    pub fn has_parent_doc_id_field(&self) -> bool {
+        self.parent_doc_id_field.is_some()
+    }
+
     /// Set the parent doc_id field name.
     pub fn set_parent_doc_id_field(&mut self, field: String) {
         self.parent_doc_id_field = Some(field);

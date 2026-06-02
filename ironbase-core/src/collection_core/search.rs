@@ -1316,4 +1316,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         })?;
         Ok(index.has_chunk_doc_mapping())
     }
+
+    /// Check if the fulltext index tracks a parent doc_id field (RAG-style).
+    /// `false` → non-RAG: the chunk `_id` is the document identity.
+    pub fn fulltext_has_parent_doc_id_field(&self, field: &str) -> Result<bool> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index.has_parent_doc_id_field())
+    }
 }

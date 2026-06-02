@@ -237,7 +237,7 @@ impl IronBaseService {
         // Get current dynamic limits from LimitsManager
         let script_limits = self.limits_manager.get_limits();
 
-        match dispatch_tool(
+        let result = match dispatch_tool(
             &request.name,
             request.arguments.clone(),
             &self.adapter,
@@ -253,7 +253,29 @@ impl IronBaseService {
                 code: e.code.code(),
                 message: e.to_string(),
             },
+        };
+
+        // ACL-mutating tools persist into _system.acl via the adapter but do not
+        // touch the live in-memory AclConfig that check_acl() reads. Without this
+        // reload the new rule only takes effect after a restart (the handler still
+        // reports success → silent "change not applied" bug). Reload here, at the
+        // layer that owns the manager, so the change is active on the next request.
+        if result.is_success()
+            && matches!(
+                request.name.as_str(),
+                "acl_set" | "acl_delete" | "acl_cleanup"
+            )
+        {
+            if let Err(e) = self.acl_manager.reload() {
+                tracing::error!(
+                    tool = %request.name,
+                    "ACL reload failed: {} — rule persisted but NOT live until restart",
+                    e
+                );
+            }
         }
+
+        result
     }
 
     /// Check API key if required

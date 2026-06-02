@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Intermediate result structure for RRF fusion pipeline processing
 #[derive(Debug)]
 pub(crate) struct FusedResult {
-    #[allow(dead_code)] // Used in tests
+    /// Stable chunk id — also the deterministic tie-break key in the fusion sorts.
     pub(crate) id: String,
     pub(crate) doc: Value,
     pub(crate) rrf_score: f64,
@@ -182,11 +182,14 @@ pub(crate) fn rerank_results(
         item.final_score = item.rrf_score * boost;
     }
 
-    // Re-sort by final_score (descending)
+    // Re-sort by final_score (descending). Deterministic tie-break on the stable
+    // chunk id (see the RRF sort in retrieve_and_fuse) so equal scores resolve
+    // reproducibly run-to-run.
     results.sort_by(|a, b| {
         b.final_score
             .partial_cmp(&a.final_score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
@@ -578,7 +581,7 @@ pub(crate) fn qualify_documents(
         }
     }
 
-    // Fallback: find-based qualification (for legacy indexes without chunk_doc_mapping)
+    // Fallback: posting-list qualification for indexes without chunk_doc_mapping.
     let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
     if tokens.len() <= 1 {
         return Ok(None);
@@ -589,9 +592,42 @@ pub(crate) fn qualify_documents(
     token_counts.sort_by_key(|(_, count)| *count);
 
     if token_counts[0].1 == 0 {
-        return Ok(Some(json!({"doc_id": {"$in": []}})));
+        return Ok(Some(json!({"_id": {"$in": []}})));
     }
 
+    // Non-RAG collections have no parent doc_id field: the chunk `_id` IS the
+    // document identity. Intersect the posting lists directly on `_id` — the
+    // previous code projected only `doc_id` (which non-RAG docs lack), so every
+    // document collapsed to an empty set → `$in: []` → 0 results for every
+    // multi-word document-scope query. Native id Values are preserved so the
+    // resulting filter matches both string and numeric `_id`s.
+    if !adapter.fulltext_has_parent_doc_id_field(collection, text_field)? {
+        let mut qualified: Option<HashMap<String, Value>> = None;
+        for (token, _) in &token_counts {
+            let ids: HashMap<String, Value> = adapter
+                .fulltext_token_chunk_ids(collection, text_field, token)?
+                .into_iter()
+                .filter_map(|v| id_to_string(&v).map(|k| (k, v)))
+                .collect();
+
+            qualified = Some(match qualified {
+                None => ids,
+                Some(prev) => prev
+                    .into_iter()
+                    .filter(|(k, _)| ids.contains_key(k))
+                    .collect(),
+            });
+
+            if qualified.as_ref().is_some_and(|q| q.is_empty()) {
+                return Ok(Some(json!({"_id": {"$in": []}})));
+            }
+        }
+        let qualified_vec: Vec<Value> = qualified.unwrap_or_default().into_values().collect();
+        return Ok(Some(json!({"_id": {"$in": qualified_vec}})));
+    }
+
+    // Legacy RAG index (parent doc_id field present, mapping not persisted):
+    // resolve each chunk back to its parent doc_id via a projected find.
     let mut qualified: Option<HashSet<String>> = None;
 
     for (token, _) in &token_counts {

@@ -1,7 +1,6 @@
 //! Vector index and similarity search tool definitions
 //!
-//! Tools: index_create_vector, index_list_vector, index_drop_vector,
-//!        vector_search, vector_search_filter
+//! Tools: index_create_vector, index_list_vector, index_drop_vector, vector_search
 
 use super::common::fields;
 use serde_json::{json, Value};
@@ -119,41 +118,6 @@ pub fn tools() -> Vec<Value> {
                     "projection": fields::projection_simple()
                 },
                 "required": ["collection", "vector"]
-            }
-        }),
-        json!({
-            "name": "vector_search_filter",
-            "title": "Vector Search with Filter",
-            "description": "Hybrid search: combine vector similarity with attribute filtering. Filter is applied first, then vector search on matching documents.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "collection": {
-                        "type": "string",
-                        "description": "Collection with vector index"
-                    },
-                    "field": {
-                        "type": "string",
-                        "description": "Field with vector index (default: 'embedding')",
-                        "default": "embedding"
-                    },
-                    "vector": {
-                        "type": "array",
-                        "items": { "type": "number" },
-                        "description": "Query embedding vector"
-                    },
-                    "filter": {
-                        "type": "object",
-                        "description": "MongoDB-style filter applied BEFORE vector search. Example: {\"category\": \"science\"}"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum results to return",
-                        "default": 10
-                    },
-                    "projection": fields::projection_simple()
-                },
-                "required": ["collection", "vector", "filter"]
             }
         }),
     ]

@@ -217,31 +217,13 @@ fn search_doc_order(adapter: &Arc<IronBaseAdapter>, query: &str) -> Vec<String> 
         .unwrap_or_default()
 }
 
-/// Run `hybrid_search` grouped (BM25-only, matching the harness's no-provider
-/// mode) and return its document order — the baseline for the no-regression gate.
-fn hybrid_doc_order(adapter: &Arc<IronBaseAdapter>, query: &str) -> Vec<String> {
-    let res = dispatch_ok(
-        adapter,
-        "hybrid_search",
-        json!({"collection": "kb", "query": query, "group_by_document": true,
-               "vector_weight": 0.0, "fulltext_weight": 1.0}),
-    );
-    res["results"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|g| g["doc_id"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Stage-A/B gate (redesign §12 metric 1): `search` must not regress nDCG@k or
-/// Recall@k versus the `hybrid_search` baseline on the labeled set. (In Stage A
-/// they share the same fusion, so they are expected equal; the harness is what
-/// will catch a real regression when Stage B/C change the fusion.)
+/// Stage-A gate (redesign §12 metric 1): `search` must retrieve the labeled
+/// relevant documents with non-trivial nDCG@k / Recall@k on the eval set. The
+/// former vs-`hybrid_search` no-regression baseline was dropped when that tool
+/// was removed (`search` is now the sole retrieval surface), so this is an
+/// absolute quality floor rather than a relative comparison.
 #[test]
-fn test_search_no_regression_vs_hybrid_on_labeled_set() {
+fn test_search_quality_on_labeled_set() {
     let (adapter, _tmp) = create_test_adapter();
     seed_labeled_kb(&adapter);
 
@@ -270,15 +252,12 @@ fn test_search_no_regression_vs_hybrid_on_labeled_set() {
 
     let k = 5;
     let mut search_ndcg_sum = 0.0;
-    let mut hybrid_ndcg_sum = 0.0;
     let mut search_recall_sum = 0.0;
-    let mut hybrid_recall_sum = 0.0;
 
     for lq in &eval_set {
         let relevant: HashSet<String> = lq.relevant.iter().map(|s| s.to_string()).collect();
 
         let s_order = search_doc_order(&adapter, lq.query);
-        let h_order = hybrid_doc_order(&adapter, lq.query);
 
         // The labeled relevant docs must actually be retrievable (sanity: the
         // harness is exercising real retrieval, not an empty set).
@@ -289,27 +268,18 @@ fn test_search_no_regression_vs_hybrid_on_labeled_set() {
         );
 
         search_ndcg_sum += ndcg_at_k(&s_order, &relevant, k);
-        hybrid_ndcg_sum += ndcg_at_k(&h_order, &relevant, k);
         search_recall_sum += recall_at_k(&s_order, &relevant, k);
-        hybrid_recall_sum += recall_at_k(&h_order, &relevant, k);
     }
 
     let n = eval_set.len() as f64;
-    let (s_ndcg, h_ndcg) = (search_ndcg_sum / n, hybrid_ndcg_sum / n);
-    let (s_recall, h_recall) = (search_recall_sum / n, hybrid_recall_sum / n);
+    let (s_ndcg, s_recall) = (search_ndcg_sum / n, search_recall_sum / n);
 
-    // No regression: search ≥ hybrid (small epsilon for float noise).
-    assert!(
-        s_ndcg >= h_ndcg - 1e-9,
-        "nDCG regression: search={s_ndcg:.4} < hybrid={h_ndcg:.4}"
-    );
-    assert!(
-        s_recall >= h_recall - 1e-9,
-        "Recall regression: search={s_recall:.4} < hybrid={h_recall:.4}"
-    );
-    // Sanity: the harness actually finds the relevant docs (not a vacuous pass).
+    // Absolute floors: the labeled relevant docs are retrieved (recall) and
+    // ranked sensibly (nDCG). The clean single/two-token queries should rank the
+    // relevant docs at or near the top, so a >0.5 mean is a non-vacuous gate.
     assert!(
         s_recall > 0.5,
-        "harness recall implausibly low: {s_recall:.4}"
+        "labeled recall implausibly low: {s_recall:.4}"
     );
+    assert!(s_ndcg > 0.5, "labeled nDCG implausibly low: {s_ndcg:.4}");
 }

@@ -121,77 +121,6 @@ impl GroupStage {
         }
     }
 
-    /// Execute $group stage with streaming accumulators (memory optimized)
-    ///
-    /// # DEPRECATED (2026-01-25)
-    ///
-    /// **WARNING:** This method has NO LIMIT CHECKING!
-    /// Use `execute_streaming_with_context()` or `execute_streaming_with_limits()` instead.
-    ///
-    /// This legacy method is kept only for backward compatibility and may be removed
-    /// in a future version.
-    ///
-    /// ## Why this is dangerous:
-    /// - No `max_group_count` limit → OOM with high-cardinality group keys
-    /// - No `max_push_elements` limit → OOM with large $push accumulators
-    /// - No deadline checking → can run indefinitely
-    ///
-    /// ## Memory comparison for 650K emails grouped by sender (~10K unique senders):
-    /// - OLD (storing docs): 650K × ~800 bytes = ~500MB
-    /// - NEW (streaming): 10K × ~64 bytes = ~640KB (780× reduction!)
-    #[deprecated(
-        since = "0.3.90",
-        note = "Use execute_streaming_with_context() or execute_streaming_with_limits() for OOM protection"
-    )]
-    #[allow(dead_code, deprecated)]
-    pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
-        // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
-        let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
-
-        for doc in docs {
-            let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
-
-            // Get or initialize accumulator states for this group
-            let entry = groups.entry(group_hash).or_insert_with(|| GroupEntry {
-                key_value: group_value,
-                states: self
-                    .accumulators
-                    .iter()
-                    .map(|(field, acc)| (field.clone(), acc.init_state()))
-                    .collect(),
-            });
-
-            // Update each accumulator state with this document (streaming)
-            // Note: execute_streaming() has no limits - use execute_streaming_with_limits() for OOM protection
-            for (field, accumulator) in &self.accumulators {
-                if let Some(state) = entry.states.get_mut(field) {
-                    state.update(&doc, accumulator)?;
-                }
-            }
-            // doc is DROPPED here - not stored in memory!
-        }
-
-        // Finalize: convert accumulated states to output values
-        let mut results = Vec::new();
-
-        for (_hash, mut entry) in groups {
-            let mut result = serde_json::Map::new();
-
-            result.insert("_id".to_string(), entry.key_value);
-
-            for field in self.accumulators.keys() {
-                if let Some(state) = entry.states.remove(field) {
-                    let value = state.finalize();
-                    result.insert(field.clone(), value);
-                }
-            }
-
-            results.push(Value::Object(result));
-        }
-
-        Ok(results)
-    }
-
     /// Extract group key as (hash, value) pair - avoids JSON serialization
     /// Returns (u64 hash for HashMap lookup, original Value for output _id)
     fn extract_group_key_hash(&self, doc: &Value) -> Result<(u64, Value)> {
@@ -923,7 +852,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         let mut counts = std::collections::HashMap::new();
 
         for doc in results {
@@ -951,7 +882,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         let mut prefixes = std::collections::HashMap::new();
         for doc in results {
             prefixes.insert(
@@ -981,7 +914,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 3);
 
         // Helper: find count for a given (year, type) combo
@@ -1015,7 +950,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 2);
 
         // Each result's _id should be an object like {"city": "NYC"}
@@ -1044,7 +981,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 3, "Each unique combo should be a group");
 
         // Check that missing fields become null in the _id
@@ -1077,7 +1016,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
 
         // Find group 1
         let group1 = results
@@ -1108,7 +1049,9 @@ mod tests {
         }))
         .unwrap();
 
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 1);
 
         let names = results[0].get("names").unwrap().as_array().unwrap();
@@ -1135,7 +1078,9 @@ mod tests {
             "total": {"$sum": "$val"}
         }))
         .unwrap();
-        let results = group_stage.execute(docs.clone()).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.clone().into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].get("_id"), Some(&json!("NYC")));
         assert_eq!(results[0].get("total"), Some(&json!(3)));
@@ -1146,7 +1091,9 @@ mod tests {
             "count": {"$sum": 1}
         }))
         .unwrap();
-        let results = group_stage.execute(docs).unwrap();
+        let results = group_stage
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].get("_id"), Some(&Value::Null));
         assert_eq!(results[0].get("count"), Some(&json!(2)));

@@ -493,8 +493,8 @@ Optional parameters:
 
 ### Response Format
 
-Flat shape (v1.0.501+, consistent with `hybrid_search`): document fields are at
-the top level of each hit; engine metadata is `_`-prefixed.
+Flat shape (v1.0.501+): document fields are at the top level of each hit; engine
+metadata is `_`-prefixed.
 
 ```json
 {{
