@@ -100,6 +100,12 @@ pub trait Storage: Send + Sync {
     /// Drop (delete) a collection
     fn drop_collection(&mut self, name: &str) -> Result<()>;
 
+    /// Rename a collection. Moves the collection metadata (and its document
+    /// catalog) from `old_name` to `new_name`; persisted index metadata names
+    /// are re-prefixed by the implementation. On-disk index files and any
+    /// in-memory index managers are handled by the caller (DatabaseCore).
+    fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()>;
+
     /// List all collection names
     fn list_collections(&self) -> Vec<String>;
 

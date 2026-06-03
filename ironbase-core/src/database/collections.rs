@@ -1477,6 +1477,155 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.drop_collection(name)
     }
 
+    /// Rename a collection, moving its metadata and on-disk index files from
+    /// `old_name` to `new_name`.
+    ///
+    /// Document data is not copied — a `.mlite` is a single append-only file and
+    /// the document catalog travels with the collection metadata. Index files
+    /// are renamed in place (no rebuild) since index names are collection-keyed.
+    /// The in-memory `IndexManager` for the old name is dropped so a fresh one
+    /// reloads the renamed files + catalog on next access (this sidesteps
+    /// surgically rewriting each index's internal lazy-load path and file handle).
+    ///
+    /// Ordering: the durable catalog update happens first; the on-disk file
+    /// moves follow as best-effort. A crash or partial failure leaves the
+    /// catalog under the new name, and any missing/misnamed index file is
+    /// recreated by rebuild-from-catalog on the next open.
+    pub fn rename_collection(&self, old_name: &str, new_name: &str) -> Result<()> {
+        if old_name == new_name {
+            return Ok(());
+        }
+
+        // Validate existence + protection, and capture the db file path. The
+        // new-name conflict is also enforced by the storage layer.
+        let db_path = {
+            let storage = self.storage.read();
+            match storage.get_collection_meta(old_name) {
+                None => return Err(IronBaseError::CollectionNotFound(old_name.to_string())),
+                Some(meta) if meta.flags.protected => {
+                    return Err(IronBaseError::OperationNotAllowed(format!(
+                        "Cannot rename protected collection '{}'",
+                        old_name
+                    )));
+                }
+                Some(_) => {}
+            }
+            if storage.get_collection_meta(new_name).is_some() {
+                return Err(IronBaseError::CollectionExists(new_name.to_string()));
+            }
+            storage.get_file_path().to_string()
+        };
+
+        // Compute on-disk index-file moves from the *persisted* index lists,
+        // before the catalog is renamed. Works whether or not the in-memory
+        // IndexManager is currently loaded.
+        let file_moves = self.collection_index_file_moves(old_name, new_name, &db_path);
+
+        // 1) Durable catalog update (metadata + persisted index-name reprefix).
+        {
+            let mut storage = self.storage.write();
+            storage.rename_collection(old_name, new_name)?;
+        }
+
+        // 2) Move index files on disk (best-effort — rebuild-from-catalog covers
+        //    any gap on the next open).
+        for (old_path, new_path) in &file_moves {
+            if old_path.exists() {
+                if let Err(e) = std::fs::rename(old_path, new_path) {
+                    tracing::warn!(
+                        "rename_collection: failed to move index file {:?} -> {:?}: {}",
+                        old_path,
+                        new_path,
+                        e
+                    );
+                }
+            }
+        }
+
+        // 3) Drop the stale in-memory IndexManager (forces a fresh reload from
+        //    the renamed files + catalog), and move the schema + write lock.
+        self.index_managers.write().remove(old_name);
+        {
+            let mut schemas = self.schema_managers.write();
+            if let Some(arc) = schemas.remove(old_name) {
+                schemas.insert(new_name.to_string(), arc);
+            }
+        }
+        {
+            let mut locks = self.collection_write_locks.write();
+            if let Some(arc) = locks.remove(old_name) {
+                locks.insert(new_name.to_string(), arc);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compute the on-disk index-file moves for a collection rename from the
+    /// persisted index metadata. Index names follow `{collection}_{suffix}`, so
+    /// only the prefix changes; the vector `.hnsw` path is raw (not hashed).
+    fn collection_index_file_moves(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        db_path: &str,
+    ) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+        use crate::collection_core::{
+            build_btree_index_file_path, build_fulltext_index_file_path,
+            build_fuzzy_index_file_path,
+        };
+
+        if db_path.is_empty() {
+            return Vec::new();
+        }
+        let prefix = format!("{}_", old_name);
+        let remap = |name: &str| -> String {
+            match name.strip_prefix(&prefix) {
+                Some(suffix) => format!("{}_{}", new_name, suffix),
+                None => name.to_string(),
+            }
+        };
+
+        let storage = self.storage.read();
+        let meta = match storage.get_collection_meta(old_name) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+
+        let mut moves: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+        for ix in &meta.indexes {
+            if let (Some(o), Some(n)) = (
+                build_btree_index_file_path(db_path, &ix.name),
+                build_btree_index_file_path(db_path, &remap(&ix.name)),
+            ) {
+                moves.push((o, n));
+            }
+        }
+        for ix in &meta.fulltext_indexes {
+            if let (Some(o), Some(n)) = (
+                build_fulltext_index_file_path(db_path, &ix.name),
+                build_fulltext_index_file_path(db_path, &remap(&ix.name)),
+            ) {
+                moves.push((o, n));
+            }
+        }
+        for ix in &meta.fuzzy_indexes {
+            if let (Some(o), Some(n)) = (
+                build_fuzzy_index_file_path(db_path, &ix.name),
+                build_fuzzy_index_file_path(db_path, &remap(&ix.name)),
+            ) {
+                moves.push((o, n));
+            }
+        }
+        for ix in &meta.vector_indexes {
+            moves.push((
+                crate::index::IndexManager::build_vector_cache_path(db_path, &ix.name),
+                crate::index::IndexManager::build_vector_cache_path(db_path, &remap(&ix.name)),
+            ));
+        }
+        moves
+    }
+
     /// Set collection flags (system, protected, hidden)
     pub fn set_collection_flags(
         &self,

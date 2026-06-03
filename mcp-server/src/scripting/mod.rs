@@ -74,6 +74,7 @@
 // Internal modules
 mod conversion;
 mod db_functions;
+pub(crate) use db_functions::RAG_CONFIG_COLLECTION;
 mod engine;
 mod error;
 mod limits;

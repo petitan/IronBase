@@ -335,8 +335,8 @@ fn dispatch_tool_inner(
         | "find_with_hint" => index::dispatch(name, params, adapter),
 
         // Collection operations
-        "collection_list" | "collection_create" | "collection_drop" | "schema_set"
-        | "schema_get" => collection::dispatch(name, params, adapter),
+        "collection_list" | "collection_create" | "collection_drop" | "collection_rename"
+        | "schema_set" | "schema_get" => collection::dispatch(name, params, adapter),
 
         // ACL operations
         "acl_list" | "acl_get" | "acl_set" | "acl_delete" | "acl_cleanup" => {

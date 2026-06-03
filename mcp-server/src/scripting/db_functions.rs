@@ -1128,7 +1128,7 @@ const MAX_AGGREGATE_DOCUMENTS: usize = 10_000;
 const MAX_DISTINCT_VALUES: usize = 10_000;
 
 /// System collection for RAG configs
-const RAG_CONFIG_COLLECTION: &str = "_system.rag";
+pub(crate) const RAG_CONFIG_COLLECTION: &str = "_system.rag";
 
 fn register_rag_functions(
     engine: &mut Engine,

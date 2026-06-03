@@ -7,7 +7,7 @@
 # on the v1.0.505-507 changes, which until now had only in-process Rust coverage:
 #
 #   A. Tool surface     — `search` present; `hybrid_search` / `vector_search_filter`
-#                         removed; tool count == 92.
+#                         removed; tool count == 93.
 #   B. Non-RAG fulltext — multi-field `match_scope="document"` qualification on a
 #                         collection with no parent doc_id (the v1.0.506 fix:
 #                         union must key on `_id`, not a `doc_id` the docs lack).
@@ -95,8 +95,8 @@ echo "== A. Tool surface (v1.0.505-507) =="
 TOOLS="$(rpc "tools/list" '{}' | jq -r '.result.tools[].name')"
 COUNT="$(printf '%s\n' "$TOOLS" | grep -c .)"
 # Non-localhost callers don't see the 8 admin_* tools (tools/list filtering,
-# SECURITY FIX #14): localhost sees 92, a remote/Internal client sees 84.
-EXP_COUNT=$([[ "$SELF_HOSTED" == 1 ]] && echo 92 || echo 84)
+# SECURITY FIX #14): localhost sees 93, a remote/Internal client sees 85.
+EXP_COUNT=$([[ "$SELF_HOSTED" == 1 ]] && echo 93 || echo 85)
 assert "search tool present"             "$(grep -qx search             <<<"$TOOLS" && echo 1 || echo 0)"
 assert "hybrid_search removed"           "$(grep -qx hybrid_search       <<<"$TOOLS" && echo 0 || echo 1)"
 assert "vector_search_filter removed"    "$(grep -qx vector_search_filter<<<"$TOOLS" && echo 0 || echo 1)"

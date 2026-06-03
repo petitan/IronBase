@@ -240,6 +240,31 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        if old_name == new_name {
+            return Ok(());
+        }
+        if !self.collections.contains_key(old_name) {
+            return Err(IronBaseError::CollectionNotFound(old_name.to_string()));
+        }
+        if self.collections.contains_key(new_name) {
+            return Err(IronBaseError::CollectionExists(new_name.to_string()));
+        }
+
+        let docs = self
+            .collections
+            .remove(old_name)
+            .expect("existence checked above");
+        self.collections.insert(new_name.to_string(), docs);
+
+        if let Some(mut meta) = self.metadata.remove(old_name) {
+            meta.apply_rename(old_name, new_name);
+            self.metadata.insert(new_name.to_string(), meta);
+        }
+
+        Ok(())
+    }
+
     fn list_collections(&self) -> Vec<String> {
         self.collections.keys().cloned().collect()
     }

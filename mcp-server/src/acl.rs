@@ -751,6 +751,7 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
         // ---- Structure admin (gated by ACL on the `collection` argument) ----
         "collection_create"
         | "collection_drop"
+        | "collection_rename"
         | "index_create"
         | "index_drop"
         | "index_create_fulltext"
@@ -862,9 +863,13 @@ pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
     tool_policy(tool_name).permission
 }
 
-/// Extract collection name from tool arguments
+/// Extract collection name from tool arguments.
+///
+/// Falls back to `old_collection` so collection_rename is ACL-gated on the
+/// collection being renamed (you need admin rights on the source collection).
 pub fn get_collection_from_args(args: &Value) -> Option<String> {
     args.get("collection")
+        .or_else(|| args.get("old_collection"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }

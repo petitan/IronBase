@@ -707,6 +707,20 @@ impl IronBaseAdapter {
         Ok(())
     }
 
+    /// Rename a collection (metadata + index files; no document copy).
+    pub fn rename_collection(&self, old_name: &str, new_name: &str) -> Result<()> {
+        {
+            let db = self.db.write();
+            db.rename_collection(old_name, new_name)?;
+        }
+        // Move the cached document count from the old name to the new one.
+        if let Some(count) = self.collection_stats.get_if_present(old_name) {
+            self.collection_stats.set(new_name, count);
+        }
+        self.collection_stats.remove(old_name);
+        Ok(())
+    }
+
     /// Get database statistics
     ///
     /// PERFORMANCE: Uses in-memory document counts instead of count_documents().

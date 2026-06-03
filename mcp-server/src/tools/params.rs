@@ -333,6 +333,13 @@ pub struct CollectionDropParams {
     pub collection: String,
 }
 
+/// Parameters for `collection_rename` tool
+#[derive(Debug, Deserialize)]
+pub struct CollectionRenameParams {
+    pub old_collection: String,
+    pub new_collection: String,
+}
+
 /// Parameters for `collection_stats` tool
 #[derive(Debug, Deserialize)]
 pub struct CollectionStatsParams {

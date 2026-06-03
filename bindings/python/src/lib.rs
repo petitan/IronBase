@@ -198,6 +198,14 @@ impl DatabaseWrapper {
         db_dispatch!(self, drop_collection, name)
     }
 
+    fn rename_collection(
+        &self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), ironbase_core::IronBaseError> {
+        db_dispatch!(self, rename_collection, old_name, new_name)
+    }
+
     fn close(&self) -> Result<(), ironbase_core::IronBaseError> {
         match self {
             DatabaseWrapper::File(db) => db.close(),
@@ -622,6 +630,13 @@ impl IronBase {
     fn drop_collection(&self, name: String) -> PyResult<()> {
         self.db
             .drop_collection(&name)
+            .map_err(ironbase_error_to_pyerr)
+    }
+
+    /// Rename a collection (moves metadata + index files; no document copy)
+    fn rename_collection(&self, old_collection: String, new_collection: String) -> PyResult<()> {
+        self.db
+            .rename_collection(&old_collection, &new_collection)
             .map_err(ironbase_error_to_pyerr)
     }
 

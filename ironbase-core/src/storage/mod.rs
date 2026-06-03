@@ -343,6 +343,34 @@ pub struct CollectionMeta {
     pub auto_embedding_config: Option<AutoEmbeddingConfig>,
 }
 
+impl CollectionMeta {
+    /// Apply a collection rename to this metadata in place: set the new name
+    /// and re-prefix every persisted index-metadata name. Index names follow
+    /// the `{collection}_{suffix}` convention, so only the prefix changes.
+    pub(crate) fn apply_rename(&mut self, old_name: &str, new_name: &str) {
+        self.name = new_name.to_string();
+        let prefix = format!("{}_", old_name);
+        let reprefix = |name: &str| -> String {
+            match name.strip_prefix(&prefix) {
+                Some(suffix) => format!("{}_{}", new_name, suffix),
+                None => name.to_string(),
+            }
+        };
+        for ix in &mut self.indexes {
+            ix.name = reprefix(&ix.name);
+        }
+        for ix in &mut self.fuzzy_indexes {
+            ix.name = reprefix(&ix.name);
+        }
+        for ix in &mut self.fulltext_indexes {
+            ix.name = reprefix(&ix.name);
+        }
+        for ix in &mut self.vector_indexes {
+            ix.name = reprefix(&ix.name);
+        }
+    }
+}
+
 /// Index record for persistence
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexRecord {
@@ -844,6 +872,40 @@ impl StorageEngine {
 
         self.collections.remove(name);
         self.header.collection_count -= 1;
+
+        self.mark_metadata_dirty()?;
+        self.flush()?;
+
+        Ok(())
+    }
+
+    /// Rename a collection.
+    ///
+    /// Moves the `CollectionMeta` (with its document catalog) from `old_name`
+    /// to `new_name` and re-prefixes every persisted index-metadata name
+    /// (`{old}_x` -> `{new}_x`) so the catalog stays consistent. Document data
+    /// is not moved — a `.mlite` is a single append-only file and the catalog
+    /// offsets travel with the metadata. The on-disk index files and any
+    /// in-memory index managers are re-keyed by the caller (DatabaseCore).
+    pub fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        if old_name == new_name {
+            return Ok(());
+        }
+        if !self.collections.contains_key(old_name) {
+            return Err(IronBaseError::CollectionNotFound(old_name.to_string()));
+        }
+        if self.collections.contains_key(new_name) {
+            return Err(IronBaseError::CollectionExists(new_name.to_string()));
+        }
+
+        let mut meta = self
+            .collections
+            .remove(old_name)
+            .expect("existence checked above");
+        meta.apply_rename(old_name, new_name);
+
+        // collection_count is unchanged — this is a move, not an add/remove.
+        self.collections.insert(new_name.to_string(), meta);
 
         self.mark_metadata_dirty()?;
         self.flush()?;
@@ -2225,6 +2287,10 @@ impl Storage for StorageEngine {
 
     fn drop_collection(&mut self, name: &str) -> Result<()> {
         self.drop_collection(name)
+    }
+
+    fn rename_collection(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        self.rename_collection(old_name, new_name)
     }
 
     fn list_collections(&self) -> Vec<String> {
