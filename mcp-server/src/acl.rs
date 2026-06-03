@@ -772,9 +772,14 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
             .scope(SYSTEM_ACL_COLLECTION)
             .local()
             .mutates_acl(),
-        // acl_cleanup keeps its historical profile (loopback-only, no ACL scope) for
-        // behavior parity — unlike acl_set/delete it carries no `_system.acl` scope.
-        "acl_cleanup" => ToolPolicy::new(Read).local().mutates_acl(),
+        // acl_cleanup deletes orphan rules from `_system.acl`, so it is gated like
+        // acl_set/delete: Admin on the `_system.acl` scope + loopback-only. (It was
+        // previously only loopback-gated with a Read level that check_acl never even
+        // evaluated, since it carried no scope.)
+        "acl_cleanup" => ToolPolicy::new(Admin)
+            .scope(SYSTEM_ACL_COLLECTION)
+            .local()
+            .mutates_acl(),
 
         // ---- Listener management (_system.listeners) ----
         "listener_list" | "listener_get" => {
@@ -812,8 +817,43 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
             .local()
             .admin_key(),
 
-        // ---- Unknown: conservative historical default ----
-        _ => ToolPolicy::new(Read),
+        // ---- Vector / RAG / embedding (gated by ACL on the `collection` arg,
+        //      like their core counterparts). Previously these all fell to the
+        //      Read default — leaving structure/config mutations (drop a vector
+        //      index, create a RAG collection, change auto-embed config) requiring
+        //      only Read. ----
+        "index_create_vector"
+        | "index_drop_vector"
+        | "rag_collection_create"
+        | "auto_embed_enable"
+        | "auto_embed_disable" => ToolPolicy::new(Admin),
+        "rag_document_import" | "embed_document" | "embed_job_cancel" | "index_stats_refresh" => {
+            ToolPolicy::new(Write)
+        }
+        "index_list_vector"
+        | "index_stats"
+        | "rag_collection_stats"
+        | "rag_load_all_chunks"
+        | "vector_search"
+        | "search"
+        | "fulltext_analyze"
+        | "embed_text"
+        | "embed_batch"
+        | "embed_list_models"
+        | "embed_cache_stats"
+        | "embed_job_list"
+        | "embed_job_status"
+        | "auto_embed_status" => ToolPolicy::new(Read),
+        // Global embedding-cache wipe has no `collection` arg, so ACL can't gate it
+        // by collection — loopback-only (like the db_* maintenance ops).
+        "embed_cache_clear" => ToolPolicy::new(Admin).local(),
+
+        // ---- Unknown tool: fail CLOSED ----
+        // Every shipped tool is classified above. A tool with no explicit policy is
+        // treated as Admin + loopback-only, so a newly added tool that someone
+        // forgets to classify is denied to remote callers rather than silently
+        // inheriting Read (the historical fail-open default).
+        _ => ToolPolicy::new(Admin).local(),
     }
 }
 
@@ -996,8 +1036,12 @@ mod tests {
         ] {
             assert_eq!(get_required_permission(t), Admin, "{t} should be Admin");
         }
-        // Unknown → conservative default Read
-        assert_eq!(get_required_permission("totally_unknown_tool"), Read);
+        // Unknown → fail-closed default (Admin, loopback-only).
+        assert_eq!(get_required_permission("totally_unknown_tool"), Admin);
+        assert!(
+            requires_localhost("totally_unknown_tool"),
+            "unknown tool must be loopback-only (fail closed)"
+        );
     }
 
     #[test]
@@ -1030,9 +1074,13 @@ mod tests {
             get_system_collection_for_tool("listener_add"),
             Some(crate::listener::SYSTEM_LISTENERS_COLLECTION)
         );
+        // acl_cleanup now carries the _system.acl scope (Admin-gated like acl_set/delete).
+        assert_eq!(
+            get_system_collection_for_tool("acl_cleanup"),
+            Some(SYSTEM_ACL_COLLECTION)
+        );
         // No implicit scope (acted on via `collection` arg, or none)
         assert_eq!(get_system_collection_for_tool("find"), None);
-        assert_eq!(get_system_collection_for_tool("acl_cleanup"), None);
         assert_eq!(get_system_collection_for_tool("db_stats"), None);
     }
 
@@ -1108,6 +1156,75 @@ mod tests {
             "unknown_tool",
         ] {
             assert!(!tool_policy(t).mutates_acl, "{t} must NOT mark mutates_acl");
+        }
+    }
+
+    #[test]
+    fn test_tool_policy_vector_rag_embed_classified() {
+        use RequiredPermission::{Admin, Read, Write};
+        // These previously fell to the Read default despite being mutations.
+        for t in [
+            "index_create_vector",
+            "index_drop_vector",
+            "rag_collection_create",
+            "auto_embed_enable",
+            "auto_embed_disable",
+        ] {
+            assert_eq!(get_required_permission(t), Admin, "{t} must be Admin");
+        }
+        for t in [
+            "rag_document_import",
+            "embed_document",
+            "embed_job_cancel",
+            "index_stats_refresh",
+        ] {
+            assert_eq!(get_required_permission(t), Write, "{t} must be Write");
+        }
+        for t in [
+            "search",
+            "vector_search",
+            "rag_load_all_chunks",
+            "fulltext_analyze",
+            "embed_text",
+            "index_stats",
+            "auto_embed_status",
+        ] {
+            assert_eq!(get_required_permission(t), Read, "{t} must be Read");
+        }
+        // Global cache wipe has no collection arg → loopback-only.
+        assert!(requires_localhost("embed_cache_clear"));
+    }
+
+    /// Completeness guard: every shipped tool must be explicitly classified, so
+    /// none silently rides the fail-closed default. A new tool added without a
+    /// `tool_policy` arm trips this (it would otherwise become Admin+loopback-only
+    /// and surprise the author).
+    #[test]
+    fn test_every_shipped_tool_is_explicitly_classified() {
+        let tools = crate::tools::get_tools_list();
+        let names: Vec<String> = tools["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+        assert!(names.len() >= 90, "unexpectedly few tools: {}", names.len());
+        // A guaranteed-unknown name yields the fail-closed default; no real tool
+        // may share that exact (Admin, no-scope, loopback, no-admin-key) shape
+        // *unless* it is intentionally one of the no-collection maintenance ops.
+        let known_loopback_admin = ["db_compact", "db_checkpoint", "embed_cache_clear"];
+        for name in &names {
+            let p = tool_policy(name);
+            let looks_like_default = p.permission == RequiredPermission::Admin
+                && p.localhost
+                && p.system_collection.is_none()
+                && !p.admin_key;
+            if looks_like_default {
+                assert!(
+                    known_loopback_admin.contains(&name.as_str()),
+                    "tool '{name}' matches the fail-closed default shape — add an explicit tool_policy arm"
+                );
+            }
         }
     }
 }
