@@ -1251,15 +1251,18 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Timeout waiting for write lock"));
 
-        // Should have waited approximately 100ms
+        // Should have waited approximately the 100ms timeout. The lower bound
+        // confirms it actually blocked; the upper bound only guards against an
+        // indefinite hang, so keep it generous — a tight bound (200ms) flaked on
+        // loaded/slow CI (macOS) where post-timeout scheduling jitter is large.
         let elapsed = start.elapsed();
         assert!(
             elapsed >= Duration::from_millis(90),
-            "Should wait at least 90ms"
+            "Should wait at least 90ms, waited {elapsed:?}"
         );
         assert!(
-            elapsed < Duration::from_millis(200),
-            "Should not wait more than 200ms"
+            elapsed < Duration::from_millis(2000),
+            "Should not hang indefinitely, waited {elapsed:?}"
         );
 
         // Cleanup
