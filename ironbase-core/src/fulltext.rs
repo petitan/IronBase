@@ -2138,6 +2138,11 @@ impl FulltextIndex {
         skip: usize,
         min_score: Option<f64>,
     ) -> Vec<FtsSearchResult> {
+        // A building/rebuilding index is not yet queryable — return no hits rather
+        // than partial/stale results (audit #15 finding E).
+        if self.building {
+            return Vec::new();
+        }
         let query_tokens = tokenize(query, &self.options);
         if query_tokens.is_empty() {
             return Vec::new();
@@ -2239,6 +2244,11 @@ impl FulltextIndex {
         min_score: Option<f64>,
         ctx: Option<&crate::execution::ExecutionContext>,
     ) -> Result<Vec<FtsSearchResult>> {
+        // A building/rebuilding index is not yet queryable — return no hits rather
+        // than partial/stale results (audit #15 finding E).
+        if self.building {
+            return Ok(Vec::new());
+        }
         let query_tokens = tokenize(query, &self.options);
         if query_tokens.is_empty() {
             return Ok(Vec::new());
@@ -3125,24 +3135,36 @@ impl FulltextIndex {
     /// on the next checkpoint (which would overwrite frozen_inverted).
     pub(crate) fn rollback_flush(&mut self) {
         if let Some(frozen) = self.frozen_inverted.take() {
-            // Restore: merge frozen entries back into inverted_index
-            // (inverted_index may have new entries from concurrent inserts during Phase 2)
+            // Restore: merge frozen entries back into inverted_index, deduping by
+            // doc_id. A concurrent Phase-2 update may have re-inserted a doc that is
+            // also in the frozen snapshot (remove()+insert() on the live index);
+            // appending both leaves a duplicate posting. Search dedups it, but the
+            // NEXT flush would persist the duplicate and skew its BM25 term frequency
+            // (audit #15 findings C/D). Keep the live (newer) entry, drop the frozen dup.
             match Arc::try_unwrap(frozen) {
                 Ok(entries) => {
-                    for (token, mut vec) in entries {
-                        self.inverted_index
-                            .entry(token)
-                            .or_default()
-                            .append(&mut vec);
+                    for (token, vec) in entries {
+                        let target = self.inverted_index.entry(token).or_default();
+                        let existing: std::collections::HashSet<DocumentId> =
+                            target.iter().map(|e| e.0.clone()).collect();
+                        for e in vec {
+                            if !existing.contains(&e.0) {
+                                target.push(e);
+                            }
+                        }
                     }
                 }
                 Err(arc) => {
                     // Snapshot still referenced (shouldn't happen, but be safe)
                     for (token, entries) in arc.as_ref() {
-                        self.inverted_index
-                            .entry(token.clone())
-                            .or_default()
-                            .extend(entries.iter().cloned());
+                        let target = self.inverted_index.entry(token.clone()).or_default();
+                        let existing: std::collections::HashSet<DocumentId> =
+                            target.iter().map(|e| e.0.clone()).collect();
+                        for e in entries {
+                            if !existing.contains(&e.0) {
+                                target.push(e.clone());
+                            }
+                        }
                     }
                 }
             }

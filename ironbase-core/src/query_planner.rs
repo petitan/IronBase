@@ -530,11 +530,13 @@ impl QueryPlanner {
         let effective_lower = gte_val.or(gt_val);
         let effective_upper = lte_val.or(lt_val);
         if let (Some(lo), Some(hi)) = (effective_lower, effective_upper) {
-            // Mixed types are impossible ranges (Number vs String can never overlap)
-            let mixed_types = matches!(
-                (lo, hi),
-                (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_))
-            );
+            // Bounds of different value-type categories can never form an overlapping
+            // range (a number can't be both ≥ 5 and ≤ false), so the range is
+            // impossible. Detect this generically by type rank rather than only the
+            // Number/String pair — `{$gte: 5, $lte: false}` and `{$gte: 5, $lte: null}`
+            // previously slipped through to a 0.0-cost index misselection (audit #27
+            // finding C). Same-type bounds fall through to the value comparison below.
+            let mixed_types = Self::value_type_rank(lo) != Self::value_type_rank(hi);
             if mixed_types || Self::compare_json_for_bound(lo, hi) == std::cmp::Ordering::Greater {
                 return None;
             }
@@ -603,6 +605,19 @@ impl QueryPlanner {
         Some(Value::Object(merged))
     }
 
+    /// Value-type category rank, used to detect mixed-type range bounds (audit #27
+    /// finding C). Bounds with different ranks can never overlap into a valid range.
+    fn value_type_rank(v: &Value) -> u8 {
+        match v {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Number(_) => 2,
+            Value::String(_) => 3,
+            Value::Array(_) => 4,
+            Value::Object(_) => 5,
+        }
+    }
+
     /// Compare two JSON values for bound tightening (used in conflicting range resolution).
     ///
     /// Supports Number and String comparisons.
@@ -635,9 +650,21 @@ impl QueryPlanner {
         field: &str,
         index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, bool)> {
+        // Prefer a single-field (non-compound) index, falling back to a compound
+        // one only when no single index exists. Without this, the result depended
+        // on the (HashMap-derived, unordered) iteration order: if a compound index
+        // happened to come first, callers that skip compounds (`if is_compound
+        // continue`) dropped the whole field to a collection scan even though a
+        // usable single index was present — a nondeterministic perf regression
+        // (audit #27 finding B).
         index_fields
             .iter()
-            .find(|info| info.prefix_field == field && !info.building)
+            .find(|info| info.prefix_field == field && !info.building && !info.is_compound)
+            .or_else(|| {
+                index_fields
+                    .iter()
+                    .find(|info| info.prefix_field == field && !info.building)
+            })
             .map(|info| (info.index_name.clone(), info.is_compound))
     }
 
@@ -2474,6 +2501,67 @@ mod tests {
             histogram: None,
             mcv: None,
         }
+    }
+
+    #[test]
+    fn audit27_find_index_prefers_single_over_compound() {
+        // Finding B: with both a compound and a single index on the same field,
+        // the choice must be deterministic (prefer the single one) regardless of
+        // the unordered list order — otherwise a compound-first ordering dropped
+        // the field to a collection scan at the `if is_compound { continue }` sites.
+        let mk_compound = || {
+            let mut c = make_index("year", "idx_year_type");
+            c.is_compound = true;
+            c.num_fields = 2;
+            c
+        };
+        let idx = vec![mk_compound(), make_index("year", "idx_year")];
+        let (name, is_compound) =
+            QueryPlanner::find_index_for_field("year", &idx).expect("index found");
+        assert_eq!(name, "idx_year");
+        assert!(!is_compound, "must prefer the single-field index");
+        // Reverse order yields the same deterministic result.
+        let idx_rev = vec![make_index("year", "idx_year"), mk_compound()];
+        assert_eq!(
+            QueryPlanner::find_index_for_field("year", &idx_rev)
+                .unwrap()
+                .0,
+            "idx_year"
+        );
+        // With only a compound index, it is still returned (is_compound = true).
+        let only = vec![mk_compound()];
+        assert!(
+            QueryPlanner::find_index_for_field("year", &only).unwrap().1,
+            "only-compound index is returned"
+        );
+    }
+
+    #[test]
+    fn audit27_mixed_type_range_bounds_are_impossible() {
+        // Finding C: bounds of different value-type categories form an impossible
+        // range; resolve_range_conditions must return None (not a 0-cost index pick).
+        let mixed = [
+            (json!(5), json!(false)),  // Number / Bool
+            (json!(5), json!(null)),   // Number / Null
+            (json!("a"), json!(5)),    // String / Number (the original case)
+            (json!(true), json!("z")), // Bool / String
+        ];
+        for (lo, hi) in mixed {
+            let conds = vec![
+                ("$gte".to_string(), lo.clone()),
+                ("$lte".to_string(), hi.clone()),
+            ];
+            assert!(
+                QueryPlanner::resolve_range_conditions(&conds).is_none(),
+                "mixed-type bounds {lo}/{hi} must be impossible"
+            );
+        }
+        // A valid same-type range must survive (not over-filtered).
+        let ok = vec![
+            ("$gte".to_string(), json!(5)),
+            ("$lte".to_string(), json!(10)),
+        ];
+        assert!(QueryPlanner::resolve_range_conditions(&ok).is_some());
     }
 
     #[test]
