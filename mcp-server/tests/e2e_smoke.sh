@@ -94,10 +94,13 @@ echo
 echo "== A. Tool surface (v1.0.505-507) =="
 TOOLS="$(rpc "tools/list" '{}' | jq -r '.result.tools[].name')"
 COUNT="$(printf '%s\n' "$TOOLS" | grep -c .)"
+# Non-localhost callers don't see the 8 admin_* tools (tools/list filtering,
+# SECURITY FIX #14): localhost sees 92, a remote/Internal client sees 84.
+EXP_COUNT=$([[ "$SELF_HOSTED" == 1 ]] && echo 92 || echo 84)
 assert "search tool present"             "$(grep -qx search             <<<"$TOOLS" && echo 1 || echo 0)"
 assert "hybrid_search removed"           "$(grep -qx hybrid_search       <<<"$TOOLS" && echo 0 || echo 1)"
 assert "vector_search_filter removed"    "$(grep -qx vector_search_filter<<<"$TOOLS" && echo 0 || echo 1)"
-assert "tool count == 92"                "$([[ "$COUNT" == 92 ]] && echo 1 || echo 0)" "got $COUNT"
+assert "tool count == $EXP_COUNT"        "$([[ "$COUNT" == "$EXP_COUNT" ]] && echo 1 || echo 0)" "got $COUNT"
 
 echo
 echo "== B. Non-RAG multi-field document-scope fulltext (v1.0.506 fix) =="
@@ -132,6 +135,10 @@ fi
 
 echo
 echo "== E. ACL change takes effect immediately — no restart (v1.0.505 reload) =="
+if [[ "$SELF_HOSTED" != 1 ]]; then
+  echo "  (skipped on a shared/remote server — the downgrade locks a collection that"
+  echo "   the caller can no longer drop; only run against the self-hosted instance)"
+else
 # Use a throwaway collection so the downgrade does not lock the main KB. Setting
 # localhost to read-only must take effect on the VERY NEXT write (before v1.0.505
 # the persisted rule only applied after a server restart). acl_set keys its
@@ -145,6 +152,7 @@ assert "write DENIED immediately after read-only acl_set (live reload)" "$(grep 
 # The read-only rule still permits acl_get — confirm it persisted in the expected shape.
 ACLGET="$(tool acl_get "$(jq -nc --arg c "$KBA" '{collection:$c}')")"
 assert "acl_get returns the persisted localhost=read rule" "$(jq -e '.rules[] | select(.principal.value=="localhost") | (.permissions.read==true and .permissions.write==false)' <<<"$ACLGET" >/dev/null 2>&1 && echo 1 || echo 0)"
+fi
 
 echo
 echo "== F. CRUD sanity =="
