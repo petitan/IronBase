@@ -710,36 +710,6 @@ impl DbWrapper {
         Ok(result)
     }
 
-    // === Hybrid search ===
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn hybrid_search(
-        &self,
-        collection: &str,
-        vector_field: &str,
-        text_field: &str,
-        vector: &[f64],
-        query: &str,
-        limit: usize,
-        search_mode: &str,
-        rrf_k: f64,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .hybrid_search(
-                collection,
-                vector_field,
-                text_field,
-                vector,
-                query,
-                limit,
-                search_mode,
-                rrf_k,
-            )
-            .await?;
-        Ok(result)
-    }
-
     // === Embedding operations ===
 
     pub async fn embed_text(&self, text: &str, provider: &str) -> Result<Value> {
