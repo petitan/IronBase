@@ -113,7 +113,7 @@ pub struct DeleteParams {
     pub filter: Value,
 }
 
-/// Parameters for `count_documents` tool
+/// Parameters for `count` tool
 #[derive(Debug, Deserialize)]
 pub struct CountParams {
     pub collection: String,
@@ -171,7 +171,7 @@ pub struct IndexDropParams {
     pub index_name: String,
 }
 
-/// Parameters for `index_create_fuzzy` tool
+/// Parameters for the fuzzy sub-route of `index_create` (type='fuzzy')
 #[derive(Debug, Deserialize)]
 pub struct FuzzyIndexParams {
     pub collection: String,
@@ -190,7 +190,7 @@ fn default_threshold() -> f64 {
     0.8
 }
 
-/// Parameters for `index_create_fulltext` tool
+/// Parameters for the fulltext sub-route of `index_create` (type='fulltext')
 #[derive(Debug, Deserialize)]
 pub struct FulltextIndexParams {
     pub collection: String,
@@ -363,13 +363,13 @@ pub struct SchemaGetParams {
 // Transaction Tool Parameters
 // ============================================================================
 
-/// Parameters for `commit_transaction` / `rollback_transaction` tools
+/// Parameters for `transaction_commit` / `transaction_rollback` tools
 #[derive(Debug, Deserialize)]
 pub struct TransactionIdParams {
     pub transaction_id: String,
 }
 
-/// Parameters for `insert_one_tx` tool
+/// Parameters for `transaction_insert_one` tool
 #[derive(Debug, Deserialize)]
 pub struct TransactionInsertParams {
     pub transaction_id: String,
@@ -377,7 +377,7 @@ pub struct TransactionInsertParams {
     pub document: Value,
 }
 
-/// Parameters for `update_one_tx` tool
+/// Parameters for `transaction_update_one` tool
 #[derive(Debug, Deserialize)]
 pub struct TransactionUpdateParams {
     pub transaction_id: String,
@@ -388,7 +388,7 @@ pub struct TransactionUpdateParams {
     pub update: Value,
 }
 
-/// Parameters for `delete_one_tx` tool
+/// Parameters for `transaction_delete_one` tool
 #[derive(Debug, Deserialize)]
 pub struct TransactionDeleteParams {
     pub transaction_id: String,
@@ -493,7 +493,7 @@ pub struct ListenerIdParams {
     pub id: String,
 }
 
-/// Parameters for `listener_add` tool
+/// Parameters for `listener_create` tool
 #[derive(Debug, Deserialize)]
 pub struct ListenerAddParams {
     pub id: String,
@@ -530,14 +530,14 @@ pub struct AdminKeyParams {
     pub admin_key: Option<String>,
 }
 
-/// Parameters for `admin_create_system_collection` and `admin_drop_protected` tools
+/// Parameters for `admin_collection_create_system` and `admin_collection_drop_protected` tools
 #[derive(Debug, Deserialize)]
 pub struct AdminCollectionParams {
     pub collection: String,
     pub admin_key: Option<String>,
 }
 
-/// Parameters for `admin_set_collection_flags` tool
+/// Parameters for `admin_collection_set_flags` tool
 #[derive(Debug, Deserialize)]
 pub struct AdminFlagsParams {
     pub collection: String,
@@ -845,7 +845,7 @@ pub struct RagCollectionStatsParams {
     pub collection: String,
 }
 
-/// Parameters for `rag_load_all_chunks` tool (#73).
+/// Parameters for `rag_chunks_load` tool (#73).
 ///
 /// Loads every chunk for the given `doc_ids` from a RAG collection. Two modes:
 /// - `query=None`: pure load, results sorted by `(doc_id, chunk_index)` ASC, no scoring

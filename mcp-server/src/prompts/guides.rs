@@ -26,7 +26,7 @@ pub fn best_practices() -> Value {
 
 ## Step 1: Check Collection Size FIRST
 ```json
-// count_documents tool
+// count tool
 {"collection": "users", "query": {}}
 ```
 
@@ -98,7 +98,7 @@ Exact limits can vary by memory profile. If limit errors occur: add $match filte
 
 | Operation | Safe Practice |
 |-----------|---------------|
-| Explore collection | `count_documents` first, then `find` with limit 5-10 |
+| Explore collection | `count` first, then `find` with limit 5-10 |
 | Get sample data | `find` with limit 3-5 and projection |
 | Search | Use specific filters, limit 10-20 |
 | Full-text search | Use `fulltext_search` with limit, projection |
@@ -464,7 +464,7 @@ When counting documents by date ranges (e.g., yearly statistics), **range querie
 | Method | Time | Speedup |
 |--------|------|---------|
 | Aggregation (`$project` + `$group`) | 31.2s | 1x |
-| Range queries (7× `count_documents`) | 346ms | **90x** |
+| Range queries (7× `count`) | 346ms | **90x** |
 
 **When to use which:**
 - **Range queries**: Known date ranges, indexed date field, need counts only
@@ -604,18 +604,18 @@ IronBase supports ACID transactions with Read Committed isolation level and Writ
 ## Transaction Lifecycle
 
 ```
-begin_transaction
+transaction_begin
     ↓
-[_tx operations: insert_one_tx, update_one_tx, delete_one_tx]
+[_tx operations: transaction_insert_one, transaction_update_one, transaction_delete_one]
     ↓
-commit_transaction  OR  rollback_transaction
+transaction_commit  OR  transaction_rollback
 ```
 
 ## Basic Usage
 
 ### 1. Begin Transaction
 ```json
-// begin_transaction tool (no parameters)
+// transaction_begin tool (no parameters)
 {}
 ```
 Returns: `{"transaction_id": "123"}`
@@ -623,22 +623,22 @@ Returns: `{"transaction_id": "123"}`
 ### 2. Perform Operations (use _tx variants!)
 All _tx operations are buffered until commit:
 ```json
-// insert_one_tx
+// transaction_insert_one
 {"transaction_id": "123", "collection": "accounts", "document": {"id": 1, "balance": 1000}}
 
-// update_one_tx
+// transaction_update_one
 {"transaction_id": "123", "collection": "accounts", "filter": {"id": 1}, "update": {"$inc": {"balance": -100}}}
 
-// delete_one_tx
+// transaction_delete_one
 {"transaction_id": "123", "collection": "accounts", "filter": {"id": 3}}
 ```
 
 ### 3. Commit or Rollback
 ```json
-// commit_transaction - make changes permanent
+// transaction_commit - make changes permanent
 {"transaction_id": "123"}
 
-// rollback_transaction - discard all changes
+// transaction_rollback - discard all changes
 {"transaction_id": "123"}
 ```
 
@@ -646,23 +646,23 @@ All _tx operations are buffered until commit:
 
 | Tool | Description |
 |------|-------------|
-| `begin_transaction` | Start new transaction, get transaction_id |
-| `commit_transaction` | Commit and make changes permanent |
-| `rollback_transaction` | Discard all buffered changes |
-| `insert_one_tx` | Insert document within transaction |
-| `update_one_tx` | Update document within transaction |
-| `delete_one_tx` | Delete document within transaction |
+| `transaction_begin` | Start new transaction, get transaction_id |
+| `transaction_commit` | Commit and make changes permanent |
+| `transaction_rollback` | Discard all buffered changes |
+| `transaction_insert_one` | Insert document within transaction |
+| `transaction_update_one` | Update document within transaction |
+| `transaction_delete_one` | Delete document within transaction |
 | `transaction_status` | Check if write transaction is active |
 
 ## Example: Money Transfer
 
 ```
-1. begin_transaction → {"transaction_id": "123"}
+1. transaction_begin → {"transaction_id": "123"}
 2. Check source balance (use find - reads see committed data)
-3. update_one_tx({id: 1}, {$inc: {balance: -100}}, tx_id: "123")
-4. update_one_tx({id: 2}, {$inc: {balance: 100}}, tx_id: "123")
-5. If all OK: commit_transaction(tx_id: "123")
-   If error: rollback_transaction(tx_id: "123")
+3. transaction_update_one({id: 1}, {$inc: {balance: -100}}, tx_id: "123")
+4. transaction_update_one({id: 2}, {$inc: {balance: 100}}, tx_id: "123")
+5. If all OK: transaction_commit(tx_id: "123")
+   If error: transaction_rollback(tx_id: "123")
 ```
 
 ## Read Committed Isolation Example
@@ -670,10 +670,10 @@ All _tx operations are buffered until commit:
 ```
 Time  | Transaction 1          | Transaction 2
 ------|------------------------|------------------
-T1    | begin_transaction      |
-T2    | insert_one_tx(Alice)   |
+T1    | transaction_begin      |
+T2    | transaction_insert_one(Alice)   |
 T3    |                        | find("users") → [] (Alice not visible!)
-T4    | commit_transaction     |
+T4    | transaction_commit     |
 T5    |                        | find("users") → [Alice] (now visible)
 ```
 
@@ -687,20 +687,20 @@ T5    |                        | find("users") → [Alice] (now visible)
 
 1. **Keep transactions short**: Long transactions block ALL other writes
 2. **Handle errors**: Always rollback on failure
-3. **Use _tx methods**: insert_one_tx, update_one_tx, delete_one_tx within transactions
+3. **Use _tx methods**: transaction_insert_one, transaction_update_one, transaction_delete_one within transactions
 4. **Check status**: Use transaction_status to see if writes are blocked
 5. **Don't mix**: Don't use regular insert_one/update_one during a transaction
 
 ## Error Handling
 
 ```
-tx = begin_transaction
+tx = transaction_begin
 try:
-    insert_one_tx(...)
-    update_one_tx(...)
-    commit_transaction(tx)
+    transaction_insert_one(...)
+    transaction_update_one(...)
+    transaction_commit(tx)
 except:
-    rollback_transaction(tx)
+    transaction_rollback(tx)
 ```
 
 ## Limitations

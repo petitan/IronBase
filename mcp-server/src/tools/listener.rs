@@ -15,7 +15,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     match name {
         "listener_list" => handle_listener_list(adapter),
         "listener_get" => handle_listener_get(params, adapter),
-        "listener_add" => handle_listener_add(params, adapter),
+        "listener_create" => handle_listener_add(params, adapter),
         "listener_delete" => handle_listener_delete(params, adapter),
         "listener_enable" => handle_listener_enable(params, adapter),
         "listener_disable" => handle_listener_disable(params, adapter),

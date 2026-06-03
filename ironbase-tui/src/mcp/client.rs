@@ -199,7 +199,7 @@ impl McpClient {
             "query": query
         });
 
-        let result = self.call_tool("count_documents", args).await?;
+        let result = self.call_tool("count", args).await?;
         // Result is {"count": 123}
         let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count)
@@ -916,7 +916,7 @@ impl McpClient {
         if let Some(key) = key_path {
             args["key_path"] = serde_json::json!(key);
         }
-        let result = self.call_tool("listener_add", args).await?;
+        let result = self.call_tool("listener_create", args).await?;
         let success = result
             .get("success")
             .and_then(|v| v.as_bool())
@@ -973,11 +973,12 @@ impl McpClient {
         language: &str,
     ) -> McpResult<()> {
         let args = serde_json::json!({
+            "type": "fulltext",
             "collection": collection,
             "field": field,
             "language": language
         });
-        self.call_tool("index_create_fulltext", args).await?;
+        self.call_tool("index_create", args).await?;
         Ok(())
     }
 
@@ -990,6 +991,7 @@ impl McpClient {
         threshold: Option<f64>,
     ) -> McpResult<()> {
         let mut args = serde_json::json!({
+            "type": "fuzzy",
             "collection": collection,
             "field": field
         });
@@ -999,7 +1001,7 @@ impl McpClient {
         if let Some(thresh) = threshold {
             args["threshold"] = serde_json::json!(thresh);
         }
-        self.call_tool("index_create_fuzzy", args).await?;
+        self.call_tool("index_create", args).await?;
         Ok(())
     }
 
@@ -1047,12 +1049,13 @@ impl McpClient {
         metric: &str,
     ) -> McpResult<String> {
         let args = serde_json::json!({
+            "type": "vector",
             "collection": collection,
             "field": field,
             "dim": dimension,
             "metric": metric
         });
-        let result = self.call_tool("index_create_vector", args).await?;
+        let result = self.call_tool("index_create", args).await?;
         let name = result
             .get("index_name")
             .and_then(|v| v.as_str())
@@ -1064,9 +1067,10 @@ impl McpClient {
     /// List all vector indexes on a collection
     pub async fn list_vector_indexes(&self, collection: &str) -> McpResult<Vec<Value>> {
         let args = serde_json::json!({
-            "collection": collection
+            "collection": collection,
+            "type": "vector"
         });
-        let result = self.call_tool("index_list_vector", args).await?;
+        let result = self.call_tool("index_list", args).await?;
         let indexes: Vec<Value> = result
             .get("indexes")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1080,7 +1084,7 @@ impl McpClient {
             "collection": collection,
             "index_name": index_name
         });
-        self.call_tool("index_drop_vector", args).await?;
+        self.call_tool("index_drop", args).await?;
         Ok(())
     }
 
@@ -1115,9 +1119,13 @@ impl McpClient {
         Ok(results)
     }
 
-    /// Perform vector similarity search with filter
+    /// Perform vector similarity search with a metadata filter.
     ///
-    /// Hybrid search: filter is applied first, then vector search on matching documents.
+    /// The dedicated `vector_search_filter` MCP tool was removed; this runs
+    /// `vector_search` (over a wider candidate pool) and applies the filter
+    /// client-side. Only equality filters (`{"field": value}`, dotted paths
+    /// supported) are honored; an operator filter (e.g. `{"x": {"$gt": 1}}`)
+    /// returns an explicit error rather than silently mismatching.
     pub async fn vector_search_filter(
         &self,
         collection: &str,
@@ -1126,19 +1134,20 @@ impl McpClient {
         filter: &Value,
         limit: usize,
     ) -> McpResult<Vec<Value>> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "field": field,
-            "vector": vector,
-            "filter": filter,
-            "limit": limit
-        });
-        let result = self.call_tool("vector_search_filter", args).await?;
-        let results: Vec<Value> = result
-            .get("results")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(results)
+        let conds = filter_equality_conditions(filter)?;
+        // Fetch a wider pool so post-filtering still yields up to `limit` hits.
+        let pool = limit.saturating_mul(5).clamp(limit.max(1), 500);
+        let candidates = self.vector_search(collection, field, vector, pool).await?;
+        let filtered: Vec<Value> = candidates
+            .into_iter()
+            .filter(|doc| {
+                conds
+                    .iter()
+                    .all(|(path, want)| get_nested(doc, path) == Some(want))
+            })
+            .take(limit)
+            .collect();
+        Ok(filtered)
     }
     // === RAG operations ===
 
@@ -1184,7 +1193,12 @@ impl McpClient {
         self.call_tool("rag_document_import", args).await
     }
 
-    /// Hybrid search with automatic query embedding (auto-embed mode)
+    /// Hybrid search with automatic query embedding, via the unified `search` tool.
+    ///
+    /// `search` is intent-only: `search_mode`/`rrf_k` (and rerank/dedup) are
+    /// server-owned and ignored here (kept in the signature for call-site
+    /// stability). The document-anchored response is adapted to the legacy
+    /// `{results: [...], count}` envelope the RAG UI consumes.
     pub async fn hybrid_search_rag(
         &self,
         collection: &str,
@@ -1193,52 +1207,20 @@ impl McpClient {
         search_mode: &str,
         rrf_k: f64,
     ) -> McpResult<Value> {
+        let _ = (search_mode, rrf_k); // server-owned in the `search` tool
         let args = serde_json::json!({
             "collection": collection,
             "query": query,
-            "limit": limit,
-            "search_mode": search_mode,
-            "rrf_k": rrf_k,
-            "rerank": true,
-            "deduplicate": true
+            "limit": limit
         });
-        self.call_tool("hybrid_search", args).await
+        let result = self.call_tool("search", args).await?;
+        Ok(search_docs_to_results(&result))
     }
 
     /// Get RAG collection statistics
     pub async fn rag_collection_stats(&self, collection: &str) -> McpResult<Value> {
         let args = serde_json::json!({"collection": collection});
         self.call_tool("rag_collection_stats", args).await
-    }
-
-    // === Hybrid search ===
-
-    /// Hybrid search combining vector similarity and fulltext search
-    #[allow(clippy::too_many_arguments)]
-    pub async fn hybrid_search(
-        &self,
-        collection: &str,
-        vector_field: &str,
-        text_field: &str,
-        vector: &[f64],
-        query: &str,
-        limit: usize,
-        search_mode: &str,
-        rrf_k: f64,
-    ) -> McpResult<Value> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "vector_field": vector_field,
-            "text_field": text_field,
-            "vector": vector,
-            "query": query,
-            "limit": limit,
-            "search_mode": search_mode,
-            "rrf_k": rrf_k,
-            "rerank": true,
-            "deduplicate": true
-        });
-        self.call_tool("hybrid_search", args).await
     }
 
     // === Embedding operations ===
@@ -1289,7 +1271,7 @@ impl McpClient {
 
     /// List available embedding models
     pub async fn embed_list_models(&self) -> McpResult<Value> {
-        self.call_tool("embed_list_models", serde_json::json!({}))
+        self.call_tool("embed_models_list", serde_json::json!({}))
             .await
     }
 
@@ -1362,4 +1344,74 @@ impl Drop for McpClient {
         // Best effort close - we can't do async in drop
         // The transport's Drop impl will handle cleanup
     }
+}
+
+// ============================================================================
+// Helpers for the `search`-tool migration (replacing removed hybrid_search /
+// vector_search_filter tools)
+// ============================================================================
+
+/// Adapt a `search` tool response (document-anchored: `{documents: [...]}`) into
+/// the legacy `{results: [...], count}` chunk-list envelope the RAG UI consumes.
+/// Each document becomes one result carrying its own fields plus a `content`
+/// string (joined passage text) and `_final_score` (the document relevance).
+fn search_docs_to_results(resp: &Value) -> Value {
+    let docs = resp
+        .get("documents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let results: Vec<Value> = docs
+        .into_iter()
+        .map(|d| {
+            let mut obj = d.as_object().cloned().unwrap_or_default();
+            let content = obj
+                .get("passages")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .unwrap_or_default();
+            obj.insert("content".to_string(), Value::String(content));
+            if let Some(rel) = obj.get("relevance").cloned() {
+                obj.insert("_final_score".to_string(), rel);
+            }
+            Value::Object(obj)
+        })
+        .collect();
+    let count = results.len();
+    serde_json::json!({ "results": results, "count": count })
+}
+
+/// Flatten a simple equality filter object into (dotted_path, expected_value)
+/// pairs. Returns an explicit error on operator keys (`$...`) or nested
+/// object/array values, which the client-side matcher cannot honor — so a
+/// removed-tool gap never silently degrades into wrong results.
+fn filter_equality_conditions(filter: &Value) -> McpResult<Vec<(String, Value)>> {
+    let Some(obj) = filter.as_object() else {
+        return Ok(vec![]); // no / non-object filter → no constraint
+    };
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        if k.starts_with('$') || v.is_object() || v.is_array() {
+            return Err(McpError::tool(format!(
+                "client-side vector filter supports only equality matches; \
+                 unsupported filter key '{k}' (the vector_search_filter tool was removed)"
+            )));
+        }
+        out.push((k.clone(), v.clone()));
+    }
+    Ok(out)
+}
+
+/// Resolve a dotted path (e.g. `"a.b"`) against a JSON document.
+fn get_nested<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut cur = doc;
+    for part in path.split('.') {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
 }

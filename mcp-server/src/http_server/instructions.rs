@@ -24,7 +24,7 @@ IronBase is a high-performance embedded NoSQL document database with MongoDB-com
 - `aggregate`: always end with `{"$limit": N}`
 
 ### 2. Check size before fetching
-Use `count_documents` before `find` on unknown collections.
+Use `count` before `find` on unknown collections.
 
 ### 3. Use projection to reduce response size
 Only request needed fields: `"projection": {"name": 1, "email": 1}`
@@ -44,7 +44,7 @@ Exclude large fields: `"projection": {"body": 0, "content": 0}`
 |------|---------|
 | `find` | Query documents with filter, projection, sort, limit, skip |
 | `find_one` | Get single document |
-| `count_documents` | Count matching documents |
+| `count` | Count matching documents |
 | `aggregate` | Run aggregation pipeline |
 | `fulltext_search` | TF-IDF text search (requires fulltext index) |
 | `fuzzy_search` | Approximate string matching (requires fuzzy index) |

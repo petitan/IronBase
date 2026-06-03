@@ -15,7 +15,7 @@
         <rect width="32" height="32" rx="6" fill="#3b82f6"/>
         <path d="M8 10h16M8 16h16M8 22h12" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
       </svg>
-      IronBase <span class="version-badge">v1.0.222</span>
+      IronBase <span class="version-badge">v1.0.509</span>
     </a>
     <div class="header-controls">
       <div class="lang-switch">
@@ -179,7 +179,7 @@
         </tr>
         <tr>
           <td>Search</td>
-          <td>Fuzzy (3 algorithms), Full-text (TF-IDF), RAG (FastText+HNSW)</td>
+          <td>Fuzzy (3 algorithms), Full-text (BM25), RAG (vLLM/BGE-M3+HNSW)</td>
         </tr>
         <tr>
           <td>Languages</td>
@@ -1528,7 +1528,7 @@ cd mcp-server && cargo build --release
 
       <h1 id="search-rag">RAG - Semantic Search</h1>
 
-      <p>Semantic search with FastText embeddings and HNSW indexing. The <code>rag_search</code> <strong>automatically embeds the query</strong> - a single MCP call for complete hybrid search!</p>
+      <p>Semantic search with vLLM/BGE-M3 embeddings and HNSW indexing. The <code>search</code> tool <strong>automatically embeds the query</strong> server-side - a single MCP call for complete hybrid retrieval!</p>
 
       <div class="ascii-diagram">
         <pre>
@@ -1541,7 +1541,7 @@ cd mcp-server && cargo build --release
 │  rag_collection_create(collection: "kb", language: "english")               │
 │         │                                                                   │
 │         ├──▶ Collection: "kb"                                               │
-│         ├──▶ HNSW index: 300 dim, cosine                                    │
+│         ├──▶ HNSW index: 1024 dim, cosine                                   │
 │         ├──▶ Fulltext index: english stemmer                                │
 │         └──▶ Config: _system.rag                                            │
 │                                                                             │
@@ -1550,28 +1550,28 @@ cd mcp-server && cargo build --release
 │  rag_document_import(collection: "kb", content: "...", title: "Guide")      │
 │         │                                                                   │
 │         ├──▶ Chunking: 1000 char, 100 overlap                               │
-│         ├──▶ Batch embedding: FastText 300-dim                              │
+│         ├──▶ Batch embedding: BGE-M3 1024-dim (vLLM)                        │
 │         └──▶ Insert chunks with vectors                                     │
 │                                                                             │
 │  3. SEARCH (1 MCP CALL!)                                                    │
 │  ════════════════════════                                                   │
-│  rag_search(collection: "kb", query: "database")                            │
+│  search(collection: "kb", query: "database")                                │
 │         │                                                                   │
 │         ├──▶ AUTO-EMBED query ← KEY DIFFERENCE!                             │
 │         ├──▶ Vector search (HNSW)                                           │
-│         ├──▶ Fulltext search (TF-IDF)                                       │
-│         ├──▶ RRF fusion (k=60)                                              │
+│         ├──▶ Fulltext search (BM25)                                         │
+│         ├──▶ RRF fusion (k=20)                                              │
 │         ├──▶ Reranking (phrase match, density)                              │
-│         └──▶ Deduplication                                                  │
+│         └──▶ Document-anchored grouping                                     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
         </pre>
       </div>
 
       <div class="info-box tip">
-        <div class="info-box-title">💡 Why is rag_search better?</div>
-        <p>The <code>hybrid_search</code> tool required <strong>2 MCP calls</strong> (embed_text + hybrid_search).
-        The <code>rag_search</code> <strong>automatically embeds</strong> the query - single call!</p>
+        <div class="info-box-title">💡 Single-call retrieval</div>
+        <p>The <code>search</code> tool <strong>automatically embeds</strong> the query
+        server-side &mdash; a single MCP call, with no separate <code>embed_text</code> step.</p>
       </div>
 
       <h2>RRF (Reciprocal Rank Fusion) Algorithm</h2>
@@ -1581,9 +1581,10 @@ cd mcp-server && cargo build --release
       <div class="code-block">
         <pre><code class="language-javascript">score = vector_weight × 1/(k + vector_rank) + fulltext_weight × 1/(k + text_rank)
 
-// Example (k=60, weights=0.5/0.5):
+// Example (k=20, weights=0.5/0.5):
 // doc1: vector_rank=1, text_rank=1
-// score = 0.5 × 1/61 + 0.5 × 1/61 = 0.0164</code></pre>
+// score = 0.5 × 1/21 + 0.5 × 1/21 = 0.0476
+// (weights and k are server-owned; not exposed by the search tool)</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
@@ -1630,7 +1631,7 @@ cd mcp-server && cargo build --release
 }}
 
 // 3. Search - SINGLE CALL!
-{"name": "rag_search", "arguments": {
+{"name": "search", "arguments": {
   "collection": "knowledge_base",
   "query": "embedded database"
 }}</code></pre>
@@ -1640,23 +1641,17 @@ cd mcp-server && cargo build --release
       <p><strong>Result:</strong></p>
       <div class="code-block">
         <pre><code class="language-json">{
-  "results": [{
-    "content": "IronBase is a high-performance embedded NoSQL database...",
-    "title": "Introduction",
+  "verdict": "unknown",
+  "documents": [{
     "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
-    "chunk_index": 0,
-    "_rrf_score": 0.01639,
-    "_final_score": 0.02344,
-    "_rerank_boost": 1.43,
-    "_vector_rank": 1,
-    "_text_rank": 1,
-    "_vector_score": 0.5578,
-    "_text_score": 4.852
+    "title": "Introduction",
+    "relevance": 0.0234,
+    "passages": [
+      {"text": "IronBase is a high-performance embedded NoSQL database..."}
+    ]
   }],
   "count": 1,
-  "query": "embedded database",
-  "algorithm": "rag_hybrid_rrf",
-  "provider": "fasttext"
+  "trimmed": false
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
@@ -1681,8 +1676,11 @@ key_path = "/etc/ssl/key.pem"
 path = "/data/ironbase.mlite"
 durability = "safe"  # safe | batch | unsafe
 
-[rag]
-fasttext_model = "/models/cc.en.300.bin"
+[embedding]
+provider = "vllm"        # vllm | ollama | openai
+base_url = "http://localhost:8800"
+model = "bge-m3"
+batch_size = 128
 
 [logging]
 level = "info"  # trace | debug | info | warn | error
@@ -1902,11 +1900,11 @@ Page size: 1,000 docs
           <td>Delete document</td>
         </tr>
         <tr>
-          <td><code>db_rag_search(coll, query)</code></td>
+          <td><code>db_hybrid_search(coll, query)</code></td>
           <td>Semantic search (default limit: 5)</td>
         </tr>
         <tr>
-          <td><code>db_rag_search(coll, query, opts)</code></td>
+          <td><code>db_hybrid_search(coll, query, opts)</code></td>
           <td>Search with options: <code>#{limit: 10, min_score: 0.5}</code></td>
         </tr>
       </table>
@@ -1916,7 +1914,7 @@ Page size: 1,000 docs
 
         <div class="code-block">
           <pre><code class="language-javascript">// RAG search
-let results = db_rag_search("knowledge_base", "capital of Hungary");
+let results = db_hybrid_search("knowledge_base", "capital of Hungary");
 for r in results {
     print("[" + r.score + "] " + r.doc_title + ": " + r.text);
 }
@@ -1931,7 +1929,7 @@ let result = db_rag_document_import(
 print("Created " + result.chunks_created + " chunks");
 
 // Search with min_score filter
-let filtered = db_rag_search("knowledge_base", "history", #{
+let filtered = db_hybrid_search("knowledge_base", "history", #{
     limit: 10,
     min_score: 0.6
 });</code></pre>
@@ -2030,7 +2028,7 @@ let filtered = db_rag_search("knowledge_base", "history", #{
 
       <h1 id="tools-rag">RAG Tools (4 tools)</h1>
 
-      <p>Semantic search with automatic query embedding. The <code>rag_search</code> performs complete hybrid search in a single MCP call!</p>
+      <p>Semantic search with automatic query embedding. The <code>search</code> tool performs complete document-anchored hybrid retrieval in a single MCP call!</p>
 
       <div class="tool-card">
         <h4><code>rag_collection_create</code> - Create RAG Collection</h4>
@@ -2056,7 +2054,7 @@ let filtered = db_rag_search("knowledge_base", "history", #{
           <tr>
             <td>provider</td>
             <td>string</td>
-            <td><span class="badge badge-optional">optional</span> Embedding provider (default: "fasttext")</td>
+            <td><span class="badge badge-optional">optional</span> Embedding provider (default: from server config, e.g. "vllm")</td>
           </tr>
           <tr>
             <td>language</td>
@@ -2084,9 +2082,9 @@ let filtered = db_rag_search("knowledge_base", "history", #{
   "config": {
     "embedding_field": "embedding",
     "text_field": "content",
-    "provider": "fasttext",
+    "provider": "vllm",
     "language": "english",
-    "dimension": 300
+    "dimension": 1024
   },
   "indexes": {
     "collection_created": true,
@@ -2166,8 +2164,8 @@ let filtered = db_rag_search("knowledge_base", "history", #{
   "collection": "knowledge_base",
   "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
   "chunks_created": 5,
-  "dimension": 300,
-  "provider": "fasttext"
+  "dimension": 1024,
+  "provider": "vllm"
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
@@ -2179,8 +2177,8 @@ let filtered = db_rag_search("knowledge_base", "history", #{
       </div>
 
       <div class="tool-card">
-        <h4><code>rag_search</code> - Semantic Search</h4>
-        <p><strong>Automatic query embedding</strong> + hybrid RRF search in a single call!</p>
+        <h4><code>search</code> - Semantic Search</h4>
+        <p><strong>Automatic query embedding</strong> + document-anchored hybrid retrieval in a single call. Intent-only: fusion/reranking are server-owned.</p>
 
         <table class="param-table">
           <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
@@ -2195,46 +2193,34 @@ let filtered = db_rag_search("knowledge_base", "history", #{
             <td><span class="badge badge-required">required</span> Search text (NOT a vector!)</td>
           </tr>
           <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Structured metadata pre-filter, e.g. {"year": 2026}</td>
+          </tr>
+          <tr>
             <td>limit</td>
             <td>integer</td>
-            <td><span class="badge badge-optional">optional</span> Max results (default: 10)</td>
+            <td><span class="badge badge-optional">optional</span> Max documents (default: 5)</td>
           </tr>
           <tr>
-            <td>vector_weight</td>
-            <td>number</td>
-            <td><span class="badge badge-optional">optional</span> Vector weight 0.0-1.0 (default: 0.5)</td>
+            <td>format</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> "structured" (default) | "context_block"</td>
           </tr>
           <tr>
-            <td>fulltext_weight</td>
-            <td>number</td>
-            <td><span class="badge badge-optional">optional</span> Fulltext weight 0.0-1.0 (default: 0.5)</td>
-          </tr>
-          <tr>
-            <td>rerank</td>
+            <td>debug</td>
             <td>boolean</td>
-            <td><span class="badge badge-optional">optional</span> Apply reranking (default: true)</td>
-          </tr>
-          <tr>
-            <td>deduplicate</td>
-            <td>boolean</td>
-            <td><span class="badge badge-optional">optional</span> Filter duplicates (default: true)</td>
-          </tr>
-          <tr>
-            <td>projection</td>
-            <td>object</td>
-            <td><span class="badge badge-optional">optional</span> Field filtering</td>
+            <td><span class="badge badge-optional">optional</span> Include diagnostics block (default: false)</td>
           </tr>
         </table>
 
         <div class="code-block">
           <pre><code class="language-json">{
-  "name": "rag_search",
+  "name": "search",
   "arguments": {
     "collection": "knowledge_base",
     "query": "database indexing",
-    "limit": 5,
-    "vector_weight": 0.7,
-    "fulltext_weight": 0.3
+    "limit": 5
   }
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -2243,36 +2229,26 @@ let filtered = db_rag_search("knowledge_base", "history", #{
         <p><strong>Result:</strong></p>
         <div class="code-block">
           <pre><code class="language-json">{
-  "results": [{
-    "_id": 1,
-    "content": "IronBase supports B+ tree indexing for fast queries...",
-    "title": "Indexing Guide",
+  "verdict": "unknown",
+  "documents": [{
     "doc_id": "abc-123",
-    "chunk_index": 2,
-    "chunk_total": 5,
-    "_rrf_score": 0.01639,
-    "_final_score": 0.02344,
-    "_rerank_boost": 1.43,
-    "_vector_rank": 1,
-    "_text_rank": 1,
-    "_vector_score": 0.75,
-    "_text_score": 4.2
+    "title": "Indexing Guide",
+    "relevance": 0.0234,
+    "passages": [
+      {"text": "IronBase supports B+ tree indexing for fast queries..."}
+    ]
   }],
   "count": 1,
-  "query": "database indexing",
-  "algorithm": "rag_hybrid_rrf",
-  "rrf_k": 60.0,
-  "weights": {"vector": 0.7, "fulltext": 0.3},
-  "provider": "fasttext",
-  "dedup_removed": 0
+  "trimmed": false
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
 
         <div class="info-box tip">
-          <div class="info-box-title">💡 Weight Configuration</div>
-          <p>Vector-only search: <code>vector_weight: 1.0, fulltext_weight: 0.0</code><br>
-          Fulltext-only: <code>vector_weight: 0.0, fulltext_weight: 1.0</code></p>
+          <div class="info-box-title">💡 Intent-only surface</div>
+          <p>Weights, fusion, reranking and thresholds are decided by the engine. To bias
+          retrieval, shape your <code>query</code> and use <code>filter</code> — there are no
+          weight knobs on this tool.</p>
         </div>
       </div>
 
@@ -2307,9 +2283,9 @@ let filtered = db_rag_search("knowledge_base", "history", #{
   "config": {
     "embedding_field": "embedding",
     "text_field": "content",
-    "provider": "fasttext",
+    "provider": "vllm",
     "language": "english",
-    "dimension": 300,
+    "dimension": 1024,
     "created_at": "2026-01-27T08:17:58.495Z"
   },
   "stats": {
@@ -2329,9 +2305,9 @@ let filtered = db_rag_search("knowledge_base", "history", #{
     }]
   },
   "provider_info": {
-    "name": "fasttext",
-    "dimension": 300,
-    "model": "cc.en.300.ironbase"
+    "name": "vllm",
+    "dimension": 1024,
+    "model": "bge-m3"
   }
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -2341,7 +2317,7 @@ let filtered = db_rag_search("knowledge_base", "history", #{
       <!-- Footer -->
       <hr style="margin-top: 60px;">
       <p style="text-align: center; color: var(--text-muted);">
-        IronBase Documentation v1.0.222<br>
+        IronBase Documentation v1.0.509<br>
         &copy; 2024 PeTitan Kft.
       </p>
 

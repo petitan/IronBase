@@ -16,12 +16,12 @@ use super::params::{
 /// Dispatch transaction tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
-        "begin_transaction" => handle_begin_transaction(adapter),
-        "commit_transaction" => handle_commit_transaction(params, adapter),
-        "rollback_transaction" => handle_rollback_transaction(params, adapter),
-        "insert_one_tx" => handle_insert_one_tx(params, adapter),
-        "update_one_tx" => handle_update_one_tx(params, adapter),
-        "delete_one_tx" => handle_delete_one_tx(params, adapter),
+        "transaction_begin" => handle_begin_transaction(adapter),
+        "transaction_commit" => handle_commit_transaction(params, adapter),
+        "transaction_rollback" => handle_rollback_transaction(params, adapter),
+        "transaction_insert_one" => handle_insert_one_tx(params, adapter),
+        "transaction_update_one" => handle_update_one_tx(params, adapter),
+        "transaction_delete_one" => handle_delete_one_tx(params, adapter),
         "transaction_status" => handle_transaction_status(adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown transaction tool: {}",

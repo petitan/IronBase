@@ -1,8 +1,9 @@
 //! Index management tool definitions
 //!
-//! Tools: index_create, index_list, index_create_fuzzy, index_create_fulltext,
-//!        fulltext_search, fulltext_analyze, fuzzy_search, index_list_fulltext,
-//!        index_drop, index_stats_refresh, explain, find_with_hint
+//! Tools: index_create (type: btree|fulltext|fuzzy|vector), index_list (optional
+//!        type filter), index_drop (any subtype), index_stats (per type),
+//!        index_stats_refresh, fulltext_search, fulltext_analyze, fuzzy_search,
+//!        explain, find_with_hint
 
 use super::common::{fields, schemas};
 use serde_json::{json, Value};
@@ -11,67 +12,93 @@ pub fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "index_create",
-            "title": "Create B+ Tree Index",
-            "description": "Create a B+ tree index on one or more fields to accelerate queries.",
+            "title": "Create Index",
+            "description": "Create an index of any type. Set 'type' to choose: 'btree' (default; B+ tree on 'field' or compound 'fields'), 'fulltext' (BM25 with language-aware stemming), 'fuzzy' (approximate string matching), or 'vector' (HNSW similarity search). Only the fields relevant to the chosen type are used; others are ignored. Required fields per type: btree → field OR fields; fulltext/fuzzy → field; vector → field + dim. Server validates per type and returns an explicit error if a required field is missing.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "collection": fields::collection(),
+                    "type": {
+                        "type": "string",
+                        "description": "Index type to create (default: 'btree')",
+                        "enum": ["btree", "fulltext", "fuzzy", "vector"],
+                        "default": "btree"
+                    },
                     "field": fields::index_field(),
                     "fields": fields::index_fields(),
                     "unique": fields::unique(),
-                    "sparse": fields::sparse()
+                    "sparse": fields::sparse(),
+                    // fulltext params
+                    "language": fields::fulltext_language(),
+                    "min_word_length": fields::min_word_length(),
+                    "accent_folding": fields::accent_folding(),
+                    // fuzzy params
+                    "algorithm": fields::fuzzy_algorithm(),
+                    "threshold": fields::fuzzy_threshold(),
+                    // vector params
+                    "dim": {
+                        "type": "integer",
+                        "description": "[vector] Vector dimension (must match your embeddings)",
+                        "minimum": 1,
+                        "maximum": 4096
+                    },
+                    "metric": {
+                        "type": "string",
+                        "description": "[vector] Distance metric for similarity calculation",
+                        "enum": ["cosine", "euclidean", "dot_product"],
+                        "default": "cosine"
+                    },
+                    "max_vectors": {
+                        "type": "integer",
+                        "description": "[vector] Maximum number of vectors (default: 100,000)",
+                        "default": 100000
+                    },
+                    "m": {
+                        "type": "integer",
+                        "description": "[vector] HNSW M parameter (connections per node, default: 16)",
+                        "default": 16,
+                        "minimum": 4,
+                        "maximum": 64
+                    },
+                    "ef_construction": {
+                        "type": "integer",
+                        "description": "[vector] HNSW ef_construction (build-time quality, default: 200)",
+                        "default": 200,
+                        "minimum": 50,
+                        "maximum": 1000
+                    },
+                    "ef_search": {
+                        "type": "integer",
+                        "description": "[vector] HNSW ef_search (search-time quality, default: 50)",
+                        "default": 50,
+                        "minimum": 10,
+                        "maximum": 500
+                    }
                 },
                 "required": ["collection"]
             }
         }),
         json!({
             "name": "index_list",
-            "title": "List All Indexes",
-            "description": "List all indexes on a collection: B+ tree, fulltext, and vector indexes with details.",
-            "inputSchema": schemas::collection_only()
-        }),
-        json!({
-            "name": "index_create_fuzzy",
-            "title": "Create Fuzzy Search Index",
-            "description": "Create an index for approximate string matching using similarity algorithms.",
+            "title": "List Indexes",
+            "description": "List indexes on a collection: B+ tree, fulltext, fuzzy, and vector — all with details. Pass 'type' (btree|fulltext|fuzzy|vector) to list only one subtype; omit it to list everything.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "collection": fields::collection(),
-                    "field": {
+                    "type": {
                         "type": "string",
-                        "description": "Text field to index for fuzzy matching"
-                    },
-                    "algorithm": fields::fuzzy_algorithm(),
-                    "threshold": fields::fuzzy_threshold()
+                        "description": "Optional: restrict listing to one index subtype",
+                        "enum": ["btree", "fulltext", "fuzzy", "vector"]
+                    }
                 },
-                "required": ["collection", "field"]
-            }
-        }),
-        json!({
-            "name": "index_create_fulltext",
-            "title": "Create Full-Text Search Index",
-            "description": "Create a BM25 full-text search index with language-aware stemming and document length normalization.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "collection": fields::collection(),
-                    "field": {
-                        "type": "string",
-                        "description": "Text field to index. Supports nested paths: \"body.content\""
-                    },
-                    "language": fields::fulltext_language(),
-                    "min_word_length": fields::min_word_length(),
-                    "accent_folding": fields::accent_folding()
-                },
-                "required": ["collection", "field"]
+                "required": ["collection"]
             }
         }),
         json!({
             "name": "fulltext_search",
             "title": "Full-Text Search",
-            "description": "Search documents using BM25 relevance scoring (TF saturation + document length normalization). Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights. Use 'fields' (array) for multi-field search, or 'field' (string) for single-field. If both are provided, 'fields' takes precedence.",
+            "description": "Search documents using BM25 relevance scoring (TF saturation + document length normalization). Requires a fulltext index first (create via index_create with type='fulltext'). Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights. Use 'fields' (array) for multi-field search, or 'field' (string) for single-field. If both are provided, 'fields' takes precedence.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -140,7 +167,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fuzzy_search",
             "title": "Fuzzy String Search",
-            "description": "Find documents with approximate string matching. Requires index_create_fuzzy first. Supports filter, projection, and highlight.",
+            "description": "Find documents with approximate string matching. Requires a fuzzy index first (create via index_create with type='fuzzy'). Supports filter, projection, and highlight.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -181,15 +208,9 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "index_list_fulltext",
-            "title": "List Full-Text Indexes",
-            "description": "List all full-text search indexes on a collection.",
-            "inputSchema": schemas::collection_only()
-        }),
-        json!({
             "name": "index_drop",
             "title": "Drop Index",
-            "description": "Remove an index from a collection.",
+            "description": "Remove an index of any type (B+ tree, fulltext, fuzzy, or vector) from a collection. The subtype is detected automatically from the index name; vector indexes also have their on-disk cache file removed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -208,8 +229,20 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "index_stats",
             "title": "Get Index Statistics",
-            "description": "Get detailed statistics for all B+ tree indexes in a collection. Returns num_keys, distinct_count, has_histogram, has_mcv for each index. Use this to monitor index health and decide when to refresh statistics.",
-            "inputSchema": schemas::collection_only()
+            "description": "Get detailed statistics for indexes in a collection. Default ('btree') returns num_keys, distinct_count, has_histogram, has_mcv per B+ tree index. Set 'type' to 'fulltext' (num_documents, num_tokens), 'fuzzy' (num_entries), or 'vector' (vector_count) for those subtypes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection": fields::collection(),
+                    "type": {
+                        "type": "string",
+                        "description": "Index subtype to report stats for (default: 'btree')",
+                        "enum": ["btree", "fulltext", "fuzzy", "vector"],
+                        "default": "btree"
+                    }
+                },
+                "required": ["collection"]
+            }
         }),
         json!({
             "name": "explain",

@@ -34,7 +34,7 @@ pipeline-ról. Lezárt issue-k: #67, #64, #65, #63, #66.
                                        _system.rag (RagConfig)
                                              │
                                              ▼
-                                       hybrid_search
+                                       search  (intent-only surface)
                   ├── effective_text_fields ◄── config ∩ indexed (#66)
                   ├── vector search       ┐
                   ├── fulltext (single|multi-field, AND/OR, match_scope)
@@ -357,8 +357,9 @@ vektor → `effective_text_fields()` fallback `[text_field]`.
 }}
 ```
 → FTS index `content`-re, `title`-re, `customer`-re, magyar stemmeléssel. A
-config tárolja a listát → minden későbbi `hybrid_search` mindhárom mezőre keres
-default-ban.
+config tárolja a listát → minden későbbi `search` mindhárom mezőre keres
+default-ban (a mező-feloldás server-owned, a `search` nem vesz át explicit
+`text_fields`-et).
 
 **Dokumentum-import retry-biztosan**:
 ```json
@@ -380,10 +381,11 @@ default-ban.
 
 **Multi-field keresés (automatikus)**:
 ```json
-{"name":"hybrid_search","arguments":{"collection":"rdocs","query":"BKV Zrt árajánlat"}}
+{"name":"search","arguments":{"collection":"rdocs","query":"BKV Zrt árajánlat"}}
 ```
-→ a config `text_fields`-éből (intersect indexed) mindhárom mezőre keres.
-Explicit `text_fields` átadása csak akkor kell, ha el akarsz térni.
+→ a config `text_fields`-éből (intersect indexed) mindhárom mezőre keres. A
+`search` intent-only felület: a mező-feloldás és a fusion server-owned, nincs
+felülíró paraméter.
 
 **Index-tokenizáció debug**:
 ```json
@@ -415,4 +417,4 @@ Explicit `text_fields` átadása csak akkor kell, ha el akarsz térni.
 
 - ~~**#68 / #69** — API-alak konzisztencia~~ **LEZÁRVA (v1.0.501)**: `fulltext_search` lapos shape (doc-mezők top szinten, `_`-prefix metadata, mint `hybrid_search`); `group_by_document=true` automatikusan csoport-szintre emeli a chunkok közt azonos értékű mezőket (`lift_common_fields`, `hybrid.rs`). Mindkettő **breaking** — részletek a CHANGELOG `[Unreleased] > Breaking (v1.0.501)` szakaszban.
 - **`test_write_lock_timeout` flake** (`ironbase-core/src/database/mod.rs:1260`) — szűk <200ms felső korlát terhelt macOS CI-n túllő. NEM RAG-munka okozta; lazítandó. Részletek: `memory/todo-flaky-write-lock-timeout-test.md`.
-- **`rag_document_import` text_fields létező collection-ön**: jelenleg `tracing::warn!` + ignorálva. Ha valódi szükség mutatkozik, későbbi feature: meglévő collection FTS-bővítése a `text_fields` mezőkkel (jelenleg `index_create_fulltext` + manual `RagConfig` patch szükséges).
+- **`rag_document_import` text_fields létező collection-ön**: jelenleg `tracing::warn!` + ignorálva. Ha valódi szükség mutatkozik, későbbi feature: meglévő collection FTS-bővítése a `text_fields` mezőkkel (jelenleg `index_create` `type:"fulltext"` + manual `RagConfig` patch szükséges).

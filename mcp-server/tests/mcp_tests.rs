@@ -52,10 +52,7 @@ fn test_tools_list_contains_crud_tools() {
     assert!(tool_names.contains(&"find"), "Missing find");
     assert!(tool_names.contains(&"update_one"), "Missing update_one");
     assert!(tool_names.contains(&"delete_one"), "Missing delete_one");
-    assert!(
-        tool_names.contains(&"count_documents"),
-        "Missing count_documents"
-    );
+    assert!(tool_names.contains(&"count"), "Missing count_documents");
     assert!(tool_names.contains(&"aggregate"), "Missing aggregate");
 }
 
@@ -127,7 +124,7 @@ fn test_insert_many() {
     // Verify count
     let count = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "products",
             "filter": {}
@@ -201,7 +198,7 @@ fn test_update_one_upsert() {
     // Verify document exists
     let count = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "users",
             "filter": {"name": "NewUser"}
@@ -241,7 +238,7 @@ fn test_delete_one() {
     // Verify only one remains
     let count = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "items",
             "filter": {}
@@ -282,7 +279,7 @@ fn test_delete_many() {
     // Verify only error log remains
     let count = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "logs",
             "filter": {}
@@ -652,7 +649,7 @@ fn test_empty_collection_operations() {
     // Count on empty collection
     let result = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "empty",
             "filter": {}
@@ -855,7 +852,7 @@ fn test_concurrent_inserts() {
     // Verify all inserts succeeded
     let result = dispatch_ok(
         &adapter,
-        "count_documents",
+        "count",
         json!({
             "collection": "concurrent",
             "filter": {}
@@ -878,8 +875,8 @@ fn test_fulltext_analyze_inherits_index_language_issue65() {
     );
     dispatch_ok(
         &adapter,
-        "index_create_fulltext",
-        json!({"collection": "docs", "field": "content", "language": "hungarian"}),
+        "index_create",
+        json!({"type": "fulltext", "collection": "docs", "field": "content", "language": "hungarian"}),
     );
 
     // No explicit language → inherits the index's hungarian config.
@@ -937,8 +934,8 @@ fn test_fulltext_search_flat_shape_issue68() {
     );
     dispatch_ok(
         &adapter,
-        "index_create_fulltext",
-        json!({"collection":"docs","field":"content"}),
+        "index_create",
+        json!({"type": "fulltext", "collection":"docs","field":"content"}),
     );
 
     let res = dispatch_ok(
@@ -988,8 +985,8 @@ fn seed_rag_kb(adapter: &Arc<IronBaseAdapter>) {
     }
     dispatch_ok(
         adapter,
-        "index_create_fulltext",
-        json!({"collection": "kb", "field": "content"}),
+        "index_create",
+        json!({"type": "fulltext", "collection": "kb", "field": "content"}),
     );
 }
 
@@ -1002,7 +999,7 @@ fn test_rag_load_all_chunks_pure_load_issue73_ac1() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": ["alpha", "beta"],
@@ -1062,7 +1059,7 @@ fn test_rag_load_all_chunks_scored_load_issue73_ac2() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": ["alpha", "beta"],
@@ -1097,7 +1094,7 @@ fn test_rag_load_all_chunks_empty_doc_ids_issue73_ac4() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": [],
@@ -1115,7 +1112,7 @@ fn test_rag_load_all_chunks_missing_doc_ids_silent_skip_issue73_ac5() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": ["alpha", "nonexistent-doc"],
@@ -1142,7 +1139,7 @@ fn test_rag_load_all_chunks_merge_chunks_issue73_ac3() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": ["alpha"],
@@ -1166,7 +1163,7 @@ fn test_rag_load_all_chunks_max_chunks_per_doc() {
 
     let res = dispatch_ok(
         &adapter,
-        "rag_load_all_chunks",
+        "rag_chunks_load",
         json!({
             "collection": "kb",
             "doc_ids": ["alpha", "beta"],
@@ -1235,13 +1232,13 @@ fn seed_search_kb(adapter: &Arc<IronBaseAdapter>) {
     }
     dispatch_ok(
         adapter,
-        "index_create_fulltext",
-        json!({"collection": "kb", "field": "content"}),
+        "index_create",
+        json!({"type": "fulltext", "collection": "kb", "field": "content"}),
     );
     dispatch_ok(
         adapter,
-        "index_create_vector",
-        json!({"collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
+        "index_create",
+        json!({"type": "vector", "collection": "kb", "field": "embedding", "dim": 4, "metric": "cosine"}),
     );
 }
 
@@ -1354,8 +1351,8 @@ fn test_search_deterministic_order_on_tied_scores() {
     }
     dispatch_ok(
         &adapter,
-        "index_create_fulltext",
-        json!({"collection": "kb", "field": "content"}),
+        "index_create",
+        json!({"type": "fulltext", "collection": "kb", "field": "content"}),
     );
 
     let run = || {

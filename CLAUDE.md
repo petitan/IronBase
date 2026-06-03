@@ -711,7 +711,7 @@ issue-k lezárva, részletek a doksiban + a CHANGELOG `[Unreleased]` szekcióban
 | **EndsWith** | `{"$endsWith": ".hu"}` | Suffix match, case-insensitive default |
 | **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
 | **Fulltext** | `fulltext_search(field, query, limit)` | BM25 (k1=1.2, b=0.75), stemming, HU/EN/DE |
-| **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion, auto-embed ha nincs vector |
+| **Hybrid** | `search(collection, query)` | Intent-only document-anchored RRF retrieval, server-owned fusion, auto-embed |
 
 `$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
 - Egyszerű forma: `{"field": {"$op": "value"}}` (case-insensitive)
@@ -756,7 +756,7 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 | `rag_collection_create` | Collection + vector + fulltext indexes |
 | `rag_document_import` | Auto-chunked import |
 | `rag_collection_stats` | Statisztikák |
-| `hybrid_search` | Unified keresés: explicit vector VAGY auto-embed |
+| `search` | Unified intent-only hybrid retrieval (document-anchored, auto-embed) |
 
 Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 </details>
@@ -819,9 +819,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Implementáció (2026-02-18 — unified):**
 
-| Tool | Fájl | Algoritmus |
+| Felület | Fájl | Algoritmus |
 |------|------|-----------|
-| `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion (explicit vector VAGY auto-embed) |
+| `search` MCP tool (intent-only) + Rhai `db_hybrid_search` (paraméterezhető) | `mcp-server/src/tools/hybrid.rs` (közös motor: `retrieve_and_fuse`) | RRF fusion (explicit vector VAGY auto-embed) |
+
+> A `hybrid_search` MCP tool megszűnt (v1.0.504, `search` váltotta). Az alábbi paraméterek
+> (mode, match_scope, text_fields, weights, rrf_k, mmr_lambda…) a **közös `hybrid.rs` motoré**:
+> a Rhai `db_hybrid_search` teszi ki őket, a `search` MCP tool NEM (server-owned, intent-only).
 
 **RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
 
@@ -863,7 +867,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Fulltext mode paraméter (45f74bf7, #47, cd70eae4 #61):**
 - `mode`: `"and"` (default) = MINDEN szó kell a dokumentumban, `"or"` = bármely szó elég (deprecated)
-- Elérhető: `hybrid_search`, `fulltext_search` — **mindkettő AND default** (v1.0.389+, korábban fulltext_search OR volt)
+- Elérhető: Rhai `db_hybrid_search` + `fulltext_search` MCP tool — **mindkettő AND default** (v1.0.389+, korábban fulltext_search OR volt). A `search` MCP tool intent-only (a mode-ot a motor dönti).
 - AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
 - `mode` hiánya = `"and"` (v1.0.375+)
 
@@ -900,9 +904,9 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Multi-field fulltext (b938c487, #48):**
 - `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
-- Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
+- Elérhető: Rhai `db_hybrid_search` (a `fulltext_search` MCP tool már korábban támogatta `fields` néven). A `search` MCP tool a RAG-config `text_fields`-éből oldja fel, server-owned.
 - `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
-- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create_fulltext`)
+- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create` `type:"fulltext"`)
 - Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
 
 ```json
@@ -912,7 +916,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Search mode presets (220679f3):**
 - `search_mode`: `"balanced"` (default), `"semantic"`, `"keyword"` — LLM-barát nevesített preset a numerikus weight-ek helyett
-- Elérhető: `hybrid_search`
+- Elérhető: Rhai `db_hybrid_search` (a `search` MCP tool nem teszi ki — server-owned weights)
 - Explicit `vector_weight`/`fulltext_weight` felülírja a preset-et ha megadva
 
 | Mode | vector_weight | fulltext_weight | Mikor |
@@ -927,7 +931,7 @@ Prioritás: explicit weights > search_mode preset > balanced default
 - `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, merge_adjacent_chunks, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
 - hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
 
-**hybrid_search pipeline (hybrid.rs):**
+**Közös fusion pipeline (hybrid.rs — `search` MCP tool + Rhai `db_hybrid_search`):**
 ```
 STEP 1: Resolve vector + field names (explicit vs auto-embed)
 STEP 1.5: Document-level AND qualification             [match_scope=document OR group_by_document + mode=and]
@@ -972,7 +976,7 @@ STEP 7: Projection + response
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
 Collection metódusok (fulltext_search...)    → scored results, index-alapú
-MCP tools (hybrid_search)                    → score fusion, ranked retrieval
+MCP tools (search)                           → score fusion, ranked retrieval
 ```
 </details>
 

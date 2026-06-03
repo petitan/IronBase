@@ -127,13 +127,14 @@ mod tests {
         let tools = tools_json["tools"].as_array().unwrap();
 
         // Verify we have the expected number of tools
-        // Database: 4, Collection: 4, Document: 11, Index: 13, Schema: 2,
+        // Database: 4, Collection: 4, Document: 11, Index: 10, Schema: 2,
         // Script: 12, Transaction: 7, Admin: 8, ACL: 5, Listener: 6,
-        // Vector: 4, Retrieval(search): 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 4 = 93 total
-        // (Collection gained collection_rename. Removed earlier: hybrid_search → superseded by
-        //  `search`; vector_search_filter → deprecated. Shared fusion + vector_search_with_filter
-        //  retained for `search`/hybrid pipeline + Rhai.)
-        assert_eq!(tools.len(), 93, "Expected 93 tools, got {}", tools.len());
+        // Vector: 1, Retrieval(search): 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 4 = 87 total
+        // (Index consolidation v1.0.5xx: index_create/list/drop/stats are now generic
+        //  across subtypes via a `type` param. Removed 6 per-subtype tools:
+        //  index_create_fulltext/fuzzy/vector, index_list_fulltext/vector, index_drop_vector.
+        //  Vector keeps only vector_search.)
+        assert_eq!(tools.len(), 87, "Expected 87 tools, got {}", tools.len());
     }
 
     #[test]

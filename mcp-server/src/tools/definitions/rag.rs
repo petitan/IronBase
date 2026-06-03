@@ -29,7 +29,7 @@ pub fn tools() -> Vec<Value> {
                     "text_fields": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and the `search` tool then defaults to searching all of them — no manual index_create_fulltext needed."
+                        "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and the `search` tool then defaults to searching all of them — no manual index_create (type='fulltext') needed."
                     },
                     "provider": {
                         "type": "string",
@@ -130,7 +130,7 @@ pub fn tools() -> Vec<Value> {
         }),
         // rag_load_all_chunks
         json!({
-            "name": "rag_load_all_chunks",
+            "name": "rag_chunks_load",
             "title": "Load All Chunks for Document IDs",
             "description": "Loads every chunk for the given doc_ids from a RAG collection. Two modes: (1) pure load when `query` is omitted — chunks sorted by (doc_id, chunk_index) ASC, no scoring; (2) scored load when `query` is provided — chunks scored via fulltext OR-search, sorted by _score DESC, every hit carries `_score`. In both modes adjacent chunks from the same document are merged by default (same algorithm as the `search` tool: removes overlap-induced duplication, dedups table headers). Use for UI doc-detail-view (pure load) or RAG context expansion after a `search` query (scored load). Empty doc_ids returns an empty result (not an error); missing doc_ids are silently skipped.",
             "inputSchema": {

@@ -81,10 +81,10 @@ def main():
     # --- Read Operations ---
     print("--- Read Operations ---")
 
-    results.append(("count_documents", benchmark("count_documents (indexed)", {
+    results.append(("count", benchmark("count_documents (indexed)", {
         "jsonrpc": "2.0", "id": 1,
         "method": "tools/call",
-        "params": {"name": "count_documents", "arguments": {"collection": "emails", "query": {}}}
+        "params": {"name": "count", "arguments": {"collection": "emails", "query": {}}}
     })))
 
     results.append(("find_one", benchmark("find_one (by _id)", {

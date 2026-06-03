@@ -1967,7 +1967,7 @@ fn rag_load_all_chunks_impl(
     params.insert("doc_ids".to_string(), Value::Array(doc_ids_json));
     let params_value = Value::Object(params);
 
-    match crate::tools::rag::dispatch("rag_load_all_chunks", params_value, adapter, &None) {
+    match crate::tools::rag::dispatch("rag_chunks_load", params_value, adapter, &None) {
         Ok(result) => json_to_dynamic(&result),
         Err(e) => Dynamic::from(format!("Error: {}", e)),
     }

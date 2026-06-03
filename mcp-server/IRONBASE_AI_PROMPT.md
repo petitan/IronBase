@@ -6,7 +6,7 @@ Use this prompt to help AI assistants correctly interact with IronBase MCP serve
 
 ### 1. ALWAYS Check Collection Size First
 ```json
-// FIRST: count_documents
+// FIRST: count
 {"collection": "emails", "query": {}}
 
 // THEN: find with limit
@@ -203,7 +203,7 @@ for res in results {
 |------|-------------|
 | `find` | Query documents with filter, projection, sort, limit, skip |
 | `find_one` | Get single document |
-| `count_documents` | Count matching documents |
+| `count` | Count matching documents |
 | `distinct` | Get unique field values |
 | `aggregate` | Run aggregation pipeline |
 | `fulltext_search` | TF-IDF text search (requires fulltext index) |
@@ -302,7 +302,7 @@ Exclude large fields like `body`, `attachments`, `content`.
 | `fulltext_search` | 300ms-4s | >10s | **YES (common!)** |
 | `fuzzy_search` | 200-500ms | >1s | rare |
 | `script_exec` | 100ms-5s | >30s | **YES** |
-| `count_documents` | 0-10ms | >100ms | rare |
+| `count` | 0-10ms | >100ms | rare |
 | `distinct` | 10-500ms | >5s | **YES** |
 
 **Timeout:** 60 seconds. Real log data shows fulltext_search: 38s, 54s, 60s+ timeouts!

@@ -227,23 +227,23 @@ results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 ### Hybrid Search (via MCP Server)
 
 ```
-hybrid_search      → RRF fusion of fulltext + vector results with reranking
-                     If 'vector' omitted → auto-embeds query (Ollama/vLLM/OpenAI)
-                     Supports flat (per-chunk) and grouped (per-document) response modes
+search             → document-anchored hybrid retrieval (RRF fusion of fulltext + vector)
+                     Query is auto-embedded server-side (Ollama/vLLM/OpenAI)
+                     Returns ranked source documents, each with its relevant passages
 ```
+
+The `search` tool is **intent-only**: the retrieval mechanism (weights, fusion,
+reranking, thresholds) is server-owned and not exposed. It supersedes the old
+`hybrid_search`/`vector_search_filter` tools.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `search_mode` | `"balanced"` | Preset: `"balanced"` (0.5/0.5), `"semantic"` (0.8/0.2), `"keyword"` (0.2/0.8) |
-| `mode` | `"and"` | Fulltext: `"and"` = all words required, `"or"` = any word |
-| `rerank` | `true` | Phrase match (1.5x), keyword density (1.0–1.3x), title boost (1.5x), short penalty (0.8x) |
-| `deduplicate` | `false` | Enable MMR diversity reranking |
-| `mmr_lambda` | `0.7` | Relevance vs diversity: `1.0` = pure relevance, `0.0` = pure diversity |
-| `merge_chunks` | `true` | Merge adjacent chunks from same document (overlap dedup) |
-| `group_by_document` | `false` | Group results by source document with all relevant chunks |
-| `filter` | - | MongoDB-style pre-filter |
-
-**`group_by_document` mode:** When `true`, results are grouped by source document. Document selection uses AND (all query words somewhere in document), chunk retrieval uses OR (any query word). The `limit` applies to document count, not chunk count.
+| `collection` | *(required)* | Collection to search |
+| `query` | *(required)* | Natural-language query or keywords |
+| `filter` | - | Structured metadata pre-filter, e.g. `{"year": 2026}` |
+| `limit` | `5` | Maximum number of documents to return |
+| `format` | `"structured"` | `"structured"` (documents + passages) or `"context_block"` (single citation-marked text block) |
+| `debug` | `false` | Include a `diagnostics` block |
 
 ## Aggregation
 
@@ -407,44 +407,39 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `update_many` | Bulk update matching documents |
 | `delete_one` | Delete single document |
 | `delete_many` | Bulk delete matching documents |
-| `count_documents` | Count matching documents |
+| `count` | Count matching documents |
 | `distinct` | Get unique field values |
 | `aggregate` | Execute aggregation pipeline |
 
 </details>
 
 <details>
-<summary><strong>Indexes & Search (15)</strong></summary>
+<summary><strong>Indexes & Search (10)</strong></summary>
 
 | Tool | Description |
 |------|-------------|
-| `index_create` | Create B+ tree index |
-| `index_list` | List all indexes |
-| `index_drop` | Remove index |
-| `index_stats` | Get index statistics |
-| `index_stats_refresh` | Recompute index statistics |
+| `index_create` | Create an index of any type (`type`: btree/fulltext/fuzzy/vector) |
+| `index_list` | List indexes (optional `type` filter; all subtypes by default) |
+| `index_drop` | Remove an index of any type |
+| `index_stats` | Get index statistics (per `type`) |
+| `index_stats_refresh` | Recompute B+ tree index statistics |
 | `explain` | Analyze query execution plan |
 | `find_with_hint` | Query with forced index hint |
-| `index_create_fuzzy` | Create fuzzy search index |
 | `fuzzy_search` | Approximate string matching |
-| `index_create_fulltext` | Create BM25 fulltext index |
-| `index_list_fulltext` | List fulltext indexes |
 | `fulltext_search` | Search with BM25 scoring |
 | `fulltext_analyze` | Debug text tokenization |
-| `index_create_vector` | Create HNSW vector index |
-| `index_list_vector` | List vector indexes |
 
 </details>
 
 <details>
-<summary><strong>Vector & Hybrid Search (4)</strong></summary>
+<summary><strong>Vector & Hybrid Search (2)</strong></summary>
+
+Vector index lifecycle uses the generic `index_*` tools with `type: "vector"`.
 
 | Tool | Description |
 |------|-------------|
-| `index_drop_vector` | Drop vector index |
 | `vector_search` | Vector similarity search |
-| `vector_search_filter` | Vector search with document filters |
-| `hybrid_search` | RRF fusion of vector + text results with reranking. Auto-embeds if vector omitted. Flat or grouped-by-document modes. |
+| `search` | Unified hybrid retrieval (RRF fusion of vector + text, auto-embed, flat or grouped-by-document modes) |
 
 </details>
 
@@ -483,12 +478,12 @@ mcp-ironbase-server install | uninstall | start | stop | status
 
 | Tool | Description |
 |------|-------------|
-| `begin_transaction` | Start ACID transaction |
-| `commit_transaction` | Commit transaction atomically |
-| `rollback_transaction` | Discard transaction changes |
-| `insert_one_tx` | Transactional insert |
-| `update_one_tx` | Transactional update |
-| `delete_one_tx` | Transactional delete |
+| `transaction_begin` | Start ACID transaction |
+| `transaction_commit` | Commit transaction atomically |
+| `transaction_rollback` | Discard transaction changes |
+| `transaction_insert_one` | Transactional insert |
+| `transaction_update_one` | Transactional update |
+| `transaction_delete_one` | Transactional delete |
 | `transaction_status` | Check transaction state |
 
 </details>
@@ -498,10 +493,10 @@ mcp-ironbase-server install | uninstall | start | stop | status
 
 | Tool | Description |
 |------|-------------|
-| `admin_list_all_collections` | List all collections including system |
-| `admin_create_system_collection` | Create protected system collection |
-| `admin_set_collection_flags` | Modify collection protection flags |
-| `admin_drop_protected` | Force delete protected collection |
+| `admin_collection_list` | List all collections including system |
+| `admin_collection_create_system` | Create protected system collection |
+| `admin_collection_set_flags` | Modify collection protection flags |
+| `admin_collection_drop_protected` | Force delete protected collection |
 | `admin_apikey_create` | Generate API key |
 | `admin_apikey_list` | List API keys (masked) |
 | `admin_apikey_revoke` | Disable API key |
@@ -521,7 +516,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 |------|-------------|
 | `listener_list` | List HTTP/HTTPS listeners |
 | `listener_get` | Get listener configuration |
-| `listener_add` | Add HTTP/HTTPS listener |
+| `listener_create` | Add HTTP/HTTPS listener |
 | `listener_delete` | Remove listener |
 | `listener_enable` | Activate listener |
 | `listener_disable` | Deactivate listener |
@@ -536,7 +531,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `embed_text` | Generate single text embedding |
 | `embed_batch` | Batch text embedding |
 | `embed_document` | Chunk and embed document |
-| `embed_list_models` | List available embedding models |
+| `embed_models_list` | List available embedding models |
 | `embed_cache_stats` | Get embedding cache statistics |
 | `embed_cache_clear` | Clear embedding cache |
 | `auto_embed_enable` | Enable auto-embedding on insert |

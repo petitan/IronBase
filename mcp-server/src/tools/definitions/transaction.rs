@@ -9,13 +9,13 @@ use serde_json::{json, Value};
 pub fn tools() -> Vec<Value> {
     vec![
         json!({
-            "name": "begin_transaction",
+            "name": "transaction_begin",
             "title": "Begin Transaction",
             "description": "Start an ACID transaction for atomic multi-operation writes.",
             "inputSchema": schemas::empty()
         }),
         json!({
-            "name": "commit_transaction",
+            "name": "transaction_commit",
             "title": "Commit Transaction",
             "description": "Commit all changes made within a transaction atomically.",
             "inputSchema": {
@@ -27,7 +27,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "rollback_transaction",
+            "name": "transaction_rollback",
             "title": "Rollback Transaction",
             "description": "Discard all changes made within a transaction.",
             "inputSchema": {
@@ -39,7 +39,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "insert_one_tx",
+            "name": "transaction_insert_one",
             "title": "Transactional Insert",
             "description": "Insert a document within an active transaction.",
             "inputSchema": {
@@ -59,7 +59,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "update_one_tx",
+            "name": "transaction_update_one",
             "title": "Transactional Update",
             "description": "Update a document within an active transaction.",
             "inputSchema": {
@@ -83,7 +83,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "delete_one_tx",
+            "name": "transaction_delete_one",
             "title": "Transactional Delete",
             "description": "Delete a document within an active transaction.",
             "inputSchema": {

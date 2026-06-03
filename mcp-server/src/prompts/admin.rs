@@ -508,7 +508,7 @@ Use cases:
 
 ### Get Collection Stats
 ```json
-// count_documents tool
+// count tool
 {"collection": "users", "query": {}}
 ```
 
@@ -955,7 +955,7 @@ Configure multiple HTTP/HTTPS endpoints for your IronBase MCP server.
 
 ### Add HTTP Listener
 ```json
-// listener_add tool
+// listener_create tool
 {
   "id": "internal",
   "bind": "192.168.1.100:8080",
@@ -966,7 +966,7 @@ Configure multiple HTTP/HTTPS endpoints for your IronBase MCP server.
 
 ### Add HTTPS Listener
 ```json
-// listener_add tool
+// listener_create tool
 {
   "id": "external",
   "bind": "0.0.0.0:443",

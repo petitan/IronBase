@@ -15,7 +15,7 @@ use super::params::ParseParams;
 // Parameter Structs
 // ============================================================================
 
-/// Parameters for `index_create_vector` tool
+/// Parameters for the vector sub-route of `index_create` (type='vector')
 #[derive(Debug, Deserialize)]
 pub struct VectorIndexCreateParams {
     pub collection: String,
@@ -49,19 +49,6 @@ fn default_ef_search() -> usize {
     50
 }
 
-/// Parameters for `index_list_vector` and `index_drop_vector` tools
-#[derive(Debug, Deserialize)]
-pub struct VectorIndexListParams {
-    pub collection: String,
-}
-
-/// Parameters for `index_drop_vector` tool
-#[derive(Debug, Deserialize)]
-pub struct VectorIndexDropParams {
-    pub collection: String,
-    pub index_name: String,
-}
-
 /// Parameters for `vector_search` tool
 ///
 /// Field default matches RAG schema: "embedding"
@@ -81,12 +68,10 @@ pub struct VectorSearchParams {
 // Dispatch
 // ============================================================================
 
-/// Dispatch vector tool calls
+/// Dispatch vector tool calls. Vector index lifecycle (create/list/drop/stats) is
+/// routed through the generic `index_*` tools; only similarity search lives here.
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
-        "index_create_vector" => handle_index_create_vector(params, adapter),
-        "index_list_vector" => handle_index_list_vector(params, adapter),
-        "index_drop_vector" => handle_index_drop_vector(params, adapter),
         "vector_search" => handle_vector_search(params, adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown vector tool: {}",
@@ -99,7 +84,12 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 // Tool Handlers
 // ============================================================================
 
-fn handle_index_create_vector(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+/// Create a vector (HNSW) index. Invoked by the generic `index_create` tool when
+/// `type: "vector"`.
+pub(super) fn handle_index_create_vector(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<Value> {
     let p: VectorIndexCreateParams = VectorIndexCreateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -125,28 +115,6 @@ fn handle_index_create_vector(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
             "ef_construction": p.ef_construction,
             "ef_search": p.ef_search
         }
-    }))
-}
-
-fn handle_index_list_vector(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: VectorIndexListParams = VectorIndexListParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
-    let indexes = adapter.list_vector_indexes(&p.collection)?;
-    Ok(json!({
-        "indexes": indexes,
-        "count": indexes.len()
-    }))
-}
-
-fn handle_index_drop_vector(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: VectorIndexDropParams = VectorIndexDropParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
-    adapter.drop_vector_index(&p.collection, &p.index_name)?;
-    Ok(json!({
-        "success": true,
-        "dropped": p.index_name
     }))
 }
 
