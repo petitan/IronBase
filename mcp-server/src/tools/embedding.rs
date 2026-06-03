@@ -32,7 +32,7 @@ pub struct EmbedBatchParams {
     pub provider: Option<String>,
 }
 
-/// Parameters for `embed_list_models` tool (no params needed)
+/// Parameters for `embed_models_list` tool (no params needed)
 #[derive(Debug, Deserialize)]
 pub struct EmbedListModelsParams {}
 
@@ -82,7 +82,7 @@ pub fn dispatch(
     match name {
         "embed_text" => handle_embed_text(params, manager),
         "embed_batch" => handle_embed_batch(params, manager),
-        "embed_list_models" => handle_embed_list_models(manager),
+        "embed_models_list" => handle_embed_list_models(manager),
         "embed_document" => {
             let adapter = adapter.ok_or_else(|| {
                 McpError::internal("Database adapter not available for embed_document")
@@ -104,7 +104,7 @@ pub fn is_embedding_tool(name: &str) -> bool {
         name,
         "embed_text"
             | "embed_batch"
-            | "embed_list_models"
+            | "embed_models_list"
             | "embed_document"
             | "embed_cache_stats"
             | "embed_cache_clear"

@@ -39,7 +39,7 @@ pub fn dispatch(
         "update_many" => handle_update_many(params, adapter),
         "delete_one" => handle_delete_one(params, adapter),
         "delete_many" => handle_delete_many(params, adapter),
-        "count_documents" => handle_count_documents(params, adapter),
+        "count" => handle_count_documents(params, adapter),
         "distinct" => handle_distinct(params, adapter),
         "aggregate" => handle_aggregate(params, adapter),
         _ => Err(McpError::invalid_params(format!(

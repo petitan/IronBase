@@ -719,20 +719,9 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
 
     match tool_name {
         // ---- Data read ----
-        "find"
-        | "find_one"
-        | "count_documents"
-        | "distinct"
-        | "aggregate"
-        | "explain"
-        | "index_list"
-        | "index_list_fulltext"
-        | "schema_get"
-        | "collection_list"
-        | "find_with_hint"
-        | "transaction_status"
-        | "fulltext_search"
-        | "fuzzy_search" => ToolPolicy::new(Read),
+        "find" | "find_one" | "count" | "distinct" | "aggregate" | "explain" | "index_list"
+        | "schema_get" | "collection_list" | "find_with_hint" | "transaction_status"
+        | "fulltext_search" | "fuzzy_search" => ToolPolicy::new(Read),
 
         // ---- Data write ----
         "insert_one"
@@ -741,22 +730,18 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
         | "update_many"
         | "delete_one"
         | "delete_many"
-        | "begin_transaction"
-        | "commit_transaction"
-        | "rollback_transaction"
-        | "insert_one_tx"
-        | "update_one_tx"
-        | "delete_one_tx" => ToolPolicy::new(Write),
+        | "transaction_begin"
+        | "transaction_commit"
+        | "transaction_rollback"
+        | "transaction_insert_one"
+        | "transaction_update_one"
+        | "transaction_delete_one" => ToolPolicy::new(Write),
 
         // ---- Structure admin (gated by ACL on the `collection` argument) ----
-        "collection_create"
-        | "collection_drop"
-        | "collection_rename"
-        | "index_create"
-        | "index_drop"
-        | "index_create_fulltext"
-        | "index_create_fuzzy"
-        | "schema_set" => ToolPolicy::new(Admin),
+        // index_create/index_drop are generic across all subtypes (btree, fulltext,
+        // fuzzy, vector) — Admin covers index creation and removal of every type.
+        "collection_create" | "collection_drop" | "collection_rename" | "index_create"
+        | "index_drop" | "schema_set" => ToolPolicy::new(Admin),
 
         // ---- Database admin ----
         // db_open was already loopback-only. db_stats/db_compact/db_checkpoint were
@@ -786,7 +771,7 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
         "listener_list" | "listener_get" => {
             ToolPolicy::new(Read).scope(crate::listener::SYSTEM_LISTENERS_COLLECTION)
         }
-        "listener_add" | "listener_delete" | "listener_enable" | "listener_disable" => {
+        "listener_create" | "listener_delete" | "listener_enable" | "listener_disable" => {
             ToolPolicy::new(Admin)
                 .scope(crate::listener::SYSTEM_LISTENERS_COLLECTION)
                 .local()
@@ -803,10 +788,10 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
             .local(),
 
         // ---- Admin tools (loopback + admin key) ----
-        "admin_list_all_collections"
-        | "admin_create_system_collection"
-        | "admin_set_collection_flags"
-        | "admin_drop_protected" => ToolPolicy::new(Admin)
+        "admin_collection_list"
+        | "admin_collection_create_system"
+        | "admin_collection_set_flags"
+        | "admin_collection_drop_protected" => ToolPolicy::new(Admin)
             .scope(SYSTEM_ACL_COLLECTION)
             .local()
             .admin_key(),
@@ -823,24 +808,21 @@ pub fn tool_policy(tool_name: &str) -> ToolPolicy {
         //      Read default — leaving structure/config mutations (drop a vector
         //      index, create a RAG collection, change auto-embed config) requiring
         //      only Read. ----
-        "index_create_vector"
-        | "index_drop_vector"
-        | "rag_collection_create"
-        | "auto_embed_enable"
-        | "auto_embed_disable" => ToolPolicy::new(Admin),
+        "rag_collection_create" | "auto_embed_enable" | "auto_embed_disable" => {
+            ToolPolicy::new(Admin)
+        }
         "rag_document_import" | "embed_document" | "embed_job_cancel" | "index_stats_refresh" => {
             ToolPolicy::new(Write)
         }
-        "index_list_vector"
-        | "index_stats"
+        "index_stats"
         | "rag_collection_stats"
-        | "rag_load_all_chunks"
+        | "rag_chunks_load"
         | "vector_search"
         | "search"
         | "fulltext_analyze"
         | "embed_text"
         | "embed_batch"
-        | "embed_list_models"
+        | "embed_models_list"
         | "embed_cache_stats"
         | "embed_job_list"
         | "embed_job_status"
@@ -996,7 +978,7 @@ mod tests {
         for t in [
             "find",
             "find_one",
-            "count_documents",
+            "count",
             "distinct",
             "aggregate",
             "explain",
@@ -1020,8 +1002,8 @@ mod tests {
             "insert_one",
             "update_many",
             "delete_one",
-            "begin_transaction",
-            "insert_one_tx",
+            "transaction_begin",
+            "transaction_insert_one",
         ] {
             assert_eq!(get_required_permission(t), Write, "{t} should be Write");
         }
@@ -1034,9 +1016,9 @@ mod tests {
             "db_checkpoint",
             "acl_set",
             "acl_delete",
-            "listener_add",
+            "listener_create",
             "script_save",
-            "admin_drop_protected",
+            "admin_collection_drop_protected",
             "admin_apikey_create",
         ] {
             assert_eq!(get_required_permission(t), Admin, "{t} should be Admin");
@@ -1072,11 +1054,11 @@ mod tests {
             Some(SYSTEM_APIKEYS_COLLECTION)
         );
         assert_eq!(
-            get_system_collection_for_tool("admin_drop_protected"),
+            get_system_collection_for_tool("admin_collection_drop_protected"),
             Some(SYSTEM_ACL_COLLECTION)
         );
         assert_eq!(
-            get_system_collection_for_tool("listener_add"),
+            get_system_collection_for_tool("listener_create"),
             Some(crate::listener::SYSTEM_LISTENERS_COLLECTION)
         );
         // acl_cleanup now carries the _system.acl scope (Admin-gated like acl_set/delete).
@@ -1096,10 +1078,10 @@ mod tests {
             "acl_set",
             "acl_delete",
             "acl_cleanup",
-            "listener_add",
+            "listener_create",
             "script_save",
             "db_open",
-            "admin_list_all_collections",
+            "admin_collection_list",
             "admin_apikey_create",
         ] {
             assert!(requires_localhost(t), "{t} should require localhost");
@@ -1121,10 +1103,10 @@ mod tests {
     fn test_tool_policy_admin_key_axis() {
         // Exactly the 8 admin_* tools require the admin key.
         for t in [
-            "admin_list_all_collections",
-            "admin_create_system_collection",
-            "admin_set_collection_flags",
-            "admin_drop_protected",
+            "admin_collection_list",
+            "admin_collection_create_system",
+            "admin_collection_set_flags",
+            "admin_collection_drop_protected",
             "admin_apikey_create",
             "admin_apikey_list",
             "admin_apikey_revoke",
@@ -1169,8 +1151,9 @@ mod tests {
         use RequiredPermission::{Admin, Read, Write};
         // These previously fell to the Read default despite being mutations.
         for t in [
-            "index_create_vector",
-            "index_drop_vector",
+            // generic index_create/index_drop now cover the vector subtype
+            "index_create",
+            "index_drop",
             "rag_collection_create",
             "auto_embed_enable",
             "auto_embed_disable",
@@ -1188,7 +1171,7 @@ mod tests {
         for t in [
             "search",
             "vector_search",
-            "rag_load_all_chunks",
+            "rag_chunks_load",
             "fulltext_analyze",
             "embed_text",
             "index_stats",
@@ -1213,7 +1196,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str().map(String::from))
             .collect();
-        assert!(names.len() >= 90, "unexpectedly few tools: {}", names.len());
+        assert!(names.len() >= 85, "unexpectedly few tools: {}", names.len());
         // A guaranteed-unknown name yields the fail-closed default; no real tool
         // may share that exact (Admin, no-scope, loopback, no-admin-key) shape
         // *unless* it is intentionally one of the no-collection maintenance ops.

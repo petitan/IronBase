@@ -42,7 +42,7 @@ benchmark() {
 echo "--- Read Operations ---"
 
 benchmark "count_documents (indexed)" \
-  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"count_documents","arguments":{"collection":"emails","query":{}}}}'
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"count","arguments":{"collection":"emails","query":{}}}}'
 
 benchmark "find_one (by _id)" \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find_one","arguments":{"collection":"emails","query":{"_id":1000}}}}'

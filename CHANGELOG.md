@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING — MCP tool naming canonicalization + index consolidation (mcp-server v1.0.509)
+
+Single canonical naming convention (`<resource>_<verb>`, noun-first, full words) plus
+consolidation of the per-subtype index tools. **No aliases** — old names are gone.
+Tool count: 93 → 87.
+
+**Renamed (14):**
+
+| Old | New |
+|-----|-----|
+| `count_documents` | `count` |
+| `begin_transaction` | `transaction_begin` |
+| `commit_transaction` | `transaction_commit` |
+| `rollback_transaction` | `transaction_rollback` |
+| `insert_one_tx` | `transaction_insert_one` |
+| `update_one_tx` | `transaction_update_one` |
+| `delete_one_tx` | `transaction_delete_one` |
+| `admin_list_all_collections` | `admin_collection_list` |
+| `admin_create_system_collection` | `admin_collection_create_system` |
+| `admin_set_collection_flags` | `admin_collection_set_flags` |
+| `admin_drop_protected` | `admin_collection_drop_protected` |
+| `rag_load_all_chunks` | `rag_chunks_load` |
+| `embed_list_models` | `embed_models_list` |
+| `listener_add` | `listener_create` |
+
+**Index consolidation — 6 tools removed**, folded into generic tools via a `type`
+parameter (`btree` default | `fulltext` | `fuzzy` | `vector`):
+
+- Removed: `index_create_fulltext`, `index_create_fuzzy`, `index_create_vector`,
+  `index_list_fulltext`, `index_list_vector`, `index_drop_vector`.
+- `index_create` gains `type` + per-type fields (server-side per-type validation;
+  no top-level `oneOf`, per Anthropic schema constraint).
+- `index_list` gains an optional `type` filter, and **now includes fuzzy indexes**
+  when listing all subtypes (previously a silent omission).
+- `index_drop` already handled all subtypes; vector drops are routed to the dedicated
+  cleanup (removes the on-disk HNSW cache file + `vector_indexes` metadata that the
+  generic path left stale).
+- `index_stats` gains `type` (fulltext → num_documents/num_tokens, fuzzy → num_entries,
+  vector → vector_count).
+- `vector_search` is unchanged.
+
+New core/adapter support: `CollectionCore::list_fuzzy_indexes()` (ironbase-core) +
+`IronBaseAdapter::list_fuzzy_indexes()` (mcp-server). Rhai `db_*` scripting functions
+are a separate namespace and are unchanged.
+
 ### Changed — internal cleanup from code review (mcp-server v1.0.507; no API change)
 
 Altitude/cleanup follow-ups to the v1.0.505–506 work; no user-visible behavior change.

@@ -131,7 +131,7 @@ pub fn dispatch(
         "rag_collection_create" => handle_rag_collection_create(params, adapter, embedding_manager),
         "rag_document_import" => handle_rag_document_import(params, adapter, embedding_manager),
         "rag_collection_stats" => handle_rag_collection_stats(params, adapter, embedding_manager),
-        "rag_load_all_chunks" => handle_rag_load_all_chunks(params, adapter),
+        "rag_chunks_load" => handle_rag_load_all_chunks(params, adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown RAG tool: {}",
             name

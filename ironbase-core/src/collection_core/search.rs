@@ -1216,6 +1216,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .collect())
     }
 
+    /// List all fuzzy indexes for this collection
+    ///
+    /// Mirrors [`list_fulltext_indexes`](Self::list_fulltext_indexes): filters by the
+    /// `{collection}_` name prefix and clones the stored metadata (name, field,
+    /// algorithm, threshold, num_entries).
+    pub fn list_fuzzy_indexes(&self) -> Result<Vec<crate::index::fuzzy::FuzzyIndexMetadata>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let prefix = format!("{}_", self.name);
+        Ok(indexes
+            .list_fuzzy_indexes()
+            .into_iter()
+            .filter(|idx| idx.metadata.name.starts_with(&prefix))
+            .map(|idx| idx.metadata.clone())
+            .collect())
+    }
+
     /// Get field names that have fulltext indexes (lightweight)
     ///
     /// Unlike `list_fulltext_indexes()`, this does NOT call `metadata()` on each index,

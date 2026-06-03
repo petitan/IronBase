@@ -308,23 +308,19 @@ fn dispatch_tool_inner(
     match name {
         // CRUD operations (with auto-embedding support for insert)
         "insert_one" | "insert_many" | "find" | "find_one" | "update_one" | "update_many"
-        | "delete_one" | "delete_many" | "count_documents" | "distinct" | "aggregate" => {
-            crud::dispatch(
-                name,
-                params,
-                adapter,
-                limits,
-                cancel_flag,
-                embedding_manager,
-            )
-        }
+        | "delete_one" | "delete_many" | "count" | "distinct" | "aggregate" => crud::dispatch(
+            name,
+            params,
+            adapter,
+            limits,
+            cancel_flag,
+            embedding_manager,
+        ),
 
-        // Index operations
+        // Index operations (index_create/list/drop/stats are generic across
+        // subtypes via a `type` param; the search ops stay dedicated)
         "index_create"
         | "index_list"
-        | "index_create_fuzzy"
-        | "index_create_fulltext"
-        | "index_list_fulltext"
         | "index_drop"
         | "index_stats_refresh"
         | "index_stats"
@@ -351,16 +347,16 @@ fn dispatch_tool_inner(
         }
 
         // Listener operations
-        "listener_list" | "listener_get" | "listener_add" | "listener_delete"
+        "listener_list" | "listener_get" | "listener_create" | "listener_delete"
         | "listener_enable" | "listener_disable" => listener::dispatch(name, params, adapter),
 
         // Transaction operations
-        "begin_transaction"
-        | "commit_transaction"
-        | "rollback_transaction"
-        | "insert_one_tx"
-        | "update_one_tx"
-        | "delete_one_tx"
+        "transaction_begin"
+        | "transaction_commit"
+        | "transaction_rollback"
+        | "transaction_insert_one"
+        | "transaction_update_one"
+        | "transaction_delete_one"
         | "transaction_status" => transaction::dispatch(name, params, adapter),
 
         // Admin operations (db_*, admin_*)
@@ -368,10 +364,10 @@ fn dispatch_tool_inner(
         | "db_stats"
         | "db_compact"
         | "db_checkpoint"
-        | "admin_list_all_collections"
-        | "admin_create_system_collection"
-        | "admin_set_collection_flags"
-        | "admin_drop_protected"
+        | "admin_collection_list"
+        | "admin_collection_create_system"
+        | "admin_collection_set_flags"
+        | "admin_collection_drop_protected"
         | "admin_apikey_create"
         | "admin_apikey_list"
         | "admin_apikey_revoke"
@@ -384,17 +380,15 @@ fn dispatch_tool_inner(
             job_manager,
         ),
 
-        // Vector operations (similarity search)
-        "index_create_vector" | "index_list_vector" | "index_drop_vector" | "vector_search" => {
-            vector::dispatch(name, params, adapter)
-        }
+        // Vector similarity search (index lifecycle handled by generic index_* tools)
+        "vector_search" => vector::dispatch(name, params, adapter),
 
         // Intent-shaped retrieval (Stage A redesign — see docs/HYBRID_RETRIEVAL_REDESIGN.md)
         // (supersedes the removed `hybrid_search` tool; shared RRF fusion lives in `hybrid`)
         "search" => retrieval::dispatch(name, params, adapter, embedding_manager),
 
         // Embedding operations
-        "embed_text" | "embed_batch" | "embed_list_models" | "embed_document"
+        "embed_text" | "embed_batch" | "embed_models_list" | "embed_document"
         | "embed_cache_stats" | "embed_cache_clear" => {
             embedding::dispatch(name, params, embedding_manager, Some(adapter))
         }
@@ -413,7 +407,7 @@ fn dispatch_tool_inner(
         "rag_collection_create"
         | "rag_document_import"
         | "rag_collection_stats"
-        | "rag_load_all_chunks" => rag::dispatch(name, params, adapter, embedding_manager),
+        | "rag_chunks_load" => rag::dispatch(name, params, adapter, embedding_manager),
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

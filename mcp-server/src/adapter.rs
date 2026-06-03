@@ -1757,6 +1757,25 @@ impl IronBaseAdapter {
             .collect())
     }
 
+    /// List all fuzzy indexes on a collection (mirrors [`list_fulltext_indexes`]).
+    pub fn list_fuzzy_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let indexes = coll.list_fuzzy_indexes()?;
+        Ok(indexes
+            .into_iter()
+            .map(|idx| {
+                serde_json::json!({
+                    "name": idx.name,
+                    "field": idx.field,
+                    "algorithm": format!("{:?}", idx.algorithm).to_lowercase(),
+                    "threshold": idx.threshold,
+                    "num_entries": idx.num_entries
+                })
+            })
+            .collect())
+    }
+
     /// Get field names that have fulltext indexes (lightweight, no metadata computation)
     ///
     /// Unlike `list_fulltext_indexes()`, avoids `unique_token_count()` in lazy mode.

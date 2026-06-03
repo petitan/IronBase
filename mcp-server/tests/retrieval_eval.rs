@@ -185,8 +185,8 @@ fn seed_labeled_kb(adapter: &Arc<IronBaseAdapter>) {
     }
     dispatch_ok(
         adapter,
-        "index_create_fulltext",
-        json!({"collection": "kb", "field": "content"}),
+        "index_create",
+        json!({"type": "fulltext", "collection": "kb", "field": "content"}),
     );
 }
 

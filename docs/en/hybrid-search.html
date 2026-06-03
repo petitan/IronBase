@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hybrid Search - IronBase Documentation</title>
+  <title>Search (Hybrid Retrieval) - IronBase Documentation</title>
   <link rel="stylesheet" href="../assets/style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
 </head>
@@ -15,7 +15,7 @@
         <rect width="32" height="32" rx="6" fill="#3b82f6"/>
         <path d="M8 10h16M8 16h16M8 22h12" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
       </svg>
-      IronBase <span class="version-badge">v1.0.373</span>
+      IronBase <span class="version-badge">v1.0.509</span>
     </a>
     <div class="header-controls">
       <div class="lang-switch">
@@ -35,63 +35,35 @@
         <div class="nav-section open">
           <div class="nav-section-title">Overview</div>
           <div class="nav-items">
-            <a href="#overview" class="nav-item">What is Hybrid Search?</a>
-            <a href="#pipeline" class="nav-item">Pipeline Overview</a>
+            <a href="#overview" class="nav-item">What is search?</a>
+            <a href="#pipeline" class="nav-item">How it works</a>
           </div>
         </div>
 
         <div class="nav-section open">
           <div class="nav-section-title">Tool Reference</div>
           <div class="nav-items">
-            <a href="#tool-reference" class="nav-item">hybrid_search</a>
+            <a href="#tool-reference" class="nav-item">search</a>
             <a href="#parameters" class="nav-item">Parameters</a>
             <a href="#response" class="nav-item">Response Format</a>
           </div>
         </div>
 
-        <div class="nav-section">
-          <div class="nav-section-title">Search Modes</div>
-          <div class="nav-items">
-            <a href="#search-modes" class="nav-item">Presets</a>
-            <a href="#custom-weights" class="nav-item">Custom Weights</a>
-          </div>
-        </div>
-
-        <div class="nav-section">
-          <div class="nav-section-title">Fulltext Options</div>
-          <div class="nav-items">
-            <a href="#fulltext-options" class="nav-item">mode (AND/OR)</a>
-            <a href="#match-scope" class="nav-item">match_scope</a>
-            <a href="#multi-field" class="nav-item">Multi-field</a>
-          </div>
-        </div>
-
-        <div class="nav-section">
-          <div class="nav-section-title">Reranking Pipeline</div>
-          <div class="nav-items">
-            <a href="#reranking" class="nav-item">Overview</a>
-            <a href="#rrf" class="nav-item">RRF Fusion</a>
-            <a href="#boosts" class="nav-item">Reranking Boosts</a>
-            <a href="#chunk-merge" class="nav-item">Chunk Merge</a>
-            <a href="#mmr" class="nav-item">MMR Diversity</a>
-          </div>
-        </div>
-
-        <div class="nav-section">
+        <div class="nav-section open">
           <div class="nav-section-title">Examples</div>
           <div class="nav-items">
             <a href="#examples" class="nav-item">Basic Search</a>
+            <a href="#example-filter" class="nav-item">Filtered Search</a>
+            <a href="#example-context" class="nav-item">Context Block</a>
             <a href="#example-rag" class="nav-item">RAG Collection</a>
-            <a href="#example-advanced" class="nav-item">Advanced Filtering</a>
-            <a href="#example-document-and" class="nav-item">Document-level AND</a>
           </div>
         </div>
 
         <div class="nav-section">
-          <div class="nav-section-title">Best Practices</div>
+          <div class="nav-section-title">Reference</div>
           <div class="nav-items">
-            <a href="#best-practices" class="nav-item">Performance Tips</a>
-            <a href="#when-to-use" class="nav-item">When to Use What</a>
+            <a href="#migration" class="nav-item">Migration from hybrid_search</a>
+            <a href="#best-practices" class="nav-item">Best Practices</a>
           </div>
         </div>
       </div>
@@ -103,849 +75,221 @@
       <!-- ============================================================== -->
       <!-- OVERVIEW -->
       <!-- ============================================================== -->
+      <h1 id="overview">What is search?</h1>
 
-      <h1 id="overview">What is Hybrid Search?</h1>
+      <p>
+        <code>search</code> is the unified, document-anchored hybrid retrieval tool for RAG.
+        It fuses BM25 full-text and HNSW vector results and returns ranked <strong>source
+        documents</strong>, each with its relevant passages &mdash; optimized for a small LLM:
+        no embeddings to pass, no engine metadata, token-budgeted output.
+      </p>
 
-      <p><strong>Hybrid Search</strong> combines vector-based semantic search with keyword-based fulltext search using <strong>Reciprocal Rank Fusion (RRF)</strong>. It delivers the best of both worlds: understanding the <em>meaning</em> of queries (semantic) while also matching <em>exact keywords</em> (fulltext).</p>
-
-      <div class="feature-grid">
-        <div class="feature-card">
-          <h4><span class="feature-icon">&#x1F500;</span> RRF Fusion</h4>
-          <p>Combines vector and fulltext rankings using Reciprocal Rank Fusion with configurable K and weights.</p>
-        </div>
-        <div class="feature-card">
-          <h4><span class="feature-icon">&#x1F9E0;</span> Auto-Embed</h4>
-          <p>Automatically embeds queries server-side using FastText. No client-side embedding needed.</p>
-        </div>
-        <div class="feature-card">
-          <h4><span class="feature-icon">&#x1F4CA;</span> Reranking</h4>
-          <p>Multi-factor reranking: phrase match, keyword density, title boost, and short content penalty.</p>
-        </div>
-        <div class="feature-card">
-          <h4><span class="feature-icon">&#x1F310;</span> MMR Diversity</h4>
-          <p>Maximal Marginal Relevance removes near-duplicates and ensures diverse results.</p>
-        </div>
+      <div class="info-box tip">
+        <div class="info-box-title">Intent-only surface</div>
+        <p>
+          The retrieval mechanism &mdash; vector/text weights, RRF fusion, reranking, MMR
+          diversity, chunk merging, thresholds &mdash; is <strong>server-owned</strong>.
+          The tool deliberately exposes only intent (<code>collection</code>,
+          <code>query</code>, <code>filter</code>, <code>limit</code>, <code>format</code>),
+          so callers never have to tune knobs. Tuning happens inside the engine.
+        </p>
       </div>
 
-      <p>The <code>hybrid_search</code> tool is the unified entry point for all search operations. It supports two modes:</p>
-
-      <table>
-        <tr>
-          <th>Mode</th>
-          <th>When</th>
-          <th>Description</th>
-        </tr>
-        <tr>
-          <td><strong>Auto-embed</strong></td>
-          <td><code>vector</code> parameter omitted</td>
-          <td>Server embeds the query using the RAG collection's provider (FastText by default)</td>
-        </tr>
-        <tr>
-          <td><strong>Explicit vector</strong></td>
-          <td><code>vector</code> parameter provided</td>
-          <td>Client provides a pre-computed embedding vector</td>
-        </tr>
-      </table>
+      <div class="info-box warning">
+        <div class="info-box-title">Supersedes hybrid_search / vector_search_filter</div>
+        <p>
+          <code>search</code> replaces the older <code>hybrid_search</code> and
+          <code>vector_search_filter</code> MCP tools (removed). The same RRF fusion engine
+          powers it under the hood, but the per-call tuning parameters they exposed
+          (<code>search_mode</code>, <code>vector_weight</code>, <code>rrf_k</code>,
+          <code>mode</code>, <code>match_scope</code>, <code>rerank</code>,
+          <code>mmr_lambda</code>, <code>group_by_document</code>, …) are no longer part of
+          the tool surface. See <a href="#migration">Migration</a>.
+        </p>
+      </div>
 
       <!-- ============================================================== -->
       <!-- PIPELINE -->
       <!-- ============================================================== -->
+      <h2 id="pipeline">How it works (server-side)</h2>
 
-      <h2 id="pipeline">Pipeline Overview</h2>
+      <p>
+        A <code>search</code> call runs an internal pipeline you do not configure. The steps
+        below are informational &mdash; they describe what the engine does, not parameters you set:
+      </p>
 
-      <p>Every <code>hybrid_search</code> call goes through a 7-step pipeline:</p>
-
-      <div class="ascii-diagram">
-        <pre>
-&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
-&#9474;                     hybrid_search Pipeline                        &#9474;
-&#9500;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9508;
-&#9474;                                                                      &#9474;
-&#9474;  STEP 1    Resolve vector field + text field names                   &#9474;
-&#9474;            (explicit vector OR auto-embed query)                     &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 1.5  Document-level AND qualification          [optional]      &#9474;
-&#9474;            (match_scope="document" + mode="and")                     &#9474;
-&#9474;            Posting list intersection &#8594; qualified doc_ids            &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;              &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;                          &#9474;
-&#9474;              &#9660;                       &#9660;                          &#9474;
-&#9474;  STEP 2    Vector Search       STEP 3  Fulltext Search              &#9474;
-&#9474;            (HNSW cosine)                (TF-IDF ranked)              &#9474;
-&#9474;              &#9474;                       &#9474;                          &#9474;
-&#9474;              &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9524;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;                          &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 4    RRF Fusion (weighted rank combination)                    &#9474;
-&#9474;            score = &#931;(weight_i / (K + rank_i))                        &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 5    Reranking                                 [rerank=true]   &#9474;
-&#9474;            (phrase, density, title, length boosts)                    &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 5.5  Adjacent Chunk Merge                  [merge_chunks=true] &#9474;
-&#9474;            (overlap dedup for RAG chunks)                             &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 6    MMR Diversity Reranking                [deduplicate=true]  &#9474;
-&#9474;            (cosine similarity penalty)                                &#9474;
-&#9474;                          &#9474;                                            &#9474;
-&#9474;                          &#9660;                                            &#9474;
-&#9474;  STEP 7    Projection + Response                                     &#9474;
-&#9474;                                                                      &#9474;
-&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
-        </pre>
+      <div class="code-block">
+        <pre><code class="language-text">query ─► (auto-embed) ─┬─► HNSW vector search ─┐
+                       └─► BM25 fulltext       ┘
+                                  │
+                                  ▼
+                       RRF fusion (Reciprocal Rank Fusion)
+                                  │
+                                  ▼
+                       rerank (phrase / density / title / length)
+                                  │
+                                  ▼
+                       adjacent-chunk merge (overlap dedup)
+                                  │
+                                  ▼
+                       group by source document, token-budget passages
+                                  │
+                                  ▼
+                       ranked documents (+ passages)</code></pre>
       </div>
 
-      <table>
-        <tr>
-          <th>Step</th>
-          <th>Description</th>
-          <th>Condition</th>
-        </tr>
-        <tr>
-          <td><strong>1</strong></td>
-          <td>Resolve vector/text field names; embed query if no explicit vector provided</td>
-          <td>Always</td>
-        </tr>
-        <tr>
-          <td><strong>1.5</strong></td>
-          <td>Document-level AND: intersect posting lists to find docs containing ALL query terms</td>
-          <td><code>match_scope="document"</code> + <code>mode="and"</code></td>
-        </tr>
-        <tr>
-          <td><strong>2</strong></td>
-          <td>Vector search via HNSW index (cosine similarity)</td>
-          <td>Always</td>
-        </tr>
-        <tr>
-          <td><strong>3</strong></td>
-          <td>Fulltext search via TF-IDF index (keyword ranking)</td>
-          <td>Always</td>
-        </tr>
-        <tr>
-          <td><strong>4</strong></td>
-          <td>RRF Fusion: combine vector and fulltext ranks with configurable weights</td>
-          <td>Always</td>
-        </tr>
-        <tr>
-          <td><strong>5</strong></td>
-          <td>Reranking: apply phrase match, keyword density, title, and length boosts</td>
-          <td><code>rerank=true</code> (default)</td>
-        </tr>
-        <tr>
-          <td><strong>5.5</strong></td>
-          <td>Adjacent chunk merge: combine consecutive RAG chunks with overlapping text</td>
-          <td><code>merge_chunks=true</code> (default)</td>
-        </tr>
-        <tr>
-          <td><strong>6</strong></td>
-          <td>MMR diversity: penalize near-duplicate results using cosine similarity</td>
-          <td><code>deduplicate=true</code> (default)</td>
-        </tr>
-        <tr>
-          <td><strong>7</strong></td>
-          <td>Apply projection and build response</td>
-          <td>Always</td>
-        </tr>
-      </table>
+      <ul>
+        <li><strong>Auto-embed</strong>: the query is embedded server-side using the
+          collection's configured provider (Ollama / vLLM / OpenAI). You never pass a vector.</li>
+        <li><strong>RRF fusion</strong>: vector and lexical rankings are combined by
+          Reciprocal Rank Fusion, robust to incomparable score scales.</li>
+        <li><strong>Document anchoring</strong>: results are grouped by source document; each
+          document carries its relevant, overlap-merged passages (no chunk internals).</li>
+        <li><strong>Token budget</strong>: passages are capped; if the budget trims output,
+          the response flags <code>trimmed: true</code> (a non-empty corpus never returns empty).</li>
+      </ul>
 
       <!-- ============================================================== -->
       <!-- TOOL REFERENCE -->
       <!-- ============================================================== -->
+      <h1 id="tool-reference">search Tool Reference</h1>
 
-      <h1 id="tool-reference">hybrid_search Tool Reference</h1>
-
-      <div class="tool-card" id="parameters">
-        <h4><code>hybrid_search</code> &mdash; Unified Hybrid Search</h4>
-        <p>Combines vector (semantic) and fulltext (keyword) search with RRF fusion, reranking, and MMR diversity filtering. Supports auto-embedding or explicit vector input.</p>
-
-        <table class="param-table">
-          <tr>
-            <th>Parameter</th>
-            <th>Type</th>
-            <th>Default</th>
-            <th>Description</th>
-          </tr>
-          <tr>
-            <td>collection</td>
-            <td>string</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-required">required</span> Target collection name</td>
-          </tr>
-          <tr>
-            <td>query</td>
-            <td>string</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-required">required</span> Search query text</td>
-          </tr>
-          <tr>
-            <td>vector</td>
-            <td>array[number]</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Pre-computed embedding vector. If omitted, server auto-embeds the query</td>
-          </tr>
-          <tr>
-            <td>limit</td>
-            <td>integer</td>
-            <td>10</td>
-            <td><span class="badge badge-optional">optional</span> Maximum number of results</td>
-          </tr>
-          <tr>
-            <td>text_field</td>
-            <td>string</td>
-            <td>auto</td>
-            <td><span class="badge badge-optional">optional</span> Single text field for fulltext search</td>
-          </tr>
-          <tr>
-            <td>text_fields</td>
-            <td>array[string]</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Multiple text fields (best-field strategy). Overrides <code>text_field</code></td>
-          </tr>
-          <tr>
-            <td>vector_field</td>
-            <td>string</td>
-            <td>auto</td>
-            <td><span class="badge badge-optional">optional</span> Vector field name (auto-detected from RAG config)</td>
-          </tr>
-          <tr>
-            <td>mode</td>
-            <td>string</td>
-            <td>"or"</td>
-            <td><span class="badge badge-optional">optional</span> Fulltext mode: <code>"or"</code> (any word) or <code>"and"</code> (all words required)</td>
-          </tr>
-          <tr>
-            <td>match_scope</td>
-            <td>string</td>
-            <td>"chunk"</td>
-            <td><span class="badge badge-optional">optional</span> <code>"chunk"</code> = all words in one chunk, <code>"document"</code> = words across different chunks of the same document</td>
-          </tr>
-          <tr>
-            <td>search_mode</td>
-            <td>string</td>
-            <td>"balanced"</td>
-            <td><span class="badge badge-optional">optional</span> Preset: <code>"balanced"</code>, <code>"semantic"</code>, or <code>"keyword"</code></td>
-          </tr>
-          <tr>
-            <td>vector_weight</td>
-            <td>number</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Explicit vector weight (0.0&ndash;1.0). Overrides search_mode preset</td>
-          </tr>
-          <tr>
-            <td>fulltext_weight</td>
-            <td>number</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Explicit fulltext weight (0.0&ndash;1.0). Overrides search_mode preset</td>
-          </tr>
-          <tr>
-            <td>rrf_k</td>
-            <td>number</td>
-            <td>20.0</td>
-            <td><span class="badge badge-optional">optional</span> RRF smoothing constant. Lower K = more spread between scores</td>
-          </tr>
-          <tr>
-            <td>title_field</td>
-            <td>string</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Field name for title-based reranking boost</td>
-          </tr>
-          <tr>
-            <td>rerank</td>
-            <td>boolean</td>
-            <td>true</td>
-            <td><span class="badge badge-optional">optional</span> Apply reranking boosts (phrase, density, title, length)</td>
-          </tr>
-          <tr>
-            <td>deduplicate</td>
-            <td>boolean</td>
-            <td>true</td>
-            <td><span class="badge badge-optional">optional</span> Apply MMR diversity reranking</td>
-          </tr>
-          <tr>
-            <td>mmr_lambda</td>
-            <td>number</td>
-            <td>0.5</td>
-            <td><span class="badge badge-optional">optional</span> MMR balance: 1.0 = pure relevance, 0.0 = pure diversity</td>
-          </tr>
-          <tr>
-            <td>merge_chunks</td>
-            <td>boolean</td>
-            <td>true</td>
-            <td><span class="badge badge-optional">optional</span> Merge adjacent RAG chunks with overlapping text</td>
-          </tr>
-          <tr>
-            <td>filter</td>
-            <td>object</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> MongoDB-style query filter applied to results</td>
-          </tr>
-          <tr>
-            <td>projection</td>
-            <td>object</td>
-            <td>&mdash;</td>
-            <td><span class="badge badge-optional">optional</span> Field projection (<code>{"field": 1}</code> include, <code>{"field": 0}</code> exclude)</td>
-          </tr>
-          <tr>
-            <td>provider</td>
-            <td>string</td>
-            <td>"fasttext"</td>
-            <td><span class="badge badge-optional">optional</span> Embedding provider for auto-embed mode</td>
-          </tr>
-        </table>
+      <div class="tool-card">
+        <h4><code>search</code> &mdash; Document-anchored hybrid retrieval</h4>
+        <p>Returns ranked source documents with their relevant passages for a natural-language query.</p>
       </div>
 
-      <!-- ============================================================== -->
-      <!-- RESPONSE FORMAT -->
-      <!-- ============================================================== -->
+      <h2 id="parameters">Parameters</h2>
 
+      <table class="param-table">
+        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        <tr>
+          <td><code>collection</code></td>
+          <td>string</td>
+          <td><span class="badge badge-required">required</span></td>
+          <td>Collection to search.</td>
+        </tr>
+        <tr>
+          <td><code>query</code></td>
+          <td>string</td>
+          <td><span class="badge badge-required">required</span></td>
+          <td>Natural-language query or keywords. Auto-embedded server-side.</td>
+        </tr>
+        <tr>
+          <td><code>filter</code></td>
+          <td>object</td>
+          <td><span class="badge badge-optional">optional</span></td>
+          <td>Structured metadata filter applied before retrieval, e.g. <code>{"year": 2026, "customer": "X"}</code>.</td>
+        </tr>
+        <tr>
+          <td><code>limit</code></td>
+          <td>integer</td>
+          <td><code>5</code></td>
+          <td>Maximum number of documents to return.</td>
+        </tr>
+        <tr>
+          <td><code>format</code></td>
+          <td>string</td>
+          <td><code>"structured"</code></td>
+          <td><code>"structured"</code> = documents with passages; <code>"context_block"</code> = a single citation-marked text block ready to paste into a prompt.</td>
+        </tr>
+        <tr>
+          <td><code>debug</code></td>
+          <td>boolean</td>
+          <td><code>false</code></td>
+          <td>Include a <code>diagnostics</code> block (stage, fusion, qualified doc count, total chunks).</td>
+        </tr>
+      </table>
+
+      <!-- ============================================================== -->
+      <!-- RESPONSE -->
+      <!-- ============================================================== -->
       <h2 id="response">Response Format</h2>
 
-      <p>A successful <code>hybrid_search</code> response includes results with scoring metadata and pipeline information:</p>
-
+      <h3>structured (default)</h3>
       <div class="code-block">
         <pre><code class="language-json">{
-  "results": [
+  "verdict": "unknown",
+  "documents": [
     {
-      "_id": "550e8400-e29b-41d4-a716-446655440001",
-      "content": "IronBase supports B+ tree indexing for fast lookups...",
-      "title": "Indexing Guide",
-      "doc_id": "guide-001",
-      "chunk_index": 2,
-      "chunk_total": 8,
-      "_rrf_score": 0.03205,
-      "_final_score": 0.04487,
-      "_rerank_boost": 1.40,
-      "_vector_rank": 1,
-      "_text_rank": 3,
-      "_vector_score": 0.8721,
-      "_text_score": 12.45
+      "doc_id": "arajanlat-2026-001",
+      "title": "BKV árajánlat",
+      "relevance": 0.039,
+      "passages": [
+        {"text": "..."},
+        {"text": "..."}
+      ]
     }
   ],
   "count": 1,
-  "query": "database indexing",
-  "algorithm": "hybrid_rrf",
-  "rrf_k": 20.0,
-  "weights": {
-    "vector": 0.5,
-    "fulltext": 0.5
-  },
-  "auto_embedded": true,
-  "provider": "fasttext",
-  "reranked": true,
-  "dedup_removed": 2,
-  "chunks_merged": 1,
-  "match_scope": "chunk"
+  "trimmed": false
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
-      <h3>Result Metadata Fields</h3>
-
-      <table>
-        <tr>
-          <th>Field</th>
-          <th>Type</th>
-          <th>Description</th>
-        </tr>
-        <tr>
-          <td><code>_rrf_score</code></td>
-          <td>number</td>
-          <td>Raw RRF fusion score (before reranking)</td>
-        </tr>
-        <tr>
-          <td><code>_final_score</code></td>
-          <td>number</td>
-          <td>Final score after all reranking boosts</td>
-        </tr>
-        <tr>
-          <td><code>_rerank_boost</code></td>
-          <td>number</td>
-          <td>Combined multiplicative boost factor applied during reranking</td>
-        </tr>
-        <tr>
-          <td><code>_vector_rank</code></td>
-          <td>integer</td>
-          <td>Rank position in vector search results (0 = not found)</td>
-        </tr>
-        <tr>
-          <td><code>_text_rank</code></td>
-          <td>integer</td>
-          <td>Rank position in fulltext search results (0 = not found)</td>
-        </tr>
-        <tr>
-          <td><code>_vector_score</code></td>
-          <td>number</td>
-          <td>Raw cosine similarity score from HNSW</td>
-        </tr>
-        <tr>
-          <td><code>_text_score</code></td>
-          <td>number</td>
-          <td>Raw TF-IDF score from fulltext search</td>
-        </tr>
+      <table class="param-table">
+        <tr><th>Field</th><th>Description</th></tr>
+        <tr><td><code>verdict</code></td><td>Stage A always returns <code>"unknown"</code> (no absolute-relevance / abstention calibration yet).</td></tr>
+        <tr><td><code>documents</code></td><td>Ranked source documents. Each has <code>doc_id</code>, document-level fields, <code>relevance</code> (fused score), and <code>passages</code> (<code>{"text": ...}</code> only — no engine internals).</td></tr>
+        <tr><td><code>count</code></td><td>Number of documents returned.</td></tr>
+        <tr><td><code>trimmed</code></td><td><code>true</code> if the token budget dropped some passages.</td></tr>
+        <tr><td><code>dropped_empty_documents</code></td><td>Present only when qualified documents had no body text under the resolved text field (surfaced anomaly, never silently hidden).</td></tr>
+        <tr><td><code>diagnostics</code></td><td>Present only with <code>debug: true</code>.</td></tr>
       </table>
 
-      <h3>Response-level Fields</h3>
-
-      <table>
-        <tr>
-          <th>Field</th>
-          <th>Description</th>
-        </tr>
-        <tr>
-          <td><code>count</code></td>
-          <td>Number of results returned</td>
-        </tr>
-        <tr>
-          <td><code>algorithm</code></td>
-          <td>Always <code>"hybrid_rrf"</code></td>
-        </tr>
-        <tr>
-          <td><code>rrf_k</code></td>
-          <td>The K constant used for RRF fusion</td>
-        </tr>
-        <tr>
-          <td><code>weights</code></td>
-          <td>Resolved vector/fulltext weights</td>
-        </tr>
-        <tr>
-          <td><code>auto_embedded</code></td>
-          <td><code>true</code> if server embedded the query, <code>false</code> if client provided a vector</td>
-        </tr>
-        <tr>
-          <td><code>provider</code></td>
-          <td>Embedding provider used (e.g. <code>"fasttext"</code>) or <code>null</code></td>
-        </tr>
-        <tr>
-          <td><code>reranked</code></td>
-          <td>Whether reranking was applied</td>
-        </tr>
-        <tr>
-          <td><code>dedup_removed</code></td>
-          <td>Number of near-duplicate results removed by MMR</td>
-        </tr>
-        <tr>
-          <td><code>chunks_merged</code></td>
-          <td>Number of adjacent chunk merges performed</td>
-        </tr>
-        <tr>
-          <td><code>match_scope</code></td>
-          <td><code>"chunk"</code> or <code>"document"</code></td>
-        </tr>
-        <tr>
-          <td><code>qualified_doc_ids</code></td>
-          <td>Number of qualified documents (only with <code>match_scope="document"</code>)</td>
-        </tr>
-      </table>
-
-      <!-- ============================================================== -->
-      <!-- SEARCH MODES -->
-      <!-- ============================================================== -->
-
-      <h1 id="search-modes">Search Modes</h1>
-
-      <p>Search mode presets provide LLM-friendly named configurations instead of raw numeric weights. Use <code>search_mode</code> to quickly choose a strategy:</p>
-
-      <table>
-        <tr>
-          <th>Mode</th>
-          <th>vector_weight</th>
-          <th>fulltext_weight</th>
-          <th>Best For</th>
-        </tr>
-        <tr>
-          <td><code>"balanced"</code></td>
-          <td>0.5</td>
-          <td>0.5</td>
-          <td>General-purpose search (default)</td>
-        </tr>
-        <tr>
-          <td><code>"semantic"</code></td>
-          <td>0.8</td>
-          <td>0.2</td>
-          <td>Conceptual questions, "what is...", topic exploration</td>
-        </tr>
-        <tr>
-          <td><code>"keyword"</code></td>
-          <td>0.2</td>
-          <td>0.8</td>
-          <td>Specific terms, names, product codes, exact phrases</td>
-        </tr>
-      </table>
-
+      <h3>context_block</h3>
+      <p>With <code>format: "context_block"</code>, the <code>documents</code> array is replaced by a single <code>context</code> string &mdash; citation-marked (<code>[doc_id] title</code>), ready to paste into a prompt:</p>
       <div class="code-block">
         <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "knowledge_base",
-    "query": "how does indexing work",
-    "search_mode": "semantic"
-  }
+  "verdict": "unknown",
+  "context": "[arajanlat-2026-001] BKV árajánlat\n...passage text...\n\n",
+  "count": 1,
+  "trimmed": false
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <h2 id="custom-weights">Custom Weights</h2>
-
-      <p>For fine-grained control, set <code>vector_weight</code> and <code>fulltext_weight</code> explicitly. These <strong>override</strong> the search_mode preset.</p>
-
-      <div class="info-box note">
-        <div class="info-box-title">Priority Order</div>
-        <p>Explicit <code>vector_weight</code> / <code>fulltext_weight</code> &gt; <code>search_mode</code> preset &gt; balanced default (0.5 / 0.5)</p>
-      </div>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "articles",
-    "query": "machine learning optimization",
-    "vector_weight": 0.7,
-    "fulltext_weight": 0.3
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <p>Special cases:</p>
-
-      <table>
-        <tr>
-          <th>Configuration</th>
-          <th>Effect</th>
-        </tr>
-        <tr>
-          <td><code>vector_weight: 1.0, fulltext_weight: 0.0</code></td>
-          <td>Vector-only search (pure semantic)</td>
-        </tr>
-        <tr>
-          <td><code>vector_weight: 0.0, fulltext_weight: 1.0</code></td>
-          <td>Fulltext-only search (pure keyword)</td>
-        </tr>
-      </table>
-
-      <!-- ============================================================== -->
-      <!-- FULLTEXT OPTIONS -->
-      <!-- ============================================================== -->
-
-      <h1 id="fulltext-options">Fulltext Options</h1>
-
-      <h2>mode: AND vs OR</h2>
-
-      <p>The <code>mode</code> parameter controls how query terms are matched in the fulltext component:</p>
-
-      <table>
-        <tr>
-          <th>Mode</th>
-          <th>Behavior</th>
-          <th>Example: query = "database indexing"</th>
-        </tr>
-        <tr>
-          <td><code>"or"</code> (default)</td>
-          <td>Match documents containing <em>any</em> query term</td>
-          <td>Matches "database performance" or "indexing strategies"</td>
-        </tr>
-        <tr>
-          <td><code>"and"</code></td>
-          <td>Match documents containing <em>all</em> query terms</td>
-          <td>Only matches documents with both "database" AND "indexing"</td>
-        </tr>
-      </table>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "docs",
-    "query": "brake pad replacement cost",
-    "mode": "and"
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <div class="info-box tip">
-        <div class="info-box-title">AND mode + vector search</div>
-        <p>AND mode only affects the fulltext component. Vector search remains unfiltered, so RRF fusion can still return semantically relevant results even if they don't contain all keywords.</p>
-      </div>
-
-      <!-- match_scope -->
-
-      <h2 id="match-scope">match_scope: Chunk vs Document</h2>
-
-      <p>In RAG collections, documents are split into chunks. The <code>match_scope</code> parameter controls the granularity of AND matching:</p>
-
-      <table>
-        <tr>
-          <th>Scope</th>
-          <th>Behavior</th>
-          <th>Use Case</th>
-        </tr>
-        <tr>
-          <td><code>"chunk"</code> (default)</td>
-          <td>All query terms must appear in the <em>same chunk</em></td>
-          <td>Short queries, precise matching</td>
-        </tr>
-        <tr>
-          <td><code>"document"</code></td>
-          <td>Query terms can be spread across <em>different chunks</em> of the same document</td>
-          <td>Long queries, multi-topic documents</td>
-        </tr>
-      </table>
-
-      <div class="ascii-diagram">
-        <pre>
-  Document "User Guide" (3 chunks)
-  &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
-  &#9474; Chunk 0              &#9474;&#9474; Chunk 1              &#9474;&#9474; Chunk 2              &#9474;
-  &#9474; "...brake pad..."    &#9474;&#9474; "...replacement..."  &#9474;&#9474; "...cost analysis..." &#9474;
-  &#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;&#9492;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
-
-  Query: "brake pad cost"
-
-  match_scope="chunk":     No chunk contains ALL three terms &#8594; 0 fulltext results
-  match_scope="document":  "brake pad" in chunk 0, "cost" in chunk 2
-                           &#8594; Document qualifies &#8594; all chunks searchable
-        </pre>
-      </div>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "docs",
-    "query": "brake pad replacement cost",
-    "mode": "and",
-    "match_scope": "document",
-    "text_field": "content_text"
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <div class="info-box note">
-        <div class="info-box-title">Requirements</div>
-        <p><code>match_scope="document"</code> requires <code>mode="and"</code> and a RAG collection (documents with <code>doc_id</code> field). Without these, it falls back to chunk-level matching.</p>
-      </div>
-
-      <!-- Multi-field -->
-
-      <h2 id="multi-field">Multi-field Fulltext Search</h2>
-
-      <p>Search across multiple text fields simultaneously using <code>text_fields</code>. Each field must have a fulltext index. Results use a <strong>best-field strategy</strong>: the highest score from any field wins.</p>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "articles",
-    "query": "machine learning",
-    "text_fields": ["content", "title", "abstract"]
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <div class="info-box tip">
-        <div class="info-box-title">text_fields vs text_field</div>
-        <p>If both <code>text_fields</code> (array) and <code>text_field</code> (string) are provided, <code>text_fields</code> takes precedence. Each field in the array needs its own fulltext index (<code>index_create_fulltext</code>).</p>
-      </div>
-
-      <!-- ============================================================== -->
-      <!-- RERANKING PIPELINE -->
-      <!-- ============================================================== -->
-
-      <h1 id="reranking">Reranking Pipeline</h1>
-
-      <p>After RRF fusion produces an initial ranking, multiple reranking stages refine the results. Each stage is optional and can be toggled independently.</p>
-
-      <!-- RRF -->
-
-      <h2 id="rrf">RRF Fusion (Step 4)</h2>
-
-      <p>Reciprocal Rank Fusion combines rankings from different sources using a simple but effective formula:</p>
-
-      <div class="ascii-diagram">
-        <pre>
-  RRF Score = &#931; ( weight_i / (K + rank_i) )
-
-  Where:
-    weight_i = source weight (vector_weight or fulltext_weight)
-    K        = smoothing constant (default: 20)
-    rank_i   = 1-based rank position in source results
-
-  Example (K=20, balanced weights):
-    Document appears at vector_rank=1, text_rank=5
-
-    score = 0.5/(20+1) + 0.5/(20+5) = 0.02381 + 0.02000 = 0.04381
-        </pre>
-      </div>
-
-      <p>The <code>rrf_k</code> parameter controls score spread. Lower K values create more separation between high-ranked and low-ranked results:</p>
-
-      <table>
-        <tr>
-          <th>K Value</th>
-          <th>Score Spread (top-10)</th>
-          <th>Effect</th>
-        </tr>
-        <tr>
-          <td>60</td>
-          <td>0.00049</td>
-          <td>Very compressed &mdash; reranking has minimal effect</td>
-        </tr>
-        <tr>
-          <td><strong>20 (default)</strong></td>
-          <td><strong>0.00430</strong></td>
-          <td>8.8x wider spread &mdash; reranking is meaningful</td>
-        </tr>
-        <tr>
-          <td>20 + title_field</td>
-          <td>0.01162</td>
-          <td>23.7x wider &mdash; title boost amplifies differences</td>
-        </tr>
-      </table>
-
-      <!-- Boosts -->
-
-      <h2 id="boosts">Reranking Boosts (Step 5)</h2>
-
-      <p>When <code>rerank=true</code> (default), four multiplicative boost factors are applied to each result's RRF score:</p>
-
-      <table>
-        <tr>
-          <th>Factor</th>
-          <th>Boost</th>
-          <th>Condition</th>
-        </tr>
-        <tr>
-          <td><strong>Exact phrase match</strong></td>
-          <td>1.5x</td>
-          <td>The exact query string appears in the document text</td>
-        </tr>
-        <tr>
-          <td><strong>Keyword density</strong></td>
-          <td>1.0x &ndash; 1.3x</td>
-          <td>Proportion of query terms found in the document (scaled linearly)</td>
-        </tr>
-        <tr>
-          <td><strong>Title match</strong></td>
-          <td>1.0x &ndash; 1.5x</td>
-          <td>Query terms found in the <code>title_field</code> (requires <code>title_field</code> parameter)</td>
-        </tr>
-        <tr>
-          <td><strong>Short content penalty</strong></td>
-          <td>0.8x</td>
-          <td>Document text is shorter than 50 characters</td>
-        </tr>
-      </table>
-
-      <p>The final score is: <code>_final_score = _rrf_score * phrase_boost * density_boost * title_boost * length_factor</code></p>
-
-      <div class="info-box tip">
-        <div class="info-box-title">Title Boost</div>
-        <p>To enable title-based boosting, set <code>title_field</code> to the name of the field containing document titles (e.g. <code>"title"</code>). Without this parameter, title boost is always 1.0x (no effect).</p>
-      </div>
-
-      <!-- Chunk Merge -->
-
-      <h2 id="chunk-merge">Adjacent Chunk Merge (Step 5.5)</h2>
-
-      <p>RAG chunking with overlap (~100 chars) causes adjacent chunks to duplicate boundary text. When both chunks appear in the top results, they waste slots with redundant content.</p>
-
-      <p>When <code>merge_chunks=true</code> (default), consecutive chunks from the same document are merged:</p>
-
-      <table>
-        <tr>
-          <th>Aspect</th>
-          <th>Detail</th>
-        </tr>
-        <tr>
-          <td>Trigger</td>
-          <td>Same <code>doc_id</code> + consecutive <code>chunk_index</code> values</td>
-        </tr>
-        <tr>
-          <td>Text merge</td>
-          <td>Overlap removed using <code>start_char</code>/<code>end_char</code> boundaries (UTF-8 safe)</td>
-        </tr>
-        <tr>
-          <td>Score</td>
-          <td><code>max(_final_score)</code> from the merged run</td>
-        </tr>
-        <tr>
-          <td>Embedding</td>
-          <td>Embedding from the highest-scoring chunk in the run</td>
-        </tr>
-        <tr>
-          <td>Metadata</td>
-          <td><code>chunk_merged: true</code>, <code>chunks_in_merge: N</code>, updated <code>start_char</code>/<code>end_char</code></td>
-        </tr>
-        <tr>
-          <td>Position</td>
-          <td>After reranking, before MMR &mdash; merged chunks feed into diversity filtering</td>
-        </tr>
-      </table>
-
-      <!-- MMR -->
-
-      <h2 id="mmr">MMR Diversity (Step 6)</h2>
-
-      <p>Maximal Marginal Relevance (MMR) reduces near-duplicate results by penalizing documents that are too similar to already-selected results.</p>
-
-      <div class="ascii-diagram">
-        <pre>
-  MMR(c) = &#955; * relevance(c) - (1 - &#955;) * max_similarity(c, selected)
-
-  Where:
-    &#955; (mmr_lambda)       = balance between relevance and diversity
-    relevance(c)         = normalized _final_score
-    max_similarity(...)  = highest cosine similarity to any already-selected result
-        </pre>
-      </div>
-
-      <table>
-        <tr>
-          <th>mmr_lambda</th>
-          <th>Behavior</th>
-        </tr>
-        <tr>
-          <td>1.0</td>
-          <td>Pure relevance (no diversity penalty) &mdash; equivalent to <code>deduplicate=false</code></td>
-        </tr>
-        <tr>
-          <td><strong>0.5 (default)</strong></td>
-          <td>Balanced: equal weight to relevance and diversity</td>
-        </tr>
-        <tr>
-          <td>0.0</td>
-          <td>Maximum diversity: aggressively penalizes similar results</td>
-        </tr>
-      </table>
-
-      <div class="info-box note">
-        <div class="info-box-title">Embedding required</div>
-        <p>MMR uses cosine similarity between document embeddings. Results without embeddings are ranked by relevance only (no diversity penalty applied).</p>
       </div>
 
       <!-- ============================================================== -->
       <!-- EXAMPLES -->
       <!-- ============================================================== -->
-
       <h1 id="examples">Examples</h1>
 
-      <h2>Basic Search (Auto-embed)</h2>
-
-      <p>The simplest form: just provide a collection and query. The server auto-embeds the query and uses balanced weights.</p>
-
+      <h2>Basic Search</h2>
       <div class="code-block">
         <pre><code class="language-json">{
-  "name": "hybrid_search",
+  "name": "search",
   "arguments": {
-    "collection": "knowledge_base",
-    "query": "how to create indexes"
+    "collection": "rdocs",
+    "query": "BKV Zrt árajánlat",
+    "limit": 5
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h2 id="example-filter">Filtered Search</h2>
+      <p>Narrow retrieval with a structured metadata filter applied before fusion:</p>
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "search",
+  "arguments": {
+    "collection": "rdocs",
+    "query": "karbantartási díj",
+    "filter": {"year": 2026, "customer": "BKV"},
+    "limit": 5
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h2 id="example-context">Context Block (for prompting)</h2>
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "search",
+  "arguments": {
+    "collection": "rdocs",
+    "query": "szállítási határidő",
+    "format": "context_block"
   }
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -953,323 +297,94 @@
 
       <h2 id="example-rag">RAG Collection Setup + Search</h2>
 
-      <p>First create a RAG collection, import documents, then search:</p>
-
       <h3>1. Create RAG Collection</h3>
-
       <div class="code-block">
         <pre><code class="language-json">{
   "name": "rag_collection_create",
   "arguments": {
-    "collection": "docs",
-    "language": "english"
+    "collection": "rdocs",
+    "language": "hungarian",
+    "text_fields": ["title", "customer"]
   }
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
       <h3>2. Import Documents</h3>
-
       <div class="code-block">
         <pre><code class="language-json">{
   "name": "rag_document_import",
   "arguments": {
-    "collection": "docs",
-    "content": "# Getting Started\n\nIronBase is an embedded NoSQL database...",
-    "title": "Getting Started Guide",
-    "metadata": {"category": "tutorial", "version": "1.0"}
+    "collection": "rdocs",
+    "doc_id": "arajanlat-2026-001",
+    "content": "...",
+    "title": "BKV árajánlat",
+    "if_exists": "replace"
   }
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
-      <h3>3. Search with Reranking</h3>
-
+      <h3>3. Search</h3>
       <div class="code-block">
         <pre><code class="language-json">{
-  "name": "hybrid_search",
+  "name": "search",
   "arguments": {
-    "collection": "docs",
-    "query": "embedded database getting started",
-    "search_mode": "balanced",
-    "title_field": "title",
-    "limit": 5
+    "collection": "rdocs",
+    "query": "BKV árajánlat karbantartás"
   }
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
-
-      <h2 id="example-advanced">Advanced Filtering</h2>
-
-      <p>Combine hybrid search with MongoDB-style filters and projection:</p>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "articles",
-    "query": "machine learning optimization",
-    "search_mode": "semantic",
-    "filter": {
-      "year": {"$gte": 2024},
-      "status": "published"
-    },
-    "projection": {
-      "title": 1,
-      "content": 1,
-      "year": 1
-    },
-    "title_field": "title",
-    "limit": 10
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      <div class="info-box tip">
+        <div class="info-box-title">Multi-field is automatic</div>
+        <p>
+          The fields configured at <code>rag_collection_create</code> time
+          (<code>text_fields</code>) are searched automatically &mdash; the RAG config stores
+          the list and <code>search</code> resolves it server-side. There is no per-call
+          <code>text_fields</code> override.
+        </p>
       </div>
 
-      <h2 id="example-document-and">Document-level AND</h2>
+      <!-- ============================================================== -->
+      <!-- MIGRATION -->
+      <!-- ============================================================== -->
+      <h1 id="migration">Migration from hybrid_search</h1>
 
-      <p>Find documents where ALL query terms appear somewhere across the document's chunks, even if no single chunk contains all of them:</p>
+      <p>
+        <code>hybrid_search</code> and <code>vector_search_filter</code> were removed. Map your
+        calls to <code>search</code> as follows. Tuning parameters have no replacement &mdash;
+        they are now decided by the engine.
+      </p>
 
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "manuals",
-    "query": "brake pad replacement cost estimate",
-    "mode": "and",
-    "match_scope": "document",
-    "text_field": "content_text",
-    "search_mode": "keyword",
-    "title_field": "title",
-    "limit": 15
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <p>Response includes qualification info:</p>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "results": [...],
-  "count": 12,
-  "match_scope": "document",
-  "qualified_doc_ids": 8,
-  "algorithm": "hybrid_rrf"
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <h2>Multi-field Search</h2>
-
-      <p>Search across title, content, and customer name simultaneously:</p>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "offers",
-    "query": "hydraulic press maintenance",
-    "text_fields": ["content_text", "title", "customer"],
-    "search_mode": "keyword",
-    "mode": "and",
-    "limit": 20
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <h2>Explicit Vector Search</h2>
-
-      <p>If you have a pre-computed embedding (e.g. from OpenAI), pass it directly:</p>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "hybrid_search",
-  "arguments": {
-    "collection": "articles",
-    "query": "original query text for fulltext",
-    "vector": [0.0234, -0.1567, 0.3891, "... (300 dimensions)"],
-    "vector_field": "embedding",
-    "text_field": "content",
-    "vector_weight": 0.6,
-    "fulltext_weight": 0.4
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
-
-      <h2>Full Response Example</h2>
-
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "results": [
-    {
-      "_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "content": "B+ tree indexes provide O(log n) lookup time for equality and range queries...",
-      "title": "Indexing Deep Dive",
-      "doc_id": "indexing-guide",
-      "chunk_index": 3,
-      "chunk_total": 12,
-      "_rrf_score": 0.04381,
-      "_final_score": 0.06571,
-      "_rerank_boost": 1.50,
-      "_vector_rank": 1,
-      "_text_rank": 2,
-      "_vector_score": 0.9102,
-      "_text_score": 18.73,
-      "chunk_merged": true,
-      "chunks_in_merge": 2
-    },
-    {
-      "_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-      "content": "Compound indexes support multi-field queries efficiently. Create them with...",
-      "title": "Indexing Deep Dive",
-      "doc_id": "indexing-guide",
-      "chunk_index": 5,
-      "chunk_total": 12,
-      "_rrf_score": 0.03205,
-      "_final_score": 0.04167,
-      "_rerank_boost": 1.30,
-      "_vector_rank": 3,
-      "_text_rank": 1,
-      "_vector_score": 0.8234,
-      "_text_score": 21.05
-    }
-  ],
-  "count": 2,
-  "query": "database indexing compound",
-  "algorithm": "hybrid_rrf",
-  "rrf_k": 20.0,
-  "weights": {
-    "vector": 0.5,
-    "fulltext": 0.5
-  },
-  "auto_embedded": true,
-  "provider": "fasttext",
-  "reranked": true,
-  "dedup_removed": 1,
-  "chunks_merged": 1,
-  "match_scope": "chunk"
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
+      <table class="param-table">
+        <tr><th>Old (hybrid_search)</th><th>Now (search)</th></tr>
+        <tr><td><code>collection</code>, <code>query</code>, <code>filter</code>, <code>limit</code></td><td>same</td></tr>
+        <tr><td><code>vector</code> (explicit embedding)</td><td>removed — query is always auto-embedded</td></tr>
+        <tr><td><code>search_mode</code>, <code>vector_weight</code>, <code>fulltext_weight</code>, <code>rrf_k</code></td><td>removed — server-owned fusion</td></tr>
+        <tr><td><code>mode</code>, <code>match_scope</code>, <code>text_fields</code>, <code>title_field</code></td><td>removed — resolved server-side from the RAG config</td></tr>
+        <tr><td><code>rerank</code>, <code>deduplicate</code>, <code>mmr_lambda</code>, <code>merge_chunks</code></td><td>removed — applied internally</td></tr>
+        <tr><td><code>group_by_document</code> (flat vs grouped)</td><td>always document-anchored; use <code>format</code> for output shape</td></tr>
+        <tr><td>response: <code>results[]</code> with <code>_rrf_score</code>/<code>_final_score</code>/…</td><td><code>documents[]</code> with <code>relevance</code> + <code>passages</code> (no internals)</td></tr>
+      </table>
 
       <!-- ============================================================== -->
       <!-- BEST PRACTICES -->
       <!-- ============================================================== -->
-
       <h1 id="best-practices">Best Practices</h1>
 
-      <div class="info-box tip">
-        <div class="info-box-title">Performance Tips</div>
-        <p>
-          &bull; Use <code>projection</code> to return only needed fields &mdash; reduces response size<br>
-          &bull; Set an appropriate <code>limit</code> &mdash; higher limits increase RRF computation<br>
-          &bull; <code>search_mode</code> presets are zero-cost &mdash; prefer them over manual weight tuning<br>
-          &bull; <code>title_field</code> adds minimal overhead but significantly improves relevance<br>
-          &bull; <code>merge_chunks=true</code> (default) reduces redundant results in RAG collections
-        </p>
-      </div>
-
-      <h2 id="when-to-use">When to Use What</h2>
-
-      <h3>AND vs OR Mode</h3>
-
-      <table>
-        <tr>
-          <th>Scenario</th>
-          <th>Recommended Mode</th>
-          <th>Why</th>
-        </tr>
-        <tr>
-          <td>Short queries (1&ndash;2 words)</td>
-          <td><code>"or"</code> (default)</td>
-          <td>AND is equivalent to OR for single-word queries</td>
-        </tr>
-        <tr>
-          <td>Broad exploration</td>
-          <td><code>"or"</code></td>
-          <td>Cast a wide net, let reranking sort by relevance</td>
-        </tr>
-        <tr>
-          <td>Multi-term specific queries</td>
-          <td><code>"and"</code></td>
-          <td>Ensures all concepts are present in results</td>
-        </tr>
-        <tr>
-          <td>Product/entity search</td>
-          <td><code>"and"</code></td>
-          <td>All terms are typically required (e.g. "brake pad ABS")</td>
-        </tr>
-      </table>
-
-      <h3>Chunk vs Document Scope</h3>
-
-      <table>
-        <tr>
-          <th>Scenario</th>
-          <th>Recommended Scope</th>
-          <th>Why</th>
-        </tr>
-        <tr>
-          <td>Short documents (single chunk)</td>
-          <td><code>"chunk"</code> (default)</td>
-          <td>Document scope has no effect on single-chunk documents</td>
-        </tr>
-        <tr>
-          <td>Precise passage retrieval</td>
-          <td><code>"chunk"</code></td>
-          <td>Finds the exact chunk containing all terms</td>
-        </tr>
-        <tr>
-          <td>Long documents, multi-topic queries</td>
-          <td><code>"document"</code></td>
-          <td>Terms may be spread across different sections</td>
-        </tr>
-        <tr>
-          <td>QA over technical manuals</td>
-          <td><code>"document"</code></td>
-          <td>Answer may require context from multiple sections</td>
-        </tr>
-      </table>
-
-      <h3>Search Mode Selection</h3>
-
-      <table>
-        <tr>
-          <th>Query Type</th>
-          <th>Recommended Mode</th>
-          <th>Example</th>
-        </tr>
-        <tr>
-          <td>Conceptual / "What is..."</td>
-          <td><code>"semantic"</code></td>
-          <td>"how does garbage collection work"</td>
-        </tr>
-        <tr>
-          <td>Exact terms / product codes</td>
-          <td><code>"keyword"</code></td>
-          <td>"ABS-2024-XR brake assembly"</td>
-        </tr>
-        <tr>
-          <td>General / mixed</td>
-          <td><code>"balanced"</code> (default)</td>
-          <td>"indexing performance optimization"</td>
-        </tr>
-      </table>
-
-      <div class="info-box warning">
-        <div class="info-box-title">Heavy Queries</div>
-        <p>
-          Combining <code>match_scope="document"</code> + <code>mode="and"</code> + <code>text_fields</code> (multi-field) + high <code>limit</code> is the most expensive configuration. For large collections (100K+ chunks), consider narrowing the query or using <code>filter</code> to reduce the search space.
-        </p>
-      </div>
+      <ul>
+        <li>Use a natural-language <code>query</code> &mdash; the engine handles both lexical and semantic matching.</li>
+        <li>Add a <code>filter</code> to bound the search space on large collections (100K+ chunks) before retrieval.</li>
+        <li>Keep <code>limit</code> small (default 5) for LLM prompting; passages are token-budgeted.</li>
+        <li>Use <code>format: "context_block"</code> when you want a ready-to-paste, citation-marked context for a prompt.</li>
+        <li>Set <code>debug: true</code> while developing to see <code>diagnostics</code> (qualified docs, total chunks, fusion stage).</li>
+      </ul>
 
       <!-- Footer -->
       <hr style="margin-top: 60px;">
       <p style="text-align: center; color: var(--text-muted);">
-        IronBase Documentation v1.0.373<br>
+        IronBase Documentation v1.0.509<br>
         &copy; 2024 PeTitan Kft.
       </p>
 
@@ -1289,13 +404,13 @@
       const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
       html.setAttribute('data-theme', newTheme);
       localStorage.setItem('theme', newTheme);
-      document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+      document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '☀️' : '🌙';
     }
 
     // Load saved theme
     const savedTheme = localStorage.getItem('theme') || 'light';
     document.documentElement.setAttribute('data-theme', savedTheme);
-    document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+    document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
 
     // Copy button
     function copyCode(btn) {

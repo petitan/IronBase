@@ -1402,13 +1402,13 @@ mod pipeline_integration_tests {
         }
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_vector",
-            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
         );
 
         let (p, fo) = fuse(
@@ -1454,13 +1454,13 @@ mod pipeline_integration_tests {
         }
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_vector",
-            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
         );
 
         let (p, fo) = fuse(
@@ -1538,18 +1538,18 @@ mod pipeline_integration_tests {
         }
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"title"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"title"}),
         );
         ok(
             &a,
-            "index_create_vector",
-            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
         );
 
         let common = json!({"collection":"kb","query":"PEF-35 fékpad",
@@ -1599,13 +1599,13 @@ mod pipeline_integration_tests {
         }
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_vector",
-            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
         );
 
         let (_p, fo) = fuse(
@@ -1637,13 +1637,13 @@ mod pipeline_integration_tests {
         }
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_vector",
-            json!({"collection":"kb","field":"embedding","dim":4,"metric":"cosine"}),
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
         );
 
         let (_p, fo) = fuse(
@@ -1683,13 +1683,13 @@ mod pipeline_integration_tests {
         );
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"content"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
         );
         ok(
             &a,
-            "index_create_fulltext",
-            json!({"collection":"kb","field":"title"}),
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"title"}),
         );
 
         // BM25-only (vector_weight=0 → skip embedding), multi-field, default

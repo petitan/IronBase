@@ -199,7 +199,7 @@ impl McpClient {
             "query": query
         });
 
-        let result = self.call_tool("count_documents", args).await?;
+        let result = self.call_tool("count", args).await?;
         // Result is {"count": 123}
         let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count)
@@ -916,7 +916,7 @@ impl McpClient {
         if let Some(key) = key_path {
             args["key_path"] = serde_json::json!(key);
         }
-        let result = self.call_tool("listener_add", args).await?;
+        let result = self.call_tool("listener_create", args).await?;
         let success = result
             .get("success")
             .and_then(|v| v.as_bool())
@@ -973,11 +973,12 @@ impl McpClient {
         language: &str,
     ) -> McpResult<()> {
         let args = serde_json::json!({
+            "type": "fulltext",
             "collection": collection,
             "field": field,
             "language": language
         });
-        self.call_tool("index_create_fulltext", args).await?;
+        self.call_tool("index_create", args).await?;
         Ok(())
     }
 
@@ -990,6 +991,7 @@ impl McpClient {
         threshold: Option<f64>,
     ) -> McpResult<()> {
         let mut args = serde_json::json!({
+            "type": "fuzzy",
             "collection": collection,
             "field": field
         });
@@ -999,7 +1001,7 @@ impl McpClient {
         if let Some(thresh) = threshold {
             args["threshold"] = serde_json::json!(thresh);
         }
-        self.call_tool("index_create_fuzzy", args).await?;
+        self.call_tool("index_create", args).await?;
         Ok(())
     }
 
@@ -1047,12 +1049,13 @@ impl McpClient {
         metric: &str,
     ) -> McpResult<String> {
         let args = serde_json::json!({
+            "type": "vector",
             "collection": collection,
             "field": field,
             "dim": dimension,
             "metric": metric
         });
-        let result = self.call_tool("index_create_vector", args).await?;
+        let result = self.call_tool("index_create", args).await?;
         let name = result
             .get("index_name")
             .and_then(|v| v.as_str())
@@ -1064,9 +1067,10 @@ impl McpClient {
     /// List all vector indexes on a collection
     pub async fn list_vector_indexes(&self, collection: &str) -> McpResult<Vec<Value>> {
         let args = serde_json::json!({
-            "collection": collection
+            "collection": collection,
+            "type": "vector"
         });
-        let result = self.call_tool("index_list_vector", args).await?;
+        let result = self.call_tool("index_list", args).await?;
         let indexes: Vec<Value> = result
             .get("indexes")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1080,7 +1084,7 @@ impl McpClient {
             "collection": collection,
             "index_name": index_name
         });
-        self.call_tool("index_drop_vector", args).await?;
+        self.call_tool("index_drop", args).await?;
         Ok(())
     }
 
@@ -1289,7 +1293,7 @@ impl McpClient {
 
     /// List available embedding models
     pub async fn embed_list_models(&self) -> McpResult<Value> {
-        self.call_tool("embed_list_models", serde_json::json!({}))
+        self.call_tool("embed_models_list", serde_json::json!({}))
             .await
     }
 

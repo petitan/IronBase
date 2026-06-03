@@ -179,7 +179,7 @@
         </tr>
         <tr>
           <td>Keresés</td>
-          <td>Fuzzy (3 algoritmus), Full-text (TF-IDF), RAG (FastText+HNSW)</td>
+          <td>Fuzzy (3 algoritmus), Full-text (BM25), RAG (vLLM/BGE-M3+HNSW)</td>
         </tr>
         <tr>
           <td>Nyelvek</td>
@@ -954,10 +954,15 @@ cd mcp-server && cargo build --release
       </div>
 
       <div class="tool-card">
-        <h4><code>index_create_fuzzy</code> - Fuzzy index</h4>
+        <h4><code>index_create</code> (<code>type: "fuzzy"</code>) - Fuzzy index</h4>
 
         <table class="param-table">
           <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>type</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> "fuzzy"</td>
+          </tr>
           <tr>
             <td>collection</td>
             <td>string</td>
@@ -982,10 +987,15 @@ cd mcp-server && cargo build --release
       </div>
 
       <div class="tool-card">
-        <h4><code>index_create_fulltext</code> - Full-text index</h4>
+        <h4><code>index_create</code> (<code>type: "fulltext"</code>) - Full-text index</h4>
 
         <table class="param-table">
           <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>type</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> "fulltext"</td>
+          </tr>
           <tr>
             <td>collection</td>
             <td>string</td>
@@ -1015,8 +1025,9 @@ cd mcp-server && cargo build --release
 
         <div class="code-block">
           <pre><code class="language-json">{
-  "name": "index_create_fulltext",
+  "name": "index_create",
   "arguments": {
+    "type": "fulltext",
     "collection": "articles",
     "field": "content",
     "language": "hungarian"
@@ -1694,7 +1705,7 @@ cd mcp-server && cargo build --release
 
       <h1 id="search-rag">RAG - Szemantikus Keresés</h1>
 
-      <p>Szemantikus keresés FastText embeddings és HNSW indexeléssel. A <code>rag_search</code> <strong>automatikusan beágyazza a query-t</strong> - egyetlen MCP hívás a teljes hybrid kereséshez!</p>
+      <p>Szemantikus keresés vLLM/BGE-M3 embeddings és HNSW indexeléssel. A <code>search</code> tool <strong>automatikusan beágyazza a query-t</strong> szerver-oldalon - egyetlen MCP hívás a teljes hybrid kereséshez!</p>
 
       <div class="ascii-diagram">
         <pre>
@@ -1707,7 +1718,7 @@ cd mcp-server && cargo build --release
 │  rag_collection_create(collection: "kb", language: "hungarian")             │
 │         │                                                                   │
 │         ├──▶ Collection: "kb"                                               │
-│         ├──▶ HNSW index: 300 dim, cosine                                    │
+│         ├──▶ HNSW index: 1024 dim, cosine                                   │
 │         ├──▶ Fulltext index: hungarian stemmer                              │
 │         └──▶ Config: _system.rag                                            │
 │                                                                             │
@@ -1716,28 +1727,28 @@ cd mcp-server && cargo build --release
 │  rag_document_import(collection: "kb", content: "...", title: "Mese")       │
 │         │                                                                   │
 │         ├──▶ Chunking: 1000 char, 100 overlap                               │
-│         ├──▶ Batch embedding: FastText 300-dim                              │
+│         ├──▶ Batch embedding: BGE-M3 1024-dim (vLLM)                        │
 │         └──▶ Insert chunks with vectors                                     │
 │                                                                             │
 │  3. SEARCH (1 MCP HÍVÁS!)                                                   │
 │  ═════════════════════════                                                  │
-│  rag_search(collection: "kb", query: "király")                              │
+│  search(collection: "kb", query: "király")                                  │
 │         │                                                                   │
 │         ├──▶ AUTO-EMBED query ← KULCS KÜLÖNBSÉG!                            │
 │         ├──▶ Vector search (HNSW)                                           │
-│         ├──▶ Fulltext search (TF-IDF)                                       │
-│         ├──▶ RRF fusion (k=60)                                              │
+│         ├──▶ Fulltext search (BM25)                                         │
+│         ├──▶ RRF fusion (k=20)                                              │
 │         ├──▶ Reranking (phrase match, density)                              │
-│         └──▶ Deduplication                                                  │
+│         └──▶ Dokumentum-horgonyzott csoportosítás                           │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
         </pre>
       </div>
 
       <div class="info-box tip">
-        <div class="info-box-title">💡 Miért jobb a rag_search?</div>
-        <p>A <code>hybrid_search</code> tool-hoz <strong>2 MCP hívás</strong> kellett (embed_text + hybrid_search).
-        A <code>rag_search</code> <strong>automatikusan beágyazza</strong> a query-t - egyetlen hívás!</p>
+        <div class="info-box-title">💡 Egyetlen hívásos keresés</div>
+        <p>A <code>search</code> tool <strong>automatikusan beágyazza</strong> a query-t
+        szerver-oldalon &mdash; egyetlen MCP hívás, külön <code>embed_text</code> lépés nélkül.</p>
       </div>
 
       <h2>RRF (Reciprocal Rank Fusion) Algoritmus</h2>
@@ -1747,9 +1758,10 @@ cd mcp-server && cargo build --release
       <div class="code-block">
         <pre><code class="language-javascript">score = vector_weight × 1/(k + vector_rank) + fulltext_weight × 1/(k + text_rank)
 
-// Példa (k=60, súlyok=0.5/0.5):
+// Példa (k=20, súlyok=0.5/0.5):
 // doc1: vector_rank=1, text_rank=1
-// score = 0.5 × 1/61 + 0.5 × 1/61 = 0.0164</code></pre>
+// score = 0.5 × 1/21 + 0.5 × 1/21 = 0.0476
+// (a súlyok és k server-owned; a search tool nem teszi ki őket)</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
@@ -1796,7 +1808,7 @@ cd mcp-server && cargo build --release
 }}
 
 // 3. Keresés - EGY HÍVÁS!
-{"name": "rag_search", "arguments": {
+{"name": "search", "arguments": {
   "collection": "tudásbázis",
   "query": "kakas gyémánt"
 }}</code></pre>
@@ -1806,23 +1818,17 @@ cd mcp-server && cargo build --release
       <p><strong>Eredmény:</strong></p>
       <div class="code-block">
         <pre><code class="language-json">{
-  "results": [{
-    "content": "A kis kakas gyémánt félkrajcárja...",
-    "title": "Kis kakas mese",
+  "verdict": "unknown",
+  "documents": [{
     "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
-    "chunk_index": 0,
-    "_rrf_score": 0.01639,
-    "_final_score": 0.02344,
-    "_rerank_boost": 1.43,
-    "_vector_rank": 1,
-    "_text_rank": 1,
-    "_vector_score": 0.5578,
-    "_text_score": 4.852
+    "title": "Kis kakas mese",
+    "relevance": 0.0234,
+    "passages": [
+      {"text": "A kis kakas gyémánt félkrajcárja..."}
+    ]
   }],
   "count": 1,
-  "query": "kakas gyémánt",
-  "algorithm": "rag_hybrid_rrf",
-  "provider": "fasttext"
+  "trimmed": false
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
@@ -1847,8 +1853,11 @@ key_path = "/etc/ssl/key.pem"
 path = "/data/ironbase.mlite"
 durability = "safe"  # safe | batch | unsafe
 
-[rag]
-fasttext_model = "/models/cc.hu.300.bin"
+[embedding]
+provider = "vllm"        # vllm | ollama | openai
+base_url = "http://localhost:8800"
+model = "bge-m3"
+batch_size = 128
 
 [logging]
 level = "info"  # trace | debug | info | warn | error
@@ -2082,11 +2091,11 @@ Page size: 1,000 docs
           <td>Dokumentum törlése</td>
         </tr>
         <tr>
-          <td><code>db_rag_search(coll, query)</code></td>
+          <td><code>db_hybrid_search(coll, query)</code></td>
           <td>Szemantikus keresés (default limit: 5)</td>
         </tr>
         <tr>
-          <td><code>db_rag_search(coll, query, opts)</code></td>
+          <td><code>db_hybrid_search(coll, query, opts)</code></td>
           <td>Keresés opciókkal: <code>#{limit: 10, min_score: 0.5}</code></td>
         </tr>
       </table>
@@ -2096,7 +2105,7 @@ Page size: 1,000 docs
 
         <div class="code-block">
           <pre><code class="language-javascript">// RAG keresés
-let results = db_rag_search("knowledge_base", "magyar főváros");
+let results = db_hybrid_search("knowledge_base", "magyar főváros");
 for r in results {
     print("[" + r.score + "] " + r.doc_title + ": " + r.text);
 }
@@ -2111,7 +2120,7 @@ let result = db_rag_document_import(
 print("Created " + result.chunks_created + " chunks");
 
 // Keresés min_score szűréssel
-let filtered = db_rag_search("knowledge_base", "történelem", #{
+let filtered = db_hybrid_search("knowledge_base", "történelem", #{
     limit: 10,
     min_score: 0.6
 });</code></pre>
@@ -2228,7 +2237,7 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
 
       <h1 id="tools-rag">RAG Tools (4 tool)</h1>
 
-      <p>Szemantikus keresés automatikus query beágyazással. A <code>rag_search</code> egyetlen MCP hívásban végzi el a teljes hybrid keresést!</p>
+      <p>Szemantikus keresés automatikus query beágyazással. A <code>search</code> tool egyetlen MCP hívásban végzi el a teljes dokumentum-horgonyzott hybrid keresést!</p>
 
       <div class="tool-card">
         <h4><code>rag_collection_create</code> - RAG Collection létrehozása</h4>
@@ -2254,7 +2263,7 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
           <tr>
             <td>provider</td>
             <td>string</td>
-            <td><span class="badge badge-optional">optional</span> Embedding provider (default: "fasttext")</td>
+            <td><span class="badge badge-optional">optional</span> Embedding provider (default: szerver-config, pl. "vllm")</td>
           </tr>
           <tr>
             <td>language</td>
@@ -2282,9 +2291,9 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
   "config": {
     "embedding_field": "embedding",
     "text_field": "content",
-    "provider": "fasttext",
+    "provider": "vllm",
     "language": "hungarian",
-    "dimension": 300
+    "dimension": 1024
   },
   "indexes": {
     "collection_created": true,
@@ -2364,8 +2373,8 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
   "collection": "tudásbázis",
   "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
   "chunks_created": 5,
-  "dimension": 300,
-  "provider": "fasttext"
+  "dimension": 1024,
+  "provider": "vllm"
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
@@ -2377,8 +2386,8 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
       </div>
 
       <div class="tool-card">
-        <h4><code>rag_search</code> - Szemantikus keresés</h4>
-        <p><strong>Automatikus query beágyazás</strong> + hybrid RRF keresés egyetlen hívásban!</p>
+        <h4><code>search</code> - Szemantikus keresés</h4>
+        <p><strong>Automatikus query beágyazás</strong> + dokumentum-horgonyzott hybrid keresés egyetlen hívásban. Intent-only: a fusion/reranking server-owned.</p>
 
         <table class="param-table">
           <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
@@ -2393,46 +2402,34 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
             <td><span class="badge badge-required">required</span> Keresési szöveg (NEM vektor!)</td>
           </tr>
           <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Strukturált metaadat-szűrő, pl. {"year": 2026}</td>
+          </tr>
+          <tr>
             <td>limit</td>
             <td>integer</td>
-            <td><span class="badge badge-optional">optional</span> Max találatok (default: 10)</td>
+            <td><span class="badge badge-optional">optional</span> Max dokumentum (default: 5)</td>
           </tr>
           <tr>
-            <td>vector_weight</td>
-            <td>number</td>
-            <td><span class="badge badge-optional">optional</span> Vektor súly 0.0-1.0 (default: 0.5)</td>
+            <td>format</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> "structured" (default) | "context_block"</td>
           </tr>
           <tr>
-            <td>fulltext_weight</td>
-            <td>number</td>
-            <td><span class="badge badge-optional">optional</span> Fulltext súly 0.0-1.0 (default: 0.5)</td>
-          </tr>
-          <tr>
-            <td>rerank</td>
+            <td>debug</td>
             <td>boolean</td>
-            <td><span class="badge badge-optional">optional</span> Utólagos rangsorolás (default: true)</td>
-          </tr>
-          <tr>
-            <td>deduplicate</td>
-            <td>boolean</td>
-            <td><span class="badge badge-optional">optional</span> Duplikátum szűrés (default: true)</td>
-          </tr>
-          <tr>
-            <td>projection</td>
-            <td>object</td>
-            <td><span class="badge badge-optional">optional</span> Mező szűrés</td>
+            <td><span class="badge badge-optional">optional</span> Diagnostics blokk (default: false)</td>
           </tr>
         </table>
 
         <div class="code-block">
           <pre><code class="language-json">{
-  "name": "rag_search",
+  "name": "search",
   "arguments": {
     "collection": "tudásbázis",
     "query": "király története",
-    "limit": 5,
-    "vector_weight": 0.7,
-    "fulltext_weight": 0.3
+    "limit": 5
   }
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
@@ -2441,36 +2438,26 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
         <p><strong>Eredmény:</strong></p>
         <div class="code-block">
           <pre><code class="language-json">{
-  "results": [{
-    "_id": 1,
-    "content": "A király történetének folytatása...",
-    "title": "Mesék",
+  "verdict": "unknown",
+  "documents": [{
     "doc_id": "abc-123",
-    "chunk_index": 2,
-    "chunk_total": 5,
-    "_rrf_score": 0.01639,
-    "_final_score": 0.02344,
-    "_rerank_boost": 1.43,
-    "_vector_rank": 1,
-    "_text_rank": 1,
-    "_vector_score": 0.75,
-    "_text_score": 4.2
+    "title": "Mesék",
+    "relevance": 0.0234,
+    "passages": [
+      {"text": "A király történetének folytatása..."}
+    ]
   }],
   "count": 1,
-  "query": "király története",
-  "algorithm": "rag_hybrid_rrf",
-  "rrf_k": 60.0,
-  "weights": {"vector": 0.7, "fulltext": 0.3},
-  "provider": "fasttext",
-  "dedup_removed": 0
+  "trimmed": false
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>
         </div>
 
         <div class="info-box tip">
-          <div class="info-box-title">💡 Súlyok beállítása</div>
-          <p>Csak vektor keresés: <code>vector_weight: 1.0, fulltext_weight: 0.0</code><br>
-          Csak fulltext: <code>vector_weight: 0.0, fulltext_weight: 1.0</code></p>
+          <div class="info-box-title">💡 Intent-only felület</div>
+          <p>A súlyok, fusion, reranking és küszöbök a motor döntései. A keresés
+          befolyásolásához a <code>query</code>-t formáld és a <code>filter</code>-t használd
+          &mdash; ezen a toolon nincsenek súly-paraméterek.</p>
         </div>
       </div>
 
@@ -2505,9 +2492,9 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
   "config": {
     "embedding_field": "embedding",
     "text_field": "content",
-    "provider": "fasttext",
+    "provider": "vllm",
     "language": "hungarian",
-    "dimension": 300,
+    "dimension": 1024,
     "created_at": "2026-01-27T08:17:58.495Z"
   },
   "stats": {
@@ -2527,9 +2514,9 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
     }]
   },
   "provider_info": {
-    "name": "fasttext",
-    "dimension": 300,
-    "model": "cc.hu.300.ironbase"
+    "name": "vllm",
+    "dimension": 1024,
+    "model": "bge-m3"
   }
 }</code></pre>
           <button class="copy-btn" onclick="copyCode(this)">Copy</button>

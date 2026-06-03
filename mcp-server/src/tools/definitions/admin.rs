@@ -11,13 +11,13 @@ use serde_json::{json, Value};
 pub fn tools() -> Vec<Value> {
     vec![
         json!({
-            "name": "admin_list_all_collections",
+            "name": "admin_collection_list",
             "title": "List All Collections (Admin)",
             "description": "List all collections including system and hidden ones.",
             "inputSchema": schemas::admin_key_only()
         }),
         json!({
-            "name": "admin_create_system_collection",
+            "name": "admin_collection_create_system",
             "title": "Create System Collection (Admin)",
             "description": "Create a protected system collection with special flags.",
             "inputSchema": {
@@ -33,7 +33,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "admin_set_collection_flags",
+            "name": "admin_collection_set_flags",
             "title": "Set Collection Flags (Admin)",
             "description": "Modify collection protection and visibility flags.",
             "inputSchema": {
@@ -58,7 +58,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "admin_drop_protected",
+            "name": "admin_collection_drop_protected",
             "title": "Drop Protected Collection (Admin)",
             "description": "Force-delete a protected collection.",
             "inputSchema": {

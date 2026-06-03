@@ -150,7 +150,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "count_documents",
+            "name": "count",
             "title": "Count Documents",
             "description": "Count documents matching a query filter.",
             "inputSchema": {

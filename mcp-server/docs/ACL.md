@@ -38,7 +38,7 @@
 
 | Tool | Szükséges jog | Localhost-only |
 |------|---------------|----------------|
-| `find`, `count_documents`, `aggregate`, `collection_list`, `fulltext_search`, `fuzzy_search` | read | nem |
+| `find`, `count`, `aggregate`, `collection_list`, `fulltext_search`, `fuzzy_search` | read | nem |
 | `insert_*`, `update_*`, `delete_*` | write | nem |
 | `index_create`, `collection_drop`, `schema_set` | admin | nem |
 | `script_run`, `script_exec` | read | nem |
@@ -46,11 +46,11 @@
 | `acl_list`, `acl_get` | read | nem |
 | `acl_set`, `acl_delete` | admin | igen |
 | `listener_list`, `listener_get` | read | nem |
-| `listener_add`, `listener_delete`, `listener_enable/disable` | admin | igen |
-| `admin_list_all_collections` | admin | igen |
-| `admin_create_system_collection` | admin | igen |
-| `admin_set_collection_flags` | admin | igen |
-| `admin_drop_protected` | admin | igen |
+| `listener_create`, `listener_delete`, `listener_enable/disable` | admin | igen |
+| `admin_collection_list` | admin | igen |
+| `admin_collection_create_system` | admin | igen |
+| `admin_collection_set_flags` | admin | igen |
+| `admin_collection_drop_protected` | admin | igen |
 | `admin_apikey_*` | admin | igen |
 
 ## ACL beállítás példa

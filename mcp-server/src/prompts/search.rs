@@ -294,8 +294,9 @@ Pre-computed index for high-performance searches. Returns similarity scores.
 
 **Step 1: Create fuzzy index**
 ```json
-// index_create_fuzzy tool
+// index_create tool (type: fuzzy)
 {{
+  "type": "fuzzy",
   "collection": "users",
   "field": "{field}",
   "algorithm": "jaro_winkler",
@@ -467,8 +468,9 @@ IronBase provides TF-IDF based full-text search with language-aware stemming and
 ## Step 1: Create Full-Text Index
 
 ```json
-// index_create_fulltext tool
+// index_create tool (type: fulltext)
 {{
+  "type": "fulltext",
   "collection": "articles",
   "field": "content",
   "language": "{language}"

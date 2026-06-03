@@ -520,7 +520,7 @@ class MCPTestSuite:
 
         # Count all
         def test_count_all():
-            result, _ = self.client.tool("count_documents", {
+            result, _ = self.client.tool("count", {
                 "collection": self.test_collection,
                 "query": {}
             })
@@ -529,7 +529,7 @@ class MCPTestSuite:
 
         # Count with filter
         def test_count_filter():
-            result, _ = self.client.tool("count_documents", {
+            result, _ = self.client.tool("count", {
                 "collection": self.test_collection,
                 "query": {"active": True}
             })
@@ -1328,7 +1328,7 @@ class MCPTestSuite:
 
         # Count large
         def test_count_large():
-            result, duration = self.client.tool("count_documents", {
+            result, duration = self.client.tool("count", {
                 "collection": self.test_collection,
                 "query": {}
             })
@@ -1384,32 +1384,32 @@ class MCPTestSuite:
         # Begin transaction
         def test_begin_tx():
             nonlocal tx_id
-            result, _ = self.client.tool("begin_transaction", {})
+            result, _ = self.client.tool("transaction_begin", {})
             tx_id = result.get("transaction_id")
             assert tx_id is not None
             return f"TX ID: {tx_id}"
-        self._run_test("begin_transaction", "transaction", test_begin_tx)
+        self._run_test("transaction_begin", "transaction", test_begin_tx)
 
         # Insert in transaction
         def test_insert_tx():
-            result, _ = self.client.tool("insert_one_tx", {
+            result, _ = self.client.tool("transaction_insert_one", {
                 "transaction_id": str(tx_id),
                 "collection": self.test_collection,
                 "document": {"tx_test": True, "value": 999}
             })
             return f"Inserted: {result.get('inserted_id')}"
-        self._run_test("insert_one_tx", "transaction", test_insert_tx)
+        self._run_test("transaction_insert_one", "transaction", test_insert_tx)
 
         # Update in transaction
         def test_update_tx():
-            result, _ = self.client.tool("update_one_tx", {
+            result, _ = self.client.tool("transaction_update_one", {
                 "transaction_id": str(tx_id),
                 "collection": self.test_collection,
                 "filter": {"tx_test": True},
                 "update": {"$set": {"updated_in_tx": True}}
             })
             return f"Modified: {result.get('modified_count', 0)}"
-        self._run_test("update_one_tx", "transaction", test_update_tx)
+        self._run_test("transaction_update_one", "transaction", test_update_tx)
 
         # Transaction status
         def test_tx_status():
@@ -1421,11 +1421,11 @@ class MCPTestSuite:
 
         # Commit transaction
         def test_commit_tx():
-            result, _ = self.client.tool("commit_transaction", {
+            result, _ = self.client.tool("transaction_commit", {
                 "transaction_id": str(tx_id)
             })
             return f"Committed: {result.get('success')}"
-        self._run_test("commit_transaction", "transaction", test_commit_tx)
+        self._run_test("transaction_commit", "transaction", test_commit_tx)
 
         # Verify committed data
         def test_verify_commit():
@@ -1441,22 +1441,22 @@ class MCPTestSuite:
         # Begin and rollback
         def test_rollback():
             # Begin new TX
-            result, _ = self.client.tool("begin_transaction", {})
+            result, _ = self.client.tool("transaction_begin", {})
             new_tx_id = result.get("transaction_id")
 
             # Insert something
-            self.client.tool("insert_one_tx", {
+            self.client.tool("transaction_insert_one", {
                 "transaction_id": str(new_tx_id),
                 "collection": self.test_collection,
                 "document": {"rollback_test": True, "should_not_exist": True}
             })
 
             # Rollback
-            result, _ = self.client.tool("rollback_transaction", {
+            result, _ = self.client.tool("transaction_rollback", {
                 "transaction_id": str(new_tx_id)
             })
             return f"Rolled back: {result.get('success')}"
-        self._run_test("rollback_transaction", "transaction", test_rollback)
+        self._run_test("transaction_rollback", "transaction", test_rollback)
 
         # Verify rollback
         def test_verify_rollback():
@@ -1497,7 +1497,7 @@ class MCPTestSuite:
 
         # Create fulltext index
         def test_ft_index():
-            result, _ = self.client.tool("index_create_fulltext", {
+            result, _ = self.client.tool("index_create", {"type": "fulltext",
                 "collection": ft_collection,
                 "field": "content",
                 "language": "hungarian"
@@ -1585,7 +1585,7 @@ class MCPTestSuite:
 
         # Create fuzzy index
         def test_fz_index():
-            result, _ = self.client.tool("index_create_fuzzy", {
+            result, _ = self.client.tool("index_create", {"type": "fuzzy",
                 "collection": fz_collection,
                 "field": "name",
                 "algorithm": "jaro_winkler",
@@ -1902,7 +1902,7 @@ class MCPTestSuite:
             })
 
             # Count before
-            before, _ = self.client.tool("count_documents", {
+            before, _ = self.client.tool("count", {
                 "collection": self.test_collection,
                 "query": {"delete_integrity": True}
             })
@@ -1914,7 +1914,7 @@ class MCPTestSuite:
             })
 
             # Count after
-            after, _ = self.client.tool("count_documents", {
+            after, _ = self.client.tool("count", {
                 "collection": self.test_collection,
                 "query": {"delete_integrity": True}
             })
@@ -2084,7 +2084,7 @@ class MCPTestSuite:
                         "limit": 5
                     })
                 else:
-                    self.client.tool("count_documents", {
+                    self.client.tool("count", {
                         "collection": self.test_collection,
                         "query": {"mixed": True}
                     })
@@ -2112,7 +2112,7 @@ class MCPTestSuite:
 
         # Count on large collection
         def test_large_count():
-            result, duration = self.client.tool("count_documents", {
+            result, duration = self.client.tool("count", {
                 "collection": stress_collection,
                 "query": {}
             })
@@ -2121,7 +2121,7 @@ class MCPTestSuite:
 
         # Filtered count on large collection
         def test_filtered_count():
-            result, duration = self.client.tool("count_documents", {
+            result, duration = self.client.tool("count", {
                 "collection": stress_collection,
                 "query": {"idx": {"$gt": 1000}}
             })

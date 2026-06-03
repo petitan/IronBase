@@ -109,7 +109,7 @@ pub fn tools() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "embed_list_models",
+            "name": "embed_models_list",
             "title": "List Embedding Models",
             "description": "List all available embedding models and their properties (provider, dimension, availability).",
             "inputSchema": {

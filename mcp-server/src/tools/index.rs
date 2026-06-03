@@ -22,9 +22,6 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     match name {
         "index_create" => handle_index_create(params, adapter),
         "index_list" => handle_index_list(params, adapter),
-        "index_create_fuzzy" => handle_index_create_fuzzy(params, adapter),
-        "index_create_fulltext" => handle_index_create_fulltext(params, adapter),
-        "index_list_fulltext" => handle_index_list_fulltext(params, adapter),
         "index_drop" => handle_index_drop(params, adapter),
         "index_stats_refresh" => handle_index_stats_refresh(params, adapter),
         "index_stats" => handle_index_stats(params, adapter),
@@ -40,7 +37,27 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     }
 }
 
+/// Create an index of any type, routed by the `type` discriminator
+/// (default `btree`). Per-type params are re-parsed from the raw value into the
+/// matching typed struct; serde ignores the unrelated fields.
 fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let index_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("btree");
+    match index_type {
+        "btree" => handle_index_create_btree(params, adapter),
+        "fulltext" => handle_index_create_fulltext(params, adapter),
+        "fuzzy" => handle_index_create_fuzzy(params, adapter),
+        "vector" => super::vector::handle_index_create_vector(params, adapter),
+        other => Err(McpError::invalid_params(format!(
+            "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
+            other
+        ))),
+    }
+}
+
+fn handle_index_create_btree(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: IndexCreateParams = IndexCreateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -72,30 +89,64 @@ fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     }
 }
 
+/// List indexes. With no `type`, returns every subtype (B+ tree, fulltext, fuzzy,
+/// vector). With a `type`, returns only that subtype's list under `indexes`.
 fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexListParams = IndexListParams::parse(params)?;
+    let p: IndexListParams = IndexListParams::parse(params.clone())?;
     validate_collection_name(&p.collection)?;
 
-    // Get all index types
-    let btree_indexes = adapter.list_indexes(&p.collection)?;
-    let fulltext_indexes = adapter
-        .list_fulltext_indexes(&p.collection)
-        .unwrap_or_default();
-    let vector_indexes = adapter
-        .list_vector_indexes(&p.collection)
-        .unwrap_or_default();
+    let index_type = params.get("type").and_then(|v| v.as_str());
 
-    Ok(json!({
-        "btree_indexes": btree_indexes,
-        "fulltext_indexes": fulltext_indexes,
-        "vector_indexes": vector_indexes,
-        "summary": {
-            "btree_count": btree_indexes.len(),
-            "fulltext_count": fulltext_indexes.len(),
-            "vector_count": vector_indexes.len(),
-            "total": btree_indexes.len() + fulltext_indexes.len() + vector_indexes.len()
+    match index_type {
+        Some("btree") => {
+            let indexes = adapter.list_indexes(&p.collection)?;
+            Ok(json!({"indexes": indexes, "count": indexes.len()}))
         }
-    }))
+        Some("fulltext") => {
+            let indexes = adapter.list_fulltext_indexes(&p.collection)?;
+            Ok(json!({"indexes": indexes, "count": indexes.len()}))
+        }
+        Some("fuzzy") => {
+            let indexes = adapter.list_fuzzy_indexes(&p.collection)?;
+            Ok(json!({"indexes": indexes, "count": indexes.len()}))
+        }
+        Some("vector") => {
+            let indexes = adapter.list_vector_indexes(&p.collection)?;
+            Ok(json!({"indexes": indexes, "count": indexes.len()}))
+        }
+        Some(other) => Err(McpError::invalid_params(format!(
+            "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
+            other
+        ))),
+        None => {
+            // No filter: list all subtypes (fuzzy now included — was missing before)
+            let btree_indexes = adapter.list_indexes(&p.collection)?;
+            let fulltext_indexes = adapter
+                .list_fulltext_indexes(&p.collection)
+                .unwrap_or_default();
+            let fuzzy_indexes = adapter
+                .list_fuzzy_indexes(&p.collection)
+                .unwrap_or_default();
+            let vector_indexes = adapter
+                .list_vector_indexes(&p.collection)
+                .unwrap_or_default();
+
+            Ok(json!({
+                "btree_indexes": btree_indexes,
+                "fulltext_indexes": fulltext_indexes,
+                "fuzzy_indexes": fuzzy_indexes,
+                "vector_indexes": vector_indexes,
+                "summary": {
+                    "btree_count": btree_indexes.len(),
+                    "fulltext_count": fulltext_indexes.len(),
+                    "fuzzy_count": fuzzy_indexes.len(),
+                    "vector_count": vector_indexes.len(),
+                    "total": btree_indexes.len() + fulltext_indexes.len()
+                        + fuzzy_indexes.len() + vector_indexes.len()
+                }
+            }))
+        }
+    }
 }
 
 fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -131,19 +182,27 @@ fn handle_index_create_fulltext(params: Value, adapter: &Arc<IronBaseAdapter>) -
     }))
 }
 
-fn handle_index_list_fulltext(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexListParams = IndexListParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
-
-    let indexes = adapter.list_fulltext_indexes(&p.collection)?;
-    Ok(json!({"indexes": indexes, "count": indexes.len()}))
-}
-
+/// Drop an index of any subtype. Vector indexes are routed to the dedicated
+/// `drop_vector_index` (which also removes the on-disk HNSW cache file and the
+/// `vector_indexes` metadata that the generic `drop_index` does not touch);
+/// btree/fulltext/fuzzy go through the generic path.
 fn handle_index_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: IndexDropParams = IndexDropParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    adapter.drop_index(&p.collection, &p.index_name)?;
+    let is_vector = adapter
+        .list_vector_indexes(&p.collection)
+        .map(|v| {
+            v.iter()
+                .any(|i| i.get("name").and_then(|n| n.as_str()) == Some(&p.index_name))
+        })
+        .unwrap_or(false);
+
+    if is_vector {
+        adapter.drop_vector_index(&p.collection, &p.index_name)?;
+    } else {
+        adapter.drop_index(&p.collection, &p.index_name)?;
+    }
     Ok(json!({"success": true, "dropped": p.index_name}))
 }
 
@@ -166,11 +225,28 @@ fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
 ///
 /// Returns num_keys, distinct_count, has_histogram, has_mcv for each index.
 fn handle_index_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexListParams = IndexListParams::parse(params)?;
+    let p: IndexListParams = IndexListParams::parse(params.clone())?;
     validate_collection_name(&p.collection)?;
 
-    let stats = adapter.get_index_statistics(&p.collection)?;
+    let index_type = params
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("btree");
+
+    let stats = match index_type {
+        "btree" => adapter.get_index_statistics(&p.collection)?,
+        "fulltext" => adapter.list_fulltext_indexes(&p.collection)?,
+        "fuzzy" => adapter.list_fuzzy_indexes(&p.collection)?,
+        "vector" => adapter.list_vector_indexes(&p.collection)?,
+        other => {
+            return Err(McpError::invalid_params(format!(
+                "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
+                other
+            )))
+        }
+    };
     Ok(json!({
+        "type": index_type,
         "indexes": stats,
         "count": stats.len()
     }))

@@ -711,7 +711,7 @@ issue-k lezárva, részletek a doksiban + a CHANGELOG `[Unreleased]` szekcióban
 | **EndsWith** | `{"$endsWith": ".hu"}` | Suffix match, case-insensitive default |
 | **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
 | **Fulltext** | `fulltext_search(field, query, limit)` | BM25 (k1=1.2, b=0.75), stemming, HU/EN/DE |
-| **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion, auto-embed ha nincs vector |
+| **Hybrid** | `search(collection, query)` | Intent-only document-anchored RRF retrieval, server-owned fusion, auto-embed |
 
 `$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
 - Egyszerű forma: `{"field": {"$op": "value"}}` (case-insensitive)
@@ -756,7 +756,7 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 | `rag_collection_create` | Collection + vector + fulltext indexes |
 | `rag_document_import` | Auto-chunked import |
 | `rag_collection_stats` | Statisztikák |
-| `hybrid_search` | Unified keresés: explicit vector VAGY auto-embed |
+| `search` | Unified intent-only hybrid retrieval (document-anchored, auto-embed) |
 
 Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 </details>
@@ -902,7 +902,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 - `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
 - Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
 - `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
-- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create_fulltext`)
+- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create` `type:"fulltext"`)
 - Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
 
 ```json

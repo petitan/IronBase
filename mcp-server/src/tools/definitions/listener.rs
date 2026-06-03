@@ -21,7 +21,7 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": schemas::listener_id_only()
         }),
         json!({
-            "name": "listener_add",
+            "name": "listener_create",
             "title": "Add Listener",
             "description": "Configure a new HTTP or HTTPS listener endpoint.",
             "inputSchema": {
