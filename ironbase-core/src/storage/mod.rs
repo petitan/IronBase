@@ -399,6 +399,17 @@ pub struct MetadataWALEntry {
     pub data_end_offset: u64,
 }
 
+/// Borrowing twin of `MetadataWALEntry` used only for serialization, so the WAL
+/// snapshot can be written WITHOUT deep-cloning the entire `collections` map
+/// (a multi-GB allocation under the write lock on a large catalog — audit P1-8).
+/// serde encodes `&HashMap` byte-identically to `HashMap`, so the WAL JSON — and
+/// crash recovery via `MetadataWALEntry` — is unchanged.
+#[derive(Serialize)]
+struct MetadataWALEntryRef<'a> {
+    collections: &'a HashMap<String, CollectionMeta>,
+    data_end_offset: u64,
+}
+
 // ============================================================================
 // HEADER WRITER - Safe, invariant-preserving header modifications
 // ============================================================================
@@ -944,12 +955,39 @@ impl StorageEngine {
     fn write_metadata_snapshot(&mut self) -> Result<()> {
         use crate::wal::{WALEntry, WALEntryType};
 
-        let metadata_entry = MetadataWALEntry {
-            collections: self.collections.clone(),
+        // Serialize from a borrow — NO full catalog clone (a 50M-doc catalog clone
+        // was a multi-GB allocation under the write lock). serde encodes the
+        // borrowing twin identically, so the WAL format / crash recovery is the same.
+        let metadata_ref = MetadataWALEntryRef {
+            collections: &self.collections,
             data_end_offset: self.header.data_end_offset,
         };
 
-        let entry_data = serde_json::to_vec(&metadata_entry)
+        // Estimate + try_reserve the buffer so a giant catalog fails with a typed
+        // OutOfMemory error instead of aborting the process (mirrors
+        // serialize_metadata's guard at metadata.rs).
+        let estimated_size: usize = 4 + self
+            .collections
+            .values()
+            .map(|meta| {
+                let catalog_size = meta.document_catalog.len() * 30;
+                let order_size = meta.document_order.len() * 10;
+                4 + catalog_size + order_size + 512
+            })
+            .sum::<usize>();
+        let mut entry_data: Vec<u8> = Vec::new();
+        entry_data.try_reserve(estimated_size).map_err(|_| {
+            IronBaseError::OutOfMemory(format!(
+                "Failed to allocate {}MB for metadata WAL snapshot ({} collections, {} total docs)",
+                estimated_size / (1024 * 1024),
+                self.collections.len(),
+                self.collections
+                    .values()
+                    .map(|m| m.document_catalog.len())
+                    .sum::<usize>()
+            ))
+        })?;
+        serde_json::to_writer(&mut entry_data, &metadata_ref)
             .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         let entry = WALEntry::new(
@@ -2476,6 +2514,29 @@ mod tests {
         let db_path = temp_dir.path().join("test.mlite");
         let storage = StorageEngine::open(&db_path).unwrap();
         (temp_dir, storage)
+    }
+
+    /// P1-8: the borrowing `MetadataWALEntryRef` used by `write_metadata_snapshot`
+    /// (to avoid deep-cloning the whole catalog) must serialize byte-identically
+    /// to the owned `MetadataWALEntry`, so the WAL format and crash recovery are
+    /// unchanged.
+    #[test]
+    fn metadata_snapshot_ref_serializes_identically() {
+        let (_t, mut storage) = setup_test_db();
+        storage.create_collection("c").unwrap();
+
+        let owned = MetadataWALEntry {
+            collections: storage.collections.clone(),
+            data_end_offset: storage.header.data_end_offset,
+        };
+        let by_ref = MetadataWALEntryRef {
+            collections: &storage.collections,
+            data_end_offset: storage.header.data_end_offset,
+        };
+        assert_eq!(
+            serde_json::to_vec(&owned).unwrap(),
+            serde_json::to_vec(&by_ref).unwrap()
+        );
     }
 
     #[test]
