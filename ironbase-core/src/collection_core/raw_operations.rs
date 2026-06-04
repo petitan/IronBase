@@ -670,9 +670,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // Update last_id with max of manual + auto-generated IDs
         meta.last_id = meta.last_id.max(start_id + auto_id_count);
 
-        // Update indexes in batch BEFORE writing to storage
-        let docs_for_index: Vec<Document> =
-            prepared_docs.iter().map(|(_, doc)| doc.clone()).collect();
+        // Update indexes in batch BEFORE writing to storage.
+        // Borrow the documents (no content clone) — batch_add_to_indexes only
+        // reads them, and prepared_docs is consumed by the storage write below.
+        let docs_for_index: Vec<&Document> = prepared_docs.iter().map(|(_, doc)| doc).collect();
         self.batch_add_to_indexes(&docs_for_index)?;
 
         // Write all documents to storage
@@ -1788,12 +1789,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         }
 
         // Update indexes in batch FIRST (atomic operation, all-or-nothing)
-        // This is safer for partial storage failure - phantom entries are handled gracefully
-        let docs_for_index: Vec<Document> = prepared
-            .prepared_docs
-            .iter()
-            .map(|p| p.document.clone())
-            .collect();
+        // This is safer for partial storage failure - phantom entries are handled gracefully.
+        // Borrow the documents (no content clone) — batch_add_to_indexes only reads them.
+        let docs_for_index: Vec<&Document> =
+            prepared.prepared_docs.iter().map(|p| &p.document).collect();
         self.batch_add_to_indexes(&docs_for_index)?;
 
         // Write all documents to storage

@@ -634,11 +634,21 @@ impl HnswIndex {
         // IMPORTANT: iterate id_to_index (HashMap, unique keys) instead of nodes,
         // because nodes may contain duplicate IDs after remove+reinsert cycles
         // (orphan node + new active node with same ID).
-        let items: Vec<(String, Vec<f32>)> = self
-            .id_to_index
-            .iter()
-            .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone()))
-            .collect();
+        // try_reserve so a huge index fails with a typed OOM error instead of
+        // aborting during the rebuild clone (mirrors the insert-path guard).
+        let mut items: Vec<(String, Vec<f32>)> = Vec::new();
+        items.try_reserve(self.id_to_index.len()).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Failed to reserve {} entries for HNSW rebuild: {}",
+                self.id_to_index.len(),
+                e
+            ))
+        })?;
+        items.extend(
+            self.id_to_index
+                .iter()
+                .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone())),
+        );
 
         // Clear and reinsert
         self.nodes.clear();
