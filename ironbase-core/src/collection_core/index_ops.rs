@@ -803,12 +803,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Drop an index
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
         self.check_not_closed()?;
+        // LOCK ORDER (issue #75): acquire `storage` BEFORE `indexes` to match the
+        // global storage→indexes order used by the write paths (insert/update *_raw)
+        // and by count_with_plan. Acquiring indexes-then-storage here previously
+        // risked an ABBA deadlock against concurrent storage→indexes writers.
+        // Both locks are held simultaneously so the metadata update stays atomic.
+        let mut storage = self.storage.write();
         let mut indexes = self.indexes.write();
         indexes.drop_index(index_name)?;
 
-        // FIX: Hold index lock while updating metadata to prevent race condition
-        // where another thread sees inconsistent state (index gone but metadata present)
-        let mut storage = self.storage.write();
+        // Hold both locks while updating metadata to prevent a race where another
+        // thread sees inconsistent state (index gone but metadata present).
         if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
             // Remove from B+ tree indexes
             meta.indexes.retain(|idx| idx.name != index_name);
