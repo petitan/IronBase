@@ -332,3 +332,109 @@ fn idle_checkpoint_does_not_grow_file() {
         size1, size2
     );
 }
+
+/// PR #89 follow-up, finding A (companion to the storage-level crash test
+/// `committed_write_survives_crash_via_checkpoint`): exercise the two-phase
+/// `checkpoint_wal_only` (including the re-check the fix added to the Phase-B
+/// `None` arm) under heavy concurrency. The fix calls `storage.checkpoint()`
+/// while already holding `storage.write()`; this guards against a deadlock or
+/// panic on that path and confirms that under a *graceful* shutdown every
+/// committed insert is present. (It does NOT prove the crash-durability fix —
+/// a graceful close always flushes the in-memory catalog, healing any WAL
+/// clear; the crash case is covered deterministically in the storage test.)
+#[test]
+fn concurrent_inserts_and_wal_checkpoints_stay_consistent() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("ckpt_race.mlite");
+    // Enough concurrency to race Phase A/B against committing inserts and hit the
+    // None/Some arms repeatedly; kept modest so CI cost stays low (this is a
+    // deadlock/consistency smoke test, not the durability guard).
+    const N: i64 = 600;
+
+    {
+        let db = Arc::new(DatabaseCore::<StorageEngine>::open(&db_path).unwrap());
+
+        let writer = {
+            let db = Arc::clone(&db);
+            thread::spawn(move || {
+                for i in 0..N {
+                    let mut doc = HashMap::new();
+                    doc.insert("i".to_string(), json!(i));
+                    db.insert_one("c", doc).unwrap();
+                }
+            })
+        };
+
+        // Race the two-phase checkpoint against the writer, so Phase A
+        // frequently catches a clean state (→ None path, which now re-checks
+        // is_metadata_dirty and may call checkpoint() under the write lock).
+        // yield_now() between iterations avoids a CPU-burning busy-spin that
+        // would also starve the writer and inflate the test's wall-clock.
+        while !writer.is_finished() {
+            db.checkpoint_wal_only().unwrap();
+            std::thread::yield_now();
+        }
+        writer.join().unwrap();
+
+        db.checkpoint_wal_only().unwrap();
+        db.close().unwrap();
+    }
+
+    // Graceful shutdown → every committed insert must be present (no deadlock,
+    // no panic, no double-count).
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let count = db2.count_documents("c", &json!({})).unwrap();
+    assert_eq!(
+        count as i64, N,
+        "concurrent inserts + checkpoints lost consistency (got {} of {})",
+        count, N
+    );
+}
+
+/// PR #89 follow-up, finding C+D: `last_compact_size` reached the Header only via
+/// `close()`. The Drop path persisted the tx_id watermark but NOT the compact-size
+/// baseline, so a process that compacted and then dropped (or crashed) without an
+/// explicit `close()` lost the baseline → `bloat_ratio = +inf` → the auto-compact
+/// rewrote the whole file on the next start (P1-7). The fix persists the baseline
+/// into the Header at compact time (under the storage write lock), which marks
+/// metadata dirty so Drop's `flush()` writes it. This guard compacts and then lets
+/// the DB *drop* (no `close()`), and requires the baseline to come back on reopen.
+#[test]
+fn last_compact_size_persists_across_drop_without_close() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("persist_compact_drop.mlite");
+
+    let size_after_compact: u64;
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..50i64 {
+            let mut doc = HashMap::new();
+            doc.insert("v".to_string(), json!(i));
+            db.insert_one("c", doc).unwrap();
+        }
+        for i in 0..20i64 {
+            db.delete_one("c", &json!({ "v": i })).unwrap();
+        }
+        let stats = db.compact().unwrap();
+        size_after_compact = stats.size_after;
+        assert!(size_after_compact > 0);
+        // NO close() — the DB drops here. Drop::flush() must persist the Header
+        // because compact() marked metadata dirty via storage.set_last_compact_size.
+    }
+
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert_eq!(
+        w.estimated_live_bytes, size_after_compact,
+        "last_compact_size must survive a Drop without close() (got {}, expected {})",
+        w.estimated_live_bytes, size_after_compact
+    );
+    assert!(
+        w.bloat_ratio.is_finite(),
+        "bloat_ratio must be finite after reopen, got {}",
+        w.bloat_ratio
+    );
+}

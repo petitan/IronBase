@@ -1120,6 +1120,13 @@ impl StorageEngine {
     pub fn checkpoint_wal_clear_only(&mut self) -> Result<compaction::CheckpointStats> {
         let wal_size_before = self.wal.file_size().unwrap_or(0);
         self.wal.clear()?;
+        // The cleared WAL no longer holds the metadata snapshot, so the next
+        // ensure_metadata_snapshot() must write a fresh one into the now-empty
+        // WAL. Leaving this true would make ensure_metadata_snapshot() early-
+        // return → an empty WAL with no recovery base (PR #89 follow-up,
+        // finding B). Matches every sibling WAL-clearer (flush / checkpoint /
+        // checkpoint_with_preserialized).
+        self.metadata_snapshot_pending = false;
         self.wal_ops_since_clear = 0;
         let wal_size_after = self.wal.file_size().unwrap_or(0);
         Ok(compaction::CheckpointStats {
@@ -2536,6 +2543,126 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&owned).unwrap(),
             serde_json::to_vec(&by_ref).unwrap()
+        );
+    }
+
+    /// PR #89 follow-up, finding B: `checkpoint_wal_clear_only` clears the WAL,
+    /// which discards the metadata snapshot it held. It must therefore reset
+    /// `metadata_snapshot_pending` (like flush/checkpoint/checkpoint_with_preserialized);
+    /// leaving it true makes the next `ensure_metadata_snapshot()` early-return,
+    /// so the now-empty WAL gets no recovery base.
+    #[test]
+    fn checkpoint_wal_clear_only_resets_snapshot_pending() {
+        let (_t, mut storage) = setup_test_db();
+
+        // Dirty metadata → writes a snapshot into the WAL and arms the flag.
+        storage.mark_metadata_dirty().unwrap();
+        assert!(
+            storage.metadata_snapshot_pending,
+            "mark_metadata_dirty should arm metadata_snapshot_pending"
+        );
+
+        storage.checkpoint_wal_clear_only().unwrap();
+        assert!(
+            !storage.metadata_snapshot_pending,
+            "checkpoint_wal_clear_only must reset metadata_snapshot_pending after clearing the WAL"
+        );
+    }
+
+    /// PR #89 follow-up, finding A (RED, data loss) — crash-durability of the
+    /// choice the `checkpoint_wal_only` None arm makes, exercised through the
+    /// REAL production recovery path. A committed insert's durable record is its
+    /// WAL `Begin`/`Operation`/`Commit` entries (the document bytes are in the
+    /// data region, but the on-disk catalog does not yet reference them, and the
+    /// catalog is only made durable by a metadata flush). `DatabaseCore::open`
+    /// ALWAYS replays the WAL (`recover_from_wal`), so a committed insert
+    /// survives a crash via that replay — UNLESS the WAL was cleared first. The
+    /// buggy None arm cleared the WAL (`checkpoint_wal_clear_only`) without
+    /// flushing the catalog, so a crash before the next checkpoint left nothing
+    /// to replay and a stale on-disk catalog → the committed doc was lost. The
+    /// fix routes the dirty case to `checkpoint()`, which flushes the catalog
+    /// to the main file before the WAL is cleared.
+    ///
+    /// The insert uses the real `commit_transaction` path (real WAL txn entries)
+    /// and reopen goes through `DatabaseCore::open` (real `recover_from_wal`), so
+    /// this models the actual durability mechanism — not the MetadataSnapshot
+    /// entries, which recovery skips. A crash is simulated by releasing the file
+    /// lock and `mem::forget`-ing the engine so its Drop (which would flush +
+    /// checkpoint) never runs, leaving exactly the on-disk state a power loss
+    /// would. NOTE: this pins the durability CONTRACT the None arm chooses
+    /// between (`checkpoint` vs `checkpoint_wal_clear_only`); the None-arm wiring
+    /// itself is only reachable via the Phase-A→B race and is covered by review,
+    /// not driven here (a deterministic wiring test would need a test-only seam
+    /// in the checkpoint hot path).
+    #[test]
+    fn committed_write_survives_crash_via_checkpoint() {
+        use crate::transaction::{Operation, Transaction};
+
+        // Returns the document count visible after a simulated crash, where
+        // `finalize` is the None-arm action applied to the dirty engine.
+        fn run(tag: &str, finalize: impl Fn(&mut StorageEngine)) -> u64 {
+            let temp_dir = TempDir::new().unwrap();
+            let db_path = temp_dir.path().join(format!("crash_{tag}.mlite"));
+
+            {
+                let mut storage = StorageEngine::open(&db_path).unwrap();
+                storage.create_collection("c").unwrap();
+                storage.flush().unwrap(); // clean baseline: empty catalog on disk
+
+                // A real committed insert: Begin/Operation/Commit fsynced to the
+                // WAL, the in-memory catalog updated, metadata marked dirty — but
+                // NOT flushed to the main metadata section (per-commit flush was
+                // removed for perf, so the WAL is the only durable record yet).
+                let mut tx = Transaction::new(1);
+                tx.add_operation(Operation::Insert {
+                    collection: "c".to_string(),
+                    doc_id: crate::document::DocumentId::Int(1),
+                    doc: std::sync::Arc::new(serde_json::json!({"v": 1})),
+                })
+                .unwrap();
+                storage.commit_transaction(&mut tx).unwrap();
+                assert!(storage.is_metadata_dirty());
+
+                finalize(&mut storage); // the None-arm action under test
+
+                // Simulate a crash: free the lock, then skip Drop (no flush).
+                storage.release_lock().unwrap();
+                std::mem::forget(storage);
+            }
+
+            // Reopen via DatabaseCore so recover_from_wal() runs (production path).
+            let db = crate::DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            db.count_documents("c", &serde_json::json!({})).unwrap() as u64
+        }
+
+        // Control: no checkpoint at all → the WAL still holds the txn, so the
+        // committed insert is recovered by recover_from_wal on reopen. Proves the
+        // recovery path is genuinely exercised and that any loss below is caused
+        // specifically by clearing the WAL, not by a broken reopen.
+        let recovered = run("no_clear", |_s| {});
+        assert_eq!(
+            recovered, 1,
+            "a committed insert must be recovered from the WAL on crash when the WAL is intact"
+        );
+
+        // Buggy choice: clear the WAL without flushing → the committed insert has
+        // no durable record left (empty WAL + stale catalog) → lost on crash.
+        let lost = run("clear_only", |s| {
+            s.checkpoint_wal_clear_only().unwrap();
+        });
+        assert_eq!(
+            lost, 0,
+            "checkpoint_wal_clear_only on dirty metadata strands the committed insert on crash — \
+             this is exactly why the None arm must not use it while metadata is dirty"
+        );
+
+        // Fixed choice: checkpoint() flushes the catalog first → the write survives.
+        let kept = run("checkpoint", |s| {
+            s.checkpoint().unwrap();
+        });
+        assert_eq!(
+            kept, 1,
+            "checkpoint() must flush the catalog so a committed insert survives a crash"
         );
     }
 
