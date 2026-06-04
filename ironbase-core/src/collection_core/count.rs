@@ -182,6 +182,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// conditions on multiple fields (e.g., $regex on a non-indexed field).
     fn count_with_plan(&self, query_json: &Value, ctx: Option<&ExecutionContext>) -> Result<u64> {
         // Try index-based counting
+        //
+        // LOCK ORDER (issue #75): acquire `storage` BEFORE `indexes`. The write
+        // paths (insert/update *_raw) hold `storage.write()` across their index
+        // updates for read-modify-write atomicity ($inc), i.e. they lock in
+        // storage→indexes order. Co-holding here in the opposite order
+        // (indexes→storage) produced a classic ABBA deadlock: a concurrent
+        // insert_many holding storage.write waited for indexes.write while this
+        // count held indexes.read and waited for storage.read. We adopt the same
+        // global storage→indexes order. Branches that delegate (count_index_narrowed
+        // / count_with_scan, which re-acquire storage themselves) drop BOTH guards
+        // first to avoid a re-entrant read deadlock.
+        let storage = self.storage.read();
         let indexes = self.indexes.read();
         let index_fields = indexes.list_indexes_with_compound_info();
 
@@ -213,7 +225,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 let end_key = end.as_ref().unwrap_or(&default_end);
 
                                 if fully_covered {
-                                    let storage = self.storage.read();
                                     let meta = storage.get_collection_meta(&self.name).ok_or_else(
                                         || IronBaseError::CollectionNotFound(self.name.clone()),
                                     )?;
@@ -241,6 +252,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         )
                                         .unwrap_docs();
                                     drop(indexes);
+                                    drop(storage);
                                     return self.count_index_narrowed(doc_ids, query_json, ctx);
                                 }
                             }
@@ -252,7 +264,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         } => {
                             if let Some(index) = indexes.get_btree_index(index_name) {
                                 if fully_covered {
-                                    let storage = self.storage.read();
                                     let meta = storage.get_collection_meta(&self.name).ok_or_else(
                                         || IronBaseError::CollectionNotFound(self.name.clone()),
                                     )?;
@@ -304,6 +315,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     all_doc_ids.sort_unstable();
                                     all_doc_ids.dedup();
                                     drop(indexes);
+                                    drop(storage);
                                     return self.count_index_narrowed(all_doc_ids, query_json, ctx);
                                 }
                             }
@@ -322,7 +334,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 };
 
                                 if fully_covered {
-                                    let storage = self.storage.read();
                                     let meta = storage.get_collection_meta(&self.name).ok_or_else(
                                         || IronBaseError::CollectionNotFound(self.name.clone()),
                                     )?;
@@ -344,6 +355,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         .range_query(&start, &end, true, true, mode)
                                         .unwrap_docs();
                                     drop(indexes);
+                                    drop(storage);
                                     return self.count_index_narrowed(doc_ids, query_json, ctx);
                                 }
                             }
@@ -351,6 +363,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         _ => {
                             // Other plan types: use collect_doc_ids_from_plan as fallback
                             drop(indexes);
+                            drop(storage);
                             let parsed_query = Query::from_json(query_json)?;
                             let cancel_flag = ctx.and_then(|c| c.cancel_flag());
                             let deadline = ctx.and_then(|c| c.deadline());
@@ -372,6 +385,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Fallback: original per-clause logical operator handling
             drop(indexes);
+            drop(storage);
             let parsed_query = Query::from_json(query_json)?;
             let cancel_flag = ctx.and_then(|c| c.cancel_flag());
             let deadline = ctx.and_then(|c| c.deadline());
@@ -411,7 +425,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                         if fully_covered {
                             // Fast path: validate index entries against catalog — O(1) memory
-                            let storage = self.storage.read();
                             let meta =
                                 storage.get_collection_meta(&self.name).ok_or_else(|| {
                                     IronBaseError::CollectionNotFound(self.name.clone())
@@ -435,6 +448,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 .range_query(&start, &end, true, true, mode)
                                 .unwrap_docs();
                             drop(indexes);
+                            drop(storage);
                             return self.count_index_narrowed(doc_ids, query_json, ctx);
                         }
                     }
@@ -455,7 +469,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                         if fully_covered {
                             // Fast path: validate index entries against catalog — O(1) memory
-                            let storage = self.storage.read();
                             let meta =
                                 storage.get_collection_meta(&self.name).ok_or_else(|| {
                                     IronBaseError::CollectionNotFound(self.name.clone())
@@ -485,6 +498,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 )
                                 .unwrap_docs();
                             drop(indexes);
+                            drop(storage);
                             return self.count_index_narrowed(doc_ids, query_json, ctx);
                         }
                     }
@@ -502,7 +516,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                             if fully_covered {
                                 // Fast path: validate index entries against catalog — O(1) memory
-                                let storage = self.storage.read();
                                 let meta =
                                     storage.get_collection_meta(&self.name).ok_or_else(|| {
                                         IronBaseError::CollectionNotFound(self.name.clone())
@@ -526,6 +539,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     .range_query(&start, &end, true, true, mode)
                                     .unwrap_docs();
                                 drop(indexes);
+                                drop(storage);
                                 return self.count_index_narrowed(doc_ids, query_json, ctx);
                             }
                         }
@@ -539,7 +553,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
                             // Fast path: validate index entries against catalog — O(1) memory
-                            let storage = self.storage.read();
                             let meta =
                                 storage.get_collection_meta(&self.name).ok_or_else(|| {
                                     IronBaseError::CollectionNotFound(self.name.clone())
@@ -599,6 +612,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             all_doc_ids.sort_unstable();
                             all_doc_ids.dedup();
                             drop(indexes);
+                            drop(storage);
                             return self.count_index_narrowed(all_doc_ids, query_json, ctx);
                         }
                     }
@@ -611,7 +625,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
                             // Fast path: validate index entries against catalog — O(1) memory
-                            let storage = self.storage.read();
                             let meta =
                                 storage.get_collection_meta(&self.name).ok_or_else(|| {
                                     IronBaseError::CollectionNotFound(self.name.clone())
@@ -658,6 +671,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             all_doc_ids.sort_unstable();
                             all_doc_ids.dedup();
                             drop(indexes);
+                            drop(storage);
                             return self.count_index_narrowed(all_doc_ids, query_json, ctx);
                         }
                     }
@@ -666,7 +680,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
                             // Fast path: validate index entries against catalog — O(1) memory
-                            let storage = self.storage.read();
                             let meta =
                                 storage.get_collection_meta(&self.name).ok_or_else(|| {
                                     IronBaseError::CollectionNotFound(self.name.clone())
@@ -690,6 +703,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 .range_query(&IndexKey::Null, &IndexKey::MaxKey, true, true, mode)
                                 .unwrap_docs();
                             drop(indexes);
+                            drop(storage);
                             return self.count_index_narrowed(doc_ids, query_json, ctx);
                         }
                     }
@@ -697,8 +711,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             drop(indexes);
+            drop(storage);
         } else {
             drop(indexes);
+            drop(storage);
         }
 
         // Fallback: streaming count without Vec allocation
