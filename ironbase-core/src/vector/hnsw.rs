@@ -396,13 +396,16 @@ impl HnswIndex {
             let neighbors =
                 self.search_layer(&node.vector, current, self.config.ef_construction, level);
 
-            // Select M best neighbors (simple heuristic: closest ones)
+            // Select M neighbors via the HNSW diversity heuristic (Algorithm 4),
+            // not closest-only — see select_neighbors_heuristic. `neighbors` is
+            // nearest-first from search_layer; the new node is not pushed yet, so
+            // it cannot appear among the candidates (new_node = None).
             let m = if level == 0 {
                 self.config.m * 2
             } else {
                 self.config.m
             };
-            let selected: Vec<usize> = neighbors.iter().take(m).map(|(idx, _)| *idx).collect();
+            let selected = self.select_neighbors_heuristic(&neighbors, m, None);
 
             // Set neighbors for new node
             node.neighbors[level] = selected.clone();
@@ -438,12 +441,16 @@ impl HnswIndex {
                         with_distances
                             .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
-                        // Update neighbor list
-                        self.nodes[neighbor_idx].neighbors[level] = with_distances
-                            .into_iter()
-                            .take(max_neighbors)
-                            .map(|(idx, _)| idx)
-                            .collect();
+                        // Re-select the neighbor's connections with the SAME
+                        // diversity heuristic — closest-only here would undo the
+                        // bridge edges. node_index is not pushed yet, so resolve
+                        // its vector via new_node.
+                        let pruned = self.select_neighbors_heuristic(
+                            &with_distances,
+                            max_neighbors,
+                            Some((node_index, &node.vector)),
+                        );
+                        self.nodes[neighbor_idx].neighbors[level] = pruned;
                     }
                 }
             }
@@ -846,6 +853,67 @@ impl HnswIndex {
     }
 
     /// Greedy search within a single layer (returns single best node)
+    /// HNSW SELECT-NEIGHBORS-HEURISTIC (Malkov & Yashunin, Algorithm 4).
+    ///
+    /// Replaces naive closest-`m` selection. A candidate is kept only when it is
+    /// closer to the base node than to every already-selected neighbor, which
+    /// preserves long-range "bridge" edges between clusters and keeps the graph
+    /// globally navigable. (Closest-only selection builds disconnected local
+    /// pockets and collapses search recall as the index grows.) The
+    /// `keepPrunedConnections` rule is emulated by backfilling up to `m` from the
+    /// discarded candidates, so every node still receives `m` edges.
+    ///
+    /// `candidates` MUST be sorted nearest-first by distance to the base node
+    /// (the order `search_layer` already returns). `new_node` supplies the vector
+    /// of a not-yet-pushed node when a candidate may reference it — the same
+    /// `idx == node_index` special-case the prune path already uses.
+    fn select_neighbors_heuristic(
+        &self,
+        candidates: &[(usize, f32)],
+        m: usize,
+        new_node: Option<(usize, &[f32])>,
+    ) -> Vec<usize> {
+        let mut selected: Vec<usize> = Vec::with_capacity(m);
+        let mut deferred: Vec<usize> = Vec::new();
+
+        for &(cand_idx, dist_to_base) in candidates {
+            if selected.len() >= m {
+                break;
+            }
+            let cand_vec: &[f32] = match new_node {
+                Some((ni, vec)) if cand_idx == ni => vec,
+                _ => &self.nodes[cand_idx].vector,
+            };
+            // Keep the candidate only if it is closer to the base than to every
+            // already-selected neighbor (diversity / long-range bridge retention).
+            let is_diverse = selected.iter().all(|&s_idx| {
+                let sel_vec: &[f32] = match new_node {
+                    Some((ni, vec)) if s_idx == ni => vec,
+                    _ => &self.nodes[s_idx].vector,
+                };
+                dist_to_base < self.compute_distance(cand_vec, sel_vec)
+            });
+            if is_diverse {
+                selected.push(cand_idx);
+            } else {
+                deferred.push(cand_idx);
+            }
+        }
+
+        // keepPrunedConnections: guarantee `m` edges by backfilling with the
+        // nearest discarded candidates (deferred preserves nearest-first order).
+        if selected.len() < m {
+            for cand_idx in deferred {
+                if selected.len() >= m {
+                    break;
+                }
+                selected.push(cand_idx);
+            }
+        }
+
+        selected
+    }
+
     fn search_layer_greedy(&self, query: &[f32], entry: usize, level: usize) -> usize {
         let mut current = entry;
         let mut current_dist = self.compute_distance(query, &self.nodes[current].vector);
@@ -1087,6 +1155,287 @@ mod tests {
         cfg.m = 4;
         cfg.ef_construction = 10;
         cfg
+    }
+
+    fn euclidean_cfg() -> VectorIndexConfig {
+        let mut cfg = VectorIndexConfig::new(2);
+        cfg.metric = DistanceMetric::Euclidean;
+        cfg
+    }
+
+    #[test]
+    fn select_neighbors_heuristic_prefers_bridges_then_backfills() {
+        let base = [0.0f32, 0.0];
+
+        // Scenario 1 — diversity: A and B are a near-duplicate cluster, C is a
+        // far "bridge" in another direction. With m=2 the heuristic must keep
+        // {A, C} (a long-range edge) rather than closest-only {A, B}.
+        let mut idx = HnswIndex::new(euclidean_cfg());
+        idx.insert("A", &[1.0, 0.0]).unwrap();
+        idx.insert("B", &[1.05, 0.0]).unwrap();
+        idx.insert("C", &[0.0, 1.4]).unwrap();
+        let (ia, ib, ic) = (
+            idx.id_to_index["A"],
+            idx.id_to_index["B"],
+            idx.id_to_index["C"],
+        );
+        let mut cands: Vec<(usize, f32)> = [ia, ib, ic]
+            .iter()
+            .map(|&i| (i, idx.compute_distance(&base, &idx.nodes[i].vector)))
+            .collect();
+        cands.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            idx.select_neighbors_heuristic(&cands, 2, None),
+            vec![ia, ic],
+            "heuristic must keep the bridge C over near-duplicate B"
+        );
+
+        // Scenario 2 — backfill: a tight 1-D cluster. Diversity keeps only A, so
+        // keepPrunedConnections must backfill the nearest discarded (B before C).
+        let mut idx2 = HnswIndex::new(euclidean_cfg());
+        idx2.insert("A", &[1.0, 0.0]).unwrap();
+        idx2.insert("B", &[1.01, 0.0]).unwrap();
+        idx2.insert("C", &[1.02, 0.0]).unwrap();
+        let (ja, jb, jc) = (
+            idx2.id_to_index["A"],
+            idx2.id_to_index["B"],
+            idx2.id_to_index["C"],
+        );
+        let mut cands2: Vec<(usize, f32)> = [ja, jb, jc]
+            .iter()
+            .map(|&i| (i, idx2.compute_distance(&base, &idx2.nodes[i].vector)))
+            .collect();
+        cands2.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            idx2.select_neighbors_heuristic(&cands2, 2, None),
+            vec![ja, jb],
+            "backfill must add the nearest discarded candidate"
+        );
+    }
+
+    // ===================================================================
+    // Phase 0 — HNSW recall validation harness (drives the recall rework).
+    // Structural diagnostics need private fields, so the harness lives here in
+    // the unit-test module. The enforcing gate + full baseline are #[ignore]d
+    // (run with `--ignored`) until the rework reaches RECALL_TARGET (Phase 3),
+    // to keep the default suite fast.
+    // ===================================================================
+
+    /// Production-grade recall gate (clustered N=2000, ef_search=50).
+    const RECALL_TARGET: f64 = 0.95;
+
+    /// Production-like HNSW config for recall tests.
+    fn recall_cfg(dim: usize) -> VectorIndexConfig {
+        let mut cfg = VectorIndexConfig::new(dim);
+        cfg.m = 16;
+        cfg.ef_construction = 200;
+        cfg.ef_search = 50;
+        cfg.metric = DistanceMetric::Cosine;
+        cfg
+    }
+
+    /// Deterministic clustered vectors (like real RAG embeddings: many
+    /// near-duplicates per topic) — the regime where the build defect shows.
+    /// Vectors are inserted in order with no removals, so node index `i` ==
+    /// vector `i`, and the cluster of vector `i` is `i % clusters`.
+    fn gen_clustered(
+        n: usize,
+        dim: usize,
+        clusters: usize,
+        noise: f32,
+        seed0: u64,
+    ) -> Vec<Vec<f32>> {
+        let mut seed = seed0;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f64 / (1u64 << 31) as f64 - 1.0) as f32
+        };
+        let centers: Vec<Vec<f32>> = (0..clusters)
+            .map(|_| (0..dim).map(|_| next()).collect())
+            .collect();
+        (0..n)
+            .map(|i| {
+                centers[i % clusters]
+                    .iter()
+                    .map(|&x| x + noise * next())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn build_index(cfg: VectorIndexConfig, vectors: &[Vec<f32>]) -> HnswIndex {
+        let mut idx = HnswIndex::new(cfg);
+        for (i, v) in vectors.iter().enumerate() {
+            idx.insert(&format!("v{i}"), v).unwrap();
+        }
+        idx
+    }
+
+    /// Fraction of vectors whose own embedding self-retrieves at rank 1.
+    fn self_recall_at1(idx: &HnswIndex, vectors: &[Vec<f32>]) -> f64 {
+        let hits = vectors
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| {
+                idx.search(v, 1)
+                    .first()
+                    .map(|r| r.id == format!("v{i}"))
+                    .unwrap_or(false)
+            })
+            .count();
+        hits as f64 / vectors.len() as f64
+    }
+
+    /// (reachable_all_layer, reachable_layer0, zero_in_degree, avg_in_degree, max_level)
+    fn structural_report(idx: &HnswIndex) -> (usize, usize, usize, f64, usize) {
+        let n = idx.nodes.len();
+        let entry = idx.entry_point.expect("non-empty index");
+
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(entry);
+        let mut stack = vec![entry];
+        while let Some(node) = stack.pop() {
+            for layer in &idx.nodes[node].neighbors {
+                for &nb in layer {
+                    if seen.insert(nb) {
+                        stack.push(nb);
+                    }
+                }
+            }
+        }
+
+        let mut seen0 = std::collections::HashSet::new();
+        seen0.insert(entry);
+        let mut stack0 = vec![entry];
+        while let Some(node) = stack0.pop() {
+            if let Some(l0) = idx.nodes[node].neighbors.first() {
+                for &nb in l0 {
+                    if seen0.insert(nb) {
+                        stack0.push(nb);
+                    }
+                }
+            }
+        }
+
+        let mut indeg = vec![0usize; n];
+        for node in 0..n {
+            if let Some(l0) = idx.nodes[node].neighbors.first() {
+                for &nb in l0 {
+                    indeg[nb] += 1;
+                }
+            }
+        }
+        let zero_in = indeg.iter().filter(|&&d| d == 0).count();
+        let avg_in = indeg.iter().sum::<usize>() as f64 / n as f64;
+        (seen.len(), seen0.len(), zero_in, avg_in, idx.max_level)
+    }
+
+    /// Fraction of self-queries whose upper-layer greedy descent lands in a
+    /// DIFFERENT cluster than the target (diagnoses hierarchy navigation).
+    fn descent_miss_rate(idx: &HnswIndex, vectors: &[Vec<f32>], clusters: usize) -> f64 {
+        let entry = match idx.entry_point {
+            Some(e) => e,
+            None => return 1.0,
+        };
+        let mut miss = 0usize;
+        for (i, v) in vectors.iter().enumerate() {
+            let mut current = entry;
+            for level in (1..=idx.max_level).rev() {
+                current = idx.search_layer_greedy(v, current, level);
+            }
+            if current % clusters != i % clusters {
+                miss += 1;
+            }
+        }
+        miss as f64 / vectors.len() as f64
+    }
+
+    /// Phase-0 baseline measurement: prints the full harness report.
+    /// `#[ignore]`d (slow); run with `cargo test ... -- --ignored hnsw_recall_baseline`.
+    #[test]
+    #[ignore = "harness measurement; run on demand with --ignored"]
+    fn hnsw_recall_baseline_diagnostic() {
+        const N: usize = 2000;
+        const DIM: usize = 48;
+        const CLUSTERS: usize = 40;
+        let vectors = gen_clustered(N, DIM, CLUSTERS, 0.05, 0x9E37_79B9_7F4A_7C15);
+        let idx = build_index(recall_cfg(DIM), &vectors);
+        let recall = self_recall_at1(&idx, &vectors);
+        let (reach_all, reach_l0, zero_in, avg_in, max_level) = structural_report(&idx);
+        let dmiss = descent_miss_rate(&idx, &vectors, CLUSTERS);
+        eprintln!(
+            "HNSW HARNESS N={N} recall@1={recall:.3} (target {RECALL_TARGET}) \
+             reachable_all={reach_all}/{N} reachable_l0={reach_l0}/{N} \
+             zero_in={zero_in} avg_in={avg_in:.1} max_level={max_level} descent_miss={dmiss:.3}"
+        );
+
+        // Categorize each MISSED self-query to prioritize the fixes.
+        let entry = idx.entry_point.unwrap();
+        let mut indeg = vec![0usize; idx.nodes.len()];
+        for node in 0..idx.nodes.len() {
+            if let Some(l0) = idx.nodes[node].neighbors.first() {
+                for &nb in l0 {
+                    indeg[nb] += 1;
+                }
+            }
+        }
+        let (mut miss_sink, mut miss_descent, mut miss_other) = (0usize, 0usize, 0usize);
+        for (i, v) in vectors.iter().enumerate() {
+            let found = idx
+                .search(v, 1)
+                .first()
+                .map(|r| r.id == format!("v{i}"))
+                .unwrap_or(false);
+            if found {
+                continue;
+            }
+            let mut current = entry;
+            for level in (1..=idx.max_level).rev() {
+                current = idx.search_layer_greedy(v, current, level);
+            }
+            let landed_wrong = current % CLUSTERS != i % CLUSTERS;
+            if indeg[i] == 0 {
+                miss_sink += 1;
+            } else if landed_wrong {
+                miss_descent += 1;
+            } else {
+                miss_other += 1;
+            }
+        }
+        eprintln!(
+            "HNSW MISS-BREAKDOWN total_miss={} sink={miss_sink} descent_wrong={miss_descent} \
+             other(layer0)={miss_other}",
+            miss_sink + miss_descent + miss_other
+        );
+        assert_eq!(idx.len(), N);
+        assert!((0.0..=1.0).contains(&recall));
+    }
+
+    /// Production recall gate — ENFORCED once the rework reaches target (Phase 3).
+    /// `#[ignore]`d until then; documents the current ~0.64 baseline.
+    #[test]
+    #[ignore = "enable when the HNSW recall rework reaches RECALL_TARGET (Phase 3)"]
+    fn hnsw_recall_meets_target() {
+        const N: usize = 2000;
+        const DIM: usize = 48;
+        let vectors = gen_clustered(N, DIM, 40, 0.05, 0x1234_5678_9ABC_DEF0);
+        let idx = build_index(recall_cfg(DIM), &vectors);
+
+        let r = self_recall_at1(&idx, &vectors);
+        assert!(
+            r >= RECALL_TARGET,
+            "self-recall@1 {r:.3} < target {RECALL_TARGET}"
+        );
+
+        // Round-trip must preserve recall (full adjacency is serialized).
+        let idx2 = HnswIndex::from_bytes(&idx.to_bytes().unwrap()).unwrap();
+        let r2 = self_recall_at1(&idx2, &vectors);
+        assert!(
+            (r - r2).abs() < 1e-9,
+            "recall changed after to_bytes/from_bytes: {r:.3} -> {r2:.3}"
+        );
     }
 
     #[test]
