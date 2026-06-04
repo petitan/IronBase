@@ -1010,10 +1010,14 @@ impl HnswIndex {
                 for &neighbor_idx in &neighbors[level] {
                     if visited.insert(neighbor_idx) {
                         let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
-                        // Expand if the navigable set isn't full or this node is
-                        // nearer than its current furthest.
+                        // Expand if the navigable set isn't full, or this node is no
+                        // farther than its current furthest. `<=` (not `<`) admits
+                        // distance ties so that, in a dense same-distance cluster
+                        // (e.g. many identical-vector orphans around one live node),
+                        // the live node is still explored and collected into
+                        // `w_active` instead of being crowded out by the ties.
                         let promising = w_nav.len() < ef
-                            || w_nav.peek().map(|f| dist < f.distance).unwrap_or(true);
+                            || w_nav.peek().map(|f| dist <= f.distance).unwrap_or(true);
                         if promising {
                             candidates.push(NearestCandidate {
                                 index: neighbor_idx,

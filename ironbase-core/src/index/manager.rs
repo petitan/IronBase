@@ -993,28 +993,35 @@ impl IndexManager {
         Ok(rebuilt)
     }
 
-    /// Rebuild ALL vector indexes unconditionally.
+    /// Rebuild ALL non-empty vector indexes **unconditionally**.
     ///
-    /// Used during db_compact to ensure clean HNSW state.
+    /// Used by `db_compact` (the explicit/auto heavy maintenance op) to fully
+    /// rebuild the HNSW graphs from their active vectors. Unlike the checkpoint
+    /// path (`rebuild_vector_indexes_if_needed`, orphan-ratio gated), this does
+    /// NOT gate on orphan count: a graph can be degraded (poor connectivity, e.g.
+    /// built by an older/buggy version) with zero orphans, and only a forced
+    /// rebuild repairs it. `rebuild()` reconstructs from `id_to_index` (the active
+    /// vectors), so it both removes orphans and re-links the graph correctly.
     /// Returns the number of indexes rebuilt.
     pub fn rebuild_all_vector_indexes(&mut self) -> Result<usize> {
         let mut rebuilt = 0;
         let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
         for name in names {
             if let Some(index) = self.vector_indexes.get_mut(&name) {
-                let orphans = index.orphan_count();
-                if orphans > 0 {
-                    let active = index.len();
-                    index.rebuild()?;
-                    self.dirty_vector_indexes.insert(name.clone());
-                    crate::log_info!(
-                        "HNSW index '{}' compacted: removed {} orphan nodes, {} active vectors remain",
-                        name,
-                        orphans,
-                        active
-                    );
-                    rebuilt += 1;
+                let active = index.len();
+                if active == 0 {
+                    continue; // nothing to rebuild
                 }
+                let orphans = index.orphan_count();
+                index.rebuild()?;
+                self.dirty_vector_indexes.insert(name.clone());
+                crate::log_info!(
+                    "HNSW index '{}' rebuilt during compact: {} active vectors, {} orphans removed",
+                    name,
+                    active,
+                    orphans
+                );
+                rebuilt += 1;
             }
         }
         Ok(rebuilt)
