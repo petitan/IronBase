@@ -634,11 +634,21 @@ impl HnswIndex {
         // IMPORTANT: iterate id_to_index (HashMap, unique keys) instead of nodes,
         // because nodes may contain duplicate IDs after remove+reinsert cycles
         // (orphan node + new active node with same ID).
-        let items: Vec<(String, Vec<f32>)> = self
-            .id_to_index
-            .iter()
-            .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone()))
-            .collect();
+        // try_reserve so a huge index fails with a typed OOM error instead of
+        // aborting during the rebuild clone (mirrors the insert-path guard).
+        let mut items: Vec<(String, Vec<f32>)> = Vec::new();
+        items.try_reserve(self.id_to_index.len()).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Failed to reserve {} entries for HNSW rebuild: {}",
+                self.id_to_index.len(),
+                e
+            ))
+        })?;
+        items.extend(
+            self.id_to_index
+                .iter()
+                .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone())),
+        );
 
         // Clear and reinsert
         self.nodes.clear();
@@ -726,6 +736,47 @@ impl HnswIndex {
             IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
         })?;
         Ok(())
+    }
+
+    /// Stream-deserialize a current-format (v3) index from a reader, e.g.
+    /// `BufReader<File>`. Decodes directly off disk via `bincode::deserialize_from`
+    /// instead of buffering the entire file into a `Vec` first (as `from_bytes`
+    /// does) — roughly halves the peak memory when loading a large index (the file
+    /// buffer + the graph both resident). (Audit P1-6.)
+    ///
+    /// Only the v3 framing is streamed; legacy (v1/v2) files return an error so
+    /// the caller falls back to the buffered `from_bytes` — those are old/small,
+    /// so the 2× spike is moot there.
+    pub fn from_reader(mut reader: impl std::io::Read) -> Result<Self> {
+        // v3 header: MAGIC (4) + version (4, LE) + watermark (8, LE) = 16 bytes.
+        let mut hdr = [0u8; 16];
+        reader.read_exact(&mut hdr).map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "Failed to read HNSW v3 header: {}",
+                e
+            )))
+        })?;
+        if &hdr[0..4] != Self::MAGIC_HEADER {
+            return Err(IronBaseError::Serialization(
+                "not a v3 HNSW stream (legacy/headerless) — fall back to from_bytes".to_string(),
+            ));
+        }
+        let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        if version != Self::SERIALIZATION_VERSION {
+            return Err(IronBaseError::Serialization(format!(
+                "HNSW stream version {} != current {} — fall back to from_bytes",
+                version,
+                Self::SERIALIZATION_VERSION
+            )));
+        }
+        let watermark = u64::from_le_bytes([
+            hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
+        ]);
+        let mut index: HnswIndex = bincode::deserialize_from(&mut reader).map_err(|e| {
+            IronBaseError::Serialization(format!("Failed to deserialize HNSW index: {}", e))
+        })?;
+        index.last_flushed_tx_id = watermark;
+        Ok(index)
     }
 
     /// Deserialize the index from bytes
@@ -1674,6 +1725,30 @@ mod tests {
         assert_eq!(hnsw2.len(), 2);
         assert!(hnsw2.contains("doc1"));
         assert!(hnsw2.contains("doc2"));
+    }
+
+    /// P1-6: `from_reader` streams the v3 format off a reader (½ peak memory of
+    /// `from_bytes`) and must round-trip identically; legacy/headerless input
+    /// returns Err so the caller falls back to the buffered `from_bytes`.
+    #[test]
+    fn from_reader_streams_v3_roundtrip() {
+        let mut hnsw = HnswIndex::with_dim(3);
+        hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+        hnsw.insert("doc2", &[0.0, 1.0, 0.0]).unwrap();
+
+        // v3 stream framing (same one persist_hnsw_to_file / save_to_writer emit).
+        let mut buf = Vec::new();
+        hnsw.save_to_writer(&mut buf).unwrap();
+
+        // Streamed load == buffered load.
+        let streamed = HnswIndex::from_reader(&buf[..]).unwrap();
+        assert_eq!(streamed.len(), 2);
+        assert!(streamed.contains("doc1"));
+        assert!(streamed.contains("doc2"));
+        assert_eq!(streamed.len(), HnswIndex::from_bytes(&buf).unwrap().len());
+
+        // Headerless / legacy input → Err (caller uses from_bytes fallback).
+        assert!(HnswIndex::from_reader(&b"not-an-hnsw-stream-0123456789abcd"[..]).is_err());
     }
 
     #[test]

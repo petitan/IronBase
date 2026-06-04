@@ -2059,7 +2059,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// FIX #19: Refactored to use IndexManager.add_document_to_indexes()
     /// which properly handles compound indexes.
-    fn batch_add_to_indexes(&self, docs: &[Document]) -> Result<()> {
+    fn batch_add_to_indexes(&self, docs: &[&Document]) -> Result<()> {
         if docs.is_empty() {
             return Ok(());
         }
@@ -2067,7 +2067,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
 
-        for doc in docs {
+        for &doc in docs {
             // Add to _id index (handled separately due to DocumentId type)
             if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
                 let id_key = match &doc.id {

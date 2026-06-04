@@ -1211,11 +1211,27 @@ impl IndexManager {
             return None;
         }
 
+        // Stream the current-format (v3) index directly off disk — roughly half
+        // the peak memory of read-all + from_bytes on a large index (audit P1-6).
+        // Legacy v1/v2 or any stream error falls through to the buffered path.
+        if let Some(index) = std::fs::File::open(&cache_path)
+            .ok()
+            .and_then(|f| HnswIndex::from_reader(std::io::BufReader::new(f)).ok())
+        {
+            crate::log_debug!(
+                "Loaded vector index '{}' from {} ({} vectors, streamed)",
+                index_name,
+                cache_path.display(),
+                index.len()
+            );
+            return Some(index);
+        }
+
         match std::fs::read(&cache_path) {
             Ok(bytes) => match HnswIndex::from_bytes(&bytes) {
                 Ok(index) => {
                     crate::log_debug!(
-                        "Loaded vector index '{}' from {} ({} vectors)",
+                        "Loaded vector index '{}' from {} ({} vectors, buffered)",
                         index_name,
                         cache_path.display(),
                         index.len()

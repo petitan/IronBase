@@ -258,3 +258,77 @@ fn test_compaction_no_sparse_hole_on_drop() {
         assert_eq!(docs.len(), 10, "Should have 10 documents after compact");
     }
 }
+
+/// P1-7: `last_compact_size` must persist across a graceful close+reopen so the
+/// reopened DB keeps an accurate `bloat_ratio`. Before the fix it reset to 0 →
+/// `bloat_ratio = +inf` → the auto-compact rewrote the whole file on every
+/// restart. This regression guard fails on the unfixed code (estimated_live=0,
+/// bloat_ratio=inf) and passes after the Header field is persisted.
+#[test]
+fn last_compact_size_persists_across_reopen() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("persist_compact.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..50i64 {
+            let mut doc = HashMap::new();
+            doc.insert("v".to_string(), json!(i));
+            db.insert_one("c", doc).unwrap();
+        }
+        // Create reclaimable bloat, then compact (sets the in-memory baseline).
+        for i in 0..20i64 {
+            db.delete_one("c", &json!({ "v": i })).unwrap();
+        }
+        let stats = db.compact().unwrap();
+        assert!(stats.size_after > 0);
+        // Graceful close persists last_compact_size into the Header.
+        db.close().unwrap();
+    }
+
+    // Reopen: the baseline must come back from the Header, NOT reset to 0.
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert!(
+        w.estimated_live_bytes > 0,
+        "last_compact_size must persist across reopen (got 0 → bloat_ratio would be +inf)"
+    );
+    assert!(
+        w.bloat_ratio.is_finite(),
+        "bloat_ratio must be finite after reopen, got {}",
+        w.bloat_ratio
+    );
+}
+
+/// P1-3: idle checkpoints (no writes since the last flush) must NOT re-append the
+/// metadata catalog. Before the fix the clean path fell through to a full
+/// `storage.checkpoint()` whose `flush_metadata()` appends the catalog regardless
+/// of dirtiness, so an idle DB grew on every 60s checkpoint (multi-GB/day at
+/// 100GB). This guard fails on the unfixed code (file grows) and passes after the
+/// clean path is routed to WAL-clear-only.
+#[test]
+fn idle_checkpoint_does_not_grow_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("idle_ckpt.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    for i in 0..30i64 {
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(i));
+        db.insert_one("c", doc).unwrap();
+    }
+    // First checkpoint flushes the (dirty) metadata to disk.
+    db.checkpoint_wal_only().unwrap();
+    let size1 = std::fs::metadata(&db_path).unwrap().len();
+
+    // No writes since → metadata is clean → further checkpoints must be no-ops
+    // for the data file (only WAL is touched), so the file must NOT grow.
+    for _ in 0..5 {
+        db.checkpoint_wal_only().unwrap();
+    }
+    let size2 = std::fs::metadata(&db_path).unwrap().len();
+    assert_eq!(
+        size2, size1,
+        "idle checkpoints must not re-append metadata (file grew {} → {})",
+        size1, size2
+    );
+}

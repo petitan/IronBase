@@ -170,6 +170,21 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Data file size after the previous compaction (0 = never compacted /
+    /// unknown). Used by `storage_wastage` to compute `bloat_ratio` across
+    /// restarts; without it the in-memory baseline resets to 0 on every
+    /// `open()` → `bloat_ratio = +inf` → a spurious full-file compaction on
+    /// every restart. Default no-op returns 0 (suitable for in-memory storage).
+    fn last_compact_size(&self) -> u64 {
+        0
+    }
+
+    /// Persist the data file size after a successful compaction.
+    /// Default no-op (suitable for in-memory storage that does not survive exit).
+    fn set_last_compact_size(&mut self, _size: u64) -> Result<()> {
+        Ok(())
+    }
+
     /// Mark the database as cleanly shutting down
     ///
     /// Called during graceful shutdown to enable fast restart.

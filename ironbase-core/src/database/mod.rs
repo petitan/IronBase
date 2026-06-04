@@ -413,6 +413,10 @@ impl DatabaseCore<StorageEngine> {
         // the watermark so post-rebuild flushes stamp a non-zero value
         // into the index metadata even on read-mostly DBs.
         let stored_watermark = storage.last_committed_tx_id();
+        // P1-7: seed the compaction-size baseline from the persisted Header so a
+        // reopened DB keeps an accurate bloat_ratio instead of 0 → +inf → a
+        // spurious full-file auto-compaction on every restart.
+        let stored_compact_size = storage.last_compact_size();
         let max_recovered = recovered_ops
             .iter()
             .map(|(tx_id, _)| *tx_id)
@@ -472,7 +476,7 @@ impl DatabaseCore<StorageEngine> {
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
-            last_compact_size: AtomicU64::new(0),
+            last_compact_size: AtomicU64::new(stored_compact_size),
             recovered_operations: Arc::new(RwLock::new(recovered_ops_by_collection)),
         };
 

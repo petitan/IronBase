@@ -182,13 +182,23 @@ pub struct Header {
     // the new value.
     #[serde(default)]
     pub last_committed_tx_id: u64,
+
+    // Persisted compaction-size baseline (version 6+)
+    // Data file size after the last successful compaction. `storage_wastage`
+    // uses it as `estimated_live_bytes` to compute `bloat_ratio`. Persisting it
+    // means a freshly reopened DB keeps an accurate baseline instead of seeing
+    // `bloat_ratio = +inf` (the 0-init case) and rewriting the entire file via
+    // auto-compaction on every restart. `#[serde(default)]` → legacy DBs read 0
+    // (first compaction recalibrates), mirroring `last_committed_tx_id` (R1).
+    #[serde(default)]
+    pub last_compact_size: u64,
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 5, // Version 5: tx_id watermark persistence (task #26 R1)
+            version: 6, // Version 6: last_compact_size persistence (P1-7)
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -198,6 +208,7 @@ impl Default for Header {
             data_end_offset: HEADER_SIZE, // Documents start right after header
             clean_shutdown: false,        // Will be set to true on graceful shutdown
             last_committed_tx_id: 0,      // Persisted at clean shutdown, replaces 0-init on reopen
+            last_compact_size: 0,         // Persisted after compaction; 0 = never compacted
         }
     }
 }
@@ -386,6 +397,17 @@ pub struct MetadataWALEntry {
     pub collections: HashMap<String, CollectionMeta>,
     /// End of document data section (where metadata should start)
     pub data_end_offset: u64,
+}
+
+/// Borrowing twin of `MetadataWALEntry` used only for serialization, so the WAL
+/// snapshot can be written WITHOUT deep-cloning the entire `collections` map
+/// (a multi-GB allocation under the write lock on a large catalog — audit P1-8).
+/// serde encodes `&HashMap` byte-identically to `HashMap`, so the WAL JSON — and
+/// crash recovery via `MetadataWALEntry` — is unchanged.
+#[derive(Serialize)]
+struct MetadataWALEntryRef<'a> {
+    collections: &'a HashMap<String, CollectionMeta>,
+    data_end_offset: u64,
 }
 
 // ============================================================================
@@ -933,12 +955,39 @@ impl StorageEngine {
     fn write_metadata_snapshot(&mut self) -> Result<()> {
         use crate::wal::{WALEntry, WALEntryType};
 
-        let metadata_entry = MetadataWALEntry {
-            collections: self.collections.clone(),
+        // Serialize from a borrow — NO full catalog clone (a 50M-doc catalog clone
+        // was a multi-GB allocation under the write lock). serde encodes the
+        // borrowing twin identically, so the WAL format / crash recovery is the same.
+        let metadata_ref = MetadataWALEntryRef {
+            collections: &self.collections,
             data_end_offset: self.header.data_end_offset,
         };
 
-        let entry_data = serde_json::to_vec(&metadata_entry)
+        // Estimate + try_reserve the buffer so a giant catalog fails with a typed
+        // OutOfMemory error instead of aborting the process (mirrors
+        // serialize_metadata's guard at metadata.rs).
+        let estimated_size: usize = 4 + self
+            .collections
+            .values()
+            .map(|meta| {
+                let catalog_size = meta.document_catalog.len() * 30;
+                let order_size = meta.document_order.len() * 10;
+                4 + catalog_size + order_size + 512
+            })
+            .sum::<usize>();
+        let mut entry_data: Vec<u8> = Vec::new();
+        entry_data.try_reserve(estimated_size).map_err(|_| {
+            IronBaseError::OutOfMemory(format!(
+                "Failed to allocate {}MB for metadata WAL snapshot ({} collections, {} total docs)",
+                estimated_size / (1024 * 1024),
+                self.collections.len(),
+                self.collections
+                    .values()
+                    .map(|m| m.document_catalog.len())
+                    .sum::<usize>()
+            ))
+        })?;
+        serde_json::to_writer(&mut entry_data, &metadata_ref)
             .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         let entry = WALEntry::new(
@@ -1058,6 +1107,26 @@ impl StorageEngine {
             wal_size_after,
             wal_ops_cleared: wal_ops_cleared as u64,
             indexes_flushed: 0, // Storage layer doesn't know about indexes; set by DatabaseCore
+        })
+    }
+
+    /// WAL-clear-only checkpoint: clears the WAL WITHOUT re-flushing metadata.
+    ///
+    /// Used by `checkpoint_wal_only` when metadata is clean (no mutations since
+    /// the last flush): the catalog is already durable, so calling `flush_metadata`
+    /// would only append the full catalog again and grow the file on every idle
+    /// checkpoint (audit P1-3). In that state the WAL holds no un-checkpointed
+    /// ops, so clearing it is a cheap no-op.
+    pub fn checkpoint_wal_clear_only(&mut self) -> Result<compaction::CheckpointStats> {
+        let wal_size_before = self.wal.file_size().unwrap_or(0);
+        self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
+        let wal_size_after = self.wal.file_size().unwrap_or(0);
+        Ok(compaction::CheckpointStats {
+            wal_size_before,
+            wal_size_after,
+            wal_ops_cleared: 0,
+            indexes_flushed: 0,
         })
     }
 
@@ -1415,6 +1484,28 @@ impl StorageEngine {
             self.header.version = 5;
         }
         self.header.last_committed_tx_id = tx_id;
+        self.mark_metadata_dirty()?;
+        Ok(())
+    }
+
+    /// Data file size after the last successful compaction (0 = never compacted),
+    /// persisted in the Header so `bloat_ratio` survives restarts.
+    pub fn last_compact_size(&self) -> u64 {
+        self.header.last_compact_size
+    }
+
+    /// Persist the post-compaction data file size baseline. Called after a
+    /// successful compaction and at graceful shutdown (next to
+    /// `set_last_committed_tx_id`). Marks metadata dirty so the new value is
+    /// written by the next checkpoint / clean-shutdown flush.
+    pub fn set_last_compact_size(&mut self, size: u64) -> Result<()> {
+        if self.header.last_compact_size == size {
+            return Ok(());
+        }
+        if self.header.version < 6 {
+            self.header.version = 6;
+        }
+        self.header.last_compact_size = size;
         self.mark_metadata_dirty()?;
         Ok(())
     }
@@ -2352,6 +2443,14 @@ impl Storage for StorageEngine {
         StorageEngine::set_last_committed_tx_id(self, tx_id)
     }
 
+    fn last_compact_size(&self) -> u64 {
+        StorageEngine::last_compact_size(self)
+    }
+
+    fn set_last_compact_size(&mut self, size: u64) -> Result<()> {
+        StorageEngine::set_last_compact_size(self, size)
+    }
+
     fn mark_clean_shutdown(&mut self) -> Result<()> {
         StorageEngine::mark_clean_shutdown(self)
     }
@@ -2417,12 +2516,35 @@ mod tests {
         (temp_dir, storage)
     }
 
+    /// P1-8: the borrowing `MetadataWALEntryRef` used by `write_metadata_snapshot`
+    /// (to avoid deep-cloning the whole catalog) must serialize byte-identically
+    /// to the owned `MetadataWALEntry`, so the WAL format and crash recovery are
+    /// unchanged.
+    #[test]
+    fn metadata_snapshot_ref_serializes_identically() {
+        let (_t, mut storage) = setup_test_db();
+        storage.create_collection("c").unwrap();
+
+        let owned = MetadataWALEntry {
+            collections: storage.collections.clone(),
+            data_end_offset: storage.header.data_end_offset,
+        };
+        let by_ref = MetadataWALEntryRef {
+            collections: &storage.collections,
+            data_end_offset: storage.header.data_end_offset,
+        };
+        assert_eq!(
+            serde_json::to_vec(&owned).unwrap(),
+            serde_json::to_vec(&by_ref).unwrap()
+        );
+    }
+
     #[test]
     fn test_create_new_database() {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
+        assert_eq!(storage.header.version, 6); // Version 6: last_compact_size persistence (P1-7)
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -2766,7 +2888,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
+        assert_eq!(header.version, 6); // Version 6: last_compact_size persistence (P1-7)
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
