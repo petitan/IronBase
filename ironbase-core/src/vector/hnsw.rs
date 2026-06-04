@@ -849,26 +849,42 @@ impl HnswIndex {
         let mut candidates = BinaryHeap::new(); // Min-heap for nearest
         let mut results = BinaryHeap::new(); // Max-heap for furthest (to maintain top-ef)
 
+        // #77/#53: nodes lazily removed via `remove()` stay in the graph (orphans:
+        // still in `nodes`/edges, gone from `id_to_index`). They MUST remain
+        // navigable so traversal can pass *through* them to reach live nodes, but
+        // they must NOT consume the `ef` result budget — otherwise an orphan-dense
+        // neighborhood (e.g. a chunk replaced many times) starves the result set
+        // and search recall collapses. So orphans go into `candidates` (frontier)
+        // but never into `results` (the ef-capped valid set that also drives the
+        // early-stop). Search then keeps expanding until it has `ef` *active*
+        // results or the reachable graph is exhausted.
+        let is_active = |idx: usize| self.id_to_index.contains_key(&self.nodes[idx].id);
+
         let entry_dist = self.compute_distance(query, &self.nodes[entry].vector);
         visited.insert(entry);
         candidates.push(NearestCandidate {
             index: entry,
             distance: entry_dist,
         });
-        results.push(SearchCandidate {
-            index: entry,
-            distance: entry_dist,
-        });
+        if is_active(entry) {
+            results.push(SearchCandidate {
+                index: entry,
+                distance: entry_dist,
+            });
+        }
 
         while let Some(NearestCandidate {
             index: current,
             distance: current_dist,
         }) = candidates.pop()
         {
-            // Check if we can stop early
-            if let Some(furthest) = results.peek() {
-                if current_dist > furthest.distance && results.len() >= ef {
-                    break;
+            // Early stop only once we have ef *active* results and the closest
+            // remaining frontier node is farther than the furthest of them.
+            if results.len() >= ef {
+                if let Some(furthest) = results.peek() {
+                    if current_dist > furthest.distance {
+                        break;
+                    }
                 }
             }
 
@@ -879,23 +895,27 @@ impl HnswIndex {
                     if visited.insert(neighbor_idx) {
                         let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
 
-                        // Add to candidates if promising
-                        let dominated = results.len() >= ef
-                            && results.peek().map(|f| dist >= f.distance).unwrap_or(false);
+                        // A neighbor is worth keeping if we still lack ef active
+                        // results or it is nearer than the current furthest active
+                        // result. Orphans are judged the same way for traversal.
+                        let promising = results.len() < ef
+                            || results.peek().map(|f| dist < f.distance).unwrap_or(true);
 
-                        if !dominated || results.len() < ef {
+                        if promising {
+                            // Always traverse through it (preserves connectivity).
                             candidates.push(NearestCandidate {
                                 index: neighbor_idx,
                                 distance: dist,
                             });
-                            results.push(SearchCandidate {
-                                index: neighbor_idx,
-                                distance: dist,
-                            });
-
-                            // Trim results if too many
-                            while results.len() > ef {
-                                results.pop();
+                            // Only active (non-orphan) nodes count toward results.
+                            if is_active(neighbor_idx) {
+                                results.push(SearchCandidate {
+                                    index: neighbor_idx,
+                                    distance: dist,
+                                });
+                                while results.len() > ef {
+                                    results.pop();
+                                }
                             }
                         }
                     }
