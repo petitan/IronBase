@@ -173,3 +173,60 @@ fn deleted_vector_not_returned() {
         "deleted vector must not be returned by search"
     );
 }
+
+/// Deleting the graph entry point (the first-inserted node) must not break
+/// search: `remove()` re-anchors `entry_point` to a live node, so upper-layer
+/// descent never starts from a dead node. Repeatedly delete the current
+/// first-generation anchor and confirm the rest stays fully retrievable.
+#[test]
+fn search_survives_entry_point_deletion() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("kb").unwrap();
+    const DIM: usize = 32;
+    const DOCS: usize = 24;
+    make_index(&coll, DIM);
+
+    let embedding = |d: usize| -> Vec<f32> {
+        let mut v = vec![0.0f32; DIM];
+        v[d % DIM] = 1.0;
+        v[(d + 5) % DIM] = 0.4;
+        v
+    };
+
+    // "anchor" is inserted FIRST, so it becomes the HNSW entry point.
+    let mut anchor_ids = db
+        .insert_many("kb", vec![embedding_doc("anchor", &embedding(0))])
+        .unwrap();
+    for d in 1..DOCS {
+        db.insert_many("kb", vec![embedding_doc(&format!("doc{d}"), &embedding(d))])
+            .unwrap();
+    }
+
+    // Delete + re-insert the entry-point anchor several times. Each delete drops
+    // the node that is (or was promoted to) entry point.
+    for _ in 0..6 {
+        let ids: Vec<serde_json::Value> = anchor_ids.iter().map(|id| json!(id)).collect();
+        db.delete_many("kb", &json!({ "_id": { "$in": ids } }))
+            .unwrap();
+        anchor_ids = db
+            .insert_many("kb", vec![embedding_doc("anchor", &embedding(0))])
+            .unwrap();
+    }
+
+    // All docs (including the re-inserted anchor) must self-retrieve.
+    for d in 0..DOCS {
+        let want = if d == 0 {
+            "anchor".to_string()
+        } else {
+            format!("doc{d}")
+        };
+        let res = coll.vector_search("embedding", &embedding(d), 1).unwrap();
+        assert_eq!(
+            res.first()
+                .and_then(|(doc, _)| doc.get("doc_id"))
+                .and_then(|v| v.as_str()),
+            Some(want.as_str()),
+            "self-retrieval failed for {want} after entry-point deletions"
+        );
+    }
+}

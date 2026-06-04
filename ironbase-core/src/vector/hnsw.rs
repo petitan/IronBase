@@ -462,18 +462,12 @@ impl HnswIndex {
             current = self.search_layer_greedy(query, current, level);
         }
 
-        // Search at layer 0 with ef_search candidates
+        // Search at layer 0. search_layer already excludes orphan (lazy-removed)
+        // nodes from its result set, so every candidate here is an active vector.
         let candidates = self.search_layer(query, current, self.config.ef_search, 0);
 
-        // Convert to results with similarity scores based on metric
-        // Filter out orphan nodes: after lazy remove(), nodes remain in the graph
-        // but are no longer in id_to_index. Only return active (non-orphan) results.
         candidates
             .into_iter()
-            .filter(|(idx, _)| {
-                let node = &self.nodes[*idx];
-                self.id_to_index.contains_key(&node.id)
-            })
             .take(k)
             .map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
@@ -511,19 +505,16 @@ impl HnswIndex {
             current = self.search_layer_greedy(query, current, level);
         }
 
-        // Search at layer 0 with more candidates to compensate for filtering
+        // Search at layer 0 with extra candidates to compensate for the caller's
+        // filter dropping results. Orphan (lazy-removed) nodes are already
+        // excluded by search_layer, so this budget only covers the caller filter.
         let ef = self.config.ef_search * 3; // Expand search space
         let candidates = self.search_layer(query, current, ef, 0);
 
-        // Filter and convert to results
-        // First filter out orphan nodes (lazy-deleted), then apply caller's filter.
         candidates
             .into_iter()
             .filter_map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
-                if !self.id_to_index.contains_key(&node.id) {
-                    return None; // orphan node — skip
-                }
                 if filter(&node.id) {
                     let score = self.compute_similarity(query, &node.vector);
                     Some(VectorSearchResult {
@@ -583,10 +574,25 @@ impl HnswIndex {
     /// Note: This marks the node as deleted but doesn't fully update
     /// the graph structure. Call rebuild() after many deletions.
     pub fn remove(&mut self, id: &str) -> bool {
-        if let Some(&_idx) = self.id_to_index.get(id) {
-            // For now, just remove from lookup (lazy removal)
+        if let Some(&idx) = self.id_to_index.get(id) {
+            // Lazy removal: drop from the lookup; the node and its edges stay in
+            // the graph as an orphan (search_layer traverses through but never
+            // returns orphans). Memory is reclaimed later by rebuild().
             self.id_to_index.remove(id);
             self.dirty = true;
+
+            // If we just removed the graph entry point, re-anchor it to a live
+            // node. Otherwise upper-layer descent (search_layer_greedy) would
+            // start every search from a dead node, which can settle in an orphan
+            // local minimum and hurt recall (#77). Pick the highest-level active
+            // node (most neighbor layers) as the new entry; None if none remain.
+            if self.entry_point == Some(idx) {
+                self.entry_point = self
+                    .id_to_index
+                    .values()
+                    .copied()
+                    .max_by_key(|&i| self.nodes[i].neighbors.len());
+            }
             true
         } else {
             false
