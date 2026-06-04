@@ -7,7 +7,7 @@
 # on the v1.0.505-507 changes, which until now had only in-process Rust coverage:
 #
 #   A. Tool surface     — `search` present; `hybrid_search` / `vector_search_filter`
-#                         removed; tool count == 93.
+#                         removed; tool count == 87 (post-#74 rename).
 #   B. Non-RAG fulltext — multi-field `match_scope="document"` qualification on a
 #                         collection with no parent doc_id (the v1.0.506 fix:
 #                         union must key on `_id`, not a `doc_id` the docs lack).
@@ -95,8 +95,9 @@ echo "== A. Tool surface (v1.0.505-507) =="
 TOOLS="$(rpc "tools/list" '{}' | jq -r '.result.tools[].name')"
 COUNT="$(printf '%s\n' "$TOOLS" | grep -c .)"
 # Non-localhost callers don't see the 8 admin_* tools (tools/list filtering,
-# SECURITY FIX #14): localhost sees 93, a remote/Internal client sees 85.
-EXP_COUNT=$([[ "$SELF_HOSTED" == 1 ]] && echo 93 || echo 85)
+# SECURITY FIX #14): localhost sees 87, a remote/Internal client sees 79.
+# (Tool count is 87 after the #74 noun-first rename + index consolidation.)
+EXP_COUNT=$([[ "$SELF_HOSTED" == 1 ]] && echo 87 || echo 79)
 assert "search tool present"             "$(grep -qx search             <<<"$TOOLS" && echo 1 || echo 0)"
 assert "hybrid_search removed"           "$(grep -qx hybrid_search       <<<"$TOOLS" && echo 0 || echo 1)"
 assert "vector_search_filter removed"    "$(grep -qx vector_search_filter<<<"$TOOLS" && echo 0 || echo 1)"
@@ -107,8 +108,8 @@ echo "== B. Non-RAG multi-field document-scope fulltext (v1.0.506 fix) =="
 tool collection_create "$(jq -nc --arg c "$KB" '{collection:$c}')" >/dev/null
 tool insert_one "$(jq -nc --arg c "$KB" '{collection:$c,document:{content:"fékpad PEF-35 berendezés leírás",title:"alpha"}}')" >/dev/null
 tool insert_one "$(jq -nc --arg c "$KB" '{collection:$c,document:{content:"csak fékpad egyedül",title:"beta"}}')" >/dev/null
-tool index_create_fulltext "$(jq -nc --arg c "$KB" '{collection:$c,field:"content"}')" >/dev/null
-tool index_create_fulltext "$(jq -nc --arg c "$KB" '{collection:$c,field:"title"}')" >/dev/null
+tool index_create "$(jq -nc --arg c "$KB" '{collection:$c,field:"content",type:"fulltext"}')" >/dev/null
+tool index_create "$(jq -nc --arg c "$KB" '{collection:$c,field:"title",type:"fulltext"}')" >/dev/null
 # Multi-field, multi-word, default match_scope="document". Doc 1 has both tokens.
 MF="$(tool fulltext_search "$(jq -nc --arg c "$KB" '{collection:$c,field:"content",fields:["content","title"],query:"fékpad PEF-35"}')")"
 MF_COUNT="$(jq -r '[.results[]? // .[]?] | length' <<<"$MF" 2>/dev/null || echo 0)"
@@ -157,7 +158,7 @@ fi
 echo
 echo "== F. CRUD sanity =="
 tool insert_one "$(jq -nc --arg c "$KB" '{collection:$c,document:{k:"v",n:7}}')" >/dev/null
-CNT="$(tool count_documents "$(jq -nc --arg c "$KB" '{collection:$c,query:{}}')" | jq -r '.count // empty')"
+CNT="$(tool count "$(jq -nc --arg c "$KB" '{collection:$c,query:{}}')" | jq -r '.count // empty')"
 assert "count_documents >= 3 after inserts" "$([[ "${CNT:-0}" -ge 3 ]] && echo 1 || echo 0)" "count=$CNT"
 FND="$(tool find "$(jq -nc --arg c "$KB" '{collection:$c,query:{n:7}}')")"
 assert "find by field returns the doc" "$(jq -e '[.. | objects | select(.n? == 7)] | length > 0' <<<"$FND" >/dev/null 2>&1 && echo 1 || echo 0)"

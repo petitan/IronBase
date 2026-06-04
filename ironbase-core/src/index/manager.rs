@@ -995,9 +995,11 @@ impl IndexManager {
 
     /// Rebuild ALL non-empty vector indexes **unconditionally**.
     ///
-    /// Used by `db_compact` (the explicit/auto heavy maintenance op) to fully
-    /// rebuild the HNSW graphs from their active vectors. Unlike the checkpoint
-    /// path (`rebuild_vector_indexes_if_needed`, orphan-ratio gated), this does
+    /// Used by an explicit operator-initiated `db_compact` (force path) and the
+    /// blocking `compact()` to fully rebuild the HNSW graphs from their active
+    /// vectors. The automatic bloat-triggered compact does NOT use this — it
+    /// takes the orphan-gated `rebuild_vector_indexes_if_needed` instead. Unlike
+    /// the checkpoint path (`rebuild_vector_indexes_if_needed`), this does
     /// NOT gate on orphan count: a graph can be degraded (poor connectivity, e.g.
     /// built by an older/buggy version) with zero orphans, and only a forced
     /// rebuild repairs it. `rebuild()` reconstructs from `id_to_index` (the active

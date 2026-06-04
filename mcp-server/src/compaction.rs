@@ -167,11 +167,16 @@ impl Drop for CompactGuard {
 ///
 /// Takes CompactGuard by reference — the guard is owned by the caller (closure)
 /// and its Drop impl will clear the compacting flag when the closure exits.
+///
+/// `force_vector_rebuild`: `true` for an explicit operator `db_compact` (fully
+/// reconstruct every HNSW graph), `false` for the automatic bloat-triggered
+/// compact (orphan-gated rebuild only — cheap when nothing needs repair).
 pub fn run_compact_job(
     job_id: &str,
     job_mgr: &JobManager,
     guard: &CompactGuard,
     shutdown_flag: &AtomicBool,
+    force_vector_rebuild: bool,
 ) {
     let adapter = &guard.adapter;
     let start = Instant::now();
@@ -179,8 +184,9 @@ pub fn run_compact_job(
 
     // Combined cancel flag: checked by CompactionConfig.is_cancelled()
     let combined_cancel = Arc::new(AtomicBool::new(false));
-    let config =
-        ironbase_core::storage::CompactionConfig::new().with_cancel_flag(combined_cancel.clone());
+    let config = ironbase_core::storage::CompactionConfig::new()
+        .with_cancel_flag(combined_cancel.clone())
+        .with_force_vector_rebuild(force_vector_rebuild);
 
     let result = adapter.compact_nonblocking(&config, &|processed, total| {
         // Cancel propagation: job cancel OR shutdown → combined_cancel
@@ -327,7 +333,9 @@ pub fn auto_compact_check(
     let state_clone = state.clone();
 
     let handle = std::thread::spawn(move || {
-        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag);
+        // Automatic (bloat-triggered) compact: orphan-gated vector rebuild only,
+        // so a routine startup compact does not pay for a full HNSW rebuild.
+        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag, false);
         // Mark compact completed for cooldown tracking
         state_clone.lock().mark_compact_completed();
     });
