@@ -258,3 +258,44 @@ fn test_compaction_no_sparse_hole_on_drop() {
         assert_eq!(docs.len(), 10, "Should have 10 documents after compact");
     }
 }
+
+/// P1-7: `last_compact_size` must persist across a graceful close+reopen so the
+/// reopened DB keeps an accurate `bloat_ratio`. Before the fix it reset to 0 →
+/// `bloat_ratio = +inf` → the auto-compact rewrote the whole file on every
+/// restart. This regression guard fails on the unfixed code (estimated_live=0,
+/// bloat_ratio=inf) and passes after the Header field is persisted.
+#[test]
+fn last_compact_size_persists_across_reopen() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("persist_compact.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..50i64 {
+            let mut doc = HashMap::new();
+            doc.insert("v".to_string(), json!(i));
+            db.insert_one("c", doc).unwrap();
+        }
+        // Create reclaimable bloat, then compact (sets the in-memory baseline).
+        for i in 0..20i64 {
+            db.delete_one("c", &json!({ "v": i })).unwrap();
+        }
+        let stats = db.compact().unwrap();
+        assert!(stats.size_after > 0);
+        // Graceful close persists last_compact_size into the Header.
+        db.close().unwrap();
+    }
+
+    // Reopen: the baseline must come back from the Header, NOT reset to 0.
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert!(
+        w.estimated_live_bytes > 0,
+        "last_compact_size must persist across reopen (got 0 → bloat_ratio would be +inf)"
+    );
+    assert!(
+        w.bloat_ratio.is_finite(),
+        "bloat_ratio must be finite after reopen, got {}",
+        w.bloat_ratio
+    );
+}

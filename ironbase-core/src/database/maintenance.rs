@@ -316,6 +316,10 @@ impl DatabaseCore<StorageEngine> {
         {
             let mut storage = self.storage.write();
             storage.set_last_committed_tx_id(self.max_committed_tx_id.load(Ordering::SeqCst))?;
+            // Persist the compaction-size baseline so bloat_ratio survives the
+            // restart and the auto-compact does not rewrite the whole file again
+            // on next open (P1-7). Mirrors the tx_id watermark persistence above.
+            storage.set_last_compact_size(self.last_compact_size.load(Ordering::Relaxed))?;
             storage.mark_clean_shutdown()?;
         }
 

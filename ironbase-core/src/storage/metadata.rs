@@ -488,6 +488,7 @@ mod tests {
             data_end_offset: HEADER_SIZE,
             clean_shutdown: false,
             last_committed_tx_id: 0,
+            last_compact_size: 0,
         }
     }
 

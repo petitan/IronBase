@@ -182,13 +182,23 @@ pub struct Header {
     // the new value.
     #[serde(default)]
     pub last_committed_tx_id: u64,
+
+    // Persisted compaction-size baseline (version 6+)
+    // Data file size after the last successful compaction. `storage_wastage`
+    // uses it as `estimated_live_bytes` to compute `bloat_ratio`. Persisting it
+    // means a freshly reopened DB keeps an accurate baseline instead of seeing
+    // `bloat_ratio = +inf` (the 0-init case) and rewriting the entire file via
+    // auto-compaction on every restart. `#[serde(default)]` → legacy DBs read 0
+    // (first compaction recalibrates), mirroring `last_committed_tx_id` (R1).
+    #[serde(default)]
+    pub last_compact_size: u64,
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 5, // Version 5: tx_id watermark persistence (task #26 R1)
+            version: 6, // Version 6: last_compact_size persistence (P1-7)
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -198,6 +208,7 @@ impl Default for Header {
             data_end_offset: HEADER_SIZE, // Documents start right after header
             clean_shutdown: false,        // Will be set to true on graceful shutdown
             last_committed_tx_id: 0,      // Persisted at clean shutdown, replaces 0-init on reopen
+            last_compact_size: 0,         // Persisted after compaction; 0 = never compacted
         }
     }
 }
@@ -1419,6 +1430,28 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Data file size after the last successful compaction (0 = never compacted),
+    /// persisted in the Header so `bloat_ratio` survives restarts.
+    pub fn last_compact_size(&self) -> u64 {
+        self.header.last_compact_size
+    }
+
+    /// Persist the post-compaction data file size baseline. Called after a
+    /// successful compaction and at graceful shutdown (next to
+    /// `set_last_committed_tx_id`). Marks metadata dirty so the new value is
+    /// written by the next checkpoint / clean-shutdown flush.
+    pub fn set_last_compact_size(&mut self, size: u64) -> Result<()> {
+        if self.header.last_compact_size == size {
+            return Ok(());
+        }
+        if self.header.version < 6 {
+            self.header.version = 6;
+        }
+        self.header.last_compact_size = size;
+        self.mark_metadata_dirty()?;
+        Ok(())
+    }
+
     /// Commit a transaction (9-step atomic operation) - internal implementation
     /// This is the core of ACD guarantee
     ///
@@ -2352,6 +2385,14 @@ impl Storage for StorageEngine {
         StorageEngine::set_last_committed_tx_id(self, tx_id)
     }
 
+    fn last_compact_size(&self) -> u64 {
+        StorageEngine::last_compact_size(self)
+    }
+
+    fn set_last_compact_size(&mut self, size: u64) -> Result<()> {
+        StorageEngine::set_last_compact_size(self, size)
+    }
+
     fn mark_clean_shutdown(&mut self) -> Result<()> {
         StorageEngine::mark_clean_shutdown(self)
     }
@@ -2422,7 +2463,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
+        assert_eq!(storage.header.version, 6); // Version 6: last_compact_size persistence (P1-7)
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -2766,7 +2807,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 5); // Version 5: tx_id watermark persistence (task #26 R1)
+        assert_eq!(header.version, 6); // Version 6: last_compact_size persistence (P1-7)
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
