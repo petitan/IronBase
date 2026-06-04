@@ -144,6 +144,13 @@ impl DatabaseCore<StorageEngine> {
         let stats = storage.compact()?;
         // Calibrate last_compact_size for bloat_ratio calculations
         self.set_last_compact_size(stats.size_after);
+        // Persist the baseline into the Header while the write lock is held so
+        // it survives a crash or Drop before the next close() (PR #89 follow-up,
+        // finding C+D). set_last_compact_size marks metadata dirty → the next
+        // checkpoint and Drop's flush() both write the updated Header. Without
+        // this the baseline only reached the Header at close(), so the auto-
+        // compact rewrote the whole file again on the next start (P1-7).
+        storage.set_last_compact_size(stats.size_after)?;
         Ok(stats)
     }
 
@@ -235,7 +242,14 @@ impl DatabaseCore<StorageEngine> {
 
         // Phase C: brief storage.write() — catch-up + finalize
         let mut storage = self.storage.write();
-        storage.compact_finalize_with_catchup(scan_result, &snapshot_collections)
+        let stats = storage.compact_finalize_with_catchup(scan_result, &snapshot_collections)?;
+        // Persist the baseline into the Header while this write lock is still
+        // held — the outer compact_nonblocking() sets only the in-memory atomic
+        // and runs after the lock is released (PR #89 follow-up, finding C+D).
+        // Marks metadata dirty → next checkpoint / Drop's flush() writes it,
+        // so the baseline survives a crash before close() (P1-7).
+        storage.set_last_compact_size(stats.size_after)?;
+        Ok(stats)
     }
 
     /// Checkpoint - flush indexes and clear WAL (MongoDB-style)
@@ -411,12 +425,27 @@ impl DatabaseCore<StorageEngine> {
                 storage.checkpoint_with_preserialized(metadata_bytes)
             }
             None => {
-                // Metadata was clean at Phase A (no mutations since the last
-                // flush): the catalog is already durable, so a full checkpoint
-                // would only re-append it and grow the file on every idle
-                // checkpoint (audit P1-3). Clear the WAL only — in this state it
-                // holds no un-checkpointed ops, so it is a cheap no-op.
-                storage.checkpoint_wal_clear_only()
+                // Metadata was clean at Phase A, but Phase A released
+                // storage.read() before Phase B acquired storage.write(). A
+                // concurrent insert in that gap commits its txn to the WAL and
+                // dirties the in-memory catalog WITHOUT flushing it. Re-check
+                // dirtiness under the Phase-B write lock: clearing the WAL while
+                // metadata is dirty would erase that insert's only durable
+                // record while the catalog is never flushed → committed doc lost
+                // on restart (PR #89 follow-up, finding A).
+                if storage.is_metadata_dirty() {
+                    // Dirtied between phases → full checkpoint flushes the
+                    // catalog to the main file BEFORE clearing the WAL.
+                    storage.checkpoint()
+                } else {
+                    // Truly clean (no mutations since the last flush): the
+                    // catalog is already durable, so a full checkpoint would
+                    // only re-append it and grow the file on every idle
+                    // checkpoint (audit P1-3). Clear the WAL only — in this
+                    // state it holds no un-checkpointed ops, so it is a cheap
+                    // no-op.
+                    storage.checkpoint_wal_clear_only()
+                }
             }
             Some(_) => {
                 // Guard FAIL: mutations happened between Phase A and B (or a v2

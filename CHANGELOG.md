@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — checkpoint/compact durability regressions from PR #89 (mcp-server v1.0.520, core v0.3.326)
+
+Three correctness regressions introduced by the scalability batch-1 split (PR #89, v1.0.519),
+fixed before deploy. All in the storage durability path (`ironbase-core`).
+
+- **Data loss (HIGH) — concurrent write lost across `checkpoint_wal_only`.** The two-phase
+  checkpoint serializes metadata under `storage.read()` (Phase A), releases it, then clears the
+  WAL under `storage.write()` (Phase B). When Phase A saw clean metadata it returned `None`; the
+  P1-3 split then made the Phase-B `None` arm clear the WAL unconditionally. An insert committing
+  in the gap between the two phases dirties the in-memory catalog and writes its only durable
+  record to the WAL — clearing it without flushing stranded that committed document on a crash
+  before the next checkpoint. Fix: the `None` arm now re-checks `is_metadata_dirty()` under the
+  Phase-B write lock and runs a full `checkpoint()` (flush-then-clear) when dirty, restoring the
+  pre-PR-89 `_ => checkpoint()` safety. (`database/maintenance.rs`)
+- **`checkpoint_wal_clear_only` did not reset `metadata_snapshot_pending`.** Clearing the WAL
+  discards the metadata snapshot it held, so the next `ensure_metadata_snapshot()` must write a
+  fresh one; leaving the flag set made it early-return, yielding an empty WAL with no recovery
+  base. Now reset after `wal.clear()`, matching every sibling WAL-clearer. (`storage/mod.rs`)
+- **`last_compact_size` reached the Header only at `close()`.** The Drop/crash path persisted the
+  tx_id watermark but not the compaction-size baseline, so a process that compacted then dropped
+  (or crashed) without an explicit `close()` lost it → `bloat_ratio = +inf` → the auto-compact
+  rewrote the whole file on the next start (P1-7). Now persisted into the Header at compact time
+  (under the storage write lock, in both the blocking and non-blocking compact paths), which marks
+  metadata dirty so Drop's `flush()` and the next checkpoint both write it. (`database/maintenance.rs`)
+
 ### Fixed — `search` context budget collapsed broad queries (mcp-server v1.0.518)
 
 The `search` tool's response contract (`retrieval/contract.rs`) spent its 12 000-char
