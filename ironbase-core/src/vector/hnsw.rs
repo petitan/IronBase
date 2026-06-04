@@ -49,6 +49,17 @@ const MIN_ORPHANS_FOR_REBUILD: usize = 100;
 const ORPHAN_RATIO_THRESHOLD: f64 = 0.3;
 const MAX_ABSOLUTE_ORPHANS: usize = 10_000;
 
+/// Backstop bound on nodes visited per `search_layer` call (#80).
+///
+/// When the active vector count is below `ef` (or a neighbourhood is
+/// orphan-dense), `results` can't fill to `ef` and the distance-based early-stop
+/// never fires, so the layer search would otherwise walk the whole reachable
+/// graph. The budget = `ef * VISIT_BUDGET_FACTOR` (floored at `MIN_VISIT_BUDGET`)
+/// is set far above what a healthy query touches — healthy queries early-stop by
+/// distance long before — so it only caps pathological orphan-dense scans.
+const VISIT_BUDGET_FACTOR: usize = 64;
+const MIN_VISIT_BUDGET: usize = 1024;
+
 /// A node in the HNSW graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnswNode {
@@ -885,6 +896,10 @@ impl HnswIndex {
         // results or the reachable graph is exhausted.
         let is_active = |idx: usize| self.id_to_index.contains_key(&self.nodes[idx].id);
 
+        // #80: backstop so a few-active / orphan-dense layer can't degrade into a
+        // full reachable-graph walk. Generous — healthy queries early-stop first.
+        let max_visits = ef.saturating_mul(VISIT_BUDGET_FACTOR).max(MIN_VISIT_BUDGET);
+
         let entry_dist = self.compute_distance(query, &self.nodes[entry].vector);
         visited.insert(entry);
         candidates.push(NearestCandidate {
@@ -903,6 +918,10 @@ impl HnswIndex {
             distance: current_dist,
         }) = candidates.pop()
         {
+            // #80 backstop: stop if we've already explored the visit budget.
+            if visited.len() >= max_visits {
+                break;
+            }
             // Early stop only once we have ef *active* results and the closest
             // remaining frontier node is farther than the furthest of them.
             if results.len() >= ef {
@@ -1112,6 +1131,39 @@ mod tests {
             idx.needs_rebuild(),
             "absolute orphan cap should trigger rebuild even below the ratio threshold"
         );
+    }
+
+    #[test]
+    fn search_returns_all_active_with_orphans_under_budget() {
+        // #80: few active vectors + orphan churn (under the visit budget) must
+        // still return every active node — the backstop bounds work without
+        // truncating valid results. Uses a realistic config (good connectivity);
+        // the point under test is the budget, not graph quality.
+        let mut idx = HnswIndex::with_dim(12);
+        for i in 0..12 {
+            let mut v = vec![0.0f32; 12];
+            v[i] = 1.0; // orthogonal one-hot directions, distinct under cosine
+            idx.insert(&format!("a{i}"), &v).unwrap();
+        }
+        // ~600 orphans (well under MIN_VISIT_BUDGET=1024) via insert+remove.
+        for i in 0..600 {
+            let id = format!("tmp{i}");
+            let mut v = vec![0.0f32; 12];
+            v[i % 12] = 0.5;
+            v[(i + 1) % 12] = 0.5;
+            idx.insert(&id, &v).unwrap();
+            idx.remove(&id);
+        }
+        for i in 0..12 {
+            let mut v = vec![0.0f32; 12];
+            v[i] = 1.0;
+            let res = idx.search(&v, 1);
+            assert_eq!(
+                res.first().map(|r| r.id.as_str()),
+                Some(format!("a{i}").as_str()),
+                "active anchor a{i} must self-retrieve despite orphan churn"
+            );
+        }
     }
 
     #[test]
