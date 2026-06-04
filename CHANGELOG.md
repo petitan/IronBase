@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `search` context budget collapsed broad queries (mcp-server v1.0.518)
+
+The `search` tool's response contract (`retrieval/contract.rs`) spent its 12 000-char
+context budget **depth-first**: it emitted every passage of the first document before the
+next, so one large document (e.g. 10 × ~1000-char passages) consumed ~70 % of the budget and
+all remaining matched documents were dropped with empty passages. A broad query (`fékerőmérő`:
+602 matching documents, 194 from the shared engine) returned only **4**, and `limit` was
+effectively ignored. The fix allocates the budget **breadth-first** (Pass 1: one passage per
+document up to `limit`; Pass 2: fill the remainder with further passages), so `count` reflects
+matched documents up to `limit`, each with ≥1 representative passage. Budget-dropped documents
+are surfaced via a new `dropped_due_to_budget` field (P6). Pure response-shaping change — the
+shared `retrieve_and_fuse`/`build_doc_groups` engine and `db_hybrid_search` are unchanged.
+
 ### BREAKING — MCP tool naming canonicalization + index consolidation (mcp-server v1.0.509)
 
 Single canonical naming convention (`<resource>_<verb>`, noun-first, full words) plus
