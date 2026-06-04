@@ -200,10 +200,19 @@ impl DatabaseCore<StorageEngine> {
             let index_managers = self.index_managers.read();
             for (collection_name, index_manager) in index_managers.iter() {
                 let mut mgr = index_manager.write();
-                let rebuilt = mgr.rebuild_all_vector_indexes()?;
+                // A forced (explicit operator) compact fully reconstructs every
+                // graph; the automatic bloat-triggered compact only rebuilds
+                // orphan-heavy ones — so a routine startup compact with zero
+                // orphans no longer pays for a full HNSW rebuild.
+                let rebuilt = if config.force_vector_rebuild {
+                    mgr.rebuild_all_vector_indexes()?
+                } else {
+                    mgr.rebuild_vector_indexes_if_needed()?
+                };
                 if rebuilt > 0 {
                     tracing::info!(
                         collection = %collection_name, rebuilt,
+                        forced = config.force_vector_rebuild,
                         "Compact (non-blocking): HNSW indexes rebuilt"
                     );
                 }
@@ -874,5 +883,152 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Get current durability mode
     pub fn durability_mode(&self) -> DurabilityMode {
         self.durability_mode
+    }
+}
+
+#[cfg(test)]
+mod compact_vector_rebuild_tests {
+    //! Verifies the `force_vector_rebuild` dispatch in `compact_nonblocking`.
+    //!
+    //! These are crate-internal so they can read `orphan_count()` (only reachable
+    //! via the `pub(crate)` index_managers) — the divergence between the gated and
+    //! forced paths is NOT observable through the public API. The setup leaves a
+    //! sub-gate number of orphans (< MIN_ORPHANS_FOR_REBUILD=100), the regime
+    //! where the two paths actually differ: the gated (automatic) path is a no-op,
+    //! the forced (explicit) path rebuilds and clears them. Inverting the dispatch
+    //! flips both assertions, so a mis-wired flag is caught.
+
+    use crate::storage::{CompactionConfig, StorageEngine};
+    use crate::vector::{DistanceMetric, VectorIndexConfig};
+    use crate::DatabaseCore;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    // DIM > DOCS so each doc's dominant dimension (`d % DIM`) is unique (distinct
+    // vectors). CHURN < 100 keeps the orphan count below the rebuild gate.
+    const DIM: usize = 64;
+    const DOCS: usize = 60;
+    const CHURN: usize = 40;
+
+    fn embedding(d: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; DIM];
+        v[d % DIM] = 1.0;
+        v[(d + 1) % DIM] = 0.3;
+        v[(d + 2) % DIM] = 0.1;
+        v
+    }
+
+    fn doc(tag: &str, v: &[f32]) -> HashMap<String, serde_json::Value> {
+        HashMap::from([
+            ("doc_id".to_string(), json!(tag)),
+            ("embedding".to_string(), json!(v)),
+        ])
+    }
+
+    fn orphan_count(db: &DatabaseCore<StorageEngine>) -> usize {
+        let mgrs = db.index_managers.read();
+        let mgr = mgrs.get("kb").expect("kb index manager").read();
+        let idxs = mgr.list_vector_indexes();
+        assert_eq!(idxs.len(), 1, "exactly one vector index expected");
+        idxs[0].orphan_count()
+    }
+
+    /// Build `kb` with DOCS distinct vectors, then churn (delete + reinsert) the
+    /// first CHURN docs so the HNSW graph carries CHURN lazy-removed orphans.
+    fn build_churned_db() -> (TempDir, DatabaseCore<StorageEngine>) {
+        let temp = TempDir::new().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(temp.path().join("c.mlite")).unwrap();
+        {
+            let coll = db.collection("kb").unwrap();
+            let mut cfg = VectorIndexConfig::new(DIM);
+            cfg.field = "embedding".to_string();
+            cfg.metric = DistanceMetric::Cosine;
+            coll.create_vector_index("embedding", cfg).unwrap();
+        }
+        let mut ids: Vec<Vec<serde_json::Value>> = Vec::with_capacity(DOCS);
+        for d in 0..DOCS {
+            let new = db
+                .insert_many("kb", vec![doc(&format!("doc{d}"), &embedding(d))])
+                .unwrap();
+            ids.push(new.into_iter().map(|i| json!(i)).collect());
+        }
+        for d in 0..CHURN {
+            let new = db
+                .insert_many("kb", vec![doc(&format!("doc{d}"), &embedding(d))])
+                .unwrap();
+            db.delete_many("kb", &json!({ "_id": { "$in": ids[d].clone() } }))
+                .unwrap();
+            ids[d] = new.into_iter().map(|i| json!(i)).collect();
+        }
+        (temp, db)
+    }
+
+    fn assert_top1(db: &DatabaseCore<StorageEngine>, d: usize) {
+        let coll = db.collection("kb").unwrap();
+        let res = coll.vector_search("embedding", &embedding(d), 1).unwrap();
+        assert_eq!(
+            res.first()
+                .and_then(|(doc, _)| doc.get("doc_id"))
+                .and_then(|v| v.as_str()),
+            Some(format!("doc{d}").as_str()),
+            "self-retrieval failed for doc{d}"
+        );
+    }
+
+    /// Automatic (default) compact: orphan-gated → below the gate it must NOT
+    /// rebuild, so the orphans survive and no full-rebuild cost is paid.
+    #[test]
+    fn auto_gated_compact_does_not_rebuild_below_orphan_gate() {
+        let (_t, db) = build_churned_db();
+        let before = orphan_count(&db);
+        assert!(
+            before > 0 && before < 100,
+            "setup must leave sub-gate orphans, got {before}"
+        );
+
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap();
+
+        assert_eq!(
+            orphan_count(&db),
+            before,
+            "automatic (gated) compact must NOT rebuild below the orphan gate"
+        );
+        assert_top1(&db, 0); // search still correct (orphans excluded at query time)
+    }
+
+    /// Explicit operator compact: forced → rebuilds unconditionally and clears
+    /// every orphan, even below the gate.
+    #[test]
+    fn forced_compact_rebuilds_and_clears_orphans() {
+        let (_t, db) = build_churned_db();
+        assert!(orphan_count(&db) > 0, "setup must create orphans");
+
+        db.compact_nonblocking(
+            &CompactionConfig::new().with_force_vector_rebuild(true),
+            &|_, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            orphan_count(&db),
+            0,
+            "forced compact must rebuild and remove all orphans"
+        );
+        assert_top1(&db, 0);
+    }
+
+    /// Regression guard: the default must stay non-forced on every construction
+    /// path, so a routine/automatic compact never triggers the heavy rebuild.
+    #[test]
+    fn compaction_config_defaults_to_gated_rebuild() {
+        assert!(!CompactionConfig::new().force_vector_rebuild);
+        assert!(!CompactionConfig::default().force_vector_rebuild);
+        assert!(
+            CompactionConfig::new()
+                .with_force_vector_rebuild(true)
+                .force_vector_rebuild
+        );
     }
 }

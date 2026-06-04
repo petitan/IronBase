@@ -21,6 +21,12 @@ pub struct CompactionConfig {
     pub chunk_size: usize,
     /// Optional cancellation flag - set to true to abort compaction
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Force a full rebuild of every vector (HNSW) index even when there is no
+    /// orphan pressure. The automatic bloat-triggered compact leaves this
+    /// `false` (orphan-gated rebuild — cheap when nothing needs repair); an
+    /// explicit operator-initiated `db_compact` sets it `true` to fully
+    /// reconstruct possibly-degraded graphs. Default: `false`.
+    pub force_vector_rebuild: bool,
 }
 
 impl CompactionConfig {
@@ -29,6 +35,7 @@ impl CompactionConfig {
         Self {
             chunk_size: 1000,
             cancel_flag: None,
+            force_vector_rebuild: false,
         }
     }
 
@@ -41,6 +48,12 @@ impl CompactionConfig {
     /// Set a cancellation flag for interruptible compaction
     pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Force an unconditional rebuild of all vector indexes (see field docs).
+    pub fn with_force_vector_rebuild(mut self, force: bool) -> Self {
+        self.force_vector_rebuild = force;
         self
     }
 

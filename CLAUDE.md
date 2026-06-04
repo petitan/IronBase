@@ -430,9 +430,19 @@ index.needs_rebuild()  // >30% orphan ÉS >100 orphan
 index.rebuild_if_needed()  // Rebuild ha needs_rebuild()
 ```
 
-**Automatikus orphan compaction:**
-- **Checkpoint** (60s): `rebuild_vector_indexes_if_needed()` — csak ha >30% orphan
-- **Compact** (`db_compact`): `rebuild_all_vector_indexes()` — minden orphan eltávolítása
+**Orphan compaction — gated (automatikus) vs force (explicit):**
+- **Checkpoint** (60s): `rebuild_vector_indexes_if_needed()` — csak ha >30% ÉS >100 orphan
+- **Automatikus compact** (bloat-trigger, induláskor: `last_compact_size=0` → `bloat_ratio=inf`):
+  `force_vector_rebuild=false` → `rebuild_vector_indexes_if_needed()` (orphan-gated, **olcsó**).
+  ⚠️ Ezért az automatikus/induló compact **NEM** javít degradált-de-orphan-mentes
+  (vagy <100 orphan) gráfot — ez szándékos (különben minden restart teljes,
+  egyszálú HNSW rebuild-et fizetne 0 orphannál is, ~15-20 perc 1 mag pinned).
+- **Explicit compact** (MCP `db_compact` tool, blokkoló `DatabaseCore::compact()`,
+  Python/C# `db.compact()`): `force_vector_rebuild=true` → `rebuild_all_vector_indexes()`
+  — minden orphan eltávolítása + teljes gráf-rekonstrukció. Degradált gráf
+  javításához EZT kell hívni (pl. régi/buggos verzió után). Szemantika: *explicit hívás = force*.
+- Flag: `CompactionConfig::force_vector_rebuild` (default `false`). Belépési pontok:
+  `mcp-server/src/compaction.rs` auto path → `false`, `tools/admin.rs` db_compact → `true`.
 
 **Key files:**
 - `ironbase-core/src/vector/hnsw.rs` — `len()`, `orphan_count()`, `needs_rebuild()`, `rebuild_if_needed()`

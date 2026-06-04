@@ -156,7 +156,9 @@ fn handle_db_compact(
     let handle = std::thread::spawn(move || {
         // guard is moved here — Drop will fire when this closure exits
         // (whether normally, via early return, or via panic)
-        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag);
+        // Explicit operator compact: force a full vector-index rebuild so a
+        // degraded graph (e.g. built by an older version) gets reconstructed.
+        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag, true);
     });
 
     job_mgr.register_thread(job_id.clone(), handle);
