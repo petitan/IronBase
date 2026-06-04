@@ -36,6 +36,19 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+/// Orphan-rebuild thresholds (see `HnswIndex::needs_rebuild`).
+///
+/// `remove()` is lazy — removed nodes linger in the graph as orphans until a
+/// `rebuild()`. Two triggers reclaim them:
+/// - RATIO: an orphan-heavy index (small/medium, where local poisoning is most
+///   likely) is rebuilt once orphans exceed `ORPHAN_RATIO_THRESHOLD` of total.
+/// - ABSOLUTE: a large index under steady replace churn keeps the ratio low
+///   forever, so orphans would accumulate unbounded between full compacts (#81).
+///   An absolute cap bounds that growth regardless of ratio.
+const MIN_ORPHANS_FOR_REBUILD: usize = 100;
+const ORPHAN_RATIO_THRESHOLD: f64 = 0.3;
+const MAX_ABSOLUTE_ORPHANS: usize = 10_000;
+
 /// A node in the HNSW graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnswNode {
@@ -213,20 +226,26 @@ impl HnswIndex {
         self.nodes.len().saturating_sub(self.id_to_index.len())
     }
 
-    /// Check if the index needs rebuilding due to excessive orphan nodes
+    /// Check if the index needs rebuilding due to excessive orphan nodes.
     ///
-    /// Returns true if orphan ratio exceeds 30% and there are at least 100 orphans.
-    /// Small absolute counts are ignored to avoid unnecessary rebuilds.
+    /// Two triggers (either fires), both ignoring tiny absolute counts:
+    /// - RATIO: orphans exceed `ORPHAN_RATIO_THRESHOLD` (30%) of total nodes —
+    ///   catches orphan-heavy small/medium indexes where search recall/cost is
+    ///   most affected.
+    /// - ABSOLUTE: orphans exceed `MAX_ABSOLUTE_ORPHANS` regardless of ratio —
+    ///   catches a large index under steady replace churn, whose ratio stays
+    ///   under 30% but whose orphans would otherwise grow unbounded between full
+    ///   compacts (#81).
     pub fn needs_rebuild(&self) -> bool {
         let orphans = self.orphan_count();
-        if orphans < 100 {
+        if orphans < MIN_ORPHANS_FOR_REBUILD {
             return false;
         }
         let total = self.nodes.len();
         if total == 0 {
             return false;
         }
-        (orphans as f64 / total as f64) > 0.3
+        (orphans as f64 / total as f64) > ORPHAN_RATIO_THRESHOLD || orphans >= MAX_ABSOLUTE_ORPHANS
     }
 
     /// Rebuild the index only if orphan ratio exceeds threshold.
@@ -1042,6 +1061,58 @@ impl LazyLoadable for HnswIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Small, fast HNSW config for threshold tests (recall quality irrelevant).
+    fn fast_cfg(dim: usize) -> VectorIndexConfig {
+        let mut cfg = VectorIndexConfig::new(dim);
+        cfg.m = 4;
+        cfg.ef_construction = 10;
+        cfg
+    }
+
+    #[test]
+    fn needs_rebuild_respects_min_and_ratio() {
+        let mut idx = HnswIndex::new(fast_cfg(2));
+        for i in 0..200 {
+            idx.insert(&format!("k{i}"), &[i as f32, 0.0]).unwrap();
+        }
+        // 50 orphans (< MIN_ORPHANS_FOR_REBUILD=100) → no rebuild even at 25%.
+        for i in 0..50 {
+            idx.remove(&format!("k{i}"));
+        }
+        assert!(!idx.needs_rebuild());
+        // 150 orphans / 200 total = 75% (> 30%) and ≥ 100 → rebuild.
+        for i in 50..150 {
+            idx.remove(&format!("k{i}"));
+        }
+        assert!(idx.needs_rebuild());
+    }
+
+    #[test]
+    fn needs_rebuild_absolute_cap_fires_below_ratio() {
+        // #81: a large index under churn keeps the ratio < 30% but accumulates
+        // orphans past MAX_ABSOLUTE_ORPHANS — the absolute cap must trigger.
+        let total = 34_000;
+        let orphans = MAX_ABSOLUTE_ORPHANS; // 10_000
+        let mut idx = HnswIndex::new(fast_cfg(2));
+        for i in 0..total {
+            idx.insert(&format!("k{i}"), &[i as f32, (i % 7) as f32])
+                .unwrap();
+        }
+        for i in 0..orphans {
+            idx.remove(&format!("k{i}"));
+        }
+        let ratio = idx.orphan_count() as f64 / idx.total_nodes() as f64;
+        assert!(
+            ratio < ORPHAN_RATIO_THRESHOLD,
+            "precondition: ratio must be below the ratio trigger, got {ratio}"
+        );
+        assert!(idx.orphan_count() >= MAX_ABSOLUTE_ORPHANS);
+        assert!(
+            idx.needs_rebuild(),
+            "absolute orphan cap should trigger rebuild even below the ratio threshold"
+        );
+    }
 
     #[test]
     fn test_empty_index() {
