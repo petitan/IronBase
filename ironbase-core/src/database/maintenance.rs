@@ -231,7 +231,11 @@ impl DatabaseCore<StorageEngine> {
         let (snapshot, snapshot_collections) = {
             let mut storage = self.storage.write();
             let snapshot = storage.compact_prepare()?;
-            // Arc::clone is O(1) — no deep copy of collection metadata
+            // Genuinely O(1): `compact_prepare` now snapshots the catalog with an
+            // `Arc::clone` (copy-on-write), so the multi-GB catalog is NOT
+            // deep-cloned under the write lock (audit P0-1). A concurrent write
+            // during Phase B pays a single `Arc::make_mut` clone; this clone here
+            // just bumps the refcount.
             let snap_colls = std::sync::Arc::clone(&snapshot.snapshot_collections);
             (snapshot, snap_colls)
         }; // storage.write() RELEASED

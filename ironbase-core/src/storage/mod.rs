@@ -540,7 +540,14 @@ pub fn write_compaction_header(
 pub struct StorageEngine {
     file: File,
     header: Header,
-    collections: HashMap<String, CollectionMeta>,
+    /// Collection catalog behind an `Arc` for copy-on-write snapshots.
+    ///
+    /// Compaction's Phase A (`compact_prepare`) takes an O(1) `Arc::clone`
+    /// snapshot instead of deep-cloning the whole catalog under the write lock
+    /// (audit P0-1). Mutations go through `collections_mut()` (`Arc::make_mut`),
+    /// which deep-clones once on the first write while a snapshot is alive and is
+    /// O(1) otherwise.
+    collections: std::sync::Arc<HashMap<String, CollectionMeta>>,
     file_path: String,
     wal: WriteAheadLog,
     metadata_dirty: bool,
@@ -753,7 +760,7 @@ impl StorageEngine {
         let mut storage = StorageEngine {
             file,
             header,
-            collections,
+            collections: std::sync::Arc::new(collections),
             file_path: path_str,
             wal,
             metadata_dirty: false,
@@ -763,7 +770,7 @@ impl StorageEngine {
             was_clean_shutdown: was_clean,
         };
 
-        let migrated = Self::rebuild_document_order_if_needed(&mut storage.collections);
+        let migrated = Self::rebuild_document_order_if_needed(storage.collections_mut());
         if migrated {
             storage.metadata_dirty = true;
         }
@@ -876,7 +883,7 @@ impl StorageEngine {
             auto_embedding_config: None,
         };
 
-        self.collections.insert(name.to_string(), meta);
+        self.collections_mut().insert(name.to_string(), meta);
         self.header.collection_count += 1;
 
         // Mark metadata dirty and flush to persist new collection
@@ -892,7 +899,7 @@ impl StorageEngine {
             return Err(IronBaseError::CollectionNotFound(name.to_string()));
         }
 
-        self.collections.remove(name);
+        self.collections_mut().remove(name);
         self.header.collection_count -= 1;
 
         self.mark_metadata_dirty()?;
@@ -921,13 +928,13 @@ impl StorageEngine {
         }
 
         let mut meta = self
-            .collections
+            .collections_mut()
             .remove(old_name)
             .expect("existence checked above");
         meta.apply_rename(old_name, new_name);
 
         // collection_count is unchanged — this is a move, not an add/remove.
-        self.collections.insert(new_name.to_string(), meta);
+        self.collections_mut().insert(new_name.to_string(), meta);
 
         self.mark_metadata_dirty()?;
         self.flush()?;
@@ -948,7 +955,7 @@ impl StorageEngine {
     /// Get collection metadata (mutable)
     /// Metadata changes are persisted only when flush() is called (typically on database close)
     pub fn get_collection_meta_mut(&mut self, name: &str) -> Option<&mut CollectionMeta> {
-        self.collections.get_mut(name)
+        self.collections_mut().get_mut(name)
     }
 
     /// Write a metadata snapshot to the WAL for crash recovery
@@ -1060,6 +1067,17 @@ impl StorageEngine {
     /// Reference to all collection metadata (for pre-serialization outside lock)
     pub(crate) fn collections_ref(&self) -> &HashMap<String, CollectionMeta> {
         &self.collections
+    }
+
+    /// Mutable access to the collection catalog (copy-on-write).
+    ///
+    /// While a compaction snapshot (Phase A `Arc::clone` in `compact_prepare`)
+    /// is still alive, the first mutation deep-clones the catalog exactly once;
+    /// every other call is O(1). Centralizing the `Arc::make_mut` here is what
+    /// keeps `compact_prepare` from deep-cloning the whole catalog under the
+    /// write lock (audit P0-1).
+    fn collections_mut(&mut self) -> &mut HashMap<String, CollectionMeta> {
+        std::sync::Arc::make_mut(&mut self.collections)
     }
 
     /// Checkpoint - flush metadata and clear WAL for durability
@@ -1238,7 +1256,7 @@ impl StorageEngine {
             );
 
             // Restore collections and header
-            self.collections = snapshot.collections;
+            self.collections = std::sync::Arc::new(snapshot.collections);
             // CRITICAL: Use HeaderWriter instead of direct assignment
             // set_recovery_offset sets data_end_offset; flush_metadata() below
             // will call set_after_metadata() which updates metadata_offset too.
@@ -1276,7 +1294,7 @@ impl StorageEngine {
         // If file is too small to have any documents, just initialize empty
         if file_len <= HEADER_SIZE {
             self.header = Header::default();
-            self.collections.clear();
+            self.collections_mut().clear();
             self.mark_metadata_dirty()?;
             self.flush_metadata()?;
             self.metadata_snapshot_pending = false;
@@ -1285,7 +1303,7 @@ impl StorageEngine {
         }
 
         // Clear existing collections - we're rebuilding from scratch
-        self.collections.clear();
+        self.collections_mut().clear();
 
         // Scan all documents from HEADER_SIZE to file end
         // We scan conservatively - stop when we hit invalid data (which is likely metadata)
@@ -1340,7 +1358,7 @@ impl StorageEngine {
                 if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
                     // Get or create collection meta
                     let meta = self
-                        .collections
+                        .collections_mut()
                         .entry(collection_name.clone())
                         .or_insert_with(|| CollectionMeta {
                             name: collection_name.clone(),
@@ -1391,7 +1409,7 @@ impl StorageEngine {
 
         // Update last_id for each collection
         for (collection_name, max_id) in max_ids_by_collection {
-            if let Some(meta) = self.collections.get_mut(&collection_name) {
+            if let Some(meta) = self.collections_mut().get_mut(&collection_name) {
                 meta.last_id = max_id;
             }
         }
@@ -1758,7 +1776,7 @@ impl StorageEngine {
         // Step 7: Apply metadata changes (skip if already applied)
         if !already_applied {
             for metadata_change in transaction.metadata_changes() {
-                if let Some(meta) = self.collections.get_mut(&metadata_change.collection) {
+                if let Some(meta) = self.collections_mut().get_mut(&metadata_change.collection) {
                     // SAFETY: Only positive i64 values are valid auto-increment IDs.
                     // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
                     if metadata_change.last_id > 0 {
@@ -2122,7 +2140,7 @@ impl StorageEngine {
         }
 
         // Clear existing catalogs and reset counts
-        for meta in self.collections.values_mut() {
+        for meta in self.collections_mut().values_mut() {
             meta.document_catalog.clear();
             meta.document_order.clear();
             meta.document_count = 0;
@@ -2170,7 +2188,7 @@ impl StorageEngine {
                         if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
                             // Get or create collection meta
                             let meta = self
-                                .collections
+                                .collections_mut()
                                 .entry(collection_name.to_string())
                                 .or_insert_with(|| CollectionMeta {
                                     name: collection_name.to_string(),
@@ -2226,7 +2244,7 @@ impl StorageEngine {
 
         // Update last_id for each collection
         for (collection_name, max_id) in max_ids_by_collection {
-            if let Some(meta) = self.collections.get_mut(&collection_name) {
+            if let Some(meta) = self.collections_mut().get_mut(&collection_name) {
                 if max_id > meta.last_id {
                     meta.last_id = max_id;
                 }
@@ -2237,7 +2255,7 @@ impl StorageEngine {
         // This is necessary because:
         // 1. Updates/replacements counted each version separately
         // 2. Tombstones removed from catalog but didn't decrement counts
-        for meta in self.collections.values_mut() {
+        for meta in self.collections_mut().values_mut() {
             meta.live_document_count = meta.document_catalog.len() as u64;
             meta.document_count = meta.document_catalog.len() as u64;
         }
@@ -2412,7 +2430,7 @@ impl Storage for StorageEngine {
     }
 
     fn adjust_live_count(&mut self, collection: &str, delta: i64) {
-        if let Some(meta) = self.collections.get_mut(collection) {
+        if let Some(meta) = self.collections_mut().get_mut(collection) {
             if delta >= 0 {
                 meta.live_document_count = meta.live_document_count.saturating_add(delta as u64);
             } else {
@@ -2533,7 +2551,7 @@ mod tests {
         storage.create_collection("c").unwrap();
 
         let owned = MetadataWALEntry {
-            collections: storage.collections.clone(),
+            collections: (*storage.collections).clone(),
             data_end_offset: storage.header.data_end_offset,
         };
         let by_ref = MetadataWALEntryRef {
@@ -2543,6 +2561,44 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&owned).unwrap(),
             serde_json::to_vec(&by_ref).unwrap()
+        );
+    }
+
+    /// P0-1: `compact_prepare` snapshots the catalog with an O(1) `Arc::clone`
+    /// (copy-on-write), NOT a deep clone under the write lock. The snapshot must
+    /// share the same allocation as the live catalog until the first mutation,
+    /// which then deep-clones exactly once — the live `Arc` diverges while the
+    /// snapshot stays frozen at its Phase-A contents.
+    #[test]
+    fn compact_prepare_snapshot_is_cow_not_deep_clone() {
+        let (_t, mut storage) = setup_test_db();
+        storage.create_collection("c1").unwrap();
+        storage.create_collection("c2").unwrap();
+
+        // Phase A snapshot must be the SAME Arc allocation (no deep clone under
+        // the write lock — the whole point of audit P0-1).
+        let snapshot = storage.compact_prepare().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&snapshot.snapshot_collections, &storage.collections),
+            "compact_prepare must Arc::clone the catalog (O(1)), not deep-clone it"
+        );
+
+        // A mutation while the snapshot is alive triggers copy-on-write: the live
+        // catalog diverges to a fresh allocation; the snapshot stays frozen.
+        storage.create_collection("c3").unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&snapshot.snapshot_collections, &storage.collections),
+            "first mutation while a snapshot is alive must copy-on-write"
+        );
+        assert_eq!(
+            snapshot.snapshot_collections.len(),
+            2,
+            "snapshot is frozen at its Phase-A contents"
+        );
+        assert_eq!(
+            storage.collections.len(),
+            3,
+            "live catalog sees the new write"
         );
     }
 
@@ -3243,7 +3299,7 @@ mod tests {
             let offset = storage.write_data(&doc_bytes).unwrap();
 
             // Update collection metadata
-            let meta = storage.collections.get_mut("users").unwrap();
+            let meta = storage.collections_mut().get_mut("users").unwrap();
             meta.document_count = 1;
             meta.document_catalog
                 .insert(crate::document::DocumentId::Int(1), offset);
@@ -3278,7 +3334,7 @@ mod tests {
                 let doc_bytes = serde_json::to_vec(&doc).unwrap();
                 let offset = storage.write_data(&doc_bytes).unwrap();
 
-                let meta = storage.collections.get_mut("products").unwrap();
+                let meta = storage.collections_mut().get_mut("products").unwrap();
                 meta.document_count = i as u64;
                 meta.document_catalog
                     .insert(crate::document::DocumentId::Int(i), offset);
@@ -3338,7 +3394,7 @@ mod tests {
                 let doc_bytes = serde_json::to_vec(&doc).unwrap();
                 let offset = storage.write_data(&doc_bytes).unwrap();
 
-                let meta = storage.collections.get_mut("items").unwrap();
+                let meta = storage.collections_mut().get_mut("items").unwrap();
                 meta.document_count = i as u64;
                 meta.document_catalog
                     .insert(crate::document::DocumentId::Int(i), offset);

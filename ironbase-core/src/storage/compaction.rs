@@ -235,8 +235,11 @@ impl StorageEngine {
         let size_before = self.file.metadata()?.len();
         let snapshot_data_end_offset = self.header.data_end_offset;
 
-        // Snapshot collections (clone current state, Arc-wrapped for cheap sharing)
-        let snapshot_collections = Arc::new(self.collections.clone());
+        // Snapshot collections — O(1) Arc::clone (copy-on-write). The catalog is
+        // NOT deep-cloned here under the write lock (audit P0-1); the first
+        // concurrent write during Phase B pays a single `Arc::make_mut` clone,
+        // and an idle/read-only compaction pays nothing.
+        let snapshot_collections = Arc::clone(&self.collections);
 
         Ok(CompactionSnapshot {
             temp_file: new_file,
@@ -303,7 +306,7 @@ impl StorageEngine {
 
         let mut ops: Vec<CatchupOp> = Vec::new();
 
-        for (coll_name, current_meta) in &self.collections {
+        for (coll_name, current_meta) in self.collections.iter() {
             let snap_meta = snapshot_collections.get(coll_name);
 
             match snap_meta {
@@ -555,7 +558,7 @@ impl StorageEngine {
         // Update self
         self.file = file;
         self.header = header;
-        self.collections = collections;
+        self.collections = Arc::new(collections);
 
         Ok(())
     }

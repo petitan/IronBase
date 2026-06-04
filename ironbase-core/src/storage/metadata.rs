@@ -262,7 +262,7 @@ impl StorageEngine {
     pub(crate) fn flush_metadata(&mut self) -> Result<()> {
         // 1. Update collection offsets (documents start right after header)
         let data_offset = super::HEADER_SIZE;
-        for meta in self.collections.values_mut() {
+        for meta in self.collections_mut().values_mut() {
             meta.data_offset = data_offset;
             meta.index_offset = data_offset;
         }
