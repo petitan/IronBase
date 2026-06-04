@@ -1072,6 +1072,26 @@ impl StorageEngine {
         })
     }
 
+    /// WAL-clear-only checkpoint: clears the WAL WITHOUT re-flushing metadata.
+    ///
+    /// Used by `checkpoint_wal_only` when metadata is clean (no mutations since
+    /// the last flush): the catalog is already durable, so calling `flush_metadata`
+    /// would only append the full catalog again and grow the file on every idle
+    /// checkpoint (audit P1-3). In that state the WAL holds no un-checkpointed
+    /// ops, so clearing it is a cheap no-op.
+    pub fn checkpoint_wal_clear_only(&mut self) -> Result<compaction::CheckpointStats> {
+        let wal_size_before = self.wal.file_size().unwrap_or(0);
+        self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
+        let wal_size_after = self.wal.file_size().unwrap_or(0);
+        Ok(compaction::CheckpointStats {
+            wal_size_before,
+            wal_size_after,
+            wal_ops_cleared: 0,
+            indexes_flushed: 0,
+        })
+    }
+
     /// Checkpoint with a pre-serialized metadata buffer (lock-optimized path)
     ///
     /// Instead of serializing metadata under storage.write() lock, the caller

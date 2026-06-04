@@ -410,11 +410,18 @@ impl DatabaseCore<StorageEngine> {
                 // calls flush() which normalizes immediately.
                 storage.checkpoint_with_preserialized(metadata_bytes)
             }
-            _ => {
-                // Guard FAIL: mutations happened between Phase A and B, v2 migration
-                // needed, or no dirty metadata.
-                // Fall back to full checkpoint under lock (serialize + write + fsync).
-                // This is the same as the previous behavior — no worse than before.
+            None => {
+                // Metadata was clean at Phase A (no mutations since the last
+                // flush): the catalog is already durable, so a full checkpoint
+                // would only re-append it and grow the file on every idle
+                // checkpoint (audit P1-3). Clear the WAL only — in this state it
+                // holds no un-checkpointed ops, so it is a cheap no-op.
+                storage.checkpoint_wal_clear_only()
+            }
+            Some(_) => {
+                // Guard FAIL: mutations happened between Phase A and B (or a v2
+                // database needing migration). Fall back to a full checkpoint
+                // under lock (serialize + write + fsync) — same as before.
                 storage.checkpoint()
             }
         }

@@ -299,3 +299,36 @@ fn last_compact_size_persists_across_reopen() {
         w.bloat_ratio
     );
 }
+
+/// P1-3: idle checkpoints (no writes since the last flush) must NOT re-append the
+/// metadata catalog. Before the fix the clean path fell through to a full
+/// `storage.checkpoint()` whose `flush_metadata()` appends the catalog regardless
+/// of dirtiness, so an idle DB grew on every 60s checkpoint (multi-GB/day at
+/// 100GB). This guard fails on the unfixed code (file grows) and passes after the
+/// clean path is routed to WAL-clear-only.
+#[test]
+fn idle_checkpoint_does_not_grow_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("idle_ckpt.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    for i in 0..30i64 {
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(i));
+        db.insert_one("c", doc).unwrap();
+    }
+    // First checkpoint flushes the (dirty) metadata to disk.
+    db.checkpoint_wal_only().unwrap();
+    let size1 = std::fs::metadata(&db_path).unwrap().len();
+
+    // No writes since → metadata is clean → further checkpoints must be no-ops
+    // for the data file (only WAL is touched), so the file must NOT grow.
+    for _ in 0..5 {
+        db.checkpoint_wal_only().unwrap();
+    }
+    let size2 = std::fs::metadata(&db_path).unwrap().len();
+    assert_eq!(
+        size2, size1,
+        "idle checkpoints must not re-append metadata (file grew {} → {})",
+        size1, size2
+    );
+}
