@@ -124,9 +124,9 @@ impl DatabaseCore<StorageEngine> {
     pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
         // Rebuild HNSW indexes to remove orphan nodes before flush
         {
-            let index_managers = self.index_managers.read();
-            for (collection_name, index_manager) in index_managers.iter() {
-                let mut mgr = index_manager.write();
+            let vector_managers = self.vector_managers.read();
+            for (collection_name, vector_manager) in vector_managers.iter() {
+                let mut mgr = vector_manager.write();
                 let rebuilt = mgr.rebuild_all_vector_indexes()?;
                 if rebuilt > 0 {
                     tracing::info!(
@@ -197,9 +197,9 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<crate::storage::CompactionStats> {
         // Pre-Phase: HNSW rebuild + index flush (does NOT hold storage lock)
         {
-            let index_managers = self.index_managers.read();
-            for (collection_name, index_manager) in index_managers.iter() {
-                let mut mgr = index_manager.write();
+            let vector_managers = self.vector_managers.read();
+            for (collection_name, vector_manager) in vector_managers.iter() {
+                let mut mgr = vector_manager.write();
                 let rebuilt = mgr.rebuild_all_vector_indexes()?;
                 if rebuilt > 0 {
                     tracing::info!(
@@ -438,26 +438,48 @@ impl DatabaseCore<StorageEngine> {
             storage.get_file_path().to_string()
         };
 
-        let index_managers = self.index_managers.read();
+        let watermark = self.watermark_tx_id();
 
-        // Parallel across collections: each collection has its own
-        // Arc<RwLock<IndexManager>>, so they can flush concurrently.
+        // Snapshot the paired (IndexManager, VectorIndexManager) Arcs per
+        // collection so we don't hold the MAP locks during the flush. The two
+        // maps are kept in lockstep by `ensure_managers`.
+        #[allow(clippy::type_complexity)]
+        let pairs: Vec<(
+            String,
+            std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
+            std::sync::Arc<parking_lot::RwLock<crate::index::VectorIndexManager>>,
+        )> = {
+            let im = self.index_managers.read();
+            let vm = self.vector_managers.read();
+            im.iter()
+                .map(|(name, idx)| {
+                    let vidx = vm
+                        .get(name)
+                        .map(std::sync::Arc::clone)
+                        .expect("vector_managers in lockstep with index_managers");
+                    (name.clone(), std::sync::Arc::clone(idx), vidx)
+                })
+                .collect()
+        };
+
+        // Parallel across collections: each collection has its own locks,
+        // so they can flush concurrently.
         #[cfg(feature = "parallel")]
         {
             let cpus = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1);
 
-            if cpus > 1 && index_managers.len() > 1 {
+            if cpus > 1 && pairs.len() > 1 {
                 use rayon::prelude::*;
 
-                let watermark = self.watermark_tx_id();
-                let results: Vec<Result<usize>> = index_managers
+                let results: Vec<Result<usize>> = pairs
                     .par_iter()
-                    .map(|(collection_name, index_manager)| {
+                    .map(|(collection_name, index_manager, vector_manager)| {
                         Self::flush_collection_indexes(
                             collection_name,
                             index_manager,
+                            vector_manager,
                             &db_path,
                             watermark,
                         )
@@ -474,11 +496,11 @@ impl DatabaseCore<StorageEngine> {
 
         // Sequential fallback: single collection, single core, or no parallel feature
         let mut total_flushed = 0;
-        let watermark = self.watermark_tx_id();
-        for (collection_name, index_manager) in index_managers.iter() {
+        for (collection_name, index_manager, vector_manager) in &pairs {
             total_flushed += Self::flush_collection_indexes(
                 collection_name,
                 index_manager,
+                vector_manager,
                 &db_path,
                 watermark,
             )?;
@@ -494,21 +516,22 @@ impl DatabaseCore<StorageEngine> {
     fn flush_collection_indexes(
         collection_name: &str,
         index_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
+        vector_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::VectorIndexManager>>,
         db_path: &str,
         watermark: u64,
     ) -> Result<usize> {
         let mut total_flushed = 0;
 
-        // 1. Collect dirty names under brief READ lock
-        let (dirty_bt, dirty_ft, dirty_fz, dirty_vec) = {
+        // 1. Collect dirty names under brief READ lock(s)
+        let (dirty_bt, dirty_ft, dirty_fz) = {
             let mgr = index_manager.read();
             (
                 mgr.dirty_btree_index_names(),
                 mgr.dirty_fulltext_index_names(),
                 mgr.dirty_fuzzy_index_names(),
-                mgr.dirty_vector_index_names(),
             )
         };
+        let dirty_vec = vector_manager.read().dirty_vector_index_names();
 
         let dirty_total = dirty_bt.len() + dirty_ft.len() + dirty_fz.len() + dirty_vec.len();
         if dirty_total > 0 {
@@ -563,10 +586,10 @@ impl DatabaseCore<StorageEngine> {
             }
         }
 
-        // 4. HNSW orphan compaction + vector flush
+        // 4. HNSW orphan compaction + vector flush — on the SEPARATE vector lock
         {
             let t = std::time::Instant::now();
-            let mut mgr = index_manager.write();
+            let mut mgr = vector_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
             let rebuilt = mgr.rebuild_vector_indexes_if_needed()?;
             if rebuilt > 0 {
@@ -580,7 +603,7 @@ impl DatabaseCore<StorageEngine> {
         }
         for name in &dirty_vec {
             let t = std::time::Instant::now();
-            let mut mgr = index_manager.write();
+            let mut mgr = vector_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
             if mgr.flush_one_vector_index(name, db_path, watermark)? {
                 let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
@@ -817,12 +840,20 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
                 if let Err(e) = manager.flush_btree_indexes(&db_path, watermark) {
                     log_warn!("Failed to flush btree indexes on drop: {}", e);
                 }
+            }
+        }
+        drop(index_managers); // Release lock before storage flush
+
+        // Vector indexes flush via the SEPARATE vector lock.
+        if !db_path.is_empty() {
+            let vector_managers = self.vector_managers.read();
+            for vector_manager in vector_managers.values() {
+                let mut manager = vector_manager.write();
                 if let Err(e) = manager.flush_vector_indexes(&db_path, watermark) {
                     log_warn!("Failed to flush vector indexes on drop: {}", e);
                 }
             }
         }
-        drop(index_managers); // Release lock before storage flush
 
         // 3. Flush storage (metadata + sync)
         // Note: Batch mode pending operations are NOT flushed here because

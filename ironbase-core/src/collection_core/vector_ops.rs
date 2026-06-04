@@ -231,10 +231,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         hnsw.mark_clean();
 
-        // Store the HNSW index in IndexManager for unified index management
+        // Store the HNSW index in the (separate-lock) VectorIndexManager
         {
-            let mut indexes = self.indexes.write();
-            indexes.add_loaded_vector_index(index_name.clone(), hnsw);
+            let mut vectors = self.vectors.write();
+            vectors.add_loaded_vector_index(index_name.clone(), hnsw);
         }
 
         // Create metadata
@@ -270,11 +270,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn drop_vector_index(&self, index_name: &str) -> Result<()> {
         self.check_not_closed()?;
 
-        // Remove from IndexManager first
+        // Remove from the VectorIndexManager first
         {
-            let mut indexes = self.indexes.write();
-            // Don't fail if not in IndexManager (might not have been loaded)
-            let _ = indexes.drop_vector_index(index_name);
+            let mut vectors = self.vectors.write();
+            // Don't fail if not loaded (might not have been loaded)
+            let _ = vectors.drop_vector_index(index_name);
         }
 
         // Find and remove the index metadata
@@ -341,9 +341,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if let Some(meta) = storage.get_collection_meta(&self.name) {
             let mut indexes = meta.vector_indexes.clone();
             // Update vector_count from in-memory HNSW if loaded
-            let idx_manager = self.indexes.read();
+            let vec_manager = self.vectors.read();
             for idx_meta in &mut indexes {
-                if let Some(hnsw) = idx_manager.get_vector_index(&idx_meta.name) {
+                if let Some(hnsw) = vec_manager.get_vector_index(&idx_meta.name) {
                     idx_meta.vector_count = hnsw.len();
                 }
             }
@@ -372,18 +372,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Check if already loaded
             {
-                let indexes = self.indexes.read();
-                if indexes.get_vector_index(&index_name).is_some() {
+                let vectors = self.vectors.read();
+                if vectors.get_vector_index(&index_name).is_some() {
                     continue;
                 }
             }
 
-            // Load from file and add to IndexManager
+            // Load from file and add to the VectorIndexManager
             match self.load_hnsw_index_from_file(&meta) {
                 Ok(hnsw) => {
                     let vector_count = hnsw.len();
-                    let mut indexes = self.indexes.write();
-                    indexes.add_loaded_vector_index(index_name.clone(), hnsw);
+                    let mut vectors = self.vectors.write();
+                    vectors.add_loaded_vector_index(index_name.clone(), hnsw);
                     tracing::info!(
                         collection = %self.name,
                         index = %index_name,
@@ -438,25 +438,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             )));
         }
 
-        // Try to get from IndexManager first (fast path)
+        // Try to get from the VectorIndexManager first (fast path)
         {
-            let indexes = self.indexes.read();
-            if let Some(hnsw) = indexes.get_vector_index(&index_name) {
+            let vectors = self.vectors.read();
+            if let Some(hnsw) = vectors.get_vector_index(&index_name) {
                 let results = hnsw.search(query_vector, limit);
                 // Need to release lock before loading documents
-                drop(indexes);
+                drop(vectors);
                 return self.load_documents_for_results(results);
             }
         }
 
-        // Slow path: load from file and add to IndexManager
+        // Slow path: load from file and add to the VectorIndexManager
         let hnsw = self.load_hnsw_index_from_file(&index_meta)?;
         let results = hnsw.search(query_vector, limit);
 
-        // Add to IndexManager for future queries
+        // Add to the VectorIndexManager for future queries
         {
-            let mut indexes = self.indexes.write();
-            indexes.add_loaded_vector_index(index_name, hnsw);
+            let mut vectors = self.vectors.write();
+            vectors.add_loaded_vector_index(index_name, hnsw);
         }
 
         // Load documents for results
@@ -540,26 +540,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(Vec::new());
         }
 
-        // Try to get from IndexManager first (fast path)
+        // Try to get from the VectorIndexManager first (fast path)
         {
-            let indexes = self.indexes.read();
-            if let Some(hnsw) = indexes.get_vector_index(&index_name) {
+            let vectors = self.vectors.read();
+            if let Some(hnsw) = vectors.get_vector_index(&index_name) {
                 let results =
                     hnsw.search_with_filter(query_vector, limit, |id| allowed_ids.contains(id));
                 // Need to release lock before loading documents
-                drop(indexes);
+                drop(vectors);
                 return self.load_documents_for_results(results);
             }
         }
 
-        // Slow path: load from file and add to IndexManager
+        // Slow path: load from file and add to the VectorIndexManager
         let hnsw = self.load_hnsw_index_from_file(&index_meta)?;
         let results = hnsw.search_with_filter(query_vector, limit, |id| allowed_ids.contains(id));
 
-        // Add to IndexManager for future queries
+        // Add to the VectorIndexManager for future queries
         {
-            let mut indexes = self.indexes.write();
-            indexes.add_loaded_vector_index(index_name, hnsw);
+            let mut vectors = self.vectors.write();
+            vectors.add_loaded_vector_index(index_name, hnsw);
         }
 
         // Load documents for results

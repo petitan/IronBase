@@ -190,7 +190,7 @@ use std::collections::{HashMap, HashSet};
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
+use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder, VectorIndexManager};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{LogicalOperator, QueryPlan, QueryPlanner};
@@ -281,8 +281,12 @@ pub struct InsertManyResult {
 pub struct CollectionCore<S: Storage + RawStorage> {
     pub name: String,
     pub storage: Arc<RwLock<S>>,
-    /// Index manager for B+ tree indexes
+    /// Index manager for B+ tree / fuzzy / fulltext indexes
     pub indexes: Arc<RwLock<IndexManager>>,
+    /// Vector (HNSW) index manager — SEPARATE lock so slow HNSW batch-builds
+    /// never block btree/fulltext reads (e.g. a filtered `count`). Lock-ordering
+    /// invariant: `indexes` and `vectors` are NEVER held simultaneously.
+    pub vectors: Arc<RwLock<VectorIndexManager>>,
     /// Query result cache with LRU eviction (capacity: 1000 queries)
     pub query_cache: Arc<QueryCache>,
     schema: Arc<RwLock<Option<CompiledSchema>>>,
@@ -618,6 +622,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
+            vectors: Arc::new(RwLock::new(VectorIndexManager::new())),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema: Arc::new(RwLock::new(compiled_schema)),
             is_closed,
@@ -633,6 +638,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         name: String,
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
+        vectors: Arc<RwLock<VectorIndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
@@ -648,6 +654,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes, // Shared!
+            vectors, // Shared!
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema, // Shared!
             is_closed,
@@ -664,6 +671,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         name: String,
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
+        vectors: Arc<RwLock<VectorIndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
@@ -679,6 +687,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes, // Shared!
+            vectors, // Shared!
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema, // Shared!
             is_closed,
@@ -1715,25 +1724,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// FIX #19: Refactored to use IndexManager.remove_document_from_indexes()
     /// which properly handles compound indexes.
     fn remove_from_indexes(&self, doc: &Document) -> Result<()> {
-        let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
-
-        // Remove from _id index (handled separately due to DocumentId type)
-        if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-            let id_key = match &doc.id {
-                DocumentId::Int(i) => IndexKey::Int(*i),
-                DocumentId::String(s) => IndexKey::String(s.clone()),
-                DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-            };
-            id_index.delete(&id_key, &doc.id)?;
-        }
-        // Mark _id index dirty for checkpoint persistence
-        indexes.mark_btree_dirty(&id_index_name);
-
-        // Remove from all other indexes - delegate to IndexManager
         let doc_value =
             serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-        indexes.remove_document_from_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+
+        // PHASE 1: btree/fulltext/fuzzy under the shared lock, then release.
+        {
+            let mut indexes = self.indexes.write();
+
+            // Remove from _id index (handled separately due to DocumentId type)
+            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                let id_key = match &doc.id {
+                    DocumentId::Int(i) => IndexKey::Int(*i),
+                    DocumentId::String(s) => IndexKey::String(s.clone()),
+                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+                };
+                id_index.delete(&id_key, &doc.id)?;
+            }
+            // Mark _id index dirty for checkpoint persistence
+            indexes.mark_btree_dirty(&id_index_name);
+
+            // Remove from all other (non-vector) indexes - delegate to IndexManager
+            indexes.remove_document_from_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+        }
+
+        // PHASE 2: HNSW under the separate vector lock.
+        self.vectors
+            .write()
+            .remove_document_from_vector_indexes(&doc.id, None)?;
 
         Ok(())
     }
@@ -1744,28 +1762,37 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// FIX #19: Refactored to use IndexManager.add_document_to_indexes()
     /// which properly handles compound indexes.
     fn add_to_indexes(&self, doc: &Document) -> Result<()> {
-        let t = std::time::Instant::now();
-        let mut indexes = self.indexes.write();
-        let lock_wait_ms = t.elapsed().as_millis() as u64;
-        if lock_wait_ms > 50 {
-            tracing::warn!(lock_wait_ms, collection = %self.name, "insert: indexes.write() slow acquire (add_to_indexes)");
-        }
         let id_index_name = format!("{}_id", self.name);
-
-        // Add to _id index (handled separately due to DocumentId type)
-        if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-            let id_key = match &doc.id {
-                DocumentId::Int(i) => IndexKey::Int(*i),
-                DocumentId::String(s) => IndexKey::String(s.clone()),
-                DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-            };
-            id_index.insert(id_key, doc.id.clone())?;
-        }
-
-        // Add to all other indexes - delegate to IndexManager
         let doc_value =
             serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-        indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+
+        // PHASE 1: btree/fulltext/fuzzy under the shared lock, then release.
+        {
+            let t = std::time::Instant::now();
+            let mut indexes = self.indexes.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if lock_wait_ms > 50 {
+                tracing::warn!(lock_wait_ms, collection = %self.name, "insert: indexes.write() slow acquire (add_to_indexes)");
+            }
+
+            // Add to _id index (handled separately due to DocumentId type)
+            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                let id_key = match &doc.id {
+                    DocumentId::Int(i) => IndexKey::Int(*i),
+                    DocumentId::String(s) => IndexKey::String(s.clone()),
+                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+                };
+                id_index.insert(id_key, doc.id.clone())?;
+            }
+
+            // Add to all other (non-vector) indexes - delegate to IndexManager
+            indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+        }
+
+        // PHASE 2: HNSW under the separate vector lock.
+        self.vectors
+            .write()
+            .add_document_to_vector_indexes(&doc_value, &doc.id, None)?;
 
         Ok(())
     }
@@ -1997,9 +2024,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // --- VECTOR (HNSW) INDEXES: Update for each document ---
+        // Release the shared (btree/fulltext/fuzzy) lock BEFORE the slow HNSW
+        // work so concurrent btree reads aren't blocked by the vector update.
+        drop(indexes);
+
+        // --- VECTOR (HNSW) INDEXES: Update for each document, SEPARATE lock ---
+        let mut vectors = self.vectors.write();
         // Collect vector index info before mutable borrow
-        let vector_index_info: Vec<(String, usize)> = indexes
+        let vector_index_info: Vec<(String, usize)> = vectors
             .list_vector_indexes()
             .iter()
             .map(|idx| (idx.config().field.clone(), idx.config().dim))
@@ -2023,7 +2055,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     };
 
                     if let Some(index) =
-                        indexes.get_vector_index_for_field_mut(&self.name, &vec_field)
+                        vectors.get_vector_index_for_field_mut(&self.name, &vec_field)
                     {
                         // Remove old vector if it existed (unconditional - remove() is ID-based)
                         if old_value.and_then(|v| v.as_array()).is_some() {
@@ -2063,25 +2095,39 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if docs.is_empty() {
             return Ok(());
         }
-
-        let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
 
-        for doc in docs {
-            // Add to _id index (handled separately due to DocumentId type)
-            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-                let id_key = match &doc.id {
-                    DocumentId::Int(i) => IndexKey::Int(*i),
-                    DocumentId::String(s) => IndexKey::String(s.clone()),
-                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-                };
-                id_index.insert(id_key, doc.id.clone())?;
-            }
+        // PHASE 1: fast indexes (btree/fulltext/fuzzy) under the SHARED lock,
+        // then RELEASE it so a concurrent btree read (e.g. filtered `count`,
+        // `indexes.read()`) can proceed while the slow HNSW build runs.
+        {
+            let mut indexes = self.indexes.write();
+            for doc in docs {
+                // Add to _id index (handled separately due to DocumentId type)
+                if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                    let id_key = match &doc.id {
+                        DocumentId::Int(i) => IndexKey::Int(*i),
+                        DocumentId::String(s) => IndexKey::String(s.clone()),
+                        DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+                    };
+                    id_index.insert(id_key, doc.id.clone())?;
+                }
 
-            // Add to all other indexes - delegate to IndexManager
-            let doc_value = serde_json::to_value(doc)
-                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-            indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+                // Add to all other (non-vector) indexes - delegate to IndexManager
+                let doc_value = serde_json::to_value(doc)
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+                indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+            }
+        }
+
+        // PHASE 2: slow HNSW build under the SEPARATE vector lock only.
+        {
+            let mut vectors = self.vectors.write();
+            for doc in docs {
+                let doc_value = serde_json::to_value(doc)
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+                vectors.add_document_to_vector_indexes(&doc_value, &doc.id, None)?;
+            }
         }
 
         Ok(())

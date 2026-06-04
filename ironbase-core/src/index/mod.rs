@@ -63,6 +63,7 @@ pub mod key;
 pub mod legacy;
 pub mod manager;
 pub mod traits;
+pub mod vector_manager;
 
 // Re-export main types for convenience
 pub use btree::{
@@ -76,6 +77,7 @@ pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
 pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;
 pub use traits::{calculate_lazy_threshold, IndexTrait, LazyLoadable};
+pub use vector_manager::VectorIndexManager;
 
 // Re-export from central limits module for tests
 #[cfg(test)]

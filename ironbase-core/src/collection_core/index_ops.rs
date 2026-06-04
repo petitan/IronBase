@@ -803,6 +803,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Drop an index
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
         self.check_not_closed()?;
+
+        // Vector indexes live behind the separate lock and need the dedicated
+        // cleanup (HNSW cache file + vector_indexes metadata). Route them there.
+        if self.vectors.read().contains(index_name) {
+            return self.drop_vector_index(index_name);
+        }
+
         let mut indexes = self.indexes.write();
         indexes.drop_index(index_name)?;
 
@@ -826,8 +833,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// List all indexes
     pub fn list_indexes(&self) -> Result<Vec<String>> {
         self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        Ok(indexes.list_indexes())
+        let mut names = self.indexes.read().list_indexes();
+        // Vector indexes live behind the separate lock.
+        names.extend(self.vectors.read().vector_index_names());
+        Ok(names)
     }
 
     /// List all indexes with their prefix field (for QueryPlanner)

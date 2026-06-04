@@ -54,7 +54,6 @@ use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::log_error;
 use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_array};
-use crate::vector::{HnswIndex, VectorIndexConfig};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -109,8 +108,6 @@ pub struct IndexManager {
     fuzzy_indexes: HashMap<String, FuzzyIndex>,
     /// Full-text search indexes with TF-IDF scoring
     fulltext_indexes: HashMap<String, FulltextIndex>,
-    /// HNSW vector indexes for similarity search
-    vector_indexes: HashMap<String, HnswIndex>,
     /// File paths for persistent indexes (for two-phase commit)
     index_file_paths: HashMap<String, PathBuf>,
     /// Dirty tracking for B+ tree indexes (modified since last flush)
@@ -119,8 +116,7 @@ pub struct IndexManager {
     dirty_fulltext_indexes: HashSet<String>,
     /// Dirty tracking for fuzzy indexes
     dirty_fuzzy_indexes: HashSet<String>,
-    /// Dirty tracking for vector indexes (consolidates HNSW internal dirty flag)
-    dirty_vector_indexes: HashSet<String>,
+    // NOTE: vector (HNSW) indexes now live in `VectorIndexManager` (separate lock).
 }
 
 impl IndexManager {
@@ -133,7 +129,6 @@ impl IndexManager {
             || self.legacy_indexes.contains_key(name)
             || self.fuzzy_indexes.contains_key(name)
             || self.fulltext_indexes.contains_key(name)
-            || self.vector_indexes.contains_key(name)
     }
 
     pub fn new() -> Self {
@@ -142,12 +137,10 @@ impl IndexManager {
             legacy_indexes: HashMap::new(),
             fuzzy_indexes: HashMap::new(),
             fulltext_indexes: HashMap::new(),
-            vector_indexes: HashMap::new(),
             index_file_paths: HashMap::new(),
             dirty_btree_indexes: HashSet::new(),
             dirty_fulltext_indexes: HashSet::new(),
             dirty_fuzzy_indexes: HashSet::new(),
-            dirty_vector_indexes: HashSet::new(),
         }
     }
 
@@ -156,13 +149,11 @@ impl IndexManager {
         !self.dirty_btree_indexes.is_empty()
             || !self.dirty_fulltext_indexes.is_empty()
             || !self.dirty_fuzzy_indexes.is_empty()
-            || !self.dirty_vector_indexes.is_empty()
     }
 
     impl_mark_dirty!(mark_btree_dirty, dirty_btree_indexes);
     impl_mark_dirty!(mark_fulltext_dirty, dirty_fulltext_indexes);
     impl_mark_dirty!(mark_fuzzy_dirty, dirty_fuzzy_indexes);
-    impl_mark_dirty!(mark_vector_dirty, dirty_vector_indexes);
 
     /// Set file path for an index (required for two-phase commit)
     pub fn set_index_path(&mut self, index_name: &str, path: PathBuf) {
@@ -299,8 +290,7 @@ impl IndexManager {
         let removed = self.btree_indexes.remove(name).is_some()
             || self.legacy_indexes.remove(name).is_some()
             || self.fuzzy_indexes.remove(name).is_some()
-            || self.fulltext_indexes.remove(name).is_some()
-            || self.vector_indexes.remove(name).is_some();
+            || self.fulltext_indexes.remove(name).is_some();
 
         if !removed {
             return Err(IronBaseError::IndexError(format!(
@@ -314,7 +304,6 @@ impl IndexManager {
         self.dirty_btree_indexes.remove(name);
         self.dirty_fuzzy_indexes.remove(name);
         self.dirty_fulltext_indexes.remove(name);
-        self.dirty_vector_indexes.remove(name);
         Ok(())
     }
 
@@ -354,7 +343,6 @@ impl IndexManager {
             .chain(self.legacy_indexes.keys())
             .chain(self.fuzzy_indexes.keys())
             .chain(self.fulltext_indexes.keys())
-            .chain(self.vector_indexes.keys())
             .cloned()
             .collect();
         names.sort();
@@ -778,247 +766,11 @@ impl IndexManager {
         Ok(count)
     }
 
-    // ========== VECTOR INDEX METHODS ==========
-
-    /// Create HNSW vector index for similarity search
-    ///
-    /// The index is created with dirty=true. Call `flush_vector_indexes()` before
-    /// database close to persist to .hnsw files.
-    ///
-    /// # Arguments
-    /// * `name` - Unique index name (e.g., "collection_vec_field")
-    /// * `field` - Field containing the embedding vectors
-    /// * `config` - Vector index configuration (dimension, metric, HNSW params)
-    /// * `storage_path` - Path to store the .hnsw cache file (None = memory-only)
-    pub fn create_vector_index(
-        &mut self,
-        name: String,
-        _field: String,
-        config: VectorIndexConfig,
-        storage_path: Option<PathBuf>,
-    ) -> Result<()> {
-        if self.index_exists(&name) {
-            return Err(IronBaseError::IndexError(format!(
-                "Index already exists: {}",
-                name
-            )));
-        }
-
-        // Validate config
-        config
-            .validate()
-            .map_err(|e| IronBaseError::IndexError(e.to_string()))?;
-
-        let index = HnswIndex::new(config);
-
-        if let Some(path) = storage_path {
-            self.index_file_paths.insert(name.clone(), path);
-        }
-
-        // Store field in the path map for metadata (we use naming convention)
-        // The field is embedded in the index name: {collection}_vec_{field}
-        self.vector_indexes.insert(name, index);
-        Ok(())
-    }
-
-    /// Get vector index by name
-    pub fn get_vector_index(&self, name: &str) -> Option<&HnswIndex> {
-        self.vector_indexes.get(name)
-    }
-
-    /// Get vector index by name (mutable), auto-marking as dirty
-    pub fn get_vector_index_mut(&mut self, name: &str) -> Option<&mut HnswIndex> {
-        if self.vector_indexes.contains_key(name) {
-            self.dirty_vector_indexes.insert(name.to_string());
-        }
-        self.vector_indexes.get_mut(name)
-    }
-
-    /// Get vector index for a field (if one exists)
-    ///
-    /// # Arguments
-    /// * `collection_name` - Collection name (for building index name)
-    /// * `field` - Field name to search for
-    pub fn get_vector_index_for_field(
-        &self,
-        collection_name: &str,
-        field: &str,
-    ) -> Option<&HnswIndex> {
-        let expected_name = format!("{}_vec_{}", collection_name, field);
-        self.vector_indexes.get(&expected_name)
-    }
-
-    /// Get vector index for a field (mutable)
-    pub fn get_vector_index_for_field_mut(
-        &mut self,
-        collection_name: &str,
-        field: &str,
-    ) -> Option<&mut HnswIndex> {
-        let expected_name = format!("{}_vec_{}", collection_name, field);
-        if self.vector_indexes.contains_key(&expected_name) {
-            self.dirty_vector_indexes.insert(expected_name.clone());
-        }
-        self.vector_indexes.get_mut(&expected_name)
-    }
-
-    /// List all vector indexes
-    pub fn list_vector_indexes(&self) -> Vec<&HnswIndex> {
-        self.vector_indexes.values().collect()
-    }
-
-    /// Add a pre-loaded HnswIndex (from .hnsw file)
-    pub fn add_loaded_vector_index(&mut self, name: String, index: HnswIndex) {
-        self.vector_indexes.insert(name, index);
-    }
-
-    /// Drop a vector index by name
-    pub fn drop_vector_index(&mut self, name: &str) -> Result<()> {
-        if self.vector_indexes.remove(name).is_some() {
-            self.index_file_paths.remove(name);
-            self.dirty_vector_indexes.remove(name);
-            Ok(())
-        } else {
-            Err(IronBaseError::IndexError(format!(
-                "Vector index not found: {}",
-                name
-            )))
-        }
-    }
-
-    /// Atomically persist a single HNSW index to its cache path via
-    /// temp file + rename. Returns the final file size in bytes.
-    ///
-    /// Writes to `{cache_path}.hnsw.tmp`, fsyncs, then uses
-    /// `fs_utils::atomic_rename_and_sync` to swap into place and fsync the
-    /// parent directory. A crash mid-write leaves `.hnsw.tmp` orphaned and
-    /// the original `.hnsw` untouched (or absent); a crash after rename
-    /// leaves the new file durable. Startup cleanup in `storage::mod::open`
-    /// removes stale `.hnsw.tmp` files.
-    fn persist_hnsw_to_file(index: &HnswIndex, cache_path: &PathBuf) -> Result<u64> {
-        use std::io::BufWriter;
-
-        let temp_path = cache_path.with_extension("hnsw.tmp");
-        let file = std::fs::File::create(&temp_path).map_err(|e| {
-            IronBaseError::Io(std::io::Error::other(format!(
-                "Failed to create HNSW temp file '{}': {}",
-                temp_path.display(),
-                e
-            )))
-        })?;
-        let mut writer = BufWriter::new(file);
-        index.save_to_writer(&mut writer)?;
-        std::io::Write::flush(&mut writer).map_err(|e| {
-            IronBaseError::Io(std::io::Error::other(format!(
-                "Failed to flush HNSW temp file '{}': {}",
-                temp_path.display(),
-                e
-            )))
-        })?;
-        let file = writer.into_inner().map_err(|e| {
-            IronBaseError::Io(std::io::Error::other(format!(
-                "BufWriter into_inner failed for '{}': {}",
-                temp_path.display(),
-                e
-            )))
-        })?;
-        file.sync_all().map_err(|e| {
-            IronBaseError::Io(std::io::Error::other(format!(
-                "Failed to fsync HNSW temp file '{}': {}",
-                temp_path.display(),
-                e
-            )))
-        })?;
-        drop(file);
-
-        crate::fs_utils::atomic_rename_and_sync(&temp_path, cache_path)?;
-
-        let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(file_size)
-    }
-
-    /// Flush all vector indexes to .hnsw files
-    ///
-    /// This should be called before database close to enable fast restart.
-    /// Only dirty indexes (modified since last save) are written.
-    ///
-    /// Writes go through a temp file + atomic rename so a crash mid-flush
-    /// cannot produce a torn `.hnsw` file that loads "successfully" with
-    /// garbage.
-    ///
-    /// Returns the number of indexes flushed.
-    pub fn flush_vector_indexes(&mut self, db_path: &str, watermark: u64) -> Result<usize> {
-        let mut count = 0;
-        let dirty_names: Vec<String> = self.dirty_vector_indexes.iter().cloned().collect();
-        for name in dirty_names {
-            if let Some(index) = self.vector_indexes.get_mut(&name) {
-                index.set_flushed_tx_id(watermark);
-                let cache_path = Self::build_vector_cache_path(db_path, &name);
-                let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
-                index.mark_clean();
-                self.dirty_vector_indexes.remove(&name);
-                crate::log_debug!(
-                    "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
-                    name,
-                    cache_path.display(),
-                    file_size as f64 / (1024.0 * 1024.0)
-                );
-                count += 1;
-            }
-        }
-        Ok(count)
-    }
-
     // ========== PER-INDEX FLUSH (for checkpoint lock contention fix) ==========
 
     impl_dirty_index_names!(dirty_btree_index_names, dirty_btree_indexes);
     impl_dirty_index_names!(dirty_fulltext_index_names, dirty_fulltext_indexes);
     impl_dirty_index_names!(dirty_fuzzy_index_names, dirty_fuzzy_indexes);
-    impl_dirty_index_names!(dirty_vector_index_names, dirty_vector_indexes);
-
-    /// Rebuild vector indexes that have excessive orphan nodes.
-    ///
-    /// Returns the number of indexes rebuilt.
-    /// Called during checkpoint to compact HNSW indexes with >30% orphan ratio.
-    pub fn rebuild_vector_indexes_if_needed(&mut self) -> Result<usize> {
-        let mut rebuilt = 0;
-        let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
-        for name in names {
-            if let Some(index) = self.vector_indexes.get_mut(&name) {
-                if index.rebuild_if_needed()? {
-                    self.dirty_vector_indexes.insert(name.clone());
-                    rebuilt += 1;
-                }
-            }
-        }
-        Ok(rebuilt)
-    }
-
-    /// Rebuild ALL vector indexes unconditionally.
-    ///
-    /// Used during db_compact to ensure clean HNSW state.
-    /// Returns the number of indexes rebuilt.
-    pub fn rebuild_all_vector_indexes(&mut self) -> Result<usize> {
-        let mut rebuilt = 0;
-        let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
-        for name in names {
-            if let Some(index) = self.vector_indexes.get_mut(&name) {
-                let orphans = index.orphan_count();
-                if orphans > 0 {
-                    let active = index.len();
-                    index.rebuild()?;
-                    self.dirty_vector_indexes.insert(name.clone());
-                    crate::log_info!(
-                        "HNSW index '{}' compacted: removed {} orphan nodes, {} active vectors remain",
-                        name,
-                        orphans,
-                        active
-                    );
-                    rebuilt += 1;
-                }
-            }
-        }
-        Ok(rebuilt)
-    }
 
     /// Flush a single fulltext index to disk
     ///
@@ -1151,89 +903,6 @@ impl IndexManager {
         }
     }
 
-    /// Flush a single vector index to disk
-    ///
-    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
-    /// On error, the index remains dirty for retry. Writes via temp file +
-    /// atomic rename — see `persist_hnsw_to_file`.
-    ///
-    /// `watermark` is stamped into the v3 cache file header for WAL-replay
-    /// recovery (task #26).
-    pub fn flush_one_vector_index(
-        &mut self,
-        name: &str,
-        db_path: &str,
-        watermark: u64,
-    ) -> Result<bool> {
-        if !self.dirty_vector_indexes.contains(name) {
-            return Ok(false);
-        }
-        if let Some(index) = self.vector_indexes.get_mut(name) {
-            index.set_flushed_tx_id(watermark);
-            let cache_path = Self::build_vector_cache_path(db_path, name);
-            let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
-            index.mark_clean();
-            self.dirty_vector_indexes.remove(name);
-            crate::log_debug!(
-                "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
-                name,
-                cache_path.display(),
-                file_size as f64 / (1024.0 * 1024.0)
-            );
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Build the path for HNSW cache file
-    pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
-        let db_path_buf = PathBuf::from(db_path);
-        let parent = db_path_buf.parent().unwrap_or(&db_path_buf);
-        parent.join(format!("{}.hnsw", index_name))
-    }
-
-    /// Try to load vector index from .hnsw cache file
-    ///
-    /// Returns Some(HnswIndex) if loaded successfully, None if file doesn't exist or is corrupt.
-    pub fn try_load_vector_index(db_path: &str, index_name: &str) -> Option<HnswIndex> {
-        let cache_path = Self::build_vector_cache_path(db_path, index_name);
-        if !cache_path.exists() {
-            return None;
-        }
-
-        match std::fs::read(&cache_path) {
-            Ok(bytes) => match HnswIndex::from_bytes(&bytes) {
-                Ok(index) => {
-                    crate::log_debug!(
-                        "Loaded vector index '{}' from {} ({} vectors)",
-                        index_name,
-                        cache_path.display(),
-                        index.len()
-                    );
-                    Some(index)
-                }
-                Err(e) => {
-                    crate::log_warn!(
-                        "Failed to deserialize vector index '{}' from {}: {}",
-                        index_name,
-                        cache_path.display(),
-                        e
-                    );
-                    None
-                }
-            },
-            Err(e) => {
-                crate::log_warn!(
-                    "Failed to read vector index file {}: {}",
-                    cache_path.display(),
-                    e
-                );
-                None
-            }
-        }
-    }
-
     // ========== INDEX STATISTICS ==========
 
     /// Refresh statistics for all B+ tree indexes.
@@ -1323,13 +992,8 @@ impl IndexManager {
             .map(|idx| idx.memory_usage_bytes())
             .sum();
 
-        let vector_mem: usize = self
-            .vector_indexes
-            .values()
-            .map(|idx| idx.memory_usage_bytes())
-            .sum();
-
-        btree_mem + fuzzy_mem + fulltext_mem + vector_mem
+        // Vector (HNSW) memory is tracked by `VectorIndexManager` (separate lock).
+        btree_mem + fuzzy_mem + fulltext_mem
     }
 
     /// Count indexes currently in lazy mode (not fully loaded)
@@ -1360,10 +1024,7 @@ impl IndexManager {
 
     /// Get total index count across all types
     pub fn total_index_count(&self) -> usize {
-        self.btree_indexes.len()
-            + self.fuzzy_indexes.len()
-            + self.fulltext_indexes.len()
-            + self.vector_indexes.len()
+        self.btree_indexes.len() + self.fuzzy_indexes.len() + self.fulltext_indexes.len()
     }
 
     /// Log lazy loading status (for startup diagnostics)
@@ -1528,53 +1189,9 @@ impl IndexManager {
             }
         }
 
-        // Vector indexes - auto-index documents with vector fields
-        let vector_names: Vec<String> = self.vector_indexes.keys().cloned().collect();
-
-        for index_name in vector_names {
-            if let Some(excluded) = exclude_index {
-                if index_name == excluded {
-                    continue;
-                }
-            }
-
-            if let Some(index) = self.vector_indexes.get_mut(&index_name) {
-                let field = &index.config().field;
-                if field.is_empty() {
-                    continue; // Skip if no field configured (legacy index)
-                }
-
-                // Get vector field value
-                if let Some(value) = get_nested_value(doc, field) {
-                    if let Some(arr) = value.as_array() {
-                        // Convert to f32 vector
-                        let vector: Vec<f32> = arr
-                            .iter()
-                            .filter_map(|v| v.as_f64().map(|f| f as f32))
-                            .collect();
-
-                        // Check dimension matches
-                        if vector.len() == index.config().dim {
-                            let id_str = match doc_id {
-                                DocumentId::Int(i) => i.to_string(),
-                                DocumentId::String(s) => s.clone(),
-                                DocumentId::ObjectId(oid) => oid.clone(),
-                            };
-                            // Insert into HNSW - log error but don't fail (document already persisted)
-                            if let Err(e) = index.insert(&id_str, &vector) {
-                                log_error!(
-                                    "Failed to insert into vector index '{}': {:?}",
-                                    index_name,
-                                    e
-                                );
-                            } else {
-                                self.dirty_vector_indexes.insert(index_name.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // NOTE: vector (HNSW) indexes are handled SEPARATELY by
+        // `VectorIndexManager::add_document_to_vector_indexes` under its own lock
+        // (so a slow HNSW build never blocks btree/fulltext reads).
 
         Ok(())
     }
@@ -1678,26 +1295,8 @@ impl IndexManager {
             }
         }
 
-        // Vector indexes - remove by document ID
-        let vector_names: Vec<String> = self.vector_indexes.keys().cloned().collect();
-
-        for index_name in vector_names {
-            if let Some(excluded) = exclude_index {
-                if index_name == excluded {
-                    continue;
-                }
-            }
-
-            if let Some(index) = self.vector_indexes.get_mut(&index_name) {
-                let id_str = match doc_id {
-                    DocumentId::Int(i) => i.to_string(),
-                    DocumentId::String(s) => s.clone(),
-                    DocumentId::ObjectId(oid) => oid.clone(),
-                };
-                index.remove(&id_str);
-                self.dirty_vector_indexes.insert(index_name.clone());
-            }
-        }
+        // NOTE: vector (HNSW) indexes are handled SEPARATELY by
+        // `VectorIndexManager::remove_document_from_vector_indexes` under its own lock.
 
         Ok(())
     }
@@ -1793,20 +1392,20 @@ impl Default for IndexManager {
 mod tests {
     use super::*;
 
-    /// Test that index names must be unique across ALL index types.
-    /// Previously, fuzzy and fulltext creation did not check vector_indexes,
-    /// and btree/legacy only checked their own map.
+    /// Test that index names must be unique across the shared-manager index
+    /// types (btree / legacy / fuzzy / fulltext). Vector (HNSW) indexes now live
+    /// in a SEPARATE `VectorIndexManager` and intentionally do NOT participate in
+    /// this cross-type collision check (vector names are namespaced `{coll}_vec_*`).
     #[test]
     fn test_cross_type_index_name_collision() {
         let mut mgr = IndexManager::new();
 
-        // Create a vector index first
-        let config = VectorIndexConfig::new(128).with_field("embedding");
-        mgr.create_vector_index(
+        // Create a fuzzy index first
+        mgr.create_fuzzy_index(
             "shared_name".to_string(),
-            "embedding".to_string(),
-            config,
-            None,
+            "name".to_string(),
+            FuzzyAlgorithm::JaroWinkler,
+            0.8,
         )
         .unwrap();
 
@@ -1868,7 +1467,8 @@ mod tests {
         assert!(err.to_string().contains("Index already exists"));
     }
 
-    /// Test the reverse: btree index blocks vector/fuzzy/fulltext creation
+    /// Test the reverse: btree index blocks fuzzy/fulltext creation.
+    /// (Vector indexes live in a separate manager and are not checked here.)
     #[test]
     fn test_btree_blocks_other_types() {
         let mut mgr = IndexManager::new();
@@ -1876,13 +1476,6 @@ mod tests {
         // Create btree first
         mgr.create_btree_index("idx1".to_string(), "field".to_string(), false, false)
             .unwrap();
-
-        // Vector with same name should fail
-        let config = VectorIndexConfig::new(64).with_field("vec");
-        let err = mgr
-            .create_vector_index("idx1".to_string(), "vec".to_string(), config, None)
-            .unwrap_err();
-        assert!(err.to_string().contains("Index already exists"));
 
         // Fuzzy with same name should fail
         let err = mgr

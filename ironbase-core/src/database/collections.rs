@@ -58,7 +58,7 @@ use serde_json::Value;
 use crate::collection_core::{schema::CompiledSchema, CollectionCore};
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
-use crate::index::{IndexKey, IndexManager};
+use crate::index::{IndexKey, IndexManager, VectorIndexManager};
 use crate::storage::{RawStorage, Storage};
 use crate::transaction::{Operation, TransactionId};
 
@@ -123,29 +123,51 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///
     /// This method uses double-checked locking to ensure thread-safe creation
     /// of IndexManagers while minimizing lock contention.
-    pub(crate) fn get_or_create_index_manager(
+    /// Ensure BOTH the IndexManager and the VectorIndexManager exist for a
+    /// collection, creating them together (single catalog scan) and keeping the
+    /// two per-collection maps in lockstep. Returns clones of both Arcs.
+    ///
+    /// Lock-ordering: the `index_managers` MAP lock is always taken before the
+    /// `vector_managers` MAP lock (and never the reverse), so these two map
+    /// locks can't deadlock against each other.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn ensure_managers(
         &self,
         name: &str,
-    ) -> Result<Arc<RwLock<IndexManager>>> {
-        // Fast path: read lock to check if already exists
+    ) -> Result<(Arc<RwLock<IndexManager>>, Arc<RwLock<VectorIndexManager>>)> {
+        // Fast path: both already cached
         {
-            let managers = self.index_managers.read();
-            if let Some(manager) = managers.get(name) {
-                return Ok(Arc::clone(manager));
+            let im = self.index_managers.read();
+            if let Some(m) = im.get(name) {
+                if let Some(v) = self.vector_managers.read().get(name) {
+                    return Ok((Arc::clone(m), Arc::clone(v)));
+                }
             }
         }
 
-        // Slow path: create with write lock (double-checked)
-        let mut managers = self.index_managers.write();
-        if let Some(manager) = managers.get(name) {
-            return Ok(Arc::clone(manager));
+        // Slow path: create with write lock (double-checked). index_managers
+        // first, then vector_managers — never the reverse.
+        let mut im = self.index_managers.write();
+        if let Some(m) = im.get(name) {
+            // index manager exists → vector manager is in lockstep
+            let v = self
+                .vector_managers
+                .read()
+                .get(name)
+                .map(Arc::clone)
+                .expect("vector_managers must be in lockstep with index_managers");
+            return Ok((Arc::clone(m), v));
         }
 
-        // Initialize the IndexManager for this collection
-        let index_manager = self.initialize_index_manager(name)?;
-        let shared = Arc::new(RwLock::new(index_manager));
-        managers.insert(name.to_string(), Arc::clone(&shared));
-        Ok(shared)
+        // Initialize both managers from one catalog scan
+        let (index_manager, vector_manager) = self.initialize_managers(name)?;
+        let im_arc = Arc::new(RwLock::new(index_manager));
+        let vm_arc = Arc::new(RwLock::new(vector_manager));
+        im.insert(name.to_string(), Arc::clone(&im_arc));
+        self.vector_managers
+            .write()
+            .insert(name.to_string(), Arc::clone(&vm_arc));
+        Ok((im_arc, vm_arc))
     }
 
     /// Get or create a collection-level write lock for Safe mode atomicity
@@ -293,6 +315,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// This allows fast startup even when fuzzy indexes need rebuild.
     fn rebuild_indexes_from_catalog<S2: Storage + RawStorage>(
         index_manager: &mut IndexManager,
+        vector_manager: &mut VectorIndexManager,
         storage: &mut S2,
         collection_name: &str,
         catalog: &std::collections::HashMap<DocumentId, u64>,
@@ -348,11 +371,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // SKIP indexes that already have data (loaded from .hnsw file)
         let vector_indexes_to_rebuild: Vec<(String, String, usize)> = {
             let prefix = format!("{}_vec_", collection_name);
-            index_manager
-                .list_indexes()
+            vector_manager
+                .vector_index_names()
                 .into_iter()
                 .filter_map(|name| {
-                    let idx = index_manager.get_vector_index(&name)?;
+                    let idx = vector_manager.get_vector_index(&name)?;
                     if !idx.is_empty() {
                         return None; // Skip non-empty indexes
                     }
@@ -537,7 +560,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                                     DocumentId::String(s) => s.clone(),
                                     DocumentId::ObjectId(oid) => oid.clone(),
                                 };
-                                if let Some(index) = index_manager.get_vector_index_mut(index_name)
+                                if let Some(index) = vector_manager.get_vector_index_mut(index_name)
                                 {
                                     if index.insert(&id_str, &vector).is_ok() {
                                         rebuilt_count += 1;
@@ -598,7 +621,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             index_manager.mark_fulltext_dirty(index_name);
         }
         for (index_name, _, _) in &vector_indexes_to_rebuild {
-            index_manager.mark_vector_dirty(index_name);
+            vector_manager.mark_vector_dirty(index_name);
         }
 
         Ok(rebuilt_count)
@@ -625,6 +648,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// signalling the caller to fall back to rebuild for the non-btree side.
     fn try_wal_replay_non_btree(
         index_manager: &mut IndexManager,
+        vector_manager: &mut VectorIndexManager,
         recovered_ops: &[(TransactionId, Operation)],
         persisted_fuzzy: &[crate::index::fuzzy::FuzzyIndexMetadata],
         persisted_fulltext: &[crate::fulltext::FulltextIndexMetadata],
@@ -684,7 +708,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Vector (HNSW)
         for vec_meta in persisted_vector {
-            let watermark = match index_manager.get_vector_index(&vec_meta.name) {
+            let watermark = match vector_manager.get_vector_index(&vec_meta.name) {
                 Some(idx) => {
                     if idx.last_flushed_tx_id() == 0 && !idx.is_empty() && !recovered_ops.is_empty()
                     {
@@ -695,7 +719,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 None => continue,
             };
             let field = vec_meta.field.clone();
-            if let Some(idx) = index_manager.get_vector_index_mut(&vec_meta.name) {
+            if let Some(idx) = vector_manager.get_vector_index_mut(&vec_meta.name) {
                 for (tx_id, op) in recovered_ops {
                     if *tx_id > watermark {
                         crate::recovery::apply_op_to_hnsw(idx, op, &field)?;
@@ -759,10 +783,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///
     /// This creates the _id index, loads persisted indexes, and rebuilds
     /// all indexes from the document catalog.
-    fn initialize_index_manager(&self, name: &str) -> Result<IndexManager> {
+    fn initialize_managers(&self, name: &str) -> Result<(IndexManager, VectorIndexManager)> {
         use crate::{log_debug, log_info, log_warn};
 
         let mut index_manager = IndexManager::new();
+        let mut vector_manager = VectorIndexManager::new();
         let id_index_name = format!("{}_id", name);
 
         // Ensure collection exists before loading metadata
@@ -1016,15 +1041,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             if decide_index_load_strategy(was_clean, can_try_replay)
                 == IndexLoadStrategy::LoadFromFile
             {
-                if let Some(loaded_index) =
-                    crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
-                {
+                if let Some(loaded_index) = crate::index::VectorIndexManager::try_load_vector_index(
+                    &db_path,
+                    &vec_meta.name,
+                ) {
                     log_debug!(
                         "Loaded vector index '{}' from .hnsw file ({} vectors)",
                         vec_meta.name,
                         loaded_index.len()
                     );
-                    index_manager.add_loaded_vector_index(vec_meta.name.clone(), loaded_index);
+                    vector_manager.add_loaded_vector_index(vec_meta.name.clone(), loaded_index);
                     loaded = true;
                 }
             }
@@ -1040,9 +1066,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         "dirty shutdown"
                     }
                 );
-                let storage_path =
-                    crate::index::IndexManager::build_vector_cache_path(&db_path, &vec_meta.name);
-                if let Err(e) = index_manager.create_vector_index(
+                let storage_path = crate::index::VectorIndexManager::build_vector_cache_path(
+                    &db_path,
+                    &vec_meta.name,
+                );
+                if let Err(e) = vector_manager.create_vector_index(
                     vec_meta.name.clone(),
                     vec_meta.field.clone(),
                     vec_meta.config.clone(),
@@ -1118,6 +1146,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let non_btree_replay_succeeded = if can_try_replay && all_non_btree_loaded {
             match Self::try_wal_replay_non_btree(
                 &mut index_manager,
+                &mut vector_manager,
                 &recovered_ops_for_collection,
                 &persisted_fuzzy_indexes,
                 &persisted_fulltext_indexes,
@@ -1182,7 +1211,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let has_fuzzy_without_file = fuzzy_indexes.iter().any(|idx| idx.entry_count() == 0);
         let fulltext_indexes = index_manager.list_fulltext_indexes();
         let has_fulltext_without_file = fulltext_indexes.iter().any(|idx| idx.doc_count() == 0);
-        let vector_indexes = index_manager.list_vector_indexes();
+        let vector_indexes = vector_manager.list_vector_indexes();
         let has_vector_without_cache = vector_indexes.iter().any(|idx| idx.is_empty());
 
         // Aggregate: every persisted index family has data in memory.
@@ -1240,6 +1269,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let mut storage_guard = self.storage.write();
             let rebuilt_count = Self::rebuild_indexes_from_catalog(
                 &mut index_manager,
+                &mut vector_manager,
                 &mut *storage_guard,
                 name,
                 &catalog,
@@ -1264,7 +1294,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let flush_btree = index_manager.flush_btree_indexes(&db_path, watermark)?;
             let flush_ft = index_manager.flush_fulltext_indexes(watermark)?;
             let flush_fz = index_manager.flush_fuzzy_indexes(watermark)?;
-            let flush_vec = index_manager.flush_vector_indexes(&db_path, watermark)?;
+            let flush_vec = vector_manager.flush_vector_indexes(&db_path, watermark)?;
             log_info!(
                 "Post-rebuild flush for '{}': btree={} fulltext={} fuzzy={} vector={} (watermark={})",
                 name,
@@ -1279,7 +1309,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Startup migration: populate chunk_doc_mapping for legacy fulltext indexes
         Self::migrate_chunk_doc_mapping(&self.storage, &mut index_manager, name);
 
-        Ok(index_manager)
+        Ok((index_manager, vector_manager))
     }
 
     /// Populate chunk_doc_mapping for legacy fulltext indexes that were saved
@@ -1358,12 +1388,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// For read-only access without creation, use `get_collection()` instead.
     pub fn collection(&self, name: &str) -> Result<CollectionCore<S>> {
         self.check_not_closed()?;
-        let shared_indexes = self.get_or_create_index_manager(name)?;
+        let (shared_indexes, shared_vectors) = self.ensure_managers(name)?;
         let shared_schema = self.get_or_create_schema_manager(name)?;
         CollectionCore::with_shared_indexes(
             name.to_string(),
             Arc::clone(&self.storage),
             shared_indexes,
+            shared_vectors,
             shared_schema,
             Arc::clone(&self.is_closed),
         )
@@ -1377,11 +1408,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Optimized for READ operations - uses READ locks only on the hot path.
     pub fn get_collection(&self, name: &str) -> Result<CollectionCore<S>> {
         self.check_not_closed()?;
-        // Fast path: check if index manager is cached
-        let shared_indexes = {
+        // Fast path: check if index manager is cached (vector manager is in lockstep)
+        let (shared_indexes, shared_vectors) = {
             let managers = self.index_managers.read();
             match managers.get(name) {
-                Some(manager) => Arc::clone(manager),
+                Some(manager) => {
+                    let vectors = self
+                        .vector_managers
+                        .read()
+                        .get(name)
+                        .map(Arc::clone)
+                        .expect("vector_managers must be in lockstep with index_managers");
+                    (Arc::clone(manager), vectors)
+                }
                 None => {
                     // No index manager = collection was never accessed via collection()
                     // Check storage directly
@@ -1393,12 +1432,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     // This can happen after database reopen - need to create manager
                     drop(storage);
                     drop(managers);
-                    let shared_indexes = self.get_or_create_index_manager(name)?;
+                    let (shared_indexes, shared_vectors) = self.ensure_managers(name)?;
                     let shared_schema = self.get_or_create_schema_manager(name)?;
                     return CollectionCore::with_shared_indexes_readonly(
                         name.to_string(),
                         Arc::clone(&self.storage),
                         shared_indexes,
+                        shared_vectors,
                         shared_schema,
                         Arc::clone(&self.is_closed),
                     );
@@ -1412,6 +1452,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             name.to_string(),
             Arc::clone(&self.storage),
             shared_indexes,
+            shared_vectors,
             shared_schema,
             Arc::clone(&self.is_closed),
         )
@@ -1470,6 +1511,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
+        self.vector_managers.write().remove(name);
         self.schema_managers.write().remove(name);
         self.collection_write_locks.write().remove(name);
 
@@ -1545,6 +1587,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // 3) Drop the stale in-memory IndexManager (forces a fresh reload from
         //    the renamed files + catalog), and move the schema + write lock.
         self.index_managers.write().remove(old_name);
+        self.vector_managers.write().remove(old_name);
         {
             let mut schemas = self.schema_managers.write();
             if let Some(arc) = schemas.remove(old_name) {
@@ -1619,8 +1662,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         }
         for ix in &meta.vector_indexes {
             moves.push((
-                crate::index::IndexManager::build_vector_cache_path(db_path, &ix.name),
-                crate::index::IndexManager::build_vector_cache_path(db_path, &remap(&ix.name)),
+                crate::index::VectorIndexManager::build_vector_cache_path(db_path, &ix.name),
+                crate::index::VectorIndexManager::build_vector_cache_path(
+                    db_path,
+                    &remap(&ix.name),
+                ),
             ));
         }
         moves
@@ -1675,6 +1721,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
+        self.vector_managers.write().remove(name);
         self.schema_managers.write().remove(name);
         self.collection_write_locks.write().remove(name);
 
@@ -1729,7 +1776,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 Self::try_remove_file(&path, name, "fzidx");
             }
             // HNSW vector (.hnsw)
-            let hnsw_path = IndexManager::build_vector_cache_path(&db_path, name);
+            let hnsw_path = VectorIndexManager::build_vector_cache_path(&db_path, name);
             Self::try_remove_file(&hnsw_path, name, "hnsw");
         }
     }

@@ -61,7 +61,7 @@ use crate::collection_core::{
 };
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
-use crate::index::IndexManager;
+use crate::index::{IndexManager, VectorIndexManager};
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
 
@@ -300,6 +300,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Each collection shares its IndexManager across all CollectionCore instances
     pub(crate) index_managers: Arc<RwLock<HashMap<String, Arc<RwLock<IndexManager>>>>>,
 
+    // Shared VectorIndexManagers per collection — SEPARATE lock from index_managers
+    // so slow HNSW batch-builds don't block btree/fulltext reads. Kept in lockstep
+    // with index_managers at every create/remove/rename/clear site.
+    pub(crate) vector_managers: Arc<RwLock<HashMap<String, Arc<RwLock<VectorIndexManager>>>>>,
+
     // Shared SchemaManagers per collection (fixes stale schema problem)
     // Each collection shares its CompiledSchema across all CollectionCore instances
     pub(crate) schema_managers: Arc<RwLock<HashMap<String, Arc<RwLock<Option<CompiledSchema>>>>>>,
@@ -466,6 +471,7 @@ impl DatabaseCore<StorageEngine> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            vector_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(None)),
             write_lock_condvar: Arc::new(Condvar::new()),
@@ -587,6 +593,7 @@ impl DatabaseCore<MemoryStorage> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            vector_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(None)),
             write_lock_condvar: Arc::new(Condvar::new()),
