@@ -209,7 +209,7 @@ mod query_executor;
 mod raw_operations;
 pub(crate) mod schema;
 mod search;
-mod topk;
+pub(crate) mod topk;
 mod tx;
 mod update_operators;
 mod vector_ops;
