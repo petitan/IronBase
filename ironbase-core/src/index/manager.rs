@@ -1585,10 +1585,21 @@ impl IndexManager {
                                 DocumentId::String(s) => s.clone(),
                                 DocumentId::ObjectId(oid) => oid.clone(),
                             };
-                            // Insert into HNSW - log error but don't fail (document already persisted)
+                            // Vector overflow is SWALLOWED (log-and-continue),
+                            // NOT propagated — and must stay that way. The durable
+                            // and batch insert paths write the document to storage
+                            // and commit the WAL BEFORE this index step
+                            // (insert_one_persist / persist_buffered_operations),
+                            // so a propagated Err would leave a persisted doc the
+                            // caller is told failed (ghost doc) or abort the whole
+                            // batch transaction. P0-2's RAM-derived ceiling makes a
+                            // genuine hit reachable only at true RAM exhaustion;
+                            // there the doc is still stored and findable and the
+                            // drop is logged. Uniform with the fulltext swallow ~50
+                            // lines above.
                             if let Err(e) = index.insert(&id_str, &vector) {
                                 log_error!(
-                                    "Failed to insert into vector index '{}': {:?}",
+                                    "Failed to insert into vector index '{}': {:?} (document stored; vector not indexed)",
                                     index_name,
                                     e
                                 );
@@ -1891,6 +1902,38 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("Index already exists"));
+    }
+
+    /// P0-2: vector overflow at the ceiling is SWALLOWED (logged), NOT propagated
+    /// out of `add_document_to_indexes`. The durable/batch insert paths write
+    /// storage + commit the WAL before this index step, so a propagated Err would
+    /// leave a persisted doc the caller is told failed (ghost doc / aborted
+    /// batch). The call must return Ok and simply not index the overflow vector.
+    /// Uses an explicit tiny `max_vectors` so the ceiling is hit deterministically
+    /// without depending on system RAM.
+    #[test]
+    fn test_vector_overflow_is_swallowed_not_propagated() {
+        let mut mgr = IndexManager::new();
+        let config = VectorIndexConfig::new(3)
+            .with_field("embedding")
+            .with_max_vectors(1); // explicit (non-sentinel) hard cap of 1
+        mgr.create_vector_index("emb_idx".to_string(), "embedding".to_string(), config, None)
+            .unwrap();
+
+        let doc1 = serde_json::json!({ "embedding": [0.1, 0.2, 0.3] });
+        let doc2 = serde_json::json!({ "embedding": [0.4, 0.5, 0.6] });
+
+        // First vector fits the cap.
+        mgr.add_document_to_indexes(&doc1, &DocumentId::Int(1), None)
+            .expect("first vector should index");
+
+        // Second vector exceeds the cap → must be SWALLOWED (Ok), so the durable
+        // insert path's atomicity (storage/WAL already committed) is preserved.
+        mgr.add_document_to_indexes(&doc2, &DocumentId::Int(2), None)
+            .expect("over-capacity vector must be swallowed, not propagated");
+
+        // The overflow vector is simply absent; the index holds only the first.
+        assert_eq!(mgr.get_vector_index("emb_idx").unwrap().len(), 1);
     }
 
     /// Test the reverse: btree index blocks vector/fuzzy/fulltext creation

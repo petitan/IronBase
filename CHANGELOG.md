@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — vector index ceiling is RAM-derived, no longer a fixed 100K cap that could silently lose data (mcp-server v1.0.522, core v0.3.328)
+
+Scalability audit item **P0-2** (100GB+ roadmap). The hard `DEFAULT_MAX_VECTORS = 100_000`
+ceiling is a latent data-loss flaw at scale: once a vector index left at the default cap grows
+past 100K vectors, the HNSW insert returns `OutOfMemory`, every auto-index caller logs-and-drops
+it while the document is already persisted, so those documents silently never appear in vector
+search. (A 2026-06-05 audit of the production `docs.mlite` found **no current loss** — its main
+`docs` index had been given an explicit `262144` cap and is fully indexed at 191207/262144 — but
+any index left at the default 100K sentinel hits this the moment it crosses 100K.) Root cause:
+the fixed cap, fixed here by making the **default** ceiling RAM-derived (an explicit non-default
+`max_vectors` like `docs`'s `262144` is still honoured verbatim).
+
+- **RAM-derived ceiling.** `DEFAULT_MAX_VECTORS` now doubles as an "auto" sentinel: an index
+  whose `max_vectors` is the default resolves at runtime to a memory-budgeted limit
+  (`calculate_max_vectors` / `max_vectors_for_budget`, 50% of available RAM ÷ per-vector cost),
+  mirroring `index::traits::calculate_lazy_threshold()`. The limit is **never persisted** — it
+  lives in a `#[serde(skip)] HnswIndex::effective_max_vectors: Option<usize>` resolved lazily on
+  first insert (`effective_ceiling()`), so existing on-disk indexes (and DBs moved between
+  machines) re-derive the ceiling for the current box with **no format change**. The value only
+  ever *raises* the legacy 100K floor, never lowers it, and is additionally floored at the
+  index's own active population so a large index reopened on a memory-constrained box never
+  rejects or `rebuild()`-truncates vectors it already holds. (`vector/config.rs`, `vector/hnsw.rs`)
+- **Rejection stays swallowed (logged), deliberately NOT propagated.** A code review showed that
+  propagating the `OutOfMemory` out of the auto-index callers corrupts atomicity: the durable
+  (`insert_one_persist`) and batch (`persist_buffered_operations`) paths write storage and commit
+  the WAL **before** the index step, so a propagated error leaves a persisted "ghost" document
+  the caller is told failed — or aborts an entire batch transaction, discarding unrelated ops.
+  The three auto-index sites therefore keep `log_error`/`warn`-and-continue, uniform with the
+  fulltext swallow and the lazy HNSW rebuild path. With the RAM-derived ceiling a genuine hit is
+  reachable only at true RAM exhaustion; there the document is still stored and findable, and the
+  drop is logged (a visible degradation at a real resource limit, not a hidden dummy fallback).
+- **Hardening:** the per-node `try_reserve` growth increment no longer clamps to the ceiling
+  (orphan-heavy indexes could clamp it to 0, leaving the subsequent `push` to reallocate
+  unguarded and abort the process); `effective_max_vectors` is an `Option` (not a `0` sentinel)
+  so an explicit `max_vectors == 0` is not mistaken for "unresolved"; and the per-vector cost is
+  a single shared `per_vector_bytes()` reused by `estimate_memory_bytes`.
+- Regression-guarded by `test_vector_overflow_is_swallowed_not_propagated` (atomicity),
+  `default_config_resolves_ram_derived_ceiling_lazily` + `explicit_small_cap_rejects_overflow`
+  (limit resolution), and `max_vectors_for_budget` / `resolve_max_vectors` arithmetic tests;
+  HNSW recall gates and the full ironbase-core suite stay green.
+
 ### Performance — compaction snapshot no longer deep-clones the catalog under the write lock (mcp-server v1.0.521, core v0.3.327)
 
 Scalability audit item **P0-1** (100GB+ roadmap). `StorageEngine.collections` is now held

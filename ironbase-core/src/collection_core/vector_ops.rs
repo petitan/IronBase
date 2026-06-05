@@ -169,7 +169,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 }
                             }
                         } else {
-                            // Insert into HNSW
+                            // Swallow (log-and-skip), uniform with the lazy
+                            // rebuild-from-documents twin (load_or_rebuild_hnsw)
+                            // and with add_document_to_indexes: a build hitting the
+                            // RAM-derived ceiling produces a (logged) partial index
+                            // rather than failing the whole build. P0-2's ceiling
+                            // makes a genuine hit reachable only at true RAM
+                            // exhaustion.
                             if let Err(e) = hnsw.insert(&id_str, &vector) {
                                 tracing::warn!(
                                     doc_id = %id_str,
