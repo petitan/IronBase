@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — fulltext `top_k_scored` now delegates to the shared generic top-k instead of a private heap (mcp-server v1.0.525, core v0.3.331)
+
+P1-4 code-review follow-up. The previous commit added a fulltext-private `BinaryHeap<(Reverse<OrderedScore>, DocumentId)>` for `top_k_scored`, but the codebase already has a generic comparator-based bounded top-k (`collection_core::topk::topk_select_with_skip`) that the sibling `collection_core/search.rs` already uses for score-based `(doc_id, f64)` selection. This commit removes the duplicate, finishing the consolidation the P1-4 change set out to do.
+
+- **Delegate to the generic helper.** `FulltextIndex::top_k_scored` now calls `topk_select_with_skip(scored.filter(|s| s >= min), skip, limit, cmp)` with a `(score desc, doc_id asc)` comparator. `mod topk` is now `pub(crate)` so `fulltext.rs` can reach it. One bounded-top-k implementation fewer to keep in sync. (`fulltext.rs`, `collection_core/mod.rs`)
+- **Dead code removed.** The private `OrderedScore` wrapper and the now-unused `BinaryHeap` import are gone (the comparator closure subsumes them).
+- **NaN handling restored to the OR-path's original semantics.** The pre-filter `filter(|(_, s)| *s >= min)` drops NaN scores (`NaN >= min` is false), matching the OR paths' behaviour before P1-4 (the interim private heap had kept NaN and sorted it last). Unreachable in practice — BM25 `term_score` cannot produce NaN — but it removes a latent semantic drift the review flagged.
+
 ### Changed — fulltext search top-k unified into one bounded helper; the OR path no longer full-sorts every match (mcp-server v1.0.524, core v0.3.330)
 
 Scalability audit item **P1-4** (100GB+ roadmap). The audit's billing was largely already

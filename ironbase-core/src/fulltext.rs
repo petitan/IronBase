@@ -19,7 +19,7 @@ use crate::error::{IronBaseError, Result};
 use crate::log_error;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -921,32 +921,6 @@ pub struct FtsSearchResult {
     pub doc_id: DocumentId,
     pub score: f64,
     pub matched_tokens: Vec<String>,
-}
-
-/// Wrapper for f64 scores that implements Ord (required for BinaryHeap).
-/// NaN is treated as less than any valid score.
-#[derive(Clone, Debug, PartialEq)]
-struct OrderedScore(f64);
-
-impl Eq for OrderedScore {}
-
-impl PartialOrd for OrderedScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
-                (true, true) => std::cmp::Ordering::Equal,
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => unreachable!(),
-            })
-    }
 }
 
 /// BM25 scoring context — shared across all fulltext search methods.
@@ -2520,49 +2494,35 @@ impl FulltextIndex {
             .collect())
     }
 
-    /// Bounded top-k selection over scored doc_ids — O(N log k) time, O(k) memory.
+    /// Bounded top-k selection over scored doc_ids — O((skip+limit) memory),
+    /// O(N log(skip+limit)) time.
     ///
     /// Returns the best `skip + limit` results ranked by score descending, then
-    /// doc_id ascending on ties (NaN scores sorted last via `OrderedScore`), with
-    /// `skip` applied. Shared by every search path (OR `search`/`search_with_ctx`
-    /// and AND `search_and_with_ctx`) so they bound memory identically and agree on
-    /// tie ordering — no full-result `Vec` + O(N log N) sort.
+    /// doc_id ascending on ties, with `skip` applied. Sub-threshold scores are
+    /// filtered first; `NaN >= min` is false, so NaN scores are excluded — matching
+    /// the OR path's former `filter(|s| s >= min)`. Shared by every search path
+    /// (OR `search`/`search_with_ctx`/`search_for_doc_ids_with_ctx` and AND
+    /// `search_and_with_ctx`) so they agree on tie ordering and memory bounds — no
+    /// full-result `Vec` + O(N log N) sort.
     ///
-    /// The heap grows lazily (no eager `with_capacity(skip+limit)`, which could
-    /// over-allocate or panic on a pathological skip — see the `find` top-k fix).
+    /// Delegates to the crate-wide generic `topk_select_with_skip` (one bounded
+    /// top-k implementation) rather than a fulltext-private heap.
     fn top_k_scored<I>(scored: I, skip: usize, limit: usize, min: f64) -> Vec<(DocumentId, f64)>
     where
         I: IntoIterator<Item = (DocumentId, f64)>,
     {
-        use std::cmp::Reverse;
-        let k = skip.saturating_add(limit);
-        if k == 0 {
-            return Vec::new();
-        }
-        // Max-heap keyed by (Reverse<score>, doc_id): the top is the WORST of the
-        // current best-k (lowest score, or highest doc_id on a tie) and is evicted
-        // first. A smaller key = a better result, so `into_sorted_vec` (ascending)
-        // yields best-first = score desc, doc_id asc (NaN scores sort last).
-        let mut heap: BinaryHeap<(Reverse<OrderedScore>, DocumentId)> = BinaryHeap::new();
-        for (doc_id, score) in scored {
-            if score < min {
-                continue;
-            }
-            let key = (Reverse(OrderedScore(score)), doc_id);
-            if heap.len() < k {
-                heap.push(key);
-            } else if let Some(top) = heap.peek() {
-                if key < *top {
-                    heap.pop();
-                    heap.push(key);
-                }
-            }
-        }
-        heap.into_sorted_vec()
-            .into_iter()
-            .skip(skip)
-            .map(|(Reverse(score), doc_id)| (doc_id, score.0))
-            .collect()
+        crate::collection_core::topk::topk_select_with_skip(
+            scored.into_iter().filter(|(_, score)| *score >= min),
+            skip,
+            limit,
+            // Score descending, doc_id ascending on ties (matches the former
+            // compare_search_results; NaN is already excluded by the filter).
+            |a: &(DocumentId, f64), b: &(DocumentId, f64)| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            },
+        )
     }
 
     /// Check if a document is in the index
