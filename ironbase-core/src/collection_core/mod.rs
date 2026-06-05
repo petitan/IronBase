@@ -2037,9 +2037,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                                 .collect();
                             if vector.len() == vec_dim {
+                                // Swallow (log-and-continue), NOT propagate — see
+                                // add_document_to_indexes. update_*_persist writes
+                                // storage AFTER batch_update_indexes returns, so a
+                                // propagated Err would diverge the index (NEW
+                                // state) from storage (OLD docs). P0-2's
+                                // RAM-derived ceiling makes a hit reachable only at
+                                // true RAM exhaustion.
                                 if let Err(e) = index.insert(&id_str, &vector) {
                                     log_error!(
-                                        "Failed to update vector index for field '{}': {:?}",
+                                        "Failed to update vector index for field '{}': {:?} (document stored; vector not indexed)",
                                         vec_field,
                                         e
                                     );

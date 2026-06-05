@@ -199,6 +199,18 @@ pub struct HnswIndex {
     /// sequence, which is fine since levels are only assigned on new inserts.
     #[serde(skip)]
     rng_state: u64,
+    /// Effective (resolved) vector-count ceiling used by the insert cap check.
+    /// Runtime-only (`#[serde(skip)]`) so a machine-specific RAM-derived value is
+    /// never baked into the persisted `.hnsw` body — keeping the on-disk format
+    /// unchanged. `None` means "not yet resolved" and is lazily filled on first
+    /// insert via [`Self::effective_ceiling`]. `Option` (not a 0 sentinel) so a
+    /// legitimately resolved ceiling is never confused with "unresolved" (e.g.
+    /// an explicit `max_vectors == 0`). Because resolution happens at runtime,
+    /// an index loaded from disk (whose persisted `config.max_vectors` is the
+    /// 100K "auto" sentinel) picks up the RAM-derived ceiling on the current
+    /// machine without any format migration (P0-2).
+    #[serde(skip)]
+    effective_max_vectors: Option<usize>,
 }
 
 impl HnswIndex {
@@ -215,6 +227,10 @@ impl HnswIndex {
             dirty: false,
             last_flushed_tx_id: 0,
             rng_state: 0x2545_F491_4F6C_DD1D,
+            // None = unresolved; lazily filled on first insert via
+            // effective_ceiling() (also covers the bincode deserialize paths,
+            // where serde(skip) defaults this to None).
+            effective_max_vectors: None,
         }
     }
 
@@ -226,6 +242,27 @@ impl HnswIndex {
     /// Create with dimension and custom max vectors limit
     pub fn with_dim_and_limits(dim: usize, max_vectors: usize) -> Self {
         Self::new(VectorIndexConfig::new(dim).with_max_vectors(max_vectors))
+    }
+
+    /// Resolve (and cache) the effective vector-count ceiling for the insert cap.
+    ///
+    /// RAM-derived via `config.resolve_max_vectors()` (P0-2), but **never below
+    /// the index's current active population** (`self.len()`): the ceiling only
+    /// bounds NEW growth, so a large index reopened on a memory-constrained box
+    /// (where the RAM-derived value falls under its own size) never rejects or
+    /// truncates vectors it already legitimately holds — which would otherwise
+    /// make `rebuild()`'s re-insertion abort and break checkpoint/compaction.
+    /// Cached after first resolution; `#[serde(skip)]` means it is recomputed
+    /// per process, picking up the current machine's RAM.
+    fn effective_ceiling(&mut self) -> usize {
+        match self.effective_max_vectors {
+            Some(c) => c,
+            None => {
+                let c = self.config.resolve_max_vectors().max(self.len());
+                self.effective_max_vectors = Some(c);
+                c
+            }
+        }
     }
 
     /// Get the number of active (non-orphan) vectors in the index
@@ -349,22 +386,28 @@ impl HnswIndex {
             self.remove(id);
         }
 
-        // OOM Protection: Check vector count limit
-        // Use self.len() (= id_to_index.len()) to count only active vectors,
-        // not self.nodes.len() which includes orphans from lazy removal
-        if self.len() >= self.config.max_vectors {
+        // OOM Protection: Check vector count limit (RAM-derived, P0-2).
+        // Resolve the effective ceiling lazily on first insert so it applies to
+        // indexes loaded from disk too (whose persisted config carries the 100K
+        // "auto" sentinel). Use self.len() (= id_to_index.len()) to count only
+        // active vectors, not self.nodes.len() which includes orphans.
+        let ceiling = self.effective_ceiling();
+        if self.len() >= ceiling {
             return Err(IronBaseError::OutOfMemory(format!(
-                "Vector index full: {} vectors (max: {}). Remove documents or increase max_vectors.",
+                "Vector index full: {} vectors (max: {}, RAM-derived ceiling). \
+                 Free memory, lower the vector dimension, or split the collection.",
                 self.len(),
-                self.config.max_vectors
+                ceiling
             )));
         }
 
-        // OOM Protection: Ensure capacity for new node
+        // OOM Protection: Ensure capacity for new node. Reserve a positive,
+        // bounded growth increment (NOT clamped to the ceiling — orphan nodes can
+        // push nodes.len() to/past the active ceiling, and clamping to 0 there
+        // would make try_reserve a no-op and let the subsequent push reallocate
+        // UNGUARDED, defeating the typed-OOM guard).
         if self.nodes.len() == self.nodes.capacity() {
-            let additional = (self.nodes.len() / 4)
-                .max(100)
-                .min(self.config.max_vectors - self.nodes.len());
+            let additional = (self.nodes.len() / 4).max(100);
             self.nodes.try_reserve(additional).map_err(|_| {
                 IronBaseError::OutOfMemory(format!(
                     "Failed to allocate memory for {} additional HNSW nodes. \
@@ -649,6 +692,14 @@ impl HnswIndex {
                 .iter()
                 .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone())),
         );
+
+        // Floor the effective ceiling at the rebuild population BEFORE clearing:
+        // rebuild re-inserts EXISTING active vectors, which must never be
+        // rejected by the RAM-derived growth cap (#8). Resolve fresh (machine RAM
+        // may have changed since load) but never below items.len(), so a large
+        // index on a memory-constrained box still rebuilds intact rather than
+        // aborting mid-loop and breaking checkpoint/compaction.
+        self.effective_max_vectors = Some(self.config.resolve_max_vectors().max(items.len()));
 
         // Clear and reinsert
         self.nodes.clear();
@@ -1182,6 +1233,41 @@ mod tests {
         let mut cfg = VectorIndexConfig::new(2);
         cfg.metric = DistanceMetric::Euclidean;
         cfg
+    }
+
+    /// P0-2: a default-config index carries the 100K "auto" sentinel; the
+    /// effective ceiling stays unresolved (None) until the first insert, then
+    /// resolves to a RAM-derived value (>= the legacy floor). Proves the lazy
+    /// resolution fires on the common `new()` path so the fixed 100K cap no
+    /// longer bounds large-RAM machines.
+    #[test]
+    fn default_config_resolves_ram_derived_ceiling_lazily() {
+        let mut idx = HnswIndex::new(fast_cfg(8));
+        assert_eq!(
+            idx.effective_max_vectors, None,
+            "ceiling must be unresolved before the first insert"
+        );
+        idx.insert("a", &[0.0; 8]).unwrap();
+        let resolved = idx.effective_max_vectors.expect("resolved on first insert");
+        assert!(
+            resolved >= crate::vector::config::DEFAULT_MAX_VECTORS,
+            "resolved ceiling {resolved} must be >= the legacy 100K floor",
+        );
+    }
+
+    /// P0-2: an explicit (non-sentinel) `max_vectors` is honoured verbatim, and
+    /// hitting it returns a typed OutOfMemory error rather than silently
+    /// dropping the vector.
+    #[test]
+    fn explicit_small_cap_rejects_overflow() {
+        let mut cfg = fast_cfg(4);
+        cfg.max_vectors = 2; // explicit non-sentinel hard cap
+        let mut idx = HnswIndex::new(cfg);
+        idx.insert("a", &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        idx.insert("b", &[0.5, 0.6, 0.7, 0.8]).unwrap();
+        let err = idx.insert("c", &[0.9, 1.0, 1.1, 1.2]).unwrap_err();
+        assert!(matches!(err, IronBaseError::OutOfMemory(_)), "got {err:?}");
+        assert_eq!(idx.len(), 2, "overflow vector must not be added");
     }
 
     #[test]

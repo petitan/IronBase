@@ -3,17 +3,68 @@
 //! This module defines the configuration structures for vector indexes,
 //! including HNSW parameters and distance metrics.
 
+use crate::aggregation::memory_info::get_available_memory_bytes;
 use crate::log_warn;
 use serde::{Deserialize, Serialize};
 
 /// Maximum supported vector dimension
 pub const MAX_VECTOR_DIM: usize = 4096;
 
-/// Default maximum vectors per index
+/// Default maximum vectors per index.
+///
+/// Doubles as the "auto" sentinel: a config whose `max_vectors` equals this
+/// value is resolved at runtime to a RAM-derived ceiling (see
+/// [`VectorIndexConfig::resolve_max_vectors`]). The fixed 100K cap used to
+/// silently drop every vector past 100K on machines with ample RAM — the
+/// 100GB-scale data-loss bug this constant's sentinel role fixes.
 pub const DEFAULT_MAX_VECTORS: usize = 100_000;
 
 /// Warning threshold for vector count
 pub const VECTOR_COUNT_WARNING_THRESHOLD: usize = 1_000_000;
+
+/// Divisor for the RAM-derived vector ceiling: budget `available_bytes / 2`
+/// (50% of currently-available RAM) as the *soft* ceiling for a single vector
+/// index. It is a soft ceiling only — every individual insert is still guarded
+/// by `try_reserve` in `HnswIndex::insert`, so over-committing across several
+/// indexes can never abort the process; it just fails the offending insert with
+/// a typed `OutOfMemory` error.
+const MAX_VECTORS_RAM_DIVISOR: u64 = 2;
+
+/// Resident memory cost of a single indexed vector: the f32 vector itself, the
+/// HNSW neighbour graph (~m*2 usize entries), plus ID-string/HashMap overhead.
+/// Single source of truth shared by [`VectorIndexConfig::estimate_memory_bytes`]
+/// and the RAM-derived ceiling ([`max_vectors_for_budget`]).
+fn per_vector_bytes(dim: usize, m: usize) -> usize {
+    dim * 4 + m * 2 * 8 + 64
+}
+
+/// Pure RAM-budget arithmetic for the vector-count ceiling, factored out of
+/// [`calculate_max_vectors`] so it is unit-testable without reading system
+/// memory. `available_bytes` is the live "available RAM" figure; `dim`/`m`
+/// give the per-vector cost via [`per_vector_bytes`].
+///
+/// The result is clamped to never drop below [`DEFAULT_MAX_VECTORS`]: the
+/// RAM-derived limit only ever *raises* the legacy 100K cap, never lowers it,
+/// so a small box keeps exactly the old behaviour (no regression).
+fn max_vectors_for_budget(available_bytes: u64, dim: usize, m: usize) -> usize {
+    let per_vector = per_vector_bytes(dim, m).max(1) as u64;
+    let budget = available_bytes / MAX_VECTORS_RAM_DIVISOR;
+    ((budget / per_vector) as usize).max(DEFAULT_MAX_VECTORS)
+}
+
+/// RAM-derived maximum vector count for an index of dimension `dim` and graph
+/// fan-out `m`, mirroring `index::traits::calculate_lazy_threshold()`.
+///
+/// Replaces the fixed [`DEFAULT_MAX_VECTORS`] cap, which silently dropped
+/// vectors past 100K on machines with ample RAM. Falls back to
+/// [`DEFAULT_MAX_VECTORS`] when system memory is undetectable (e.g. Windows),
+/// preserving the legacy behaviour there.
+pub fn calculate_max_vectors(dim: usize, m: usize) -> usize {
+    match get_available_memory_bytes() {
+        Some(bytes) => max_vectors_for_budget(bytes, dim, m),
+        None => DEFAULT_MAX_VECTORS,
+    }
+}
 
 /// Distance metric for vector similarity
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -136,6 +187,27 @@ impl VectorIndexConfig {
         self
     }
 
+    /// Resolve the effective vector-count ceiling for this config.
+    ///
+    /// A `max_vectors` left at the default ([`DEFAULT_MAX_VECTORS`]) is treated
+    /// as an "auto" sentinel and resolved to a RAM-derived ceiling via
+    /// [`calculate_max_vectors`]; any explicit non-default value is honoured
+    /// verbatim. The resolved value is never persisted (see
+    /// `HnswIndex::effective_max_vectors`), so a DB created on a large box and
+    /// reopened on a small one re-derives the ceiling for the current machine.
+    ///
+    /// Edge case: an *explicit* `max_vectors == DEFAULT_MAX_VECTORS` is
+    /// indistinguishable from the default and is therefore also auto-resolved
+    /// (yielding a value >= 100K). Callers wanting a hard 100K cap should pass a
+    /// nearby value (e.g. 100_001).
+    pub fn resolve_max_vectors(&self) -> usize {
+        if self.max_vectors == DEFAULT_MAX_VECTORS {
+            calculate_max_vectors(self.dim, self.m)
+        } else {
+            self.max_vectors
+        }
+    }
+
     /// Set the distance metric
     pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
         self.metric = metric;
@@ -195,16 +267,11 @@ impl VectorIndexConfig {
         Ok(())
     }
 
-    /// Estimate memory usage in bytes for the given vector count
+    /// Estimate memory usage in bytes for the given vector count.
+    /// Per-vector cost comes from the shared [`per_vector_bytes`] helper (f32
+    /// vector + neighbour graph + ID/HashMap overhead).
     pub fn estimate_memory_bytes(&self, vector_count: usize) -> usize {
-        // Per vector: dim * 4 bytes (f32)
-        // Per node: ~M * 2 * 8 bytes for neighbor lists (average)
-        // Plus overhead for HashMap, etc.
-        let vector_bytes = vector_count * self.dim * 4;
-        let graph_bytes = vector_count * self.m * 2 * 8;
-        let overhead = vector_count * 64; // ID strings, etc.
-
-        vector_bytes + graph_bytes + overhead
+        vector_count * per_vector_bytes(self.dim, self.m)
     }
 }
 
@@ -367,6 +434,43 @@ mod tests {
         //                  ≈ 152 MB
         assert!(mem > 100_000_000); // > 100 MB
         assert!(mem < 200_000_000); // < 200 MB
+    }
+
+    #[test]
+    fn test_max_vectors_for_budget_scales_above_legacy_cap() {
+        // 8 GB available, BGE-M3 dim=1024, m=16: budget = 4 GB, per-vector ~4.4 KB
+        // => ~950K, comfortably above the legacy 100K cap.
+        let n = max_vectors_for_budget(8 * 1024 * 1024 * 1024, 1024, 16);
+        assert!(
+            n > DEFAULT_MAX_VECTORS,
+            "8GB box should raise the cap well above 100K, got {n}"
+        );
+        // Prod docs.mlite (~119K vectors) must fit on a modest 4 GB-available box.
+        let prod = max_vectors_for_budget(4 * 1024 * 1024 * 1024, 1024, 16);
+        assert!(
+            prod > 119_000,
+            "4GB box must cover prod's ~119K, got {prod}"
+        );
+    }
+
+    #[test]
+    fn test_max_vectors_for_budget_never_below_legacy_floor() {
+        // Tiny RAM must NOT lower the ceiling below the legacy 100K (no regression).
+        let n = max_vectors_for_budget(128 * 1024 * 1024, 1024, 16);
+        assert_eq!(n, DEFAULT_MAX_VECTORS, "tiny RAM clamps to the 100K floor");
+        // Pathological per-vector cost (huge dim) also stays at the floor.
+        let n2 = max_vectors_for_budget(256 * 1024 * 1024, 4096, 48);
+        assert_eq!(n2, DEFAULT_MAX_VECTORS);
+    }
+
+    #[test]
+    fn test_resolve_max_vectors_sentinel_vs_explicit() {
+        // Default (sentinel) => auto-resolved, always >= the legacy floor.
+        let auto = VectorIndexConfig::new(1024);
+        assert!(auto.resolve_max_vectors() >= DEFAULT_MAX_VECTORS);
+        // Explicit non-default => honoured verbatim.
+        let explicit = VectorIndexConfig::new(1024).with_max_vectors(42);
+        assert_eq!(explicit.resolve_max_vectors(), 42);
     }
 
     #[test]
