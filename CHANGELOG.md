@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — compaction snapshot no longer deep-clones the catalog under the write lock (mcp-server v1.0.521, core v0.3.327)
+
+Scalability audit item **P0-1** (100GB+ roadmap). `StorageEngine.collections` is now held
+behind an `Arc<HashMap<…>>` so the catalog can be snapshotted copy-on-write.
+
+- **`compact_prepare` (Phase A) took an O(N) deep clone of the entire collection catalog
+  under the global `storage.write()` lock.** On a large database the `document_catalog`
+  (`HashMap<DocumentId,u64>`) + `document_order` of every collection is tens of millions of
+  entries (multi-GB); cloning it while holding the write lock stalled **all** writes for
+  seconds at the start of every compaction. Now Phase A takes an O(1) `Arc::clone` snapshot and
+  releases the lock immediately. The frozen snapshot drives the lock-free Phase-B scan and the
+  Phase-C catch-up diff exactly as before. (`storage/compaction.rs`, `database/maintenance.rs`)
+- **Copy-on-write semantics.** All catalog mutations go through a new private
+  `StorageEngine::collections_mut()` (`Arc::make_mut`). While a compaction snapshot is alive,
+  the *first* concurrent write deep-clones the catalog once; every other write is O(1). An
+  idle or read-only compaction pays **zero** clones. Worst case is therefore one deferred clone
+  borne by a single writer, versus the previous unconditional clone under the lock. Reads are
+  unchanged (via `Deref`); the public API (`collections_ref`, `get_collection_meta_mut`, …) is
+  untouched. (`storage/mod.rs`, `storage/metadata.rs`)
+- Regression-guarded by `compact_prepare_snapshot_is_cow_not_deep_clone` (asserts `Arc::ptr_eq`
+  before the first mutation and divergence after) plus the full storage + compaction suites.
+
 ### Fixed — checkpoint/compact durability regressions from PR #89 (mcp-server v1.0.520, core v0.3.326)
 
 Three correctness regressions introduced by the scalability batch-1 split (PR #89, v1.0.519),
