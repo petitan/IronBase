@@ -226,7 +226,7 @@ pub use index_ops::IndexStatisticsInfo;
 // Public exports for Query Executor
 pub use query_executor::{
     compare_docs_by_sort, topk_documents, ExecutionMethod, ExecutionStats, QueryOptions,
-    QueryResult, SortDirection,
+    QueryResult, SortDirection, TopKHeap,
 };
 
 pub(crate) use self::constraints::BatchConstraintValidator;
@@ -980,6 +980,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Phase 1: Build execution context (all setup logic centralized)
         let ctx = QueryExecutionContext::from_options(&options);
 
+        // Reject invalid sort directions up front, on EVERY sort path. The top-k
+        // heap path and the index-sorted path bypass apply_sort (which used to be
+        // the only validator), so validation must live here, before the split.
+        if let Some(ref sort_spec) = ctx.sort_spec {
+            crate::find_options::validate_sort_directions(sort_spec)?;
+        }
+
         // Phase 2: Collect document IDs (may use index for sorting)
         // Pass original skip/limit for index-based sort optimization (early termination)
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
@@ -1008,19 +1015,54 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             );
         }
 
-        // Load documents with progress logging for very large sets
-        // Use try_reserve to detect OOM before it happens
-        let mut docs = Vec::new();
-        docs.try_reserve(doc_count).map_err(|e| {
-            IronBaseError::InvalidQuery(format!(
-                "Out of memory: cannot allocate space for {} documents ({}). \
-                Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Use find_streaming() for large results.",
-                doc_count, e
-            ))
-        })?;
+        // Top-K streaming (P1-5): when an in-memory sort is required AND the user
+        // gave a positive limit, stream the scan straight into an O(k) heap
+        // (k = skip + limit) instead of materializing every matched document.
+        // Without this a 50M-row unindexed sort+limit allocates O(n) below before
+        // truncating. When the index already sorted for us
+        // (needs_memory_sort == false) the doc_ids are pre-paginated, so the plain
+        // Vec path is both correct and cheap and we keep it.
+        let mut topk_heap = match (ctx.needs_memory_sort(index_sorted), ctx.original_limit) {
+            (true, Some(limit)) if limit > 0 => {
+                let sort = ctx
+                    .sort_spec
+                    .as_ref()
+                    .expect("needs_memory_sort() is only true when a sort spec is present");
+                Some(TopKHeap::new(ctx.original_skip, limit, sort))
+            }
+            _ => None,
+        };
 
-        // Response size tracking for OOM protection
-        let max_response_bytes = ctx.max_response_bytes;
+        // Load documents with progress logging for very large sets.
+        // Use try_reserve to detect OOM before it happens. The top-k path bounds
+        // memory with the heap, so it must NOT pre-allocate O(n) for the Vec here.
+        let mut docs: Vec<Value> = Vec::new();
+        if topk_heap.is_none() {
+            docs.try_reserve(doc_count).map_err(|e| {
+                IronBaseError::InvalidQuery(format!(
+                    "Out of memory: cannot allocate space for {} documents ({}). \
+                    Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Use find_streaming() for large results.",
+                    doc_count, e
+                ))
+            })?;
+        }
+
+        // Response size tracking for OOM protection.
+        //
+        // P1-5 guard: a full in-memory sort with NO limit and NO explicit response
+        // cap would materialize every matched document — on a large unindexed sort
+        // that means OOM. In that case apply an implicit RAM-derived cap (same basis
+        // as FindOptions::with_safe_defaults, find_options.rs) so the per-doc size
+        // guard below turns the OOM into a typed, actionable error instead. The
+        // top-k path bounds memory by itself, and limit-only / index-sorted paths
+        // don't need it.
+        let max_response_bytes = match ctx.max_response_bytes {
+            Some(explicit) => Some(explicit),
+            None if topk_heap.is_none() && ctx.needs_memory_sort(index_sorted) => {
+                Some(crate::find_options::calculate_safe_response_limit())
+            }
+            None => None,
+        };
         let mut total_response_bytes: usize = 0;
 
         // Early projection optimization:
@@ -1091,25 +1133,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     doc
                 };
 
-                // Track response size if limit is set
-                // NOTE: With early projection, this checks the PROJECTED size (accurate)
-                // Without early projection, this checks the FULL document size
-                if let Some(max_bytes) = max_response_bytes {
-                    let doc_size = crate::find_options::estimate_json_size(&doc);
-                    if total_response_bytes.saturating_add(doc_size) > max_bytes {
-                        return Err(IronBaseError::InvalidQuery(format!(
-                            "Response size limit exceeded: loaded {} documents ({} bytes), \
-                            next document would exceed {} byte limit. \
-                            Solutions: 1) Add 'limit' to reduce results, \
-                            2) Use 'projection' to exclude large fields, \
-                            3) Use find_streaming() for large results.",
-                            loaded, total_response_bytes, max_bytes
-                        )));
+                if let Some(ref mut heap) = topk_heap {
+                    // Top-K path: the heap retains only k = skip + limit docs, so
+                    // memory stays bounded no matter how many match. The response-
+                    // size guard is applied to the final ≤limit result after the
+                    // scan (Phase 4), not per scanned doc.
+                    heap.push(doc);
+                } else {
+                    // Track response size if limit is set
+                    // NOTE: With early projection, this checks the PROJECTED size (accurate)
+                    // Without early projection, this checks the FULL document size
+                    if let Some(max_bytes) = max_response_bytes {
+                        let doc_size = crate::find_options::estimate_json_size(&doc);
+                        if total_response_bytes.saturating_add(doc_size) > max_bytes {
+                            return Err(IronBaseError::InvalidQuery(format!(
+                                "Response size limit exceeded: loaded {} documents ({} bytes), \
+                                next document would exceed {} byte limit. \
+                                Solutions: 1) Add 'limit' to reduce results, \
+                                2) Use 'projection' to exclude large fields, \
+                                3) Use find_streaming() for large results.",
+                                loaded, total_response_bytes, max_bytes
+                            )));
+                        }
+                        total_response_bytes += doc_size;
                     }
-                    total_response_bytes += doc_size;
-                }
 
-                docs.push(doc);
+                    docs.push(doc);
+                }
                 loaded += 1;
                 // Progress logging every 10,000 documents
                 if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
@@ -1125,20 +1175,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Phase 4: Post-processing pipeline
-        // 4a. Apply sort if needed (index didn't sort for us)
-        if ctx.needs_memory_sort(index_sorted) {
-            if let Some(ref sort_spec) = ctx.sort_spec {
-                crate::find_options::apply_sort(&mut docs, sort_spec)?;
+        let docs = if let Some(heap) = topk_heap {
+            // 4-topk. The heap already produced a fully sorted result with skip +
+            // limit applied, so the regular in-memory sort (4a) and pagination
+            // (4b) are skipped. Apply the response-size guard to the bounded
+            // ≤limit result here (it was deferred during the scan).
+            let docs = heap.into_sorted();
+            if let Some(max_bytes) = max_response_bytes {
+                let mut total = 0usize;
+                for d in &docs {
+                    total = total.saturating_add(crate::find_options::estimate_json_size(d));
+                    if total > max_bytes {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Response size limit exceeded: top-{} result exceeds {} byte limit \
+                            ({}+ bytes). Solutions: 1) Reduce 'limit', \
+                            2) Use 'projection' to exclude large fields.",
+                            docs.len(),
+                            max_bytes,
+                            total
+                        )));
+                    }
+                }
             }
-        }
-
-        // 4b. Apply pagination after sorting
-        // SKIP if index already applied skip/limit (index_sorted + empty query)
-        let docs = if index_sorted && Self::query_matches_all(query_json) {
-            // Index-based sort already applied skip/limit - don't apply again
             docs
         } else {
-            ctx.apply_post_sort_pagination(docs)
+            // 4a. Apply sort if needed (index didn't sort for us)
+            if ctx.needs_memory_sort(index_sorted) {
+                if let Some(ref sort_spec) = ctx.sort_spec {
+                    crate::find_options::apply_sort(&mut docs, sort_spec)?;
+                }
+            }
+
+            // 4b. Apply pagination after sorting
+            // SKIP if index already applied skip/limit (index_sorted + empty query)
+            if index_sorted && Self::query_matches_all(query_json) {
+                // Index-based sort already applied skip/limit - don't apply again
+                docs
+            } else {
+                ctx.apply_post_sort_pagination(docs)
+            }
         };
 
         // 4c. Apply projection (skip if already applied early)

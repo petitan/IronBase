@@ -4,6 +4,7 @@
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::{
     compare_values as compare_values_core, delete_nested_value, get_nested_value, set_nested_value,
+    type_priority,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -417,6 +418,26 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Resul
     }
 }
 
+/// Validate sort directions (MongoDB only accepts 1 or -1).
+///
+/// Path-independent: the top-k heap path and the index-sorted path do NOT call
+/// `apply_sort`, so every `find` entry point must call this up front to reject the
+/// same invalid input regardless of which sort executor ends up running.
+///
+/// # Errors
+/// Returns `InvalidQuery` if any sort direction is not 1 (ascending) or -1 (descending).
+pub fn validate_sort_directions(sort: &[(String, i32)]) -> Result<()> {
+    for (field, direction) in sort {
+        if *direction != 1 && *direction != -1 {
+            return Err(IronBaseError::InvalidQuery(format!(
+                "Invalid sort direction {} for field '{}'. Must be 1 (ascending) or -1 (descending).",
+                direction, field
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Apply sort to documents
 /// Supports dot notation for nested fields (e.g., "address.city")
 ///
@@ -427,15 +448,7 @@ pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) -> Result<()> {
         return Ok(());
     }
 
-    // Validate sort directions (MongoDB only accepts 1 or -1)
-    for (field, direction) in sort {
-        if *direction != 1 && *direction != -1 {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Invalid sort direction {} for field '{}'. Must be 1 (ascending) or -1 (descending).",
-                direction, field
-            )));
-        }
-    }
+    validate_sort_directions(sort)?;
 
     docs.sort_by(|a, b| {
         for (field, direction) in sort {
@@ -473,18 +486,6 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
                 type_priority(a_val).cmp(&type_priority(b_val))
             })
         }
-    }
-}
-
-/// Get type priority for mixed-type sorting
-fn type_priority(val: &Value) -> u8 {
-    match val {
-        Value::Null => 0,
-        Value::Number(_) => 1,
-        Value::String(_) => 2,
-        Value::Bool(_) => 3,
-        Value::Object(_) => 4,
-        Value::Array(_) => 5,
     }
 }
 
