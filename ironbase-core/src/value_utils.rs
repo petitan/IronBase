@@ -441,6 +441,25 @@ pub fn compare_values_with_none(a: Option<&Value>, b: Option<&Value>) -> Orderin
     }
 }
 
+/// Type-ordering rank for mixed-type sorting.
+///
+/// When two values have incompatible types (`compare_values` returns `None`),
+/// sorting falls back to this stable per-type rank to keep a total order.
+/// Shared by the `find` in-memory sort (`find_options::apply_sort`) and the
+/// `find` top-k heap (`query_executor::compare_docs_by_sort`) so both rank
+/// mixed-type fields identically (P1-5: the heap's eviction decision must match
+/// the full sort, or the top-k set itself would differ).
+pub fn type_priority(val: &Value) -> u8 {
+    match val {
+        Value::Null => 0,
+        Value::Number(_) => 1,
+        Value::String(_) => 2,
+        Value::Bool(_) => 3,
+        Value::Object(_) => 4,
+        Value::Array(_) => 5,
+    }
+}
+
 /// Creates a fast hash for a JSON Value using ahash.
 ///
 /// This is much faster than canonical_json_string for deduplication,

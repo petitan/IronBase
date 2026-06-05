@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `find` sort+limit uses an O(k) top-k heap, no longer materializes every matched doc before truncating (mcp-server v1.0.523, core v0.3.329)
+
+Scalability audit item **P1-5** (100GB+ roadmap). When a `find` has a sort that no single-field
+index can satisfy (a multi-field sort, or a single-field sort with no index on that field),
+`QueryExecutionContext` defers the limit (`fetch_limit = None`) and the slow path loaded **every**
+matched document into a `Vec` — `try_reserve(doc_count)` and all — before `apply_sort` sorted the
+whole thing and pagination truncated it to the limit. On a 50M-row unindexed `sort + limit 10`
+that is an O(n) allocation and full sort to return 10 rows. Root cause: there was no top-k path in
+`find` (only aggregation had one).
+
+- **Stream the scan into a bounded heap.** Both find paths — `find_with_options` (the collection
+  slow path) and `find_with_hint_ext` (the index-hint path) — now detect "in-memory sort required
+  AND positive limit" and push documents straight into an O(k) `TopKHeap` (k = skip + limit)
+  instead of the Vec. The heap keeps only the k smallest-by-sort docs seen so far, so memory is
+  O(k) regardless of how many match. The `try_reserve(doc_count)` O(n) pre-allocation is skipped
+  on this path. The heap allocates lazily (not `with_capacity(skip+limit)`), so deep pagination
+  over few matches stays O(retained) and an extreme `skip` can't trigger a capacity-overflow panic.
+  When an index already sorted+paginated for us, the cheap pre-paginated Vec path is unchanged.
+  (`collection_core/mod.rs`, `collection_core/index_ops.rs`)
+- **Reused, not reinvented.** The existing `topk_documents_streaming` heap logic
+  (`query_executor.rs`) was extracted into a reusable `TopKHeap { new, push, into_sorted }` so the
+  fallible document-loading loop (which returns `Result`) can drive it directly; the streaming
+  function now wraps the same struct. (`query_executor.rs`)
+- **Comparator unified to prevent a sort regression.** The heap ranked mixed-type fields with an
+  `Ordering::Equal` fallback while `apply_sort` used a stable `type_priority` fallback — so on a
+  mixed-type sort field the heap could evict the *wrong* documents and the top-k set would differ
+  from the full sort. `compare_docs_by_sort` now uses the identical `type_priority` fallback
+  (shared via `value_utils::type_priority`); top-k results are now byte-for-byte equal to the
+  full-sort prefix on any field, mixed types included. (`query_executor.rs`, `value_utils.rs`,
+  `find_options.rs`)
+- **Implicit RAM-derived cap for an uncapped full sort.** A required in-memory sort with **no
+  limit and no explicit `max_response_bytes`** would still materialize everything. Such a query
+  now applies an implicit RAM-derived response cap (the `with_safe_defaults` basis,
+  `calculate_safe_response_limit`), so the existing per-doc size guard turns a would-be OOM into a
+  typed, actionable error instead. On the top-k path the response-size guard applies to the
+  bounded ≤limit result rather than the whole scan. (`collection_core/mod.rs`,
+  `collection_core/index_ops.rs`)
+- **Stable top-k on tied keys.** The heap carries a scan-sequence tiebreaker, so on tied sort
+  keys it retains and orders the same documents as the old stable full sort + truncate (first-k by
+  scan order) — byte-for-byte. Without it the `BinaryHeap` could evict an arbitrary tied document
+  and return a different, run-to-run nondeterministic page. (`query_executor.rs`)
+- **Sort-direction validation is path-independent.** `validate_sort_directions` now runs at every
+  find entry point, so an invalid direction (e.g. `2`) is rejected whether or not a limit is
+  present. Previously only the full-sort path called `apply_sort`'s validator, so the top-k and
+  index-sorted paths silently accepted (and mis-sorted) invalid directions. (`find_options.rs`,
+  `collection_core/mod.rs`, `collection_core/index_ops.rs`)
+
 ### Fixed — vector index ceiling is RAM-derived, no longer a fixed 100K cap that could silently lose data (mcp-server v1.0.522, core v0.3.328)
 
 Scalability audit item **P0-2** (100GB+ roadmap). The hard `DEFAULT_MAX_VECTORS = 100_000`

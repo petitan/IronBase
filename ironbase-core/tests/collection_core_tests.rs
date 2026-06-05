@@ -1264,6 +1264,385 @@ fn test_index_based_sort_for_empty_query() {
     assert_eq!(results[2]["timestamp"], 12);
 }
 
+/// P1-5: Top-K streaming for find sort+limit WITHOUT a usable sort index.
+///
+/// Mirrors `test_index_based_sort_for_empty_query` but creates NO index on the
+/// sort field, so `needs_memory_sort` is true and the new O(k) top-k heap path
+/// is exercised (collection scan → heap). Results MUST match the index path.
+#[test]
+fn test_find_topk_no_index_single_field_sort() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    // NO index on "timestamp" -> collection scan + in-memory top-k.
+    // Zigzag covers every integer 0..1000 exactly once.
+    for i in 0..1000i64 {
+        let ts = if i % 2 == 0 { i } else { 1000 - i };
+        let mut doc = HashMap::new();
+        doc.insert("timestamp".to_string(), json!(ts));
+        doc.insert("data".to_string(), json!(format!("doc_{}", i)));
+        db.insert_one("test", doc).unwrap();
+    }
+
+    // Ascending top-5
+    let results = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("timestamp".to_string(), 1)])
+                .with_limit(5),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["timestamp"], json!(i as i64));
+    }
+
+    // Descending top-5
+    let results = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("timestamp".to_string(), -1)])
+                .with_limit(5),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["timestamp"], json!(999 - i as i64));
+    }
+
+    // skip + limit
+    let results = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("timestamp".to_string(), 1)])
+                .with_skip(10)
+                .with_limit(5),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r["timestamp"], json!(10 + i as i64));
+    }
+}
+
+/// P1-5: A multi-field sort can never be satisfied by a single-field index, so
+/// it always takes the in-memory top-k heap path when a limit is present.
+/// Verifies ordering AND tie-breaking on the second field.
+#[test]
+fn test_find_topk_multi_field_sort() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    let data = [
+        (2, 10),
+        (1, 5),
+        (2, 30),
+        (1, 99),
+        (3, 1),
+        (2, 20),
+        (1, 50),
+        (3, 7),
+        (2, 25),
+        (1, 1),
+    ];
+    for (g, r) in data {
+        let mut doc = HashMap::new();
+        doc.insert("group".to_string(), json!(g));
+        doc.insert("rank".to_string(), json!(r));
+        db.insert_one("test", doc).unwrap();
+    }
+
+    // group ASC, then rank DESC. group 1 is smallest → top-4 are all group 1,
+    // ranks 99, 50, 5, 1.
+    let results = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("group".to_string(), 1), ("rank".to_string(), -1)])
+                .with_limit(4),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 4);
+    for r in &results {
+        assert_eq!(r["group"], json!(1));
+    }
+    assert_eq!(results[0]["rank"], json!(99));
+    assert_eq!(results[1]["rank"], json!(50));
+    assert_eq!(results[2]["rank"], json!(5));
+    assert_eq!(results[3]["rank"], json!(1));
+}
+
+/// P1-5 core invariant: the top-k path must produce EXACTLY the same result as
+/// the full-sort path truncated to skip+limit. Runs both code paths on the same
+/// data/query and asserts equality (id tiebreaker makes the order total).
+#[test]
+fn test_find_topk_matches_full_sort_reference() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    for i in 0..500i64 {
+        let v = (i * 7919) % 1000; // spread with collisions
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(v));
+        doc.insert("id".to_string(), json!(i));
+        db.insert_one("test", doc).unwrap();
+    }
+
+    let sort = vec![("v".to_string(), 1), ("id".to_string(), 1)];
+    let skip = 5usize;
+    let limit = 17usize;
+
+    // Reference: full sort (no limit → non-top-k path), then manual skip+take.
+    let full = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new().with_sort(sort.clone()),
+        )
+        .unwrap();
+    let reference: Vec<_> = full.iter().skip(skip).take(limit).cloned().collect();
+
+    // Top-K path (skip + limit → heap).
+    let topk = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(sort)
+                .with_skip(skip)
+                .with_limit(limit),
+        )
+        .unwrap();
+
+    assert_eq!(topk.len(), reference.len());
+    assert_eq!(
+        topk, reference,
+        "top-k result must equal full-sort[skip..skip+limit]"
+    );
+}
+
+/// P1-5 regression guard: on a MIXED-TYPE sort field the heap's comparator must
+/// rank identically to `apply_sort` (type_priority fallback), or the heap would
+/// evict the wrong docs and the top-k set itself would diverge from the full
+/// sort. This test fails on the old `Ordering::Equal` fallback.
+#[test]
+fn test_find_topk_mixed_type_matches_full_sort() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    let vals = [
+        json!(5),
+        json!("apple"),
+        json!(true),
+        json!(null),
+        json!(2),
+        json!("banana"),
+        json!(100),
+        json!(false),
+        json!(1),
+        json!("cherry"),
+    ];
+    for (i, v) in vals.iter().enumerate() {
+        let mut doc = HashMap::new();
+        doc.insert("k".to_string(), v.clone());
+        doc.insert("id".to_string(), json!(i as i64));
+        db.insert_one("test", doc).unwrap();
+    }
+    // A few docs with "k" missing entirely (None sorts before any present value).
+    for i in 100..103i64 {
+        let mut doc = HashMap::new();
+        doc.insert("id".to_string(), json!(i));
+        db.insert_one("test", doc).unwrap();
+    }
+
+    let sort = vec![("k".to_string(), 1), ("id".to_string(), 1)];
+    let full = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new().with_sort(sort.clone()),
+        )
+        .unwrap();
+
+    for limit in [1usize, 3, 7, 13] {
+        let topk = coll
+            .find_with_options(
+                &json!({}),
+                ironbase_core::FindOptions::new()
+                    .with_sort(sort.clone())
+                    .with_limit(limit),
+            )
+            .unwrap();
+        let reference: Vec<_> = full.iter().take(limit).cloned().collect();
+        assert_eq!(
+            topk, reference,
+            "mixed-type top-{} must equal full-sort prefix",
+            limit
+        );
+    }
+}
+
+/// P1-5: the response-size guard still fires on a full (no-limit) in-memory sort.
+/// The guard moved into the non-top-k branch but must stay effective there.
+#[test]
+fn test_find_full_sort_respects_response_limit() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+    for i in 0..2000i64 {
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(i));
+        doc.insert("blob".to_string(), json!("x".repeat(500)));
+        db.insert_one("test", doc).unwrap();
+    }
+    // No limit + tiny explicit cap → must error instead of materializing all.
+    let opts = ironbase_core::FindOptions {
+        sort: Some(vec![("v".to_string(), 1)]),
+        max_response_bytes: Some(50_000), // ~50KB << 2000 * 500B
+        ..Default::default()
+    };
+    assert!(
+        coll.find_with_options(&json!({}), opts).is_err(),
+        "full sort exceeding the response cap must error"
+    );
+}
+
+/// P1-5: with a small limit the top-k path bounds the result, so the SAME tiny
+/// response cap is satisfied — the guard applies to the ≤limit result, not the
+/// whole scan. (On the old materialize-then-truncate path this would also error.)
+#[test]
+fn test_find_topk_within_response_limit() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+    for i in 0..2000i64 {
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(i));
+        doc.insert("blob".to_string(), json!("x".repeat(500)));
+        db.insert_one("test", doc).unwrap();
+    }
+    // Same tiny cap, but limit 5 → top-5 (~2.6KB) fits comfortably.
+    let opts = ironbase_core::FindOptions {
+        sort: Some(vec![("v".to_string(), 1)]),
+        limit: Some(5),
+        max_response_bytes: Some(50_000),
+        ..Default::default()
+    };
+    let results = coll.find_with_options(&json!({}), opts).unwrap();
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0]["v"], json!(0));
+    assert_eq!(results[4]["v"], json!(4));
+}
+
+/// P1-5 review fix #3: the top-k heap is STABLE on tied sort keys — it returns the
+/// same set AND order as the old stable apply_sort+truncate (first-k by scan order
+/// on ties). Before the seq-tiebreaker fix the heap could return a different tied
+/// subset (e.g. {d,b} instead of {d,a}) and nondeterministically.
+#[test]
+fn test_find_topk_stable_on_ties() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+    // Many docs tie on age=5; tag records insertion (scan) order.
+    for (age, tag) in [(5, "a"), (5, "b"), (5, "c"), (1, "d"), (5, "e"), (1, "f")] {
+        let mut doc = HashMap::new();
+        doc.insert("age".to_string(), json!(age));
+        doc.insert("tag".to_string(), json!(tag));
+        db.insert_one("test", doc).unwrap();
+    }
+    let sort = vec![("age".to_string(), 1)];
+    // Reference: full stable sort (no limit → non-top-k path), truncated per limit.
+    let full = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new().with_sort(sort.clone()),
+        )
+        .unwrap();
+    for limit in [1usize, 2, 3, 4, 5, 6] {
+        let topk = coll
+            .find_with_options(
+                &json!({}),
+                ironbase_core::FindOptions::new()
+                    .with_sort(sort.clone())
+                    .with_limit(limit),
+            )
+            .unwrap();
+        let reference: Vec<_> = full.iter().take(limit).cloned().collect();
+        assert_eq!(
+            topk, reference,
+            "top-{} must equal the stable full-sort prefix on ties",
+            limit
+        );
+    }
+}
+
+/// P1-5 review fix #2: an invalid sort direction is rejected on EVERY path — both
+/// the top-k path (with a limit) and the full-sort path (no limit). Previously the
+/// top-k path bypassed apply_sort and silently treated direction=2 as ascending.
+#[test]
+fn test_find_invalid_sort_direction_rejected_all_paths() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+    for i in 0..10i64 {
+        let mut doc = HashMap::new();
+        doc.insert("age".to_string(), json!(i));
+        db.insert_one("test", doc).unwrap();
+    }
+    // direction 2 is invalid — must error WITH a limit (top-k path) ...
+    assert!(
+        coll.find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("age".to_string(), 2)])
+                .with_limit(3),
+        )
+        .is_err(),
+        "invalid direction must error on the top-k path"
+    );
+    // ... and WITHOUT a limit (full-sort path).
+    assert!(
+        coll.find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new().with_sort(vec![("age".to_string(), 2)]),
+        )
+        .is_err(),
+        "invalid direction must error on the full-sort path"
+    );
+    // Valid directions still succeed on the top-k path.
+    assert!(coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("age".to_string(), -1)])
+                .with_limit(3),
+        )
+        .is_ok());
+}
+
+/// P1-5 review fix #1: deep-pagination skip over few matches must NOT eagerly
+/// allocate O(skip) — the heap grows lazily to the retained docs. An extreme skip
+/// (which the old with_capacity(skip+limit) turned into a capacity-overflow panic)
+/// must complete and return the correct empty page.
+#[test]
+fn test_find_topk_extreme_skip_no_panic() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+    for i in 0..50i64 {
+        let mut doc = HashMap::new();
+        doc.insert("v".to_string(), json!(i));
+        db.insert_one("test", doc).unwrap();
+    }
+    // skip = usize::MAX would panic under BinaryHeap::with_capacity(usize::MAX);
+    // with the lazy heap it just yields an empty page (only 50 docs exist).
+    let results = coll
+        .find_with_options(
+            &json!({}),
+            ironbase_core::FindOptions::new()
+                .with_sort(vec![("v".to_string(), 1)])
+                .with_skip(usize::MAX)
+                .with_limit(10),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 0);
+}
+
 /// FIX #23: Performance test for DESC sort with early termination
 /// This should be O(limit) not O(N) when using index-based sorting
 #[test]
