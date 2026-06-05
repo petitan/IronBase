@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — fulltext search top-k unified into one bounded helper; the OR path no longer full-sorts every match (mcp-server v1.0.524, core v0.3.330)
+
+Scalability audit item **P1-4** (100GB+ roadmap). The audit's billing was largely already
+addressed: the smallest-first AND-merge it called for already existed in `search_and_with_ctx`
+(rarest-token-first intersection, scoring only the intersection candidates, plus a Phase-4 top-k
+heap), and the "candidate cap on `doc_scores`" is not applicable — the BM25 score of a doc is the
+sum of its per-token contributions, so every matching doc must be scored (the `doc_scores` /
+`matched` maps are O(N) by nature, as `calculate_candidate_limit`'s own comment notes). The real
+remaining gap was the **OR path** (`search` / `search_with_ctx`, which the `fulltext_search` tool
+uses), which still materialized every scored match into a `Vec` and `sort_unstable_by` + truncated.
+
+- **One bounded top-k helper.** New `FulltextIndex::top_k_scored` selects the best `skip + limit`
+  scored doc_ids via a lazy `BinaryHeap` (no eager `with_capacity(skip+limit)`, mirroring the
+  `find` top-k fix) in O(N log k) time / O(k) memory, ranked score-descending then doc_id-ascending
+  (NaN scores last). All four search paths — `search`, `search_with_ctx`,
+  `search_for_doc_ids_with_ctx`, and the AND `search_and_with_ctx` Phase-4 — now use it, so the
+  full-result `Vec` + O(N log N) sort is gone from the OR paths. (`fulltext.rs`)
+- **Unified tie ordering.** The AND path's old `(OrderedScore, DocumentId)`-reverse heap ordered
+  ties doc_id-*descending*, diverging from the OR path's doc_id-*ascending*. All paths now share
+  `top_k_scored`'s doc_id-ascending tie-break — one deterministic ordering across fulltext search.
+- **Dead code removed.** `compare_search_results` is gone; the heap key reproduces its ordering, so
+  there is one top-k implementation instead of three. The `doc_scores` / `matched` maps remain
+  O(N) — that is fundamental to BM25, not debt.
+
 ### Fixed — `find` sort+limit uses an O(k) top-k heap, no longer materializes every matched doc before truncating (mcp-server v1.0.523, core v0.3.329)
 
 Scalability audit item **P1-5** (100GB+ roadmap). When a `find` has a sort that no single-field

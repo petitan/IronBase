@@ -2190,26 +2190,18 @@ impl FulltextIndex {
             return Vec::new();
         }
 
-        let scores = doc_scores;
-
-        // Apply min_score filter
         let min = min_score.unwrap_or(0.0);
 
-        // Sort by score descending
-        let mut results: Vec<_> = scores
+        // Bounded top-k (O(k) memory) instead of materializing + sorting every
+        // matched doc. matched_tokens is attached only to the surviving top-k.
+        Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
-            .filter(|(_, score)| *score >= min)
             .map(|(doc_id, score)| FtsSearchResult {
                 matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
                 doc_id,
                 score,
             })
-            .collect();
-
-        results.sort_unstable_by(Self::compare_search_results);
-
-        // Apply skip and limit
-        results.into_iter().skip(skip).take(limit).collect()
+            .collect()
     }
 
     /// Tokenize query using this index's config (accent folding + stop words + stemming).
@@ -2302,19 +2294,16 @@ impl FulltextIndex {
 
         let min = min_score.unwrap_or(0.0);
 
-        let mut results: Vec<_> = doc_scores
+        // Bounded top-k (O(k) memory) instead of materializing + sorting every
+        // matched doc. matched_tokens is attached only to the surviving top-k.
+        Ok(Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
-            .filter(|(_, score)| *score >= min)
             .map(|(doc_id, score)| FtsSearchResult {
                 matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
                 doc_id,
                 score,
             })
-            .collect();
-
-        results.sort_unstable_by(Self::compare_search_results);
-
-        Ok(results.into_iter().skip(skip).take(limit).collect())
+            .collect())
     }
 
     /// Fulltext search pre-filtered by target doc_ids using chunk_doc_mapping.
@@ -2407,19 +2396,16 @@ impl FulltextIndex {
 
         let min = min_score.unwrap_or(0.0);
 
-        let mut results: Vec<_> = doc_scores
+        // Bounded top-k (O(k) memory) instead of materializing + sorting every
+        // matched doc. matched_tokens is attached only to the surviving top-k.
+        Ok(Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
-            .filter(|(_, score)| *score >= min)
             .map(|(doc_id, score)| FtsSearchResult {
                 matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
                 doc_id,
                 score,
             })
-            .collect();
-
-        results.sort_unstable_by(Self::compare_search_results);
-
-        Ok(results.into_iter().skip(skip).take(limit).collect())
+            .collect())
     }
 
     /// AND-optimized fulltext search: intersects posting lists before scoring.
@@ -2520,69 +2506,63 @@ impl FulltextIndex {
 
         let min = min_score.unwrap_or(0.0);
         let all_tokens: Vec<String> = query_tokens;
-        let effective_limit = skip + limit;
 
-        // Phase 4: Top-K selection with BinaryHeap (O(N log k) instead of O(N log N))
-        // Heap stores (Reverse(score), doc_id) — min-heap by score so we can evict smallest
-        let mut heap: BinaryHeap<std::cmp::Reverse<(OrderedScore, DocumentId)>> =
-            BinaryHeap::with_capacity(effective_limit + 1);
+        // Phase 4: bounded top-k, shared with the OR paths via top_k_scored for
+        // identical tie ordering (score desc, doc_id asc) and memory bounds. Every
+        // AND-qualified doc matches all query tokens, so matched_tokens = all_tokens.
+        Ok(Self::top_k_scored(doc_scores, skip, limit, min)
+            .into_iter()
+            .map(|(doc_id, score)| FtsSearchResult {
+                matched_tokens: all_tokens.clone(),
+                doc_id,
+                score,
+            })
+            .collect())
+    }
 
-        for (doc_id, score) in &doc_scores {
-            if *score < min {
+    /// Bounded top-k selection over scored doc_ids — O(N log k) time, O(k) memory.
+    ///
+    /// Returns the best `skip + limit` results ranked by score descending, then
+    /// doc_id ascending on ties (NaN scores sorted last via `OrderedScore`), with
+    /// `skip` applied. Shared by every search path (OR `search`/`search_with_ctx`
+    /// and AND `search_and_with_ctx`) so they bound memory identically and agree on
+    /// tie ordering — no full-result `Vec` + O(N log N) sort.
+    ///
+    /// The heap grows lazily (no eager `with_capacity(skip+limit)`, which could
+    /// over-allocate or panic on a pathological skip — see the `find` top-k fix).
+    fn top_k_scored<I>(scored: I, skip: usize, limit: usize, min: f64) -> Vec<(DocumentId, f64)>
+    where
+        I: IntoIterator<Item = (DocumentId, f64)>,
+    {
+        use std::cmp::Reverse;
+        let k = skip.saturating_add(limit);
+        if k == 0 {
+            return Vec::new();
+        }
+        // Max-heap keyed by (Reverse<score>, doc_id): the top is the WORST of the
+        // current best-k (lowest score, or highest doc_id on a tie) and is evicted
+        // first. A smaller key = a better result, so `into_sorted_vec` (ascending)
+        // yields best-first = score desc, doc_id asc (NaN scores sort last).
+        let mut heap: BinaryHeap<(Reverse<OrderedScore>, DocumentId)> = BinaryHeap::new();
+        for (doc_id, score) in scored {
+            if score < min {
                 continue;
             }
-            let ordered = OrderedScore(*score);
-            if heap.len() < effective_limit {
-                heap.push(std::cmp::Reverse((ordered, doc_id.clone())));
-            } else if let Some(&std::cmp::Reverse((ref min_in_heap, _))) = heap.peek() {
-                if ordered > *min_in_heap {
+            let key = (Reverse(OrderedScore(score)), doc_id);
+            if heap.len() < k {
+                heap.push(key);
+            } else if let Some(top) = heap.peek() {
+                if key < *top {
                     heap.pop();
-                    heap.push(std::cmp::Reverse((ordered, doc_id.clone())));
+                    heap.push(key);
                 }
             }
         }
-
-        // Extract results from heap in descending score order
-        let mut results: Vec<FtsSearchResult> = heap
-            .into_sorted_vec()
+        heap.into_sorted_vec()
             .into_iter()
-            .map(
-                |std::cmp::Reverse((ordered_score, doc_id))| FtsSearchResult {
-                    matched_tokens: all_tokens.clone(),
-                    doc_id,
-                    score: ordered_score.0,
-                },
-            )
-            .collect();
-
-        // Reverse because into_sorted_vec gives ascending order
-        results.reverse();
-
-        // Apply skip
-        Ok(results.into_iter().skip(skip).take(limit).collect())
-    }
-
-    /// Compare two search results for sorting (score descending, doc_id ascending)
-    ///
-    /// Handles NaN scores by treating them as lowest relevance (sorted to end).
-    /// This ensures deterministic ordering even with corrupted/invalid scores.
-    fn compare_search_results(a: &FtsSearchResult, b: &FtsSearchResult) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-
-        match (a.score.is_nan(), b.score.is_nan()) {
-            // Both NaN: fall back to doc_id ordering
-            (true, true) => a.doc_id.cmp(&b.doc_id),
-            // a is NaN: a goes to end (is "greater" in descending sort)
-            (true, false) => Ordering::Greater,
-            // b is NaN: b goes to end (a is "less" = comes first)
-            (false, true) => Ordering::Less,
-            // Normal comparison: score descending, doc_id ascending as tiebreaker
-            (false, false) => b
-                .score
-                .partial_cmp(&a.score)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.doc_id.cmp(&b.doc_id)),
-        }
+            .skip(skip)
+            .map(|(Reverse(score), doc_id)| (doc_id, score.0))
+            .collect()
     }
 
     /// Check if a document is in the index
@@ -4059,6 +4039,42 @@ mod tests {
         assert_eq!(last2.len(), 2);
 
         // Cleanup
+        let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    /// P1-4: the bounded top-k (top_k_scored) must (a) break score ties
+    /// deterministically by doc_id ascending, and (b) return exactly the full-sort
+    /// prefix for any limit — i.e. the heap changes neither the set nor the order
+    /// vs the old materialize+sort+truncate.
+    #[test]
+    fn test_fulltext_topk_bounded_and_stable_ties() {
+        let options = FtsOptions::new(FtsLanguage::None);
+        let temp_dir = std::env::temp_dir().join("fts_test_topk_ties.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("idx", "content", options, temp_dir.clone()).unwrap();
+
+        // 9 docs with identical content → identical BM25 score → all tie on score.
+        for i in 1..=9 {
+            index.insert(&DocumentId::Int(i), "apple").unwrap();
+        }
+
+        // (a) all-tie top-3 is deterministic, doc_id ascending.
+        let top3 = index.search("apple", 3, 0, None);
+        assert_eq!(top3.len(), 3);
+        assert_eq!(top3[0].doc_id, DocumentId::Int(1));
+        assert_eq!(top3[1].doc_id, DocumentId::Int(2));
+        assert_eq!(top3[2].doc_id, DocumentId::Int(3));
+
+        // (b) bounded top-k == full-sort prefix for every limit.
+        let full = index.search("apple", 100, 0, None);
+        assert_eq!(full.len(), 9);
+        for k in [1usize, 4, 8] {
+            let topk = index.search("apple", k, 0, None);
+            let ref_ids: Vec<_> = full.iter().take(k).map(|r| r.doc_id.clone()).collect();
+            let topk_ids: Vec<_> = topk.iter().map(|r| r.doc_id.clone()).collect();
+            assert_eq!(topk_ids, ref_ids, "top-{} must equal full-sort prefix", k);
+        }
+
         let _ = std::fs::remove_file(&temp_dir);
     }
 
