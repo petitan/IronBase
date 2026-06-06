@@ -73,6 +73,10 @@ pub use fuzzy::{
     FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata, FuzzySearchOptions, FuzzySearchResult,
 };
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
+// Crate-internal query-planner helpers (audit 2026-06-06 fixes) — NOT part of
+// the public crate API. NumericBucketRanges is referenced directly via
+// super::key in btree.rs, so it is not re-exported here.
+pub(crate) use key::{numeric_range_buckets, prefix_scan_upper_bound};
 pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;
 pub use traits::{calculate_lazy_threshold, IndexTrait, LazyLoadable};

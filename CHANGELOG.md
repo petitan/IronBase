@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — query-planner correctness: 11 count/find divergence & incomplete-result bugs (mcp-server v1.0.527, core v0.3.333)
+
+A multi-agent review of the query planner (`ironbase-core/src/query_planner.rs` and its
+consumers `count.rs` / `collection_core/mod.rs` / `cursor.rs` / `index/btree.rs` / `index/key.rs`)
+found and fixed 11 verified bugs. The umbrella cause for most: `count_documents`'s
+fully-covered fast path trusts the index plan **without re-verifying** against the query, while
+`find` always post-filters — so the two silently diverged.
+
+- **`$in` with an object/array element** collapsed to `IndexKey::Null` (the audit #27-A
+  `is_indexable_value` guard existed only for equality). `collect_in_candidates` now skips the
+  candidate so the collection scan does proper deep equality.
+- **`$in` with duplicate values** double-counted on the fast path → planner now dedups keys.
+- **`$and` of two same-field membership ops** (`{$in}∧{$in}`, `{$ne}∧{$ne}`) silently dropped
+  the first via a serde-map overwrite → `resolve_range_conditions` bails out on operator collision.
+- **`query_fully_covered_by_plan`** only checked the field *name*; an operator the plan does not
+  encode (e.g. `{$gte,$ne}`, `{$in,$gte}`, `{$gte,$type}`) was dropped → it now requires the plan
+  to cover **every** operator on the field, else routes through the post-filter path.
+- **Case-insensitive index** was eligible for case-sensitive equality/range/regex selection (its
+  lowercased keys miss uppercase values) → CI indexes are now excluded from CS index selection
+  (usable only in the `(?i)` regex branch).
+- **Regex prefix upper bound** was `prefix + U+10FFFF` *inclusive*, dropping values of the form
+  `prefix + U+10FFFF + …` → now a true half-open `[prefix, successor)` bound.
+- **Non-exact / case-insensitive regex count** used the raw range count (no pattern re-check) →
+  now routed through the index-narrowed post-filter (also makes `explain` honest and uses the
+  index for `^a.*` counts instead of a full scan).
+- **Numeric range over a field mixing integers and floats**: `IndexKey` orders all `Int` below
+  all `Float`, so `[Int(18), Int(65)]` never reached `Float` keys — `find`/`count` silently
+  dropped fractional/`x.0`-float docs. Range scans now cover **both** the Int and Float buckets
+  (`numeric_range_buckets`), in find, count, and the streaming cursor.
+- **Mixed-type range** (`{$gte: 5, $lte: "z"}`) over-counted the fast path → `analyze_range_query_v2`
+  now rejects type-mismatched bounds (mirrors the merge-path guard).
+- **Multikey (array) index** counted index *entries*, not distinct documents, on the fast path →
+  multikey plans now use the index-narrowed path, which dedups doc_ids up front.
+
+Internal-only: all new helpers are `pub(crate)`; the public crate API is unchanged. Known
+limitation (documented, not fixed): a case-insensitive index keys with `str::to_lowercase` while
+`(?i)` regex matches with Unicode case folding — they diverge for a few non-ASCII scalars
+(Greek final sigma, `İ`, `ß`); no impact on ASCII / Hungarian-accented data.
+
 ### Fixed — `find` `_id` fast path now applies `projection` (was silently ignored) (mcp-server v1.0.526, core v0.3.332)
 
 A code-review of the core fast-path system found that `find_with_options`'s `_id` and `_id $in`

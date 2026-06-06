@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
-use crate::index::{IndexKey, ScanOrder};
+use crate::index::{numeric_range_buckets, prefix_scan_upper_bound, IndexKey, ScanOrder};
 use crate::query::Query;
 use crate::query_planner::QueryPlan;
 use crate::storage::{RawStorage, Storage, HEADER_SIZE};
@@ -243,6 +243,22 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 inclusive_end,
                 ..
             } => {
+                // A numeric range spans two disjoint key buckets (all Int sort
+                // below all Float), which a single contiguous streaming cursor
+                // range cannot cover. Fall back to the non-streaming
+                // collect_doc_ids_from_plan path, which scans BOTH buckets via
+                // scan_numeric_buckets — otherwise the streaming path (and
+                // aggregation $match) silently drops Float-keyed docs (finding D).
+                if numeric_range_buckets(
+                    start.as_ref(),
+                    end.as_ref(),
+                    inclusive_start,
+                    inclusive_end,
+                )
+                .is_some()
+                {
+                    return Ok(None);
+                }
                 let default_start = IndexKey::Null;
                 let default_end = IndexKey::MaxKey;
                 let start_key = start.unwrap_or(default_start);
@@ -261,9 +277,10 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 index_name, prefix, ..
             } => {
                 let start = IndexKey::String(prefix.clone());
-                let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
+                let end = prefix_scan_upper_bound(&prefix);
                 Ok(Some(FindCursor::new_index_scan(
-                    collection, query_json, index_name, start, end, true, true,
+                    collection, query_json, index_name, start, end, true, false,
                 )?))
             }
             QueryPlan::SparseIndexScan { index_name, .. } => Ok(Some(FindCursor::new_index_scan(
