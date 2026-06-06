@@ -2390,7 +2390,8 @@ impl FulltextIndex {
     /// O(sum_posting_sizes) to O(min_posting_size * num_tokens) for the
     /// intersection phase, plus O(intersection_size * num_tokens) for scoring.
     ///
-    /// Uses a Top-K binary heap instead of full sort for O(N log k) vs O(N log N).
+    /// Uses bounded top-k selection (`top_k_scored`) instead of a full sort for
+    /// O(N log k) vs O(N log N).
     ///
     /// Falls back to `search_with_ctx` for single-token queries.
     pub fn search_and_with_ctx(

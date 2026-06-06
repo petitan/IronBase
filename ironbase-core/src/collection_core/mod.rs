@@ -932,19 +932,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // FAST PATH: Direct _id lookup O(1)
         // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
         // Uses normalize_document_id to handle string/int conversion.
-        // Note: _id queries always return max 1 doc, so skip/limit don't matter.
+        // Note: _id queries always return max 1 doc, so skip/limit don't matter,
+        // but `projection` still applies — it must match the slow path exactly,
+        // else the same query yields a different shape with vs without a sort.
         // ====================================================================
         // Single _id query - always fast path (returns 0 or 1 doc)
         if options.sort.is_none() {
+            // Apply the same projection the slow path would (no-op when unset).
+            let project = |doc: Value| -> Result<Value> {
+                match &options.projection {
+                    Some(proj) => crate::find_options::apply_projection(&doc, proj),
+                    None => Ok(doc),
+                }
+            };
+
             if let Some(doc_id) = Self::extract_id_query(query_json) {
                 // Try original ID first
                 if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                    return Ok(vec![doc]);
+                    return Ok(vec![project(doc)?]);
                 }
                 // Try normalized version (string "123" → int 123)
                 if let Some(normalized) = Self::normalize_document_id(&doc_id) {
                     if let Some(doc) = self.read_document_by_id(&normalized)? {
-                        return Ok(vec![doc]);
+                        return Ok(vec![project(doc)?]);
                     }
                 }
                 return Ok(Vec::new());
@@ -962,10 +972,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 })?;
                 for doc_id in doc_ids {
                     if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                        results.push(doc);
+                        results.push(project(doc)?);
                     } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
                         if let Some(doc) = self.read_document_by_id(&normalized)? {
-                            results.push(doc);
+                            results.push(project(doc)?);
                         }
                     }
                 }

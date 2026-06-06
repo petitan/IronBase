@@ -67,6 +67,63 @@ fn test_early_projection_no_sort() {
     }
 }
 
+/// Fast-path projection (review fix): an `_id` query with a projection must APPLY
+/// the projection — the `_id` fast path previously returned the FULL document —
+/// and the result must be identical with vs without a sort (fast path vs slow path).
+#[test]
+fn test_id_fast_path_applies_projection() {
+    let db = create_memory_db();
+    let coll_name = "test";
+    let id = db
+        .insert_one(
+            coll_name,
+            HashMap::from([
+                ("name".to_string(), json!("Alice")),
+                ("secret".to_string(), json!("hidden")),
+                ("age".to_string(), json!(30)),
+            ]),
+        )
+        .unwrap();
+    let id_q = match id {
+        ironbase_core::DocumentId::Int(n) => json!(n),
+        ironbase_core::DocumentId::String(s) => json!(s),
+        other => panic!("unexpected id type: {:?}", other),
+    };
+
+    let coll = db.collection(coll_name).unwrap();
+    let proj = HashMap::from([("name".to_string(), 1)]);
+
+    // _id fast path (no sort): projection MUST apply → only _id + name.
+    let fast = coll
+        .find_with_options(
+            &json!({ "_id": id_q }),
+            FindOptions::new().with_projection(proj.clone()),
+        )
+        .unwrap();
+    assert_eq!(fast.len(), 1);
+    assert!(fast[0].get("name").is_some());
+    assert!(fast[0].get("_id").is_some());
+    assert!(
+        fast[0].get("secret").is_none(),
+        "secret must be projected out on the _id fast path"
+    );
+    assert!(fast[0].get("age").is_none());
+
+    // Same query WITH a sort → slow path; the shape must be identical.
+    let slow = coll
+        .find_with_options(
+            &json!({ "_id": id_q }),
+            FindOptions::new()
+                .with_projection(proj)
+                .with_sort(vec![("name".to_string(), 1)]),
+        )
+        .unwrap();
+    assert_eq!(
+        slow, fast,
+        "fast-path and slow-path _id projection must agree"
+    );
+}
+
 #[test]
 fn test_early_projection_sort_included_in_projection() {
     // Early projection should be applied when sort field is in projection
