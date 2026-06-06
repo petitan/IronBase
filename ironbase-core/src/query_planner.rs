@@ -486,8 +486,17 @@ impl QueryPlanner {
                 "$eq" => {
                     eq_vals.push(val);
                 }
-                // Pass through other operators as-is ($ne, $in, $nin, $exists, $type)
+                // Pass through other operators as-is ($ne, $in, $nin, $exists, $type).
+                // If the same operator already appears for this field, two $and
+                // clauses collided (e.g. {$in:[a,b]} AND {$in:[b,c]}). A serde_json
+                // Map holds one value per key, so inserting would silently OVERWRITE
+                // the first with the second — turning the AND intersection into just
+                // the second set and over-counting on the fully-covered count path.
+                // Bail out so the per-clause logical handler intersects + re-verifies.
                 other => {
+                    if result.contains_key(other) {
+                        return None;
+                    }
                     result.insert(other.to_string(), val.clone());
                 }
             }
@@ -618,6 +627,22 @@ impl QueryPlanner {
         }
     }
 
+    /// Coarse type bucket for an `IndexKey`, where `Int` and `Float` share one
+    /// bucket (numbers compare numerically). Range bounds of different buckets
+    /// can never overlap into a valid range, so a mixed-type range (e.g.
+    /// `{$gte: 5, $lte: "z"}`) matches nothing — the `IndexKey` equivalent of
+    /// `value_type_rank` (audit 2026-06-06 finding: mixed-type range over-count).
+    fn index_key_type_bucket(k: &IndexKey) -> u8 {
+        match k {
+            IndexKey::Null => 0,
+            IndexKey::Bool(_) => 1,
+            IndexKey::Int(_) | IndexKey::Float(_) => 2,
+            IndexKey::String(_) => 3,
+            IndexKey::Compound(_) => 4,
+            IndexKey::MaxKey => 5,
+        }
+    }
+
     /// Compare two JSON values for bound tightening (used in conflicting range resolution).
     ///
     /// Supports Number and String comparisons.
@@ -645,6 +670,12 @@ impl QueryPlanner {
     ///
     /// Skips indexes that are currently being built (building == true).
     ///
+    /// Excludes case-insensitive indexes: a CI index stores keys lowercased, so
+    /// a case-sensitive range/equality/regex plan built against it scans the
+    /// wrong key range and silently misses documents (audit 2026-06-06 finding
+    /// E). CI indexes are only valid for the dedicated `(?i)` regex branch,
+    /// which selects them via its own `case_insensitive` lookup.
+    ///
     /// Returns (index_name, is_compound) if found.
     fn find_index_for_field(
         field: &str,
@@ -659,13 +690,31 @@ impl QueryPlanner {
         // (audit #27 finding B).
         index_fields
             .iter()
-            .find(|info| info.prefix_field == field && !info.building && !info.is_compound)
+            .find(|info| {
+                info.prefix_field == field
+                    && !info.building
+                    && !info.is_compound
+                    && !info.case_insensitive
+            })
             .or_else(|| {
-                index_fields
-                    .iter()
-                    .find(|info| info.prefix_field == field && !info.building)
+                index_fields.iter().find(|info| {
+                    info.prefix_field == field && !info.building && !info.case_insensitive
+                })
             })
             .map(|info| (info.index_name.clone(), info.is_compound))
+    }
+
+    /// Whether a JSON value can serve as a B+ tree index key.
+    ///
+    /// `IndexKey::from` collapses both objects and arrays to `IndexKey::Null`
+    /// (key.rs), so picking an index for an object/array-valued equality — or a
+    /// `$in` element — produces a `{ key: Null }` plan that matches NULL-valued
+    /// docs, not docs whose field deep-equals the object/array. Such candidates
+    /// must be skipped so the collection-scan path performs proper deep equality.
+    /// Originally fixed for equality only (audit #27 finding A, b9209f7d); the
+    /// `$in` path (`collect_in_candidates`) needs the same guard.
+    fn is_indexable_value(v: &Value) -> bool {
+        !matches!(v, Value::Object(_) | Value::Array(_))
     }
 
     /// Analyze a query with compound-index-aware field matching (v2)
@@ -801,10 +850,9 @@ impl QueryPlanner {
         candidates: &mut Vec<CandidatePlan>,
     ) {
         if let Some((field, plan)) = Self::analyze_in_with_regex(query_json, index_fields) {
-            if let Some(info) = index_fields
-                .iter()
-                .find(|i| i.prefix_field == field && !i.is_compound && !i.building)
-            {
+            if let Some(info) = index_fields.iter().find(|i| {
+                i.prefix_field == field && !i.is_compound && !i.building && !i.case_insensitive
+            }) {
                 // Multi-regex scan cost depends on number of prefixes
                 let prefix_count = match &plan {
                     QueryPlan::MultiRegexPrefixScan { prefixes, .. } => prefixes.len(),
@@ -865,14 +913,34 @@ impl QueryPlanner {
                             continue;
                         }
 
-                        // Find matching index for this field (skip building indexes)
-                        if let Some(info) = index_fields
-                            .iter()
-                            .find(|i| i.prefix_field == *field && !i.is_compound && !i.building)
-                        {
-                            // Convert values to IndexKeys
-                            let keys: Vec<IndexKey> =
+                        // Object/array $in elements collapse to IndexKey::Null
+                        // (see is_indexable_value): a MultiValueScan on Null would
+                        // silently miss / mis-count docs whose field deep-equals the
+                        // object/array. Skip the whole candidate so the collection
+                        // scan performs proper deep equality (same defect class as
+                        // audit #27 finding A, fixed there only for equality).
+                        if in_values.iter().any(|v| !Self::is_indexable_value(v)) {
+                            continue;
+                        }
+
+                        // Find matching index for this field (skip building and
+                        // case-insensitive indexes — a CI index stores lowercased
+                        // keys and would miss case-sensitive $in values, audit E).
+                        if let Some(info) = index_fields.iter().find(|i| {
+                            i.prefix_field == *field
+                                && !i.is_compound
+                                && !i.building
+                                && !i.case_insensitive
+                        }) {
+                            // Convert values to IndexKeys, deduplicated: duplicate
+                            // $in values (e.g. machine-generated filters) are summed
+                            // per-key by the fully-covered count fast path, which
+                            // would double-count matching docs. Dedup also corrects
+                            // the keys.len() cost term below.
+                            let mut keys: Vec<IndexKey> =
                                 in_values.iter().map(IndexKey::from).collect();
+                            keys.sort();
+                            keys.dedup();
 
                             let plan = QueryPlan::MultiValueScan {
                                 index_name: info.index_name.clone(),
@@ -911,10 +979,9 @@ impl QueryPlanner {
         candidates: &mut Vec<CandidatePlan>,
     ) {
         if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
-            if let Some(info) = index_fields
-                .iter()
-                .find(|i| i.prefix_field == field && !i.is_compound && !i.building)
-            {
+            if let Some(info) = index_fields.iter().find(|i| {
+                i.prefix_field == field && !i.is_compound && !i.building && !i.case_insensitive
+            }) {
                 // Extract start/end from the plan for histogram-based estimation
                 // Clone the keys since we need to move plan later
                 let (start_key, end_key) = match &plan {
@@ -966,14 +1033,12 @@ impl QueryPlanner {
                 // short-circuit (count.rs:215) the planner returns the wrong
                 // count silently. Skip the candidate; the `$eq` operator on
                 // the collection-scan path performs proper deep equality.
-                let is_indexable_value =
-                    |v: &Value| -> bool { !matches!(v, Value::Object(_) | Value::Array(_)) };
                 let equality_value: Option<&Value> = if let Value::Object(ref val_map) = value {
                     if val_map.len() == 1 {
                         if let Some(eq_val) = val_map.get("$eq") {
                             // Explicit $eq operator: {"field": {"$eq": X}}
                             // — the inner value must itself be indexable.
-                            if is_indexable_value(eq_val) {
+                            if Self::is_indexable_value(eq_val) {
                                 Some(eq_val)
                             } else {
                                 None
@@ -1006,10 +1071,13 @@ impl QueryPlanner {
                     None => continue,
                 };
 
-                // Find ALL matching indexes for this field (not just first, skip building)
+                // Find ALL matching indexes for this field (not just first, skip
+                // building and case-insensitive indexes — equality is case-sensitive,
+                // and a CI index stores lowercased keys, so it would miss any value
+                // with uppercase characters, audit 2026-06-06 finding E).
                 for info in index_fields
                     .iter()
-                    .filter(|i| i.prefix_field == *field && !i.building)
+                    .filter(|i| i.prefix_field == *field && !i.building && !i.case_insensitive)
                 {
                     let key = IndexKey::from(eq_val);
                     let plan = QueryPlan::IndexScan {
@@ -1145,6 +1213,18 @@ impl QueryPlanner {
                             (None, Some(lte_val)) => (Some(IndexKey::from(lte_val)), true),
                             (None, None) => (None, true),
                         };
+
+                        // Mixed-type bounds (e.g. {$gte: 5, $lte: "z"}) can never
+                        // form an overlapping range — operators compare cross-type
+                        // as no-match — so an index range scan over [Int, String]
+                        // would over-count the no-post-filter count fast path. Skip
+                        // the index plan for this field (the merge path's
+                        // resolve_range_conditions already has the analogous guard).
+                        if let (Some(s), Some(e)) = (&start, &end) {
+                            if Self::index_key_type_bucket(s) != Self::index_key_type_bucket(e) {
+                                continue;
+                            }
+                        }
 
                         return Some((
                             field.clone(),

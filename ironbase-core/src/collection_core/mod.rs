@@ -190,7 +190,10 @@ use std::collections::{HashMap, HashSet};
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
+use crate::index::{
+    numeric_range_buckets, prefix_scan_upper_bound, IndexKey, IndexManager, RangeQueryMode,
+    ScanOrder,
+};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{LogicalOperator, QueryPlan, QueryPlanner};
@@ -2837,19 +2840,38 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ..
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        let default_start = IndexKey::Null;
-                        let default_end = IndexKey::String("\u{10ffff}".repeat(100));
+                        if let Some(buckets) = numeric_range_buckets(
+                            start.as_ref(),
+                            end.as_ref(),
+                            inclusive_start,
+                            inclusive_end,
+                        ) {
+                            // Numeric range: scan BOTH the Int and Float key
+                            // buckets so float-valued docs are not missed (D).
+                            // The post-filter (parsed_query.matches) below makes
+                            // the final set exact.
+                            index.scan_numeric_buckets(&buckets)
+                        } else {
+                            let default_start = IndexKey::Null;
+                            let default_end = IndexKey::String("\u{10ffff}".repeat(100));
 
-                        let start_key = start.as_ref().unwrap_or(&default_start);
-                        let end_key = end.as_ref().unwrap_or(&default_end);
-                        let mode = RangeQueryMode::Scan {
-                            skip: 0,
-                            limit: None,
-                            order: ScanOrder::Asc,
-                        };
-                        index
-                            .range_query(start_key, end_key, inclusive_start, inclusive_end, mode)
-                            .unwrap_docs()
+                            let start_key = start.as_ref().unwrap_or(&default_start);
+                            let end_key = end.as_ref().unwrap_or(&default_end);
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            index
+                                .range_query(
+                                    start_key,
+                                    end_key,
+                                    inclusive_start,
+                                    inclusive_end,
+                                    mode,
+                                )
+                                .unwrap_docs()
+                        }
                     } else {
                         vec![]
                     }
@@ -2872,14 +2894,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             (0, None)
                         };
                         let start = IndexKey::String(prefix.clone());
-                        let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                        // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
+                        let end = prefix_scan_upper_bound(prefix);
                         let mode = RangeQueryMode::Scan {
                             skip: scan_skip,
                             limit: scan_limit,
                             order: ScanOrder::Asc,
                         };
                         index
-                            .range_query(&start, &end, true, true, mode)
+                            .range_query(&start, &end, true, false, mode)
                             .unwrap_docs()
                     } else {
                         vec![]
@@ -2915,14 +2938,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         let mut all_doc_ids = Vec::new();
                         for prefix in prefixes {
                             let start = IndexKey::String(prefix.clone());
-                            let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                            // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
+                            let end = prefix_scan_upper_bound(prefix);
                             let mode = RangeQueryMode::Scan {
                                 skip: 0,
                                 limit: None,
                                 order: ScanOrder::Asc,
                             };
                             let ids = index
-                                .range_query(&start, &end, true, true, mode)
+                                .range_query(&start, &end, true, false, mode)
                                 .unwrap_docs();
                             all_doc_ids.extend(ids);
                         }
