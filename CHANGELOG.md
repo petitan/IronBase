@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `find` `_id` fast path now applies `projection` (was silently ignored) (mcp-server v1.0.526, core v0.3.332)
+
+A code-review of the core fast-path system found that `find_with_options`'s `_id` and `_id $in`
+fast paths (taken when `sort` is absent) returned the **full document**, never applying
+`options.projection` — the projection was only *validated* at the function top, then dropped. The
+slow path (taken when a sort is present) applies it. So the same `{"_id": 5}` query with a
+projection returned different shapes depending on whether a sort was present, and a caller
+projecting out a large/sensitive field would still receive it on the fast path.
+
+- **Fix:** both `_id` fast-path branches now apply the existing `find_options::apply_projection`
+  (a no-op when no projection is set) before returning — identical to the slow path. The common
+  projection-less `_id` lookup stays O(1) with zero overhead. (`collection_core/mod.rs`)
+- **Test:** new `test_id_fast_path_applies_projection` asserts the fast path projects and that the
+  fast-path and slow-path (`+sort`) results are byte-identical — the path that was previously
+  uncovered by any test.
+- **Doc cleanup:** removed a stale `search_and_with_ctx` comment that still referenced the private
+  top-k heap deleted in the v1.0.525 delegation. (`fulltext.rs`)
+
 ### Changed — fulltext `top_k_scored` now delegates to the shared generic top-k instead of a private heap (mcp-server v1.0.525, core v0.3.331)
 
 P1-4 code-review follow-up. The previous commit added a fulltext-private `BinaryHeap<(Reverse<OrderedScore>, DocumentId)>` for `top_k_scored`, but the codebase already has a generic comparator-based bounded top-k (`collection_core::topk::topk_select_with_skip`) that the sibling `collection_core/search.rs` already uses for score-based `(doc_id, f64)` selection. This commit removes the duplicate, finishing the consolidation the P1-4 change set out to do.
