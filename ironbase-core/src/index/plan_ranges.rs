@@ -296,11 +296,15 @@ impl BPlusTree {
     /// and de-duplicated — matching the former `scan_numeric_buckets`/`$in` loops —
     /// because a doc may appear in more than one sub-range.
     ///
-    /// OOM-safe: each sub-range's docs are `try_reserve`d before being appended,
-    /// so a runaway union returns an error instead of aborting. This avoids the
-    /// separate O(range) Count-mode pass the unified path would otherwise add —
-    /// the old numeric scan did a single descent per bucket, and a doubled descent
-    /// (Count then Scan) is wasted work on the hot numeric-range find/`$match` path.
+    /// OOM-safe at the UNION level: each sub-range's docs are `try_reserve`d
+    /// before being appended, so accumulating across many sub-ranges
+    /// (`$in`/multi-regex) returns an error instead of aborting. A single
+    /// sub-range whose own `range_query` materializes more docs than fit in RAM
+    /// still aborts inside `range_query` (the unbounded inner `Vec`) — the same
+    /// exposure as the single-range path and the former `scan_numeric_buckets`,
+    /// not made worse here. This avoids the separate O(range) Count-mode pass the
+    /// unified path would otherwise add — a doubled descent (Count then Scan) is
+    /// wasted work on the hot numeric-range find/`$match` path.
     ///
     /// Subsumes the former `scan_numeric_buckets`.
     pub(crate) fn scan_ranges(&self, ranges: &PlanRanges) -> Result<Vec<DocumentId>> {
@@ -433,17 +437,38 @@ mod tests {
     }
 
     #[test]
-    fn float_only_numeric_range_still_two_buckets() {
-        let plan = range_scan(
+    fn float_only_numeric_range_buckets() {
+        // Float bounds that CONTAIN integers (2..=9) → Int bucket present → two
+        // sub-ranges (Int then Float). This pins the finding-D regression guard.
+        let with_ints = range_scan(
             Some(IndexKey::Float(OrderedFloat(1.5))),
             Some(IndexKey::Float(OrderedFloat(9.5))),
             true,
             true,
         );
-        let r = PlanRanges::from_plan(&plan, &tree());
-        // No integer falls outside (1.5, 9.5) boundaries but some do inside, so
-        // the Int bucket is present; the Float bucket always is.
-        assert!(r.sub_ranges.len() == 2 || r.sub_ranges.len() == 1);
+        let r = PlanRanges::from_plan(&with_ints, &tree());
+        assert_eq!(r.sub_ranges.len(), 2, "Int bucket (2..=9) + Float bucket");
+        assert!(matches!(r.sub_ranges[0].start, IndexKey::Int(_)));
+        assert!(matches!(r.sub_ranges[1].start, IndexKey::Float(_)));
+        assert!(!r.single_contiguous());
+        assert!(r.exact);
+
+        // Float bounds with NO integer between them (ceil 1.2 = 2 > floor 1.8 = 1)
+        // → Int bucket absent → a single Float sub-range, which IS streamable.
+        let no_ints = range_scan(
+            Some(IndexKey::Float(OrderedFloat(1.2))),
+            Some(IndexKey::Float(OrderedFloat(1.8))),
+            true,
+            true,
+        );
+        let r = PlanRanges::from_plan(&no_ints, &tree());
+        assert_eq!(
+            r.sub_ranges.len(),
+            1,
+            "no integer in (1.2, 1.8) → Float bucket only"
+        );
+        assert!(r.single_contiguous());
+        assert!(matches!(r.sub_ranges[0].start, IndexKey::Float(_)));
         assert!(r.exact);
     }
 
