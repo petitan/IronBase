@@ -5,7 +5,8 @@ use std::collections::HashSet;
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
-use crate::index::{numeric_range_buckets, prefix_scan_upper_bound, IndexKey, ScanOrder};
+use crate::index::plan_ranges::PlanRanges;
+use crate::index::{IndexKey, ScanOrder};
 use crate::query::Query;
 use crate::query_planner::QueryPlan;
 use crate::storage::{RawStorage, Storage, HEADER_SIZE};
@@ -215,87 +216,48 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
         query_json: &Value,
         plan: QueryPlan,
     ) -> Result<Option<Self>> {
-        match plan {
-            QueryPlan::IndexScan {
-                index_name,
-                key,
-                is_compound,
-                ..
-            } => {
-                let (start, end) = if is_compound {
-                    let indexes = collection.indexes.read();
-                    let Some(index) = indexes.get_btree_index(&index_name) else {
-                        return Ok(None);
-                    };
-                    index.build_prefix_range(key.clone())
-                } else {
-                    (key.clone(), key.clone())
-                };
-                Ok(Some(FindCursor::new_index_scan(
-                    collection, query_json, index_name, start, end, true, true,
-                )?))
-            }
-            QueryPlan::IndexRangeScan {
-                index_name,
-                start,
-                end,
-                inclusive_start,
-                inclusive_end,
-                ..
-            } => {
-                // A numeric range spans two disjoint key buckets (all Int sort
-                // below all Float), which a single contiguous streaming cursor
-                // range cannot cover. Fall back to the non-streaming
-                // collect_doc_ids_from_plan path, which scans BOTH buckets via
-                // scan_numeric_buckets — otherwise the streaming path (and
-                // aggregation $match) silently drops Float-keyed docs (finding D).
-                if numeric_range_buckets(
-                    start.as_ref(),
-                    end.as_ref(),
-                    inclusive_start,
-                    inclusive_end,
-                )
-                .is_some()
-                {
-                    return Ok(None);
-                }
-                let default_start = IndexKey::Null;
-                let default_end = IndexKey::MaxKey;
-                let start_key = start.unwrap_or(default_start);
-                let end_key = end.unwrap_or(default_end);
-                Ok(Some(FindCursor::new_index_scan(
-                    collection,
-                    query_json,
-                    index_name,
-                    start_key,
-                    end_key,
-                    inclusive_start,
-                    inclusive_end,
-                )?))
-            }
-            QueryPlan::RegexPrefixScan {
-                index_name, prefix, ..
-            } => {
-                let start = IndexKey::String(prefix.clone());
-                // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
-                let end = prefix_scan_upper_bound(&prefix);
-                Ok(Some(FindCursor::new_index_scan(
-                    collection, query_json, index_name, start, end, true, false,
-                )?))
-            }
-            QueryPlan::SparseIndexScan { index_name, .. } => Ok(Some(FindCursor::new_index_scan(
-                collection,
-                query_json,
-                index_name,
-                IndexKey::Null,
-                IndexKey::MaxKey,
-                true,
-                true,
-            )?)),
-            QueryPlan::MultiRegexPrefixScan { .. } => Ok(None),
-            // MultiValueScan is handled by collect_doc_ids_from_plan, not cursor
-            QueryPlan::MultiValueScan { .. } => Ok(None),
+        // Derive the plan's key-ranges from the shared chokepoint (the single
+        // source of truth count/find/cursor all use — audit finding #8). The
+        // index lock is held only long enough to read the index, because a
+        // compound IndexScan needs its arity for build_prefix_range; drop it
+        // before new_index_scan, which re-acquires indexes.read() (parking_lot
+        // read locks are not recursive).
+        let ranges = {
+            let indexes = collection.indexes.read();
+            let Some(index) = indexes.get_btree_index(plan.index_name()) else {
+                return Ok(None);
+            };
+            PlanRanges::from_plan(&plan, index)
+        };
+
+        // Only a single contiguous interval is streamable. A numeric range's
+        // disjoint Int/Float buckets, an `$in` union and a multi-regex union all
+        // span multiple ranges — defer to the materialized
+        // collect_doc_ids_from_plan path, which scans EVERY sub-range. Streaming
+        // only the first would silently drop the rest (e.g. the Float-keyed docs
+        // of a numeric range — finding D).
+        if !ranges.single_contiguous() {
+            return Ok(None);
         }
+
+        let PlanRanges {
+            index_name,
+            sub_ranges,
+            ..
+        } = ranges;
+        let sr = sub_ranges
+            .into_iter()
+            .next()
+            .expect("single_contiguous ⇒ exactly one sub-range");
+        Ok(Some(FindCursor::new_index_scan(
+            collection,
+            query_json,
+            index_name,
+            sr.start,
+            sr.end,
+            sr.inclusive_start,
+            sr.inclusive_end,
+        )?))
     }
 
     /// Set the default batch size for chunk operations

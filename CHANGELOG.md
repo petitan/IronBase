@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Refactored — unify the four QueryPlan executors behind one range chokepoint (mcp-server v1.0.528, core v0.3.334)
+
+Audit finding #8: a single `QueryPlan` was interpreted by **four** hand-synced executors — the two
+`count_with_plan` blocks (`collection_core/count.rs`), `collect_doc_ids_from_plan`
+(`collection_core/mod.rs`), and `FindCursor::new_index_scan_from_plan` (`collection_core/cursor.rs`).
+Every plan→index-range fix had to be mirrored 2–4×, and the numeric Int/Float two-bucket fix once
+missed the cursor, shipping a bug where `find_streaming` (and aggregation `$match`) silently dropped
+Float-keyed docs.
+
+The plan→index key-range derivation now lives **once** in `ironbase-core/src/index/plan_ranges.rs`
+(`PlanRanges::from_plan` + the `BPlusTree::count_exact` / `scan_ranges` consumers), read by three thin
+modes: count-exact (O(1), no post-filter), materialized find, and the streaming cursor (single
+contiguous range only). The four call sites collapse to adapters; `count_numeric_buckets` /
+`scan_numeric_buckets` / `max_string_key` are subsumed and removed. Net ~−600 lines of duplicated
+derivation. Behavior-preserving, with a new 3-way `count == find == cursor == scan` parity oracle
+(file-backed streaming) that guards the cursor path the suite never exercised before. The
+unbounded-end non-numeric range now uses `IndexKey::MaxKey` consistently across all three executors
+(was `max_string_key()` in count/find vs `MaxKey` in the cursor).
+
+### Fixed — two pre-existing count/find divergences surfaced by the #8 review (mcp-server v1.0.528, core v0.3.334)
+
+- **Single-sided non-numeric range over-counted on `count`.** A typed range with a defaulted open
+  end that crosses key-type buckets (e.g. `{f: {$lt: "z"}}` → `[Null, "z"]`) was treated as exact,
+  so `count_documents` summed the Int/Float/Bool keys the operator can never match (`count = 6` vs
+  `find = 1` on mixed-type data). `PlanRanges::from_plan` now marks such a range non-exact via a
+  type-homogeneity check (`QueryPlanner::index_key_type_bucket`), routing `count` through the
+  index-narrowed post-filter to match `find`.
+- **Numeric range `find(...).sort({field})` returned DocumentId order.** A numeric Int/Float
+  two-bucket scan yields DocumentId-sorted ids, but `collect_doc_ids_from_plan` reported
+  `uses_index_sort = true`, skipping the in-memory sort. Index-sort is now claimed only for a single
+  contiguous (index-ordered) scan, so multi-bucket numeric ranges (and multi-regex unions) re-sort
+  correctly.
+
 ### Fixed — query-planner correctness: 11 count/find divergence & incomplete-result bugs (mcp-server v1.0.527, core v0.3.333)
 
 A multi-agent review of the query planner (`ironbase-core/src/query_planner.rs` and its

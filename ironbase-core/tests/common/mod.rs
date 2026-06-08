@@ -8,9 +8,10 @@
 #![allow(dead_code)]
 
 use ironbase_core::storage::MemoryStorage;
-use ironbase_core::DatabaseCore;
+use ironbase_core::{DatabaseCore, StorageEngine};
 use serde_json::Value;
 use std::collections::HashMap;
+use tempfile::TempDir;
 
 pub fn doc(v: &Value) -> HashMap<String, Value> {
     v.as_object()
@@ -31,7 +32,10 @@ fn build(docs: &[Value]) -> DatabaseCore<MemoryStorage> {
     db
 }
 
-fn compare(db: &DatabaseCore<MemoryStorage>, query: &Value) {
+/// Compares indexed `count`/`find` against the ground-truth collection scan.
+/// Returns the ground-truth row count so the caller can also assert the
+/// file-backed streaming cursor (see `assert_cursor_matches_scan`).
+fn compare(db: &DatabaseCore<MemoryStorage>, query: &Value) -> u64 {
     let cidx = db.get_collection("idx").unwrap();
     let cno = db.get_collection("noidx").unwrap();
 
@@ -53,6 +57,50 @@ fn compare(db: &DatabaseCore<MemoryStorage>, query: &Value) {
         find_idx, find_scan,
         "indexed find diverges from collection scan for {query}: {find_idx} != {find_scan}"
     );
+    count_scan
+}
+
+/// Third leg of the parity oracle: drain `find_streaming` on a **file-backed**
+/// collection and assert the cursor row count matches the ground-truth scan.
+///
+/// MemoryStorage early-returns `find_streaming` to the materialized
+/// `collect_doc_ids_from_plan` path, so the streaming cursor
+/// (`FindCursor::*_from_plan`) is only ever exercised on a real `.mlite` file.
+/// Without this leg a cursor-only divergence (e.g. the numeric Int/Float
+/// two-bucket split that originally missed the cursor) is invisible to the
+/// MemoryStorage `count == find == scan` checks above.
+fn assert_cursor_matches_scan(
+    docs: &[Value],
+    index_field: &str,
+    query: &Value,
+    ci: bool,
+    scan: u64,
+) {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("parity.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    db.collection("idx").unwrap();
+    for d in docs {
+        db.insert_one("idx", doc(d)).unwrap();
+    }
+    let cidx = db.get_collection("idx").unwrap();
+    if ci {
+        cidx.create_ci_index(index_field.to_string(), false)
+            .unwrap();
+    } else {
+        cidx.create_index(index_field.to_string(), false, false)
+            .unwrap();
+    }
+
+    let mut cursor = cidx.find_streaming(query).unwrap();
+    let mut cursor_n = 0u64;
+    while cursor.next().unwrap().is_some() {
+        cursor_n += 1;
+    }
+    assert_eq!(
+        cursor_n, scan,
+        "file-backed streaming cursor diverges from collection scan for {query}: {cursor_n} != {scan}"
+    );
 }
 
 /// Single-field B+ tree index (non-unique, non-sparse) on `index_field`.
@@ -62,7 +110,8 @@ pub fn assert_index_matches_scan(docs: &[Value], index_field: &str, query: &Valu
         .unwrap()
         .create_index(index_field.to_string(), false, false)
         .unwrap();
-    compare(&db, query);
+    let scan = compare(&db, query);
+    assert_cursor_matches_scan(docs, index_field, query, false, scan);
 }
 
 /// Case-insensitive B+ tree index (non-unique) on `index_field`.
@@ -72,5 +121,6 @@ pub fn assert_ci_index_matches_scan(docs: &[Value], index_field: &str, query: &V
         .unwrap()
         .create_ci_index(index_field.to_string(), false)
         .unwrap();
-    compare(&db, query);
+    let scan = compare(&db, query);
+    assert_cursor_matches_scan(docs, index_field, query, true, scan);
 }

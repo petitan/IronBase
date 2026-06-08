@@ -190,10 +190,8 @@ use std::collections::{HashMap, HashSet};
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::index::{
-    numeric_range_buckets, prefix_scan_upper_bound, IndexKey, IndexManager, RangeQueryMode,
-    ScanOrder,
-};
+use crate::index::plan_ranges::PlanRanges;
+use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{LogicalOperator, QueryPlan, QueryPlanner};
@@ -2802,199 +2800,86 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
         let mut index_limit_applied = false;
+        // Whether the returned doc_ids come out in index-key (= sort-field) order.
+        // Only a single contiguous range scan is index-ordered; a multi-range scan
+        // (numeric Int/Float buckets, `$in`, multi-regex) is concatenated and
+        // sorted by DocumentId in `scan_ranges`, so it is NOT in sort-field order
+        // and must be re-sorted in memory (finding #2, 2026-06-08).
+        let mut scan_index_ordered = false;
         let mut doc_ids = {
             let indexes = self.indexes.read();
-            match plan {
-                QueryPlan::IndexScan {
-                    ref index_name,
-                    ref key,
-                    is_compound,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let mode = RangeQueryMode::Scan {
-                            skip: 0,
-                            limit: None,
-                            order: ScanOrder::Asc,
-                        };
-                        if is_compound {
-                            // Compound index prefix query: use range scan with compound bounds
-                            let (start, end) = index.build_prefix_range(key.clone());
-                            index
-                                .range_query(&start, &end, true, true, mode)
-                                .unwrap_docs()
-                        } else {
-                            // Single-field index: point lookup
-                            index.range_query(key, key, true, true, mode).unwrap_docs()
-                        }
-                    } else {
-                        vec![]
-                    }
-                }
-                QueryPlan::IndexRangeScan {
-                    ref index_name,
-                    ref start,
-                    ref end,
-                    inclusive_start,
-                    inclusive_end,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        if let Some(buckets) = numeric_range_buckets(
-                            start.as_ref(),
-                            end.as_ref(),
-                            inclusive_start,
-                            inclusive_end,
-                        ) {
-                            // Numeric range: scan BOTH the Int and Float key
-                            // buckets so float-valued docs are not missed (D).
-                            // The post-filter (parsed_query.matches) below makes
-                            // the final set exact.
-                            index.scan_numeric_buckets(&buckets)
-                        } else {
-                            let default_start = IndexKey::Null;
-                            let default_end = IndexKey::String("\u{10ffff}".repeat(100));
+            match indexes.get_btree_index(plan.index_name()) {
+                // Index dropped concurrently with planning → no candidates.
+                None => Vec::new(),
+                Some(index) => {
+                    // Derive the key-ranges once via the shared chokepoint (audit
+                    // finding #8); every variant — point lookup, compound prefix,
+                    // numeric Int/Float buckets, regex prefix, sparse, `$in`/multi-
+                    // regex unions — is encoded as one or more sub-ranges.
+                    let ranges = PlanRanges::from_plan(&plan, index);
+                    scan_index_ordered = ranges.single_contiguous();
 
-                            let start_key = start.as_ref().unwrap_or(&default_start);
-                            let end_key = end.as_ref().unwrap_or(&default_end);
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            index
-                                .range_query(
-                                    start_key,
-                                    end_key,
-                                    inclusive_start,
-                                    inclusive_end,
-                                    mode,
-                                )
-                                .unwrap_docs()
+                    // Regex limit-pushdown (preserved from the pre-#8 path): a
+                    // simple (no other conditions), exact, case-sensitive prefix on
+                    // a non-multikey index has no post-filter rejection, so skip/
+                    // limit can be pushed straight into the single index range —
+                    // O(limit) instead of materializing the whole prefix.
+                    let regex_pushdown = match &plan {
+                        QueryPlan::RegexPrefixScan {
+                            exact: true, field, ..
+                        } => {
+                            !index.metadata.multikey
+                                && Self::is_simple_regex_query(parsed_query.to_json(), field)
                         }
-                    } else {
-                        vec![]
-                    }
-                }
-                QueryPlan::RegexPrefixScan {
-                    ref index_name,
-                    ref prefix,
-                    exact,
-                    ref field,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let can_apply_limit = exact
-                            && !index.metadata.multikey
-                            && Self::is_simple_regex_query(parsed_query.to_json(), field);
-                        let (scan_skip, scan_limit) = if can_apply_limit {
-                            index_limit_applied = true;
-                            (skip, limit)
-                        } else {
-                            (0, None)
-                        };
-                        let start = IndexKey::String(prefix.clone());
-                        // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
-                        let end = prefix_scan_upper_bound(prefix);
+                        _ => false,
+                    };
+
+                    // The pushdown reads only sub_ranges[0]; gate it on
+                    // single_contiguous so that if a future planner ever splits a
+                    // regex prefix into multiple sub-ranges (as numeric ranges
+                    // split into Int/Float buckets) we fall back to scan_ranges —
+                    // which covers EVERY sub-range — instead of silently dropping
+                    // the rest (the exact shape of the original cursor bug).
+                    if regex_pushdown && ranges.single_contiguous() {
+                        index_limit_applied = true;
+                        let sr = &ranges.sub_ranges[0];
                         let mode = RangeQueryMode::Scan {
-                            skip: scan_skip,
-                            limit: scan_limit,
+                            skip,
+                            limit,
                             order: ScanOrder::Asc,
                         };
                         index
-                            .range_query(&start, &end, true, false, mode)
+                            .range_query(
+                                &sr.start,
+                                &sr.end,
+                                sr.inclusive_start,
+                                sr.inclusive_end,
+                                mode,
+                            )
                             .unwrap_docs()
                     } else {
-                        vec![]
-                    }
-                }
-                QueryPlan::SparseIndexScan { ref index_name, .. } => {
-                    // Sparse index scan: return ALL doc_ids in the index
-                    // Since sparse indexes only contain documents where the field exists,
-                    // this effectively returns all documents matching $exists: true
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        // Full range scan from minimum to maximum key
-                        let start = IndexKey::Null;
-                        let end = IndexKey::MaxKey;
-                        let mode = RangeQueryMode::Scan {
-                            skip: 0,
-                            limit: None,
-                            order: ScanOrder::Asc,
-                        };
-                        index
-                            .range_query(&start, &end, true, true, mode)
-                            .unwrap_docs()
-                    } else {
-                        vec![]
-                    }
-                }
-                QueryPlan::MultiRegexPrefixScan {
-                    ref index_name,
-                    ref prefixes,
-                    ..
-                } => {
-                    // Multi-regex prefix scan: union of multiple prefix range scans
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let mut all_doc_ids = Vec::new();
-                        for prefix in prefixes {
-                            let start = IndexKey::String(prefix.clone());
-                            // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
-                            let end = prefix_scan_upper_bound(prefix);
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            let ids = index
-                                .range_query(&start, &end, true, false, mode)
-                                .unwrap_docs();
-                            all_doc_ids.extend(ids);
-                        }
-                        // Sort and dedup to remove duplicates from overlapping ranges
-                        all_doc_ids.sort_unstable();
-                        all_doc_ids.dedup();
-                        all_doc_ids
-                    } else {
-                        vec![]
-                    }
-                }
-                QueryPlan::MultiValueScan {
-                    ref index_name,
-                    ref keys,
-                    ..
-                } => {
-                    // Multi-value scan: O(k) index lookups for $in queries
-                    // Much faster than collection scan O(n) when k << n
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let mut all_doc_ids = Vec::new();
-                        for key in keys {
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            // Point lookup for each key
-                            let ids = index.range_query(key, key, true, true, mode).unwrap_docs();
-                            all_doc_ids.extend(ids);
-                        }
-                        // Sort and dedup (in case of duplicates from multikey index)
-                        all_doc_ids.sort_unstable();
-                        all_doc_ids.dedup();
-                        all_doc_ids
-                    } else {
-                        vec![]
+                        index.scan_ranges(&ranges)?
                     }
                 }
             }
         };
 
-        let uses_index_sort = match (&plan, sort_field) {
-            (QueryPlan::IndexScan { ref field, .. }, Some(sf)) if field == sf => true,
-            (QueryPlan::IndexRangeScan { ref field, .. }, Some(sf)) if field == sf => true,
-            (QueryPlan::RegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
-            (QueryPlan::MultiRegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
-            _ => false,
-        };
+        // The doc_ids are already in sort order only when BOTH the scan came out
+        // in index-key order (scan_index_ordered — a single contiguous range) AND
+        // the index field is the sort field. A numeric IndexRangeScan or a
+        // multi-regex union scans multiple sub-ranges → DocumentId-sorted, so it
+        // must fall through to a memory sort even though its field matches
+        // (finding #2, 2026-06-08).
+        let uses_index_sort = scan_index_ordered
+            && match (&plan, sort_field) {
+                (QueryPlan::IndexScan { ref field, .. }, Some(sf)) if field == sf => true,
+                (QueryPlan::IndexRangeScan { ref field, .. }, Some(sf)) if field == sf => true,
+                (QueryPlan::RegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
+                (QueryPlan::MultiRegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => {
+                    true
+                }
+                _ => false,
+            };
 
         if uses_index_sort && sort_desc {
             doc_ids.reverse();
