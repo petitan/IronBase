@@ -2402,51 +2402,6 @@ impl BPlusTree {
         results
     }
 
-    /// Count documents matching a NUMERIC range across BOTH the Int and Float
-    /// key buckets. Numbers split across two disjoint key ranges (all Int sort
-    /// below all Float), but a numeric range matches only numbers, so summing
-    /// the two bucket counts is exact. O(1) memory; validates against `catalog`.
-    /// See [`super::key::numeric_range_buckets`] (audit 2026-06-06 finding D).
-    pub(crate) fn count_numeric_buckets(
-        &self,
-        buckets: &super::key::NumericBucketRanges,
-        catalog: &std::collections::HashMap<DocumentId, u64>,
-    ) -> usize {
-        let mut total = 0;
-        if let Some((s, e, is, ie)) = &buckets.int_range {
-            total += self.count_range_validated(s, e, *is, *ie, catalog);
-        }
-        let (fs, fe, fis, fie) = &buckets.float_range;
-        total += self.count_range_validated(fs, fe, *fis, *fie, catalog);
-        total
-    }
-
-    /// Scan document ids matching a NUMERIC range across BOTH the Int and Float
-    /// key buckets (see [`Self::count_numeric_buckets`] / finding D).
-    pub(crate) fn scan_numeric_buckets(
-        &self,
-        buckets: &super::key::NumericBucketRanges,
-    ) -> Vec<DocumentId> {
-        let mut ids = Vec::new();
-        let mode = || RangeQueryMode::Scan {
-            skip: 0,
-            limit: None,
-            order: ScanOrder::Asc,
-        };
-        if let Some((s, e, is, ie)) = &buckets.int_range {
-            ids.extend(self.range_query(s, e, *is, *ie, mode()).unwrap_docs());
-        }
-        let (fs, fe, fis, fie) = &buckets.float_range;
-        ids.extend(self.range_query(fs, fe, *fis, *fie, mode()).unwrap_docs());
-        // Dedup across the two buckets: a multikey doc with elements in BOTH the
-        // Int and Float bucket would otherwise appear twice and double-count on
-        // the index-narrowed count path (siblings MultiValueScan/MultiRegex dedup
-        // likewise). find() dedups again downstream, which is harmless.
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    }
-
     /// Range scan that returns (key, doc_id) pairs for resumable streaming.
     pub fn range_query_pairs(
         &self,

@@ -263,6 +263,21 @@ pub enum QueryPlan {
     },
 }
 
+impl QueryPlan {
+    /// Name of the index this plan scans. Every variant carries one, so this
+    /// replaces the 6-arm `match` previously hand-duplicated at each call site.
+    pub fn index_name(&self) -> &str {
+        match self {
+            QueryPlan::IndexScan { index_name, .. }
+            | QueryPlan::IndexRangeScan { index_name, .. }
+            | QueryPlan::RegexPrefixScan { index_name, .. }
+            | QueryPlan::MultiRegexPrefixScan { index_name, .. }
+            | QueryPlan::MultiValueScan { index_name, .. }
+            | QueryPlan::SparseIndexScan { index_name, .. } => index_name,
+        }
+    }
+}
+
 /// Query planner - analyzes queries and selects optimal execution plan
 pub struct QueryPlanner;
 
@@ -632,7 +647,10 @@ impl QueryPlanner {
     /// can never overlap into a valid range, so a mixed-type range (e.g.
     /// `{$gte: 5, $lte: "z"}`) matches nothing — the `IndexKey` equivalent of
     /// `value_type_rank` (audit 2026-06-06 finding: mixed-type range over-count).
-    fn index_key_type_bucket(k: &IndexKey) -> u8 {
+    /// `pub(crate)` so `PlanRanges::from_plan` can reuse it to decide range
+    /// exactness for count (a single-sided range whose open end crosses buckets
+    /// is NOT exact — finding #1, 2026-06-08).
+    pub(crate) fn index_key_type_bucket(k: &IndexKey) -> u8 {
         match k {
             IndexKey::Null => 0,
             IndexKey::Bool(_) => 1,

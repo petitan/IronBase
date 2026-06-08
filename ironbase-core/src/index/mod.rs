@@ -62,6 +62,9 @@ pub mod fuzzy;
 pub mod key;
 pub mod legacy;
 pub mod manager;
+// Crate-internal: single source of truth for QueryPlan → index key-ranges
+// (audit 2026-06-06 finding #8). NOT part of the public crate API.
+pub(crate) mod plan_ranges;
 pub mod traits;
 
 // Re-export main types for convenience
@@ -73,10 +76,9 @@ pub use fuzzy::{
     FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata, FuzzySearchOptions, FuzzySearchResult,
 };
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
-// Crate-internal query-planner helpers (audit 2026-06-06 fixes) — NOT part of
-// the public crate API. NumericBucketRanges is referenced directly via
-// super::key in btree.rs, so it is not re-exported here.
-pub(crate) use key::{numeric_range_buckets, prefix_scan_upper_bound};
+// numeric_range_buckets / prefix_scan_upper_bound (audit 2026-06-06 fixes) are
+// consumed only inside the index layer (plan_ranges::from_plan, via super::key),
+// so they are not re-exported from this module.
 pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;
 pub use traits::{calculate_lazy_threshold, IndexTrait, LazyLoadable};

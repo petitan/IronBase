@@ -2,37 +2,15 @@
 
 use serde_json::Value;
 
-/// Maximum repetitions of the max Unicode codepoint for "string infinity".
-///
-/// This value is used in range queries to create an upper bound that sorts
-/// after any realistic string value. 100 repetitions is arbitrary but
-/// exceeds any practical field length (MongoDB max is 1024 chars for index keys).
-const MAX_STRING_KEY_LENGTH: usize = 100;
-
-/// Build an IndexKey representing "string infinity" for range queries.
-///
-/// Uses the maximum Unicode codepoint (U+10FFFF) repeated to create a string
-/// that lexicographically sorts after any realistic string value.
-/// Used as the exclusive upper bound to capture all strings in a range.
-///
-/// # Why U+10FFFF?
-/// - It's the highest valid Unicode code point
-/// - Any real string will sort before it
-/// - Works correctly with UTF-8 collation
-fn max_string_key() -> IndexKey {
-    IndexKey::String("\u{10ffff}".repeat(MAX_STRING_KEY_LENGTH))
-}
-
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::index::{
-    numeric_range_buckets, prefix_scan_upper_bound, IndexKey, IndexManager, RangeQueryMode,
-    ScanOrder,
-};
+use crate::index::plan_ranges::PlanRanges;
+use crate::index::{BPlusTree, IndexManager};
 use crate::query::Query;
 use crate::query_planner::{QueryPlan, QueryPlanner};
 use crate::storage::{RawStorage, Storage};
+use std::collections::HashMap;
 
 use super::CollectionCore;
 
@@ -114,18 +92,51 @@ fn query_fully_covered_by_plan(query_json: &Value, plan: &QueryPlan) -> bool {
 /// over-counted. Such plans must take the index-narrowed path instead, which
 /// deduplicates doc_ids before counting — matching find()'s multikey dedup.
 fn plan_index_is_multikey(indexes: &IndexManager, plan: &QueryPlan) -> bool {
-    let index_name = match plan {
-        QueryPlan::IndexScan { index_name, .. }
-        | QueryPlan::IndexRangeScan { index_name, .. }
-        | QueryPlan::RegexPrefixScan { index_name, .. }
-        | QueryPlan::MultiRegexPrefixScan { index_name, .. }
-        | QueryPlan::MultiValueScan { index_name, .. }
-        | QueryPlan::SparseIndexScan { index_name, .. } => index_name,
-    };
     indexes
-        .get_btree_index(index_name)
+        .get_btree_index(plan.index_name())
         .map(|i| i.metadata.multikey)
         .unwrap_or(false)
+}
+
+/// The two ways a fully-planned count resolves. Returned by [`count_for_plan`]
+/// so the **caller** owns the lock-drop discipline: `Exact` is computed while
+/// `storage`+`indexes` are held (it reads the document catalog), whereas
+/// `Narrow` hands the index-matched candidate doc_ids back so the caller can
+/// drop BOTH guards (issue #75 storage→indexes order) before delegating to the
+/// re-entrant `count_index_narrowed`.
+enum CountOutcome {
+    /// O(1)-memory catalog-validated count — the plan's ranges are exact, no
+    /// post-filter needed.
+    Exact(u64),
+    /// Index-narrowed candidate doc_ids — the caller must post-filter the full
+    /// query against them.
+    Narrow(Vec<DocumentId>),
+}
+
+/// Resolve a plan to a [`CountOutcome`] via the shared range chokepoint (audit
+/// finding #8 — the single `PlanRanges::from_plan` derivation that count, find
+/// and the cursor all share). Pure index math plus a catalog read; acquires NO
+/// locks itself.
+///
+/// The exact O(1) fast path is taken only when the caller's coverage + multikey
+/// gates pass (`fully_covered`) AND the plan's raw ranges are exact
+/// ([`PlanRanges::exact`], which folds in the regex `exact && !case_insensitive`
+/// rule). Otherwise the ranges are materialized into candidate doc_ids for the
+/// caller to post-filter.
+fn count_for_plan(
+    index: &BPlusTree,
+    plan: &QueryPlan,
+    catalog: &HashMap<DocumentId, u64>,
+    fully_covered: bool,
+) -> Result<CountOutcome> {
+    let ranges = PlanRanges::from_plan(plan, index);
+    if fully_covered && ranges.exact {
+        Ok(CountOutcome::Exact(
+            index.count_exact(&ranges, catalog) as u64
+        ))
+    } else {
+        Ok(CountOutcome::Narrow(index.scan_ranges(&ranges)?))
+    }
 }
 
 impl<S: Storage + RawStorage> CollectionCore<S> {
@@ -276,193 +287,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let fully_covered = query_fully_covered_by_plan(&merged_query, &plan)
                         && !plan_index_is_multikey(&indexes, &plan);
 
-                    // Handle fully-covered merged plans with O(1) memory count
-                    match &plan {
-                        QueryPlan::IndexRangeScan {
-                            ref index_name,
-                            ref start,
-                            ref end,
-                            inclusive_start,
-                            inclusive_end,
-                            ..
-                        } => {
-                            if let Some(index) = indexes.get_btree_index(index_name) {
-                                // Numeric range: count both Int + Float buckets (D).
-                                let buckets = numeric_range_buckets(
-                                    start.as_ref(),
-                                    end.as_ref(),
-                                    *inclusive_start,
-                                    *inclusive_end,
-                                );
-                                let default_start = IndexKey::Null;
-                                let default_end = max_string_key();
-                                let start_key = start.as_ref().unwrap_or(&default_start);
-                                let end_key = end.as_ref().unwrap_or(&default_end);
-
-                                if fully_covered {
-                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
-                                        || IronBaseError::CollectionNotFound(self.name.clone()),
-                                    )?;
-                                    let count = match &buckets {
-                                        Some(b) => {
-                                            index.count_numeric_buckets(b, &meta.document_catalog)
-                                        }
-                                        None => index.count_range_validated(
-                                            start_key,
-                                            end_key,
-                                            *inclusive_start,
-                                            *inclusive_end,
-                                            &meta.document_catalog,
-                                        ),
-                                    };
-                                    return Ok(count as u64);
-                                } else {
-                                    let doc_ids = match &buckets {
-                                        Some(b) => index.scan_numeric_buckets(b),
-                                        None => {
-                                            let mode = RangeQueryMode::Scan {
-                                                skip: 0,
-                                                limit: None,
-                                                order: ScanOrder::Asc,
-                                            };
-                                            index
-                                                .range_query(
-                                                    start_key,
-                                                    end_key,
-                                                    *inclusive_start,
-                                                    *inclusive_end,
-                                                    mode,
-                                                )
-                                                .unwrap_docs()
-                                        }
-                                    };
-                                    drop(indexes);
-                                    drop(storage);
-                                    return self.count_index_narrowed(doc_ids, query_json, ctx);
-                                }
+                    // Single shared derivation (audit finding #8). A merged
+                    // $and/$or plan references an index that exists in this same
+                    // locked `indexes`, so get_btree_index always succeeds here;
+                    // count_for_plan resolves every variant uniformly.
+                    if let Some(index) = indexes.get_btree_index(plan.index_name()) {
+                        let outcome = {
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
+                            count_for_plan(index, &plan, &meta.document_catalog, fully_covered)?
+                        };
+                        match outcome {
+                            CountOutcome::Exact(n) => return Ok(n),
+                            CountOutcome::Narrow(doc_ids) => {
+                                drop(indexes);
+                                drop(storage);
+                                return self.count_index_narrowed(doc_ids, query_json, ctx);
                             }
-                        }
-                        QueryPlan::MultiValueScan {
-                            ref index_name,
-                            ref keys,
-                            ..
-                        } => {
-                            if let Some(index) = indexes.get_btree_index(index_name) {
-                                if fully_covered {
-                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
-                                        || IronBaseError::CollectionNotFound(self.name.clone()),
-                                    )?;
-                                    let mut total_count = 0usize;
-                                    for key in keys {
-                                        total_count += index.count_range_validated(
-                                            key,
-                                            key,
-                                            true,
-                                            true,
-                                            &meta.document_catalog,
-                                        );
-                                    }
-                                    return Ok(total_count as u64);
-                                } else {
-                                    // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
-                                    let estimated: usize = keys
-                                        .iter()
-                                        .map(|key| {
-                                            index
-                                                .range_query(
-                                                    key,
-                                                    key,
-                                                    true,
-                                                    true,
-                                                    RangeQueryMode::Count,
-                                                )
-                                                .unwrap_count()
-                                        })
-                                        .sum();
-                                    let mut all_doc_ids = Vec::new();
-                                    all_doc_ids.try_reserve(estimated).map_err(|e| {
-                                        IronBaseError::OutOfMemory(format!(
-                                            "Cannot allocate space for {} index entries in MultiValueScan count ({})",
-                                            estimated, e
-                                        ))
-                                    })?;
-                                    for key in keys {
-                                        let mode = RangeQueryMode::Scan {
-                                            skip: 0,
-                                            limit: None,
-                                            order: ScanOrder::Asc,
-                                        };
-                                        let ids = index
-                                            .range_query(key, key, true, true, mode)
-                                            .unwrap_docs();
-                                        all_doc_ids.extend(ids);
-                                    }
-                                    all_doc_ids.sort_unstable();
-                                    all_doc_ids.dedup();
-                                    drop(indexes);
-                                    drop(storage);
-                                    return self.count_index_narrowed(all_doc_ids, query_json, ctx);
-                                }
-                            }
-                        }
-                        QueryPlan::IndexScan {
-                            ref index_name,
-                            ref key,
-                            is_compound,
-                            ..
-                        } => {
-                            if let Some(index) = indexes.get_btree_index(index_name) {
-                                let (start, end) = if *is_compound {
-                                    index.build_prefix_range(key.clone())
-                                } else {
-                                    (key.clone(), key.clone())
-                                };
-
-                                if fully_covered {
-                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
-                                        || IronBaseError::CollectionNotFound(self.name.clone()),
-                                    )?;
-                                    let count = index.count_range_validated(
-                                        &start,
-                                        &end,
-                                        true,
-                                        true,
-                                        &meta.document_catalog,
-                                    );
-                                    return Ok(count as u64);
-                                } else {
-                                    let mode = RangeQueryMode::Scan {
-                                        skip: 0,
-                                        limit: None,
-                                        order: ScanOrder::Asc,
-                                    };
-                                    let doc_ids = index
-                                        .range_query(&start, &end, true, true, mode)
-                                        .unwrap_docs();
-                                    drop(indexes);
-                                    drop(storage);
-                                    return self.count_index_narrowed(doc_ids, query_json, ctx);
-                                }
-                            }
-                        }
-                        _ => {
-                            // Other plan types: use collect_doc_ids_from_plan as fallback
-                            drop(indexes);
-                            drop(storage);
-                            let parsed_query = Query::from_json(query_json)?;
-                            let cancel_flag = ctx.and_then(|c| c.cancel_flag());
-                            let deadline = ctx.and_then(|c| c.deadline());
-                            let (doc_ids, _) = self.collect_doc_ids_from_plan(
-                                &parsed_query,
-                                plan,
-                                None,
-                                false,
-                                0,
-                                None,
-                                cancel_flag,
-                                deadline,
-                            )?;
-                            return Ok(doc_ids.len() as u64);
                         }
                     }
                 }
@@ -495,327 +338,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let fully_covered = query_fully_covered_by_plan(query_json, &plan)
                 && !plan_index_is_multikey(&indexes, &plan);
 
-            match &plan {
-                QueryPlan::IndexScan {
-                    ref index_name,
-                    ref key,
-                    is_compound,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let (start, end) = if *is_compound {
-                            index.build_prefix_range(key.clone())
-                        } else {
-                            (key.clone(), key.clone())
-                        };
-
-                        if fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let count = index.count_range_validated(
-                                &start,
-                                &end,
-                                true,
-                                true,
-                                &meta.document_catalog,
-                            );
-                            return Ok(count as u64);
-                        } else {
-                            // FIX #36: query has extra conditions — narrow via index, then post-filter
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            let doc_ids = index
-                                .range_query(&start, &end, true, true, mode)
-                                .unwrap_docs();
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(doc_ids, query_json, ctx);
-                        }
-                    }
-                }
-                QueryPlan::IndexRangeScan {
-                    ref index_name,
-                    ref start,
-                    ref end,
-                    inclusive_start,
-                    inclusive_end,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        // Numeric range: count both Int + Float buckets (D).
-                        let buckets = numeric_range_buckets(
-                            start.as_ref(),
-                            end.as_ref(),
-                            *inclusive_start,
-                            *inclusive_end,
-                        );
-                        let default_start = IndexKey::Null;
-                        let default_end = max_string_key();
-                        let start_key = start.as_ref().unwrap_or(&default_start);
-                        let end_key = end.as_ref().unwrap_or(&default_end);
-
-                        if fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let count = match &buckets {
-                                Some(b) => index.count_numeric_buckets(b, &meta.document_catalog),
-                                None => index.count_range_validated(
-                                    start_key,
-                                    end_key,
-                                    *inclusive_start,
-                                    *inclusive_end,
-                                    &meta.document_catalog,
-                                ),
-                            };
-                            return Ok(count as u64);
-                        } else {
-                            // FIX #36: narrow via index, then post-filter
-                            let doc_ids = match &buckets {
-                                Some(b) => index.scan_numeric_buckets(b),
-                                None => {
-                                    let mode = RangeQueryMode::Scan {
-                                        skip: 0,
-                                        limit: None,
-                                        order: ScanOrder::Asc,
-                                    };
-                                    index
-                                        .range_query(
-                                            start_key,
-                                            end_key,
-                                            *inclusive_start,
-                                            *inclusive_end,
-                                            mode,
-                                        )
-                                        .unwrap_docs()
-                                }
-                            };
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(doc_ids, query_json, ctx);
-                        }
-                    }
-                }
-                QueryPlan::RegexPrefixScan {
-                    ref index_name,
-                    ref prefix,
-                    exact,
-                    case_insensitive,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        let start = IndexKey::String(prefix.clone());
-                        // Half-open [prefix, upper) — see prefix_scan_upper_bound (H).
-                        let end = prefix_scan_upper_bound(prefix);
-
-                        // The O(1) count_range_validated fast path counts the raw key
-                        // range without re-applying the pattern, so it is correct ONLY
-                        // for an exact, case-sensitive prefix. A non-exact regex
-                        // (`^a.*b`) over-counts the range, and a case-insensitive
-                        // `(?i)` regex (whose Unicode case-folding differs from the
-                        // index's to_lowercase keys) mis-counts; both must be
-                        // re-verified per document via the narrowed path (audit
-                        // 2026-06-06 findings F + I). The narrowed path also USES the
-                        // index range for non-exact regexes instead of a full scan.
-                        if *exact && !*case_insensitive && fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let count = index.count_range_validated(
-                                &start,
-                                &end,
-                                true,
-                                false,
-                                &meta.document_catalog,
-                            );
-                            return Ok(count as u64);
-                        } else {
-                            // Narrow via index range, then post-filter the full query.
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            let doc_ids = index
-                                .range_query(&start, &end, true, false, mode)
-                                .unwrap_docs();
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(doc_ids, query_json, ctx);
-                        }
-                    }
-                }
-                QueryPlan::MultiRegexPrefixScan {
-                    ref index_name,
-                    ref prefixes,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        if fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let mut total_count = 0usize;
-                            for prefix in prefixes {
-                                let start = IndexKey::String(prefix.clone());
-                                let end = prefix_scan_upper_bound(prefix);
-                                total_count += index.count_range_validated(
-                                    &start,
-                                    &end,
-                                    true,
-                                    false,
-                                    &meta.document_catalog,
-                                );
-                            }
-                            return Ok(total_count as u64);
-                        } else {
-                            // FIX #36: narrow via index, then post-filter
-                            // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
-                            let estimated: usize = prefixes
-                                .iter()
-                                .map(|prefix| {
-                                    let start = IndexKey::String(prefix.clone());
-                                    let end = prefix_scan_upper_bound(prefix);
-                                    index
-                                        .range_query(
-                                            &start,
-                                            &end,
-                                            true,
-                                            false,
-                                            RangeQueryMode::Count,
-                                        )
-                                        .unwrap_count()
-                                })
-                                .sum();
-                            let mut all_doc_ids = Vec::new();
-                            all_doc_ids.try_reserve(estimated).map_err(|e| {
-                                IronBaseError::OutOfMemory(format!(
-                                    "Cannot allocate space for {} index entries in MultiRegexPrefixScan count ({})",
-                                    estimated, e
-                                ))
-                            })?;
-                            for prefix in prefixes {
-                                let start = IndexKey::String(prefix.clone());
-                                let end = prefix_scan_upper_bound(prefix);
-                                let mode = RangeQueryMode::Scan {
-                                    skip: 0,
-                                    limit: None,
-                                    order: ScanOrder::Asc,
-                                };
-                                let ids = index
-                                    .range_query(&start, &end, true, false, mode)
-                                    .unwrap_docs();
-                                all_doc_ids.extend(ids);
-                            }
-                            all_doc_ids.sort_unstable();
-                            all_doc_ids.dedup();
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(all_doc_ids, query_json, ctx);
-                        }
-                    }
-                }
-                QueryPlan::MultiValueScan {
-                    ref index_name,
-                    ref keys,
-                    ..
-                } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        if fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let mut total_count = 0usize;
-                            for key in keys {
-                                total_count += index.count_range_validated(
-                                    key,
-                                    key,
-                                    true,
-                                    true,
-                                    &meta.document_catalog,
-                                );
-                            }
-                            return Ok(total_count as u64);
-                        } else {
-                            // FIX #36: narrow via index, then post-filter
-                            // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
-                            let estimated: usize = keys
-                                .iter()
-                                .map(|key| {
-                                    index
-                                        .range_query(key, key, true, true, RangeQueryMode::Count)
-                                        .unwrap_count()
-                                })
-                                .sum();
-                            let mut all_doc_ids = Vec::new();
-                            all_doc_ids.try_reserve(estimated).map_err(|e| {
-                                IronBaseError::OutOfMemory(format!(
-                                    "Cannot allocate space for {} index entries in MultiValueScan count ({})",
-                                    estimated, e
-                                ))
-                            })?;
-                            for key in keys {
-                                let mode = RangeQueryMode::Scan {
-                                    skip: 0,
-                                    limit: None,
-                                    order: ScanOrder::Asc,
-                                };
-                                let ids =
-                                    index.range_query(key, key, true, true, mode).unwrap_docs();
-                                all_doc_ids.extend(ids);
-                            }
-                            all_doc_ids.sort_unstable();
-                            all_doc_ids.dedup();
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(all_doc_ids, query_json, ctx);
-                        }
-                    }
-                }
-                QueryPlan::SparseIndexScan { ref index_name, .. } => {
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        if fully_covered {
-                            // Fast path: validate index entries against catalog — O(1) memory
-                            let meta =
-                                storage.get_collection_meta(&self.name).ok_or_else(|| {
-                                    IronBaseError::CollectionNotFound(self.name.clone())
-                                })?;
-                            let count = index.count_range_validated(
-                                &IndexKey::Null,
-                                &IndexKey::MaxKey,
-                                true,
-                                true,
-                                &meta.document_catalog,
-                            );
-                            return Ok(count as u64);
-                        } else {
-                            // FIX #35/#36: query has extra conditions beyond $exists
-                            let mode = RangeQueryMode::Scan {
-                                skip: 0,
-                                limit: None,
-                                order: ScanOrder::Asc,
-                            };
-                            let doc_ids = index
-                                .range_query(&IndexKey::Null, &IndexKey::MaxKey, true, true, mode)
-                                .unwrap_docs();
-                            drop(indexes);
-                            drop(storage);
-                            return self.count_index_narrowed(doc_ids, query_json, ctx);
-                        }
+            // Single shared derivation (audit finding #8). The plan references an
+            // index present in this same locked `indexes`, so get_btree_index
+            // always succeeds; count_for_plan resolves every variant uniformly
+            // (the regex `exact && !case_insensitive` rule lives in PlanRanges).
+            if let Some(index) = indexes.get_btree_index(plan.index_name()) {
+                let outcome = {
+                    let meta = storage
+                        .get_collection_meta(&self.name)
+                        .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+                    count_for_plan(index, &plan, &meta.document_catalog, fully_covered)?
+                };
+                match outcome {
+                    CountOutcome::Exact(n) => return Ok(n),
+                    CountOutcome::Narrow(doc_ids) => {
+                        drop(indexes);
+                        drop(storage);
+                        return self.count_index_narrowed(doc_ids, query_json, ctx);
                     }
                 }
             }
