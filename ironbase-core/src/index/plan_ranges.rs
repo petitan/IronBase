@@ -49,13 +49,16 @@ pub(crate) struct PlanRanges {
     /// Whether `count` may sum the raw validated range counts WITHOUT a
     /// post-filter. This carries only the per-plan part of that decision —
     /// chiefly the `RegexPrefixScan` `exact && !case_insensitive` rule (count.rs,
-    /// audit findings F + I) and the non-numeric range type-homogeneity rule
-    /// (finding #1, 2026-06-08: a single-sided range whose defaulted open end
-    /// crosses other key-type buckets, e.g. `{f: {$lt: "z"}}` → `[Null, "z"]`, is
-    /// NOT exact — `count_exact` would count the Int/Float/Bool keys the operator
-    /// can never match). The caller still ANDs `exact` with its own coverage +
-    /// non-multikey gates; a non-exact plan routes count through the index-narrowed
-    /// post-filter, matching find.
+    /// audit findings F + I). For a non-numeric range, `from_plan` builds a
+    /// TYPE-TIGHT range (an absent bound is filled with the present bound's type
+    /// min/max), so the range holds only the operator's type and stays exact —
+    /// `{f: {$lt: "z"}}` scans `[String(""), "z")`, not `[Null, "z"]`, keeping the
+    /// O(1) count fast path while excluding the Int/Float/Bool keys the operator
+    /// can never match (finding #1 + perf follow-up, 2026-06-08). `exact` is false
+    /// only for shapes a single range cannot tighten (a bound type with no scalar
+    /// min/max sentinel, or a fully-unbounded range). The caller still ANDs `exact`
+    /// with its own coverage + non-multikey gates; a non-exact plan routes count
+    /// through the index-narrowed post-filter, matching find.
     pub exact: bool,
 }
 
@@ -152,46 +155,69 @@ impl PlanRanges {
                     });
                     PlanRanges::multi(index_name, sub_ranges, true)
                 } else {
-                    // Non-numeric (string/bool) range. An absent bound becomes the
-                    // open end of the key space (Null below, MaxKey above). All
-                    // three executors agree on this single bound; find/cursor make
-                    // it exact via their post-filter.
+                    // Non-numeric (string/bool) range. Make the scanned range
+                    // TYPE-TIGHT: an absent bound is filled with the PRESENT bound's
+                    // type min/max, so the range holds ONLY keys of that type. This
+                    // keeps count's O(1) `count_exact` path valid (no cross-bucket
+                    // keys to over-count) AND tightens the find/cursor scan — rather
+                    // than widening to `[Null, hi]` / `[lo, MaxKey]` and leaning on a
+                    // post-filter, which over-counted on the count fast path AND
+                    // dropped count from O(1) to O(matches) even on a type-
+                    // homogeneous field (finding #1 + perf follow-up, 2026-06-08).
                     //
-                    // COUNT has no post-filter (count_exact), so the raw range is
-                    // an exact answer ONLY when it is type-homogeneous — it must
-                    // not pull in index keys of a type the operator can never match
-                    // (finding #1, 2026-06-08, e.g. `{f: {$lt: "z"}}` →
-                    // `[Null, "z"]` counting Int/Float/Bool keys):
-                    //  - a defaulted LOWER (Null) pulls in every bucket below the
-                    //    upper bound → never exact;
-                    //  - a defaulted UPPER (MaxKey) pulls in every bucket above the
-                    //    lower bound → exact only when the lower bound is a String,
-                    //    the top scalar bucket on a single-field index (above it
-                    //    only the never-present Compound keys sort);
-                    //  - a fully-bounded range is exact iff both bounds share a
-                    //    type bucket (the planner already rejects mixed-type
-                    //    two-sided ranges; re-checked here for safety).
-                    // Non-exact ⇒ count takes the index-narrowed post-filter path,
-                    // matching find's correct result.
-                    let exact = match (start.as_ref(), end.as_ref()) {
-                        (Some(s), Some(e)) => {
-                            QueryPlanner::index_key_type_bucket(s)
-                                == QueryPlanner::index_key_type_bucket(e)
+                    // Bounds here are non-numeric (numeric goes through the bucket
+                    // path) — String in practice, occasionally Bool. The planner
+                    // already rejects mixed-type two-sided ranges, so a two-sided
+                    // range shares one bucket. A FILLED bound is INCLUSIVE of the
+                    // type boundary; the PRESENT bound keeps the plan's inclusivity.
+                    // IndexKey order: Null < Bool < Int < Float < String < Compound
+                    // < MaxKey. `String("")` is the lexicographically smallest string
+                    // (so `[String(""), hi)` excludes every Bool/Int/Float/Null key);
+                    // a single-field index stores no Compound keys, so `[lo, MaxKey]`
+                    // with a String `lo` is already string-only (String is the top
+                    // scalar bucket).
+                    let (lo, lo_incl, hi, hi_incl, exact) = match (start.as_ref(), end.as_ref()) {
+                        // Two-sided, same bucket → already type-tight.
+                        (Some(s), Some(e))
+                            if QueryPlanner::index_key_type_bucket(s)
+                                == QueryPlanner::index_key_type_bucket(e) =>
+                        {
+                            (s.clone(), *inclusive_start, e.clone(), *inclusive_end, true)
                         }
-                        (Some(IndexKey::String(_)), None) => true,
-                        (Some(_), None) => false,
-                        (None, _) => false,
+                        // Open lower → the upper bound's type-minimum.
+                        (None, Some(e @ IndexKey::String(_))) => (
+                            IndexKey::String(String::new()),
+                            true,
+                            e.clone(),
+                            *inclusive_end,
+                            true,
+                        ),
+                        (None, Some(e @ IndexKey::Bool(_))) => {
+                            (IndexKey::Bool(false), true, e.clone(), *inclusive_end, true)
+                        }
+                        // Open upper → the lower bound's type-maximum (MaxKey for a
+                        // String lower — the top scalar bucket; Bool(true) for Bool).
+                        (Some(s @ IndexKey::String(_)), None) => {
+                            (s.clone(), *inclusive_start, IndexKey::MaxKey, true, true)
+                        }
+                        (Some(s @ IndexKey::Bool(_)), None) => (
+                            s.clone(),
+                            *inclusive_start,
+                            IndexKey::Bool(true),
+                            true,
+                            true,
+                        ),
+                        // Unhandled bound type, both-absent, or (defensively) a
+                        // two-sided cross-bucket range → widest range + post-filter.
+                        _ => (
+                            start.clone().unwrap_or(IndexKey::Null),
+                            *inclusive_start,
+                            end.clone().unwrap_or(IndexKey::MaxKey),
+                            *inclusive_end,
+                            false,
+                        ),
                     };
-                    let start = start.clone().unwrap_or(IndexKey::Null);
-                    let end = end.clone().unwrap_or(IndexKey::MaxKey);
-                    PlanRanges::single(
-                        index_name,
-                        start,
-                        end,
-                        *inclusive_start,
-                        *inclusive_end,
-                        exact,
-                    )
+                    PlanRanges::single(index_name, lo, hi, lo_incl, hi_incl, exact)
                 }
             }
 
@@ -487,13 +513,57 @@ mod tests {
 
     #[test]
     fn unbounded_string_upper_defaults_to_maxkey() {
-        // {f: {$gte: "abc"}} → [String("abc"), MaxKey].
+        // {f: {$gte: "abc"}} → [String("abc"), MaxKey]; String is the top scalar
+        // bucket on a single-field index, so this is exact (O(1) count).
         let plan = range_scan(Some(IndexKey::String("abc".into())), None, true, true);
         let r = PlanRanges::from_plan(&plan, &tree());
         assert_eq!(r.sub_ranges.len(), 1);
         assert!(r.single_contiguous());
         assert_eq!(r.sub_ranges[0].start, IndexKey::String("abc".into()));
         assert_eq!(r.sub_ranges[0].end, IndexKey::MaxKey);
+        assert!(r.exact, "open-upper string range is type-tight → exact");
+    }
+
+    #[test]
+    fn unbounded_string_lower_is_type_tight_and_exact() {
+        // {f: {$lt: "z"}} → open lower filled with String("") (the lex-min string),
+        // NOT Null — so the range is string-only and EXACT (keeps the O(1) count
+        // fast path; the perf regression of routing it to the narrow path is gone).
+        let plan = range_scan(None, Some(IndexKey::String("z".into())), true, false);
+        let r = PlanRanges::from_plan(&plan, &tree());
+        assert_eq!(r.sub_ranges.len(), 1);
+        assert!(r.single_contiguous());
+        let sr = &r.sub_ranges[0];
+        assert_eq!(
+            sr.start,
+            IndexKey::String(String::new()),
+            "lower = String(\"\"), not Null"
+        );
+        assert!(sr.inclusive_start, "filled lower bound is inclusive");
+        assert_eq!(sr.end, IndexKey::String("z".into()));
+        assert!(!sr.inclusive_end, "$lt → exclusive upper preserved");
+        assert!(r.exact, "type-tight string range is exact");
+    }
+
+    #[test]
+    fn unbounded_bool_bounds_are_type_tight() {
+        // {f: {$gte: true}} → [Bool(true), Bool(true)] (open upper filled with the
+        // Bool max, not MaxKey), exact and bool-only.
+        let gte = range_scan(Some(IndexKey::Bool(true)), None, true, true);
+        let r = PlanRanges::from_plan(&gte, &tree());
+        assert_eq!(r.sub_ranges[0].start, IndexKey::Bool(true));
+        assert_eq!(r.sub_ranges[0].end, IndexKey::Bool(true));
+        assert!(r.exact, "bool open-upper is type-tight → exact");
+
+        // {f: {$lt: true}} → [Bool(false), Bool(true)) (open lower filled with the
+        // Bool min), exact.
+        let lt = range_scan(None, Some(IndexKey::Bool(true)), true, false);
+        let r = PlanRanges::from_plan(&lt, &tree());
+        assert_eq!(r.sub_ranges[0].start, IndexKey::Bool(false));
+        assert!(r.sub_ranges[0].inclusive_start);
+        assert_eq!(r.sub_ranges[0].end, IndexKey::Bool(true));
+        assert!(!r.sub_ranges[0].inclusive_end);
+        assert!(r.exact, "bool open-lower is type-tight → exact");
     }
 
     #[test]
