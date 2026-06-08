@@ -456,4 +456,69 @@ mod integration_tests {
         let collections = db2.list_collections();
         assert!(collections.contains(&"test".to_string()));
     }
+
+    #[test]
+    fn test_dead_pid_in_lockfile_does_not_bypass_live_holder() {
+        // Audit 2026-06-08 P0-1 (empirically reproduced): a `.lock` file recording
+        // a PID that looks DEAD must NOT let a second opener bypass a LIVE holder.
+        // The old PID-based stale-detection unlinked the live holder's lock inode
+        // and re-locked a fresh one → two live writers on one .mlite → corruption.
+        // The fix trusts the OS flock (auto-released only on holder death), so the
+        // PID written in the file is irrelevant to exclusivity.
+        use crate::error::IronBaseError;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let lock_path = temp_dir.path().join("test.mlite.lock");
+
+        // db1 holds the exclusive fs2 lock.
+        let _db1 = DatabaseCore::open(&db_path).unwrap();
+
+        // Overwrite the .lock content with a PID guaranteed not to be alive
+        // (> any pid_max → kill(pid,0) → ESRCH). The flock held by db1 is unaffected.
+        std::fs::write(&lock_path, "2147483646\n").unwrap();
+
+        // A second open MUST still fail with DatabaseLocked — db1 holds the flock,
+        // regardless of the (dead-looking) PID written in the file.
+        match DatabaseCore::open(&db_path) {
+            Err(IronBaseError::DatabaseLocked(_)) => {}
+            Ok(_) => panic!("dead PID in .lock bypassed the live flock: second open succeeded"),
+            Err(e) => panic!("expected DatabaseLocked, got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_stale_lockfile_from_crashed_holder_allows_reopen() {
+        // The other direction of P0-1: a crashed process leaves the `.lock` FILE
+        // (with its now-dead PID) but the OS released its flock on death. A fresh
+        // open MUST succeed — the file's existence is not a lock, only the flock
+        // is. This pins the foundational assumption (flock auto-release) the fix
+        // rests on, so a future lock-scheme change that doesn't auto-release on
+        // crash would fail here instead of silently locking the DB out forever.
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let lock_path = temp_dir.path().join("test.mlite.lock");
+
+        // Leftover stale lock file, NO flock held (simulates post-crash state).
+        std::fs::write(&lock_path, "2147483646\n").unwrap();
+
+        // Nothing holds the flock → open must succeed and overwrite the stale PID.
+        let _db = DatabaseCore::open(&db_path)
+            .expect("reopen after crash (stale .lock file, no flock) must succeed");
+    }
+
+    #[test]
+    fn test_distinct_db_files_do_not_share_a_lock() {
+        // P0-1 path fix: `foo` and `foo.mlite` are DIFFERENT databases and must
+        // not block each other. The old `with_extension("mlite.lock")` mapped BOTH
+        // to `foo.mlite.lock`; the fix appends `.lock` → `foo.lock` vs
+        // `foo.mlite.lock`. Both must open concurrently.
+        let temp_dir = TempDir::new().unwrap();
+        let p1 = temp_dir.path().join("foo");
+        let p2 = temp_dir.path().join("foo.mlite");
+
+        let _db1 = DatabaseCore::open(&p1).unwrap();
+        let _db2 = DatabaseCore::open(&p2)
+            .expect("distinct db files (foo vs foo.mlite) must not collide on one lock");
+    }
 }

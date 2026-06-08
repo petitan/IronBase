@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — multi-instance file lock could be bypassed → two live writers / corruption (mcp-server v1.0.529, core v0.3.335)
+
+`StorageEngine::open` guards single-writer access with an `fs2` exclusive advisory
+lock on a sibling `<db>.lock` file. The previous PID-based "stale lock" recovery
+made that guarantee bypassable (audit 2026-06-08 P0-1, empirically reproduced):
+on a failed `try_lock_exclusive` it read the PID written in the lock file and, if
+that PID looked dead, **unlinked and re-created** the lock file before re-locking.
+But `try_lock_exclusive` fails only when a **live** process holds the flock, while
+the PID could lag (a holder mid-acquire had not rewritten it) or read as dead
+across users (`kill(pid, 0)` → `EPERM` for another uid). Because the flock is
+per-inode, concurrent recoverers each unlinked the live holder's inode and locked
+a **fresh** one — so two openers could both succeed on the same `.mlite` → two
+live writers → corruption.
+
+The stale-detection (and `is_process_alive`, with its `kill`/`tasklist` probes) is
+removed entirely: the OS already releases the advisory lock when the holding
+process dies (crash / SIGKILL) or closes the fd, so a leftover `.lock` file is
+harmless and the next `try_lock_exclusive` simply succeeds. A genuine OS/FS lock
+fault (`ENOLCK`/`EIO`) is now surfaced instead of masked as `DatabaseLocked`. The
+lock path is derived by **appending** `.lock` (`format!("{path}.lock")`) rather
+than `with_extension`, so distinct databases like `foo` and `foo.mlite` no longer
+collide on one `foo.mlite.lock`. Regression tests cover the bypass, crash-recovery
+reopen, and the path collision. (Local-filesystem guarantee; advisory locks are
+host-local on NFS, as documented.)
+
 ### Refactored — unify the four QueryPlan executors behind one range chokepoint (mcp-server v1.0.528, core v0.3.334)
 
 Audit finding #8: a single `QueryPlan` was interpreted by **four** hand-synced executors — the two
