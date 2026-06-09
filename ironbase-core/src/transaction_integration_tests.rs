@@ -457,6 +457,11 @@ mod integration_tests {
         assert!(collections.contains(&"test".to_string()));
     }
 
+    // Unix-only: the setup overwrites the `.lock` file WHILE db1 holds it, which is
+    // possible only with Unix advisory flock. On Windows the lock is mandatory (the
+    // open/write would hit a sharing violation), and the dead-PID-bypass scenario it
+    // guards against was itself a Unix `kill(pid,0)` stale-detection concern.
+    #[cfg(unix)]
     #[test]
     fn test_dead_pid_in_lockfile_does_not_bypass_live_holder() {
         // Audit 2026-06-08 P0-1 (empirically reproduced): a `.lock` file recording

@@ -615,9 +615,14 @@ impl StorageEngine {
                 lock_file.sync_all()?;
                 Ok(lock_file)
             }
-            // WouldBlock = a LIVE process holds the flock (a dead holder's flock is
-            // auto-released by the OS) → the database is genuinely in use.
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            // Lock contention = a LIVE process holds the flock (a dead holder's
+            // flock is auto-released by the OS) → the database is genuinely in use.
+            // fs2::lock_contended_error() is the portable contention error: its kind
+            // is WouldBlock on Unix but a Windows-specific kind under LockFileEx, so
+            // match against it rather than hardcoding WouldBlock (which missed the
+            // Windows case → contention was misreported as a raw Io error, breaking
+            // test_file_lock_prevents_double_open on Windows).
+            Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
                 Err(IronBaseError::DatabaseLocked(db_path.to_string()))
             }
             // A genuine OS/filesystem fault (ENOLCK / EINTR / EIO, e.g. a mount
