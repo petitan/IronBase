@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — delete was not atomic: reversed lock order + concurrent double-decrement (audit P2-3) (mcp-server v1.0.531, core v0.3.337)
+
+Every delete write path de-indexed the document **before** acquiring the storage write lock
+(`remove_from_indexes()` then `storage.write()`), and read the target lock-free. This reversed the
+storage→indexes lock order the rest of the engine follows (#75) and, more seriously, opened a window
+where two concurrent deletes of the same document could **both** pass the lock-free live read and each
+write a tombstone + `adjust_live_count(-1)` → the live count silently drifted below the true value.
+`update_one_prepare` already did this correctly (storage lock held across the index mutation); the
+delete paths had diverged because the logic was copy-pasted across **seven** sites.
+
+All delete paths now funnel through a single chokepoint, `CollectionCore::tombstone_doc_atomic`, which
+acquires the storage write lock, **re-reads** the document under it (skipping a row already tombstoned by
+a concurrent writer, and re-matching the query when given), writes the tombstone, then de-indexes — all
+in one critical section, lock order storage→indexes. Callers fixed:
+
+- **delete_one:** `delete_one_prepare` (Safe), `delete_one_raw` (in-memory / Unsafe),
+  `delete_one_persist_batch` (Batch). As a side effect `delete_one_raw` now also resolves a string `_id`
+  to its stored integer form (`resolve_stored_id`), matching what `delete_one_prepare` already did.
+- **delete_many:** `delete_many_raw_with_docs` (in-memory / Unsafe) and the Safe bulk
+  `delete_many_persist`. `DeleteManyPrepared` dropped its precomputed `tombstone_writes` + `index_removals`
+  lists — the persist re-reads each doc under the lock instead, so there is nothing stale to write and the
+  prepare/persist contract shrinks to `deleted` + `wal_entries`.
+
+New `delete_one_atomicity_test` (13 tests) includes concurrent same-`_id` / same-filter guards for both
+delete_one and delete_many (in-memory raw path and Safe prepare/persist path) that assert each doc is
+deleted exactly once and the live count drops by exactly the matched count — these fail on the pre-fix
+code. The `update_one_persist_batch` update path shares the index-before-storage ordering and is out of
+this delete-focused fix's scope.
+
 ### Refactored — unify the four QueryPlan executors behind one range chokepoint (mcp-server v1.0.528, core v0.3.334)
 
 Audit finding #8: a single `QueryPlan` was interpreted by **four** hand-synced executors — the two
