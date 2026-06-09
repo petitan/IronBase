@@ -172,6 +172,32 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         lock
     }
 
+    /// Per-collection upsert serialization lock (audit P2-4).
+    ///
+    /// Returned lock is held across `update_one_with_options`'s match→insert window
+    /// so two concurrent upserts on the same filter cannot both observe `matched==0`
+    /// and each insert a duplicate. Separate from `get_collection_write_lock` (which
+    /// `insert_one` takes) to avoid a reentrant deadlock.
+    pub(crate) fn get_collection_upsert_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        // Fast path: read lock to check if already exists
+        {
+            let locks = self.collection_upsert_locks.read();
+            if let Some(lock) = locks.get(name) {
+                return Arc::clone(lock);
+            }
+        }
+
+        // Slow path: create with write lock (double-checked)
+        let mut locks = self.collection_upsert_locks.write();
+        if let Some(lock) = locks.get(name) {
+            return Arc::clone(lock);
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(name.to_string(), Arc::clone(&lock));
+        lock
+    }
+
     /// Check if a collection has any unique indexes (excluding _id which is always unique)
     ///
     /// Used for hybrid locking optimization:
@@ -1468,10 +1494,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
-        // Remove shared IndexManager, SchemaManager, and collection write lock
+        // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
         self.collection_write_locks.write().remove(name);
+        self.collection_upsert_locks.write().remove(name);
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)
@@ -1673,10 +1700,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
-        // Remove shared IndexManager, SchemaManager, and collection write lock
+        // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
         self.collection_write_locks.write().remove(name);
+        self.collection_upsert_locks.write().remove(name);
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)

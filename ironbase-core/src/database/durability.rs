@@ -752,6 +752,20 @@ impl DatabaseCore<StorageEngine> {
 
         self.check_not_closed()?;
 
+        // P2-4 FIX: hold a per-collection upsert lock across the whole match→insert
+        // window so two concurrent upserts on the same filter can't both observe
+        // matched==0 and each insert (reproduced under load: 8 threads → duplicate
+        // docs). This is a DEDICATED lock, distinct from the collection write lock
+        // insert_one takes — every collection has a unique _id index so insert_one
+        // always takes that one, and reusing it here would reentrant-deadlock. Lock
+        // order is always upsert_lock → collection_write_lock, so no ABBA.
+        let upsert_lock = if options.upsert {
+            Some(self.get_collection_upsert_lock(collection_name))
+        } else {
+            None
+        };
+        let _upsert_guard = upsert_lock.as_ref().map(|l| l.lock());
+
         // First, try the normal update
         // Handle CollectionNotFound specially for upsert
         let update_result = self.update_one(collection_name, query, update);
@@ -1454,6 +1468,20 @@ impl DatabaseCore<MemoryStorage> {
         use crate::upsert::create_upsert_document;
 
         self.check_not_closed()?;
+
+        // P2-4 FIX: hold a per-collection upsert lock across the whole match→insert
+        // window so two concurrent upserts on the same filter can't both observe
+        // matched==0 and each insert (reproduced under load: 8 threads → duplicate
+        // docs). This is a DEDICATED lock, distinct from the collection write lock
+        // insert_one takes — every collection has a unique _id index so insert_one
+        // always takes that one, and reusing it here would reentrant-deadlock. Lock
+        // order is always upsert_lock → collection_write_lock, so no ABBA.
+        let upsert_lock = if options.upsert {
+            Some(self.get_collection_upsert_lock(collection_name))
+        } else {
+            None
+        };
+        let _upsert_guard = upsert_lock.as_ref().map(|l| l.lock());
 
         // First, try the normal update
         // Handle CollectionNotFound specially for upsert
