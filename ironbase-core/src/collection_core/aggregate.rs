@@ -200,11 +200,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     return Ok(docs);
                 }
-                FastPath::CountByField { .. } => {
-                    // CountByField optimization is handled by the existing index-based
-                    // $group execution path below (try_index_based_execute_with_context).
-                    // Fall through to regular execution which already handles this case.
-                }
             }
         }
 

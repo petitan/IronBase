@@ -1,13 +1,8 @@
 // src/aggregation/optimizer.rs
 // Pipeline optimization - detects patterns for memory-efficient execution
 //
-// ## Phase 1: Logical Plan + Pattern Detection
-// - GroupShape detector: identifies _id shape and accumulator types
-// - Fast path detection: CountOnly, CountByField, IndexGroup
-//
-// ## Phase 2: Physical Plan Selection
-// - Cost model: estimates based on collection stats and index presence
-// - Plan selection: chooses between FullScan, CountOnly, IndexGroup
+// Pattern detection (`analyze_pipeline`) produces a `PipelineOptimization`:
+// a `FastPath` for whole-pipeline bypass, plus a Top-K hint for $sort+$limit.
 //
 // ## Optimization Patterns
 //
@@ -15,13 +10,9 @@
 // ```json
 // [{"$group": {"_id": null, "count": {"$sum": 1}}}]
 // ```
-// → Uses count_documents() instead of full scan
-//
-// ### CountByField (O(index) when index on _id field)
-// ```json
-// [{"$group": {"_id": "$email", "count": {"$sum": 1}}}]
-// ```
-// → Uses index distinct + count per key
+// → Uses count_documents() instead of full scan. Index-based per-field counting
+//   ({"_id": "$field"}) is decided independently by the executor via
+//   `GroupStage::can_use_index` / `try_index_based_execute_with_context`.
 //
 // ### TopK (O(n log k) instead of O(n log n))
 // ```json
@@ -35,31 +26,6 @@ use serde_json::Value;
 // ============================================================================
 // LOGICAL PLAN TYPES
 // ============================================================================
-
-/// Logical plan representation for pipeline optimization
-#[derive(Debug, Clone)]
-pub enum LogicalPlan {
-    /// Full collection scan with optional filter
-    Scan { filter: Option<Value> },
-    /// Count all documents (or filtered subset)
-    CountOnly { filter: Option<Value> },
-    /// Count documents grouped by a field
-    CountByField {
-        field: String,
-        filter: Option<Value>,
-    },
-    /// Index-based group (when index exists on group key)
-    IndexGroup {
-        field: String,
-        accumulators: Vec<AccumulatorKind>,
-    },
-    /// Full scan with group
-    FullScanGroup {
-        id: GroupIdKind,
-        accumulators: Vec<AccumulatorKind>,
-        filter: Option<Value>,
-    },
-}
 
 /// Simplified group _id representation
 #[derive(Debug, Clone, PartialEq)]
@@ -88,14 +54,6 @@ impl AccumulatorKind {
     /// Check if this accumulator is count-compatible (can be done with count query)
     pub fn is_count_only(&self) -> bool {
         matches!(self, AccumulatorKind::Count(_))
-    }
-
-    /// Check if this accumulator can use index min/max optimization
-    pub fn is_index_minmax(&self) -> bool {
-        matches!(
-            self,
-            AccumulatorKind::MinField(_) | AccumulatorKind::MaxField(_)
-        )
     }
 }
 
@@ -191,41 +149,6 @@ impl GroupShape {
             .iter()
             .all(|(_, kind)| kind.is_count_only())
     }
-
-    /// Check if this group shape could use index-based counting
-    /// Requirements:
-    /// - _id: "$field" (field-based grouping)
-    /// - Only $sum: 1 accumulators
-    pub fn is_count_by_field(&self) -> Option<&str> {
-        if let GroupIdKind::Field(ref field) = self.id_kind {
-            if self
-                .accumulators
-                .iter()
-                .all(|(_, kind)| kind.is_count_only())
-            {
-                return Some(field);
-            }
-        }
-        None
-    }
-}
-
-// ============================================================================
-// PHYSICAL PLAN TYPES
-// ============================================================================
-
-/// Physical execution plan after optimization
-#[derive(Debug, Clone)]
-pub enum PhysicalPlan {
-    /// Use count_documents() - O(1) for unfiltered, O(index) for filtered
-    CountOnly {
-        filter: Option<Value>,
-        output_field: String,
-    },
-    /// Use index-based distinct counting
-    CountByIndex { field: String, output_field: String },
-    /// Full scan with streaming pipeline (default fallback)
-    FullScanPipeline,
 }
 
 // ============================================================================
@@ -259,13 +182,6 @@ pub enum FastPath {
         multiplier: i64,
         /// Whether to include `_id: null` in the output document
         include_id: bool,
-    },
-    /// Use index-based counting per unique value
-    CountByField {
-        /// Field to group by
-        field: String,
-        /// Output field name for count
-        output_field: String,
     },
 }
 
@@ -367,23 +283,6 @@ fn detect_count_only_pattern(stages: &[Stage]) -> Option<FastPath> {
         }
     }
 
-    // Check for CountByField eligibility (index-based)
-    if let Some(field) = shape.is_count_by_field() {
-        if let Some((output_field, _)) = shape.accumulators.first() {
-            let remaining = &stages[group_idx + 1..];
-            // Allow $sort + $limit after for top-k pattern
-            if remaining.is_empty()
-                || are_post_group_stages_simple(remaining)
-                || is_sort_limit_pattern(remaining)
-            {
-                return Some(FastPath::CountByField {
-                    field: field.to_string(),
-                    output_field: output_field.clone(),
-                });
-            }
-        }
-    }
-
     None
 }
 
@@ -395,120 +294,6 @@ fn are_post_group_stages_simple(stages: &[Stage]) -> bool {
             Stage::Limit(_) | Stage::Skip(_) | Stage::Project(_) | Stage::Sort(_)
         )
     })
-}
-
-/// Check if stages form a $sort + $limit pattern
-fn is_sort_limit_pattern(stages: &[Stage]) -> bool {
-    if stages.len() < 2 {
-        return false;
-    }
-    matches!((&stages[0], &stages[1]), (Stage::Sort(_), Stage::Limit(_)))
-}
-
-// ============================================================================
-// COST MODEL (Phase 2)
-// ============================================================================
-
-/// Collection statistics for cost estimation
-#[derive(Debug, Clone, Default)]
-pub struct CollectionStats {
-    /// Total document count
-    pub doc_count: usize,
-    /// Whether an index exists on a specific field
-    pub indexed_fields: Vec<String>,
-    /// Estimated average document size in bytes
-    pub avg_doc_size: usize,
-}
-
-impl CollectionStats {
-    /// Check if a field has an index
-    pub fn has_index(&self, field: &str) -> bool {
-        self.indexed_fields.iter().any(|f| f == field)
-    }
-}
-
-/// Cost estimate for a physical plan
-#[derive(Debug, Clone)]
-pub struct CostEstimate {
-    /// Estimated documents to scan
-    pub docs_to_scan: usize,
-    /// Estimated memory usage in bytes
-    pub memory_bytes: usize,
-    /// Cost score (lower is better)
-    pub score: f64,
-}
-
-impl CostEstimate {
-    /// Create cost estimate for CountOnly plan
-    pub fn for_count_only(_stats: &CollectionStats, has_filter: bool) -> Self {
-        if has_filter {
-            // Filtered count may need index scan
-            Self {
-                docs_to_scan: 0, // Index-based count
-                memory_bytes: 64,
-                score: 10.0,
-            }
-        } else {
-            // Unfiltered count is O(1)
-            Self {
-                docs_to_scan: 0,
-                memory_bytes: 64,
-                score: 1.0,
-            }
-        }
-    }
-
-    /// Create cost estimate for full scan
-    pub fn for_full_scan(stats: &CollectionStats) -> Self {
-        Self {
-            docs_to_scan: stats.doc_count,
-            memory_bytes: stats.doc_count * stats.avg_doc_size,
-            score: stats.doc_count as f64,
-        }
-    }
-
-    /// Create cost estimate for index-based group
-    pub fn for_index_group(_stats: &CollectionStats, estimated_groups: usize) -> Self {
-        Self {
-            docs_to_scan: 0,                     // Index scan only
-            memory_bytes: estimated_groups * 64, // ~64 bytes per group
-            score: (estimated_groups as f64).sqrt() * 10.0,
-        }
-    }
-}
-
-/// Select the best physical plan based on cost
-pub fn select_plan(logical: &LogicalPlan, stats: &CollectionStats) -> (PhysicalPlan, CostEstimate) {
-    match logical {
-        LogicalPlan::CountOnly { filter } => {
-            let cost = CostEstimate::for_count_only(stats, filter.is_some());
-            let plan = PhysicalPlan::CountOnly {
-                filter: filter.clone(),
-                output_field: "count".to_string(),
-            };
-            (plan, cost)
-        }
-        LogicalPlan::CountByField { field, filter: _ } if stats.has_index(field) => {
-            let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
-            let plan = PhysicalPlan::CountByIndex {
-                field: field.clone(),
-                output_field: "count".to_string(),
-            };
-            (plan, cost)
-        }
-        LogicalPlan::IndexGroup { field, .. } if stats.has_index(field) => {
-            let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
-            let plan = PhysicalPlan::CountByIndex {
-                field: field.clone(),
-                output_field: "count".to_string(),
-            };
-            (plan, cost)
-        }
-        _ => {
-            let cost = CostEstimate::for_full_scan(stats);
-            (PhysicalPlan::FullScanPipeline, cost)
-        }
-    }
 }
 
 // ============================================================================
@@ -694,24 +479,6 @@ mod tests {
         assert!(opt.fast_path.is_none());
     }
 
-    #[test]
-    fn test_no_count_only_with_field_id() {
-        // _id: "$field" - not count only!
-        let pipeline = Pipeline::from_json(&json!([
-            {"$group": {"_id": "$email", "count": {"$sum": 1}}}
-        ]))
-        .unwrap();
-
-        let opt = analyze_pipeline(pipeline.stages());
-        // Should be CountByField, not CountOnly
-        // Note: field is stored with $ prefix (as parsed from JSON)
-        if let Some(FastPath::CountByField { field, .. }) = opt.fast_path {
-            assert_eq!(field, "$email");
-        } else {
-            panic!("Expected CountByField fast path");
-        }
-    }
-
     // ========== GroupShape Tests ==========
 
     #[test]
@@ -724,22 +491,6 @@ mod tests {
         if let Stage::Group(group) = &pipeline.stages()[0] {
             let shape = GroupShape::from_group_stage(group);
             assert!(shape.is_count_only());
-            assert!(shape.is_count_by_field().is_none());
-        }
-    }
-
-    #[test]
-    fn test_group_shape_count_by_field() {
-        let pipeline = Pipeline::from_json(&json!([
-            {"$group": {"_id": "$city", "count": {"$sum": 1}}}
-        ]))
-        .unwrap();
-
-        if let Stage::Group(group) = &pipeline.stages()[0] {
-            let shape = GroupShape::from_group_stage(group);
-            assert!(!shape.is_count_only());
-            // Note: field is stored with $ prefix (as parsed from JSON)
-            assert_eq!(shape.is_count_by_field(), Some("$city"));
         }
     }
 
@@ -754,79 +505,6 @@ mod tests {
         if let Stage::Group(group) = &pipeline.stages()[0] {
             let shape = GroupShape::from_group_stage(group);
             assert!(!shape.is_count_only());
-            // Not count_by_field because of $sum: "$amount"
-            assert!(shape.is_count_by_field().is_none());
         }
-    }
-
-    // ========== Cost Model Tests ==========
-
-    #[test]
-    fn test_cost_count_only_unfiltered() {
-        let stats = CollectionStats {
-            doc_count: 100_000,
-            indexed_fields: vec![],
-            avg_doc_size: 500,
-        };
-
-        let cost = CostEstimate::for_count_only(&stats, false);
-        assert_eq!(cost.docs_to_scan, 0);
-        assert!(cost.score < 10.0); // Very cheap
-    }
-
-    #[test]
-    fn test_cost_full_scan() {
-        let stats = CollectionStats {
-            doc_count: 100_000,
-            indexed_fields: vec![],
-            avg_doc_size: 500,
-        };
-
-        let cost = CostEstimate::for_full_scan(&stats);
-        assert_eq!(cost.docs_to_scan, 100_000);
-        assert_eq!(cost.score, 100_000.0);
-    }
-
-    #[test]
-    fn test_select_plan_count_only() {
-        let stats = CollectionStats::default();
-        let logical = LogicalPlan::CountOnly { filter: None };
-
-        let (plan, cost) = select_plan(&logical, &stats);
-        assert!(matches!(plan, PhysicalPlan::CountOnly { .. }));
-        assert!(cost.score < 10.0);
-    }
-
-    #[test]
-    fn test_select_plan_count_by_field_with_index() {
-        let stats = CollectionStats {
-            doc_count: 100_000,
-            indexed_fields: vec!["email".to_string()],
-            avg_doc_size: 500,
-        };
-        let logical = LogicalPlan::CountByField {
-            field: "email".to_string(),
-            filter: None,
-        };
-
-        let (plan, _cost) = select_plan(&logical, &stats);
-        assert!(matches!(plan, PhysicalPlan::CountByIndex { .. }));
-    }
-
-    #[test]
-    fn test_select_plan_count_by_field_no_index() {
-        let stats = CollectionStats {
-            doc_count: 100_000,
-            indexed_fields: vec![], // No index
-            avg_doc_size: 500,
-        };
-        let logical = LogicalPlan::CountByField {
-            field: "email".to_string(),
-            filter: None,
-        };
-
-        let (plan, _cost) = select_plan(&logical, &stats);
-        // Falls back to full scan without index
-        assert!(matches!(plan, PhysicalPlan::FullScanPipeline));
     }
 }
