@@ -383,6 +383,21 @@ mod tests {
         assert_eq!(results, vec![json!({"n": 2})]);
     }
 
+    #[test]
+    fn test_count_stage_empty_input() {
+        // MongoDB: $count over empty input emits NO document (matches count-only $group,
+        // which returns [] for zero input rows). Exercises the streaming $count branch.
+        let docs: Vec<serde_json::Value> = Vec::new();
+
+        let pipeline = Pipeline::from_json(&json!([{"$count": "n"}])).unwrap();
+        let results = pipeline.execute(docs).unwrap();
+        assert!(
+            results.is_empty(),
+            "empty input must yield [] (got {:?})",
+            results
+        );
+    }
+
     // ========== $project tests ==========
 
     #[test]

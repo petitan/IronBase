@@ -902,6 +902,86 @@ fn test_count_fastpath_saturates_multiplier_overflow() {
     assert_eq!(results[0].get("total").unwrap().as_i64().unwrap(), i64::MAX);
 }
 
+/// REGRESSION (#3): $count over empty input must return [] (MongoDB), not [{n:0}].
+/// Leading $match filters everything → count-only fast path (include_id=false).
+#[test]
+fn test_count_stage_empty_fastpath_returns_no_doc() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for i in 0..3 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(i));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"value": {"$gt": 1000}}},
+            {"$count": "n"}
+        ]))
+        .unwrap();
+
+    assert!(results.is_empty(), "expected [], got {:?}", results);
+}
+
+/// REGRESSION (#3): $count after a streamed $project over empty input → [] (the
+/// regular streaming $count branch in pipeline.rs).
+#[test]
+fn test_count_stage_empty_streaming_returns_no_doc() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for i in 0..3 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(i));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"value": {"$gt": 1000}}},
+            {"$project": {"value": 1}},
+            {"$count": "n"}
+        ]))
+        .unwrap();
+
+    assert!(results.is_empty(), "expected [], got {:?}", results);
+}
+
+/// REGRESSION (#3): $count of an empty $group result → [] (CountStage::execute over
+/// an empty Vec, the trailing-stage path).
+#[test]
+fn test_count_after_empty_group_returns_no_doc() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for i in 0..3 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(i));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"value": {"$gt": 1000}}},
+            {"$group": {"_id": "$value", "c": {"$sum": 1}}},
+            {"$count": "groups"}
+        ]))
+        .unwrap();
+
+    assert!(results.is_empty(), "expected [], got {:?}", results);
+}
+
 /// BUG TEST: $first should return null if first document has missing field
 /// Not skip to the second document's value
 #[test]

@@ -229,7 +229,13 @@ impl Pipeline {
                     doc_result?;
                     count += 1;
                 }
-                let result = vec![serde_json::json!({ count_stage.field.clone(): count })];
+                // MongoDB semantics: empty input → no $count document (matches the
+                // count-only $group path and CountStage::execute).
+                let result = if count == 0 {
+                    Vec::new()
+                } else {
+                    vec![serde_json::json!({ count_stage.field.clone(): count })]
+                };
                 (result, 1) // consumed 1 stage ($count)
             } else {
                 // No $group - check for early $limit/$skip optimization
@@ -421,10 +427,14 @@ impl Pipeline {
                     doc_result?;
                     count += 1;
                 }
-                (
-                    vec![serde_json::json!({ count_stage.field.clone(): count })],
-                    1,
-                )
+                // MongoDB semantics: empty input → no $count document (matches the
+                // count-only $group path and CountStage::execute).
+                let result = if count == 0 {
+                    Vec::new()
+                } else {
+                    vec![serde_json::json!({ count_stage.field.clone(): count })]
+                };
+                (result, 1)
             } else {
                 // No $group - check for early $limit/$skip
                 let early_limit = Self::detect_early_limit(remaining_stages.iter());

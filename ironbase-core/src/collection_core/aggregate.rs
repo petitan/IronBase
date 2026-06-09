@@ -167,14 +167,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         multiplier
                     );
 
-                    // MongoDB / streaming-$group semantics: a `{$group: {_id: null}}`
-                    // over an EMPTY input set produces NO group document. The streaming
-                    // path (group_stage::execute_streaming_with_context) returns [] for
-                    // zero input docs, so the fast path must match it instead of emitting
-                    // a spurious `{_id: null, <field>: 0}`. The `$count` stage keeps
-                    // include_id=false and still emits `{field: 0}`, consistent with the
-                    // streaming $count branch (pipeline.rs).
-                    let mut docs = if include_id && count == 0 {
+                    // MongoDB semantics: a `{$group: {_id: null}}` or `$count` over an
+                    // EMPTY input set produces NO document. The streaming $group path
+                    // (group_stage::execute_streaming_with_context) and CountStage::execute
+                    // both return [] for zero input rows, so the fast path must match them
+                    // instead of emitting a spurious `{_id: null, <field>: 0}` / `{field: 0}`.
+                    let mut docs = if count == 0 {
                         Vec::new()
                     } else {
                         let mut doc = serde_json::json!({ output_field: result_count });
