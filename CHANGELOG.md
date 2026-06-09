@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — concurrent upsert on the same filter created duplicate documents (audit P2-4) (mcp-server v1.0.532, core v0.3.338)
+
+`update_one_with_options` implements upsert as `update_one()` (the match — which releases all
+locks) **then** `insert_one()`, with no lock spanning the two. Two concurrent upserts on the same
+filter (no matching doc, no application-level unique index) could therefore **both** observe
+`matched == 0` and each insert → duplicate documents. Empirically reproduced: 8 threads upserting one
+filter produced 2–8 documents instead of 1.
+
+The audit's "just hold the collection write lock" turned out to be unsafe: every collection has a
+unique `_id` index, so `collection_has_unique_index` is always true and `insert_one` **always** takes
+the per-collection write lock — reusing it to wrap the upsert would reentrant-deadlock. The fix adds a
+**dedicated per-collection upsert lock** (`collection_upsert_locks`, mirroring `collection_write_locks`)
+held across the whole match→insert window. It is distinct from the write lock `insert_one` takes, so
+there is no reentrancy; lock order is always upsert_lock → collection_write_lock (no ABBA). Applied to
+both `update_one_with_options` variants (generic Safe path and the MemoryStorage path). With an
+application unique index the constraint already prevented the duplicate; the lock now also covers the
+no-unique-index case.
+
+New `upsert_toctou_test`: concurrent same-filter guards on both the in-memory and Safe (file-backed)
+paths assert exactly one document results (these **fail on the pre-fix code**, which is how the bug's
+reachability was confirmed before fixing), plus a sequential insert-then-update sanity check.
+
 ### Fixed — delete was not atomic: reversed lock order + concurrent double-decrement (audit P2-3) (mcp-server v1.0.531, core v0.3.337)
 
 Every delete write path de-indexed the document **before** acquiring the storage write lock

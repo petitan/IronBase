@@ -321,6 +321,13 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Prevents race conditions in unique constraint checks
     pub(crate) collection_write_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 
+    // Per-collection upsert serialization lock (audit P2-4).
+    // Held across update_one_with_options's match→insert window so two concurrent
+    // upserts on the same filter can't both see matched==0 and each insert. Distinct
+    // from collection_write_locks (which insert_one takes) → no reentrant deadlock;
+    // lock order is always upsert_lock → collection_write_lock.
+    pub(crate) collection_upsert_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+
     // Guard: true while compact_nonblocking() is running
     // Prevents concurrent compaction from direct Rust consumers
     // (MCP server has its own adapter-level guard; this protects core-level callers)
@@ -475,6 +482,7 @@ impl DatabaseCore<StorageEngine> {
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
+            collection_upsert_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(stored_compact_size),
             recovered_operations: Arc::new(RwLock::new(recovered_ops_by_collection)),
@@ -596,6 +604,7 @@ impl DatabaseCore<MemoryStorage> {
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
+            collection_upsert_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(0),
             recovered_operations: Arc::new(RwLock::new(HashMap::new())),
