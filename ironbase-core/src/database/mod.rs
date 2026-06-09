@@ -192,10 +192,10 @@ impl BatchDocBuffer {
 
     /// Add a prepared delete_many to the buffer (WAL ORDERING FIX for _many)
     pub fn add_delete_many(&mut self, collection: String, prepared: DeleteManyPrepared) {
-        // Estimate memory usage from tombstone writes
-        for (_, tombstone_json) in &prepared.tombstone_writes {
-            self.memory_bytes += tombstone_json.len();
-        }
+        // Rough estimate: persist writes one minimal tombstone per matched doc.
+        // (DeleteManyPrepared no longer precomputes tombstone JSON — persist re-reads
+        // under the lock, audit P2-3 — so estimate a fixed per-doc cost instead.)
+        self.memory_bytes += prepared.deleted as usize * 100;
 
         self.delete_many_ops
             .entry(collection)
