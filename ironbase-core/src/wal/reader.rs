@@ -83,13 +83,26 @@ impl<R: Read + Seek> WALEntryIterator<R> {
             return Err(IronBaseError::WALCorruption);
         }
 
-        // Read data
+        // Read data. A SHORT read here is a torn trailing entry: the process
+        // crashed while appending this record, so its data/checksum never fully
+        // reached disk. That entry was never committed — discard it (and anything
+        // after) as a clean end-of-log, exactly like a short header above.
+        // Without this, a torn tail surfaced as an Err that aborted recovery and
+        // bricked DB startup after an ordinary crash (audit 2026-06-08 P1-2).
         let mut data = vec![0u8; data_len];
-        self.reader.read_exact(&mut data)?;
+        match self.reader.read_exact(&mut data) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(IronBaseError::Io(e)),
+        }
 
-        // Read checksum
+        // Read checksum (same torn-tail handling — a crash can land here too).
         let mut checksum_bytes = [0u8; 4];
-        self.reader.read_exact(&mut checksum_bytes)?;
+        match self.reader.read_exact(&mut checksum_bytes) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(IronBaseError::Io(e)),
+        }
         let checksum = u32::from_le_bytes(checksum_bytes);
 
         let entry = WALEntry {
@@ -188,6 +201,45 @@ mod tests {
         let result = iter.next();
 
         assert!(matches!(result, Some(Err(IronBaseError::WALCorruption))));
+    }
+
+    #[test]
+    fn test_iterator_discards_torn_trailing_entry() {
+        // A crash mid-WAL-append leaves a partial final record (audit P1-2). Two
+        // truncation points are possible: mid-data and mid-checksum. In BOTH cases
+        // recovery must replay the prior COMPLETE entries and stop cleanly — never
+        // yield an Err (which previously aborted recovery → DB failed to reopen).
+        let committed1 = WALEntry::new(1, WALEntryType::Begin, vec![]);
+        let committed2 = WALEntry::new(1, WALEntryType::Operation, b"committed".to_vec());
+        let torn = WALEntry::new(1, WALEntryType::Operation, b"never-fully-written".to_vec());
+        let torn_bytes = torn.serialize();
+
+        // Truncate at every point INSIDE the final record (just past the header,
+        // mid-data, and mid-checksum) — each must be discarded without error.
+        for cut in [
+            WAL_HEADER_SIZE + 1,  // mid-data
+            torn_bytes.len() - 6, // late-data
+            torn_bytes.len() - 2, // mid-checksum (header + full data + 2/4 checksum bytes)
+        ] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&committed1.serialize());
+            data.extend_from_slice(&committed2.serialize());
+            data.extend_from_slice(&torn_bytes[..cut]);
+
+            let iter = WALEntryIterator::new(Cursor::new(data)).unwrap();
+            let entries: Vec<_> = iter.collect();
+
+            assert_eq!(
+                entries.len(),
+                2,
+                "torn tail (cut={cut}) must be discarded, not errored"
+            );
+            assert!(
+                entries.iter().all(|e| e.is_ok()),
+                "a torn tail (cut={cut}) must not surface an error"
+            );
+            assert_eq!(entries[1].as_ref().unwrap().data, b"committed".to_vec());
+        }
     }
 
     #[test]

@@ -29,6 +29,75 @@ New `upsert_toctou_test`: concurrent same-filter guards on both the in-memory an
 paths assert exactly one document results (these **fail on the pre-fix code**, which is how the bug's
 reachability was confirmed before fixing), plus a sequential insert-then-update sanity check.
 
+### Fixed — delete was not atomic: reversed lock order + concurrent double-decrement (audit P2-3) (mcp-server v1.0.531, core v0.3.337)
+
+Every delete write path de-indexed the document **before** acquiring the storage write lock
+(`remove_from_indexes()` then `storage.write()`), and read the target lock-free. This reversed the
+storage→indexes lock order the rest of the engine follows (#75) and, more seriously, opened a window
+where two concurrent deletes of the same document could **both** pass the lock-free live read and each
+write a tombstone + `adjust_live_count(-1)` → the live count silently drifted below the true value.
+`update_one_prepare` already did this correctly (storage lock held across the index mutation); the
+delete paths had diverged because the logic was copy-pasted across **seven** sites.
+
+All delete paths now funnel through a single chokepoint, `CollectionCore::tombstone_doc_atomic`, which
+acquires the storage write lock, **re-reads** the document under it (skipping a row already tombstoned by
+a concurrent writer, and re-matching the query when given), writes the tombstone, then de-indexes — all
+in one critical section, lock order storage→indexes. Callers fixed:
+
+- **delete_one:** `delete_one_prepare` (Safe), `delete_one_raw` (in-memory / Unsafe),
+  `delete_one_persist_batch` (Batch). As a side effect `delete_one_raw` now also resolves a string `_id`
+  to its stored integer form (`resolve_stored_id`), matching what `delete_one_prepare` already did.
+- **delete_many:** `delete_many_raw_with_docs` (in-memory / Unsafe) and the Safe bulk
+  `delete_many_persist`. `DeleteManyPrepared` dropped its precomputed `tombstone_writes` + `index_removals`
+  lists — the persist re-reads each doc under the lock instead, so there is nothing stale to write and the
+  prepare/persist contract shrinks to `deleted` + `wal_entries`.
+
+New `delete_one_atomicity_test` (13 tests) includes concurrent same-`_id` / same-filter guards for both
+delete_one and delete_many (in-memory raw path and Safe prepare/persist path) that assert each doc is
+deleted exactly once and the live count drops by exactly the matched count — these fail on the pre-fix
+code. The `update_one_persist_batch` update path shares the index-before-storage ordering and is out of
+this delete-focused fix's scope.
+### Fixed — a torn WAL tail (crash mid-append) bricked database startup (mcp-server v1.0.530, core v0.3.336)
+
+`WALEntryIterator::read_next` treated a short read on the entry **header** as a
+clean end-of-log (`Ok(None)`) but used a bare `?` on the **data** and **checksum**
+reads. A crash while appending a WAL record leaves a torn trailing entry (header
+written, data/checksum partial) — the bare `?` surfaced that as
+`Err(UnexpectedEof)`, which `recover()` propagated, so **`recover_from_wal`
+aborted and the database failed to reopen** after an ordinary crash, even though
+the torn entry was never committed.
+
+A short read on the data/checksum is now handled like a short header: the partial
+trailing entry (and anything after it) is discarded as a clean end-of-log, which
+is the standard WAL recovery semantics — the records before it were fully written
+and fsync'd, the torn one never committed. A genuine checksum **mismatch** on a
+complete-length entry still returns `WALCorruption` (loud failure, unchanged), so
+real corruption is not silently swallowed. New `test_iterator_discards_torn_trailing_entry`
+covers truncation mid-data and mid-checksum across the prior complete entries.
+### Fixed — multi-instance file lock could be bypassed → two live writers / corruption (mcp-server v1.0.529, core v0.3.335)
+
+`StorageEngine::open` guards single-writer access with an `fs2` exclusive advisory
+lock on a sibling `<db>.lock` file. The previous PID-based "stale lock" recovery
+made that guarantee bypassable (audit 2026-06-08 P0-1, empirically reproduced):
+on a failed `try_lock_exclusive` it read the PID written in the lock file and, if
+that PID looked dead, **unlinked and re-created** the lock file before re-locking.
+But `try_lock_exclusive` fails only when a **live** process holds the flock, while
+the PID could lag (a holder mid-acquire had not rewritten it) or read as dead
+across users (`kill(pid, 0)` → `EPERM` for another uid). Because the flock is
+per-inode, concurrent recoverers each unlinked the live holder's inode and locked
+a **fresh** one — so two openers could both succeed on the same `.mlite` → two
+live writers → corruption.
+
+The stale-detection (and `is_process_alive`, with its `kill`/`tasklist` probes) is
+removed entirely: the OS already releases the advisory lock when the holding
+process dies (crash / SIGKILL) or closes the fd, so a leftover `.lock` file is
+harmless and the next `try_lock_exclusive` simply succeeds. A genuine OS/FS lock
+fault (`ENOLCK`/`EIO`) is now surfaced instead of masked as `DatabaseLocked`. The
+lock path is derived by **appending** `.lock` (`format!("{path}.lock")`) rather
+than `with_extension`, so distinct databases like `foo` and `foo.mlite` no longer
+collide on one `foo.mlite.lock`. Regression tests cover the bypass, crash-recovery
+reopen, and the path collision. (Local-filesystem guarantee; advisory locks are
+host-local on NFS, as documented.)
 
 ### Refactored — unify the four QueryPlan executors behind one range chokepoint (mcp-server v1.0.528, core v0.3.334)
 

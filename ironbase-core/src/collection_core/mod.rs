@@ -1856,6 +1856,101 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(())
     }
 
+    /// Resolve an `_id` query value to the `DocumentId` actually stored in the
+    /// catalog, trying the raw value first and then its normalized (string→int)
+    /// form. Returns `None` if neither is present.
+    ///
+    /// This is a READ-lock lookup; callers must still go through
+    /// [`Self::tombstone_doc_atomic`], which re-checks under the write lock, so a
+    /// document that vanishes between resolution and tombstoning is handled safely.
+    fn resolve_stored_id(&self, raw_id: &DocumentId) -> Result<Option<DocumentId>> {
+        let storage = self.storage.read();
+        let meta = match storage.get_collection_meta(&self.name) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        if meta.document_catalog.contains_key(raw_id) {
+            return Ok(Some(raw_id.clone()));
+        }
+        if let Some(normalized) = Self::normalize_document_id(raw_id) {
+            if meta.document_catalog.contains_key(&normalized) {
+                return Ok(Some(normalized));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Atomically tombstone a single document under ONE storage write lock.
+    ///
+    /// This is the single chokepoint every `delete_*` path funnels through. It
+    /// acquires the storage write lock, RE-READS `target_id` under it, writes the
+    /// tombstone, then removes the document from indexes — all in one critical
+    /// section. Lock order is storage→indexes (#75), matching `update_one_prepare`.
+    ///
+    /// Returns the pre-delete document value, or `None` if the id was missing, was
+    /// already tombstoned, or (when `query` is given) no longer matches — e.g. a
+    /// concurrent writer won the race. Returning `None` instead of blindly writing
+    /// a second tombstone is what prevents the double `adjust_live_count(-1)` that
+    /// silently corrupted the live count (audit P2-3): the old delete paths
+    /// de-indexed BEFORE taking the storage lock and read the document lock-free,
+    /// so two concurrent deletes of the same doc could each tombstone + decrement.
+    fn tombstone_doc_atomic(
+        &self,
+        target_id: &DocumentId,
+        query: Option<&Query>,
+    ) -> Result<Option<Value>> {
+        let mut storage = self.storage.write();
+
+        // Re-read under the lock via the catalog offset.
+        let offset = match storage
+            .get_collection_meta(&self.name)
+            .and_then(|m| m.document_catalog.get(target_id).copied())
+        {
+            Some(off) => off,
+            None => return Ok(None), // gone between resolution and the lock
+        };
+        let doc_bytes = storage.read_data(offset)?;
+        let doc: Value = serde_json::from_slice(&doc_bytes)
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+        // Already deleted by a concurrent writer.
+        if doc
+            .get("_tombstone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+
+        // PERF: Direct Value→Document (no serialization roundtrip).
+        let document = Document::from_value(&doc)?;
+
+        // Re-match under the lock: the candidate may have been modified between
+        // candidate collection and the lock, or the planner may have
+        // over-approximated.
+        if let Some(q) = query {
+            if !q.matches(&document)? {
+                return Ok(None);
+            }
+        }
+
+        // Write the tombstone to storage (source of truth) BEFORE touching indexes,
+        // so a storage-write failure leaves indexes rebuildable from storage.
+        let mut tombstone = doc.clone();
+        if let Value::Object(ref mut map) = tombstone {
+            map.insert("_tombstone".to_string(), Value::Bool(true));
+            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+        }
+        let tombstone_json = serde_json::to_string(&tombstone)?;
+        storage.write_document_raw(&self.name, target_id, tombstone_json.as_bytes())?;
+        storage.adjust_live_count(&self.name, -1);
+
+        // De-index AFTER the successful storage write, still under the storage lock.
+        self.remove_from_indexes(&document)?;
+
+        Ok(Some(doc))
+    }
+
     /// 🚀 OPTIMIZED: Batch update indexes using HashMap + rebuild
     ///
     /// **OLD APPROACH (O(n * k)):**

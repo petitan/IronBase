@@ -576,12 +576,29 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-    /// Acquire lock with stale lock detection
+    /// Acquire the exclusive single-writer lock for a database file.
     ///
-    /// If the lock file exists and contains a PID of a dead process,
-    /// we consider it stale and remove it before retrying.
-    fn acquire_lock_with_stale_detection(lock_path: &Path, db_path: &str) -> Result<File> {
-        use std::io::{Read, Seek, Write};
+    /// The lock IS the `fs2` advisory lock on the `.lock` file — NOT the file's
+    /// existence. The OS releases the advisory lock when the holding process dies
+    /// (crash / SIGKILL) or closes the fd, so a leftover `.lock` file from a
+    /// crashed process is harmless: the next `try_lock_exclusive` simply succeeds
+    /// and overwrites the stale PID below.
+    ///
+    /// We deliberately do NOT do PID-based "stale lock" detection + unlink. That
+    /// was unsound (audit 2026-06-08 P0-1, empirically reproduced): `try_lock`
+    /// fails only when a LIVE process holds the flock, yet the PID written in the
+    /// file can lag (a holder mid-acquire has not rewritten it) or read as dead
+    /// cross-uid (`kill(pid,0)` → EPERM). The old code then unlinked + re-created
+    /// the lock file; because the flock is per-inode, concurrent recoverers each
+    /// locked a DIFFERENT inode and ALL succeeded → two live writers on one
+    /// `.mlite` → corruption. Trusting the OS flock removes that race entirely.
+    ///
+    /// LIMITATION: this assumes a LOCAL filesystem. `flock`-style advisory locks
+    /// are unreliable or host-local on network filesystems (NFS/SMB), so
+    /// multi-host exclusivity is NOT guaranteed there — an embedded DB is meant to
+    /// be opened from one host anyway.
+    fn acquire_exclusive_lock(lock_path: &Path, db_path: &str) -> Result<File> {
+        use std::io::{Seek, Write};
 
         let mut lock_file = OpenOptions::new()
             .read(true)
@@ -589,83 +606,30 @@ impl StorageEngine {
             .create(true)
             .open(lock_path)?;
 
-        // Try to acquire the lock
         match lock_file.try_lock_exclusive() {
             Ok(()) => {
-                // Lock acquired - write our PID
+                // We hold the lock — record our PID for diagnostics only.
                 lock_file.set_len(0)?;
                 lock_file.seek(std::io::SeekFrom::Start(0))?;
                 writeln!(lock_file, "{}", std::process::id())?;
                 lock_file.sync_all()?;
                 Ok(lock_file)
             }
-            Err(_) => {
-                // Lock failed - check if it's stale
-                let mut pid_str = String::new();
-                lock_file.seek(std::io::SeekFrom::Start(0))?;
-                let _ = lock_file.read_to_string(&mut pid_str);
-
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    if !Self::is_process_alive(pid) {
-                        // Process is dead - lock is stale
-                        log_warn!(
-                            "[WARN] Stale lock detected (PID {} is dead), cleaning up...",
-                            pid
-                        );
-
-                        // Release any existing lock and reopen
-                        drop(lock_file);
-
-                        // Remove and recreate lock file
-                        let _ = std::fs::remove_file(lock_path);
-
-                        let mut lock_file = OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .create(true)
-                            .open(lock_path)?;
-
-                        // Try again
-                        lock_file
-                            .try_lock_exclusive()
-                            .map_err(|_| IronBaseError::DatabaseLocked(db_path.to_string()))?;
-
-                        // Write our PID
-                        writeln!(lock_file, "{}", std::process::id())?;
-                        lock_file.sync_all()?;
-
-                        return Ok(lock_file);
-                    }
-                }
-
-                // Lock is held by a live process
+            // Lock contention = a LIVE process holds the flock (a dead holder's
+            // flock is auto-released by the OS) → the database is genuinely in use.
+            // fs2::lock_contended_error() is the portable contention error: its kind
+            // is WouldBlock on Unix but a Windows-specific kind under LockFileEx, so
+            // match against it rather than hardcoding WouldBlock (which missed the
+            // Windows case → contention was misreported as a raw Io error, breaking
+            // test_file_lock_prevents_double_open on Windows).
+            Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
                 Err(IronBaseError::DatabaseLocked(db_path.to_string()))
             }
+            // A genuine OS/filesystem fault (ENOLCK / EINTR / EIO, e.g. a mount
+            // without working advisory locks) — surface it, don't mask it as a
+            // benign "locked" that callers would retry forever.
+            Err(e) => Err(IronBaseError::Io(e)),
         }
-    }
-
-    /// Check if a process with the given PID is still alive
-    #[cfg(unix)]
-    fn is_process_alive(pid: u32) -> bool {
-        // On Unix, kill(pid, 0) checks if process exists without sending signal
-        // Returns 0 if process exists (even if we can't signal it)
-        // Returns -1 with ESRCH if process doesn't exist
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-
-    #[cfg(windows)]
-    fn is_process_alive(pid: u32) -> bool {
-        // On Windows, try to check via tasklist command
-        // This is slower but doesn't require additional dependencies
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-            .map(|output| {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // tasklist returns "INFO: No tasks..." if PID not found
-                !stdout.contains("INFO:") && stdout.contains(&pid.to_string())
-            })
-            .unwrap_or(true) // If check fails, assume process is alive (safer)
     }
 
     /// Open or create database
@@ -673,11 +637,14 @@ impl StorageEngine {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let exists = path.as_ref().exists();
 
-        // Create separate lock file to allow other processes to READ the DB (hot backup)
-        // On Windows, file locks are mandatory and block ALL access including reads
-        // By locking a separate .lock file, we allow backup tools to read the DB file
-        let lock_path = PathBuf::from(&path_str).with_extension("mlite.lock");
-        let lock_file = Self::acquire_lock_with_stale_detection(&lock_path, &path_str)?;
+        // Lock a SEPARATE "<db path>.lock" file so read-only backup tools can
+        // still open the .mlite itself (on Windows file locks block all access).
+        // APPEND ".lock" — do NOT use `with_extension`, which REPLACES the final
+        // component (`foo` and `foo.mlite` would both map to `foo.mlite.lock` and
+        // falsely block each other; audit 2026-06-08 P0-1). `.mlite` paths are
+        // unchanged (`foo.mlite` → `foo.mlite.lock`).
+        let lock_path = PathBuf::from(format!("{path_str}.lock"));
+        let lock_file = Self::acquire_exclusive_lock(&lock_path, &path_str)?;
 
         let mut file = OpenOptions::new()
             .read(true)
