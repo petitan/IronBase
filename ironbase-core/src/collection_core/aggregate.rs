@@ -156,7 +156,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Use count_documents() instead of full scan - O(1) for unfiltered!
                     let query = filter.unwrap_or_else(|| serde_json::json!({}));
                     let count = self.count_documents(&query)?;
-                    let result_count = (count as i64) * multiplier;
+                    // saturating_mul to match the streaming accumulator path, which
+                    // saturates on overflow (accumulator.rs $sum: <constant>). Plain `*`
+                    // would panic in debug builds and silently wrap in release.
+                    let result_count = (count as i64).saturating_mul(multiplier);
 
                     log_debug!(
                         "aggregate FAST PATH: CountOnly ({} docs, multiplier {})",
@@ -164,13 +167,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         multiplier
                     );
 
-                    let mut doc = serde_json::json!({ output_field: result_count });
-                    if include_id {
-                        if let Some(obj) = doc.as_object_mut() {
-                            obj.insert("_id".to_string(), serde_json::Value::Null);
+                    // MongoDB / streaming-$group semantics: a `{$group: {_id: null}}`
+                    // over an EMPTY input set produces NO group document. The streaming
+                    // path (group_stage::execute_streaming_with_context) returns [] for
+                    // zero input docs, so the fast path must match it instead of emitting
+                    // a spurious `{_id: null, <field>: 0}`. The `$count` stage keeps
+                    // include_id=false and still emits `{field: 0}`, consistent with the
+                    // streaming $count branch (pipeline.rs).
+                    let mut docs = if include_id && count == 0 {
+                        Vec::new()
+                    } else {
+                        let mut doc = serde_json::json!({ output_field: result_count });
+                        if include_id {
+                            if let Some(obj) = doc.as_object_mut() {
+                                obj.insert("_id".to_string(), serde_json::Value::Null);
+                            }
                         }
-                    }
-                    let mut docs = vec![doc];
+                        vec![doc]
+                    };
 
                     let stages = pipeline.stages();
                     let group_idx =

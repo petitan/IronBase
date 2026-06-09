@@ -818,6 +818,90 @@ fn test_count_fastpath_applies_post_stages() {
     assert_eq!(results, vec![json!({"total": 5})]);
 }
 
+/// REGRESSION: CountOnly fast path must NOT emit a `{_id: null, n: 0}` document
+/// when the input is empty ($match filters everything). The streaming $group path
+/// and MongoDB both return []. Guards the fast/slow divergence in the planner.
+#[test]
+fn test_count_fastpath_empty_input_returns_no_doc() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for i in 0..3 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(i));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+
+    // $match filters out every document → count-only $group over empty input.
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"value": {"$gt": 1000}}},
+            {"$group": {"_id": null, "n": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+    assert!(
+        results.is_empty(),
+        "empty input must yield [] (got {:?})",
+        results
+    );
+}
+
+/// REGRESSION: a trailing $project after the count-only $group must not resurrect
+/// the spurious empty-input document either.
+#[test]
+fn test_count_fastpath_empty_input_with_trailing_project() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let mut doc = HashMap::new();
+    doc.insert("value".to_string(), json!(1));
+    db.insert_one("items", doc).unwrap();
+
+    let coll = db.collection("items").unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"value": {"$gt": 1000}}},
+            {"$group": {"_id": null, "total": {"$sum": 1}}},
+            {"$project": {"total": 1, "_id": 0}}
+        ]))
+        .unwrap();
+
+    assert!(results.is_empty(), "expected [], got {:?}", results);
+}
+
+/// REGRESSION: CountOnly fast path must saturate the $sum multiplier exactly like
+/// the streaming accumulator (saturating_add/saturating_mul), instead of overflowing
+/// (debug panic / release wrap). 2 docs * i64::MAX → i64::MAX.
+#[test]
+fn test_count_fastpath_saturates_multiplier_overflow() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for _ in 0..2 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(1));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "total": {"$sum": i64::MAX}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get("total").unwrap().as_i64().unwrap(), i64::MAX);
+}
+
 /// BUG TEST: $first should return null if first document has missing field
 /// Not skip to the second document's value
 #[test]
