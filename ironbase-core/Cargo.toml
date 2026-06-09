@@ -37,7 +37,7 @@ tracing = "0.1"    # For progress logging during long operations
 ahash = "0.8"      # Fast hashing for group/distinct operations
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"       # For process existence check (kill(pid, 0))
+libc = "0.2"       # System info via sysconf (aggregation/memory_info.rs)
 
 [dev-dependencies]
 tempfile = { workspace = true }
