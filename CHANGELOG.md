@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a torn WAL tail (crash mid-append) bricked database startup (mcp-server v1.0.530, core v0.3.336)
+
+`WALEntryIterator::read_next` treated a short read on the entry **header** as a
+clean end-of-log (`Ok(None)`) but used a bare `?` on the **data** and **checksum**
+reads. A crash while appending a WAL record leaves a torn trailing entry (header
+written, data/checksum partial) — the bare `?` surfaced that as
+`Err(UnexpectedEof)`, which `recover()` propagated, so **`recover_from_wal`
+aborted and the database failed to reopen** after an ordinary crash, even though
+the torn entry was never committed.
+
+A short read on the data/checksum is now handled like a short header: the partial
+trailing entry (and anything after it) is discarded as a clean end-of-log, which
+is the standard WAL recovery semantics — the records before it were fully written
+and fsync'd, the torn one never committed. A genuine checksum **mismatch** on a
+complete-length entry still returns `WALCorruption` (loud failure, unchanged), so
+real corruption is not silently swallowed. New `test_iterator_discards_torn_trailing_entry`
+covers truncation mid-data and mid-checksum across the prior complete entries.
 ### Fixed — multi-instance file lock could be bypassed → two live writers / corruption (mcp-server v1.0.529, core v0.3.335)
 
 `StorageEngine::open` guards single-writer access with an `fs2` exclusive advisory
