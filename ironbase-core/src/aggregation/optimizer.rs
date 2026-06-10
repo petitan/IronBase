@@ -24,7 +24,7 @@ use crate::aggregation::types::{Accumulator, GroupId, GroupStage, Stage, SumExpr
 use serde_json::Value;
 
 // ============================================================================
-// LOGICAL PLAN TYPES
+// PATTERN DETECTION TYPES
 // ============================================================================
 
 /// Simplified group _id representation
@@ -472,6 +472,19 @@ mod tests {
         // $sum: "$amount" - not count only!
         let pipeline = Pipeline::from_json(&json!([
             {"$group": {"_id": null, "total": {"$sum": "$amount"}}}
+        ]))
+        .unwrap();
+
+        let opt = analyze_pipeline(pipeline.stages());
+        assert!(opt.fast_path.is_none());
+    }
+
+    #[test]
+    fn test_no_count_only_with_field_id() {
+        // _id: "$email" — a per-field count is NOT CountOnly (id_kind guard);
+        // it belongs to the executor's index-based path (GroupStage::can_use_index)
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$email", "count": {"$sum": 1}}}
         ]))
         .unwrap();
 

@@ -1,5 +1,15 @@
 # Aggregation Optimizer Plan
 
+> **STATUS (2026-06-10, historical):** Phase 1 pattern detection lives in
+> `ironbase-core/src/aggregation/optimizer.rs` (`analyze_pipeline`: CountOnly fast path +
+> $sort+$limit Top-K hint). The Phase 2 cost model described below
+> (`AggregationLogicalPlan`, `AggregationPhysicalPlan`, `CostEstimate`, `select_plan`) **was
+> implemented, had no live consumer, and was removed** (commit 2b7822f1, core v0.3.340) to
+> collapse two sources of truth into one. Index-based per-field counting (the IndexGroup idea)
+> is decided by the executor instead: `GroupStage::can_use_index` /
+> `try_index_based_execute_with_context`. **Do not re-implement Phase 2 from this document** —
+> if a cost model becomes necessary, start from the executor-side decision points.
+
 ## Goals
 - Preserve result correctness while reducing execution time for common aggregation patterns.
 - Introduce a planner that can select efficient physical strategies (count, index scan, full scan).

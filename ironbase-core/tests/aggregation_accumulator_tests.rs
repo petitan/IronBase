@@ -902,6 +902,35 @@ fn test_count_fastpath_saturates_multiplier_overflow() {
     assert_eq!(results[0].get("total").unwrap().as_i64().unwrap(), i64::MAX);
 }
 
+/// REGRESSION: the index-based $group count path
+/// (GroupStage::try_index_based_execute_with_context) must saturate `n * count`
+/// like the streaming accumulator and the CountOnly fast path — not panic/wrap.
+/// Indexed group field + leading $group routes through the index path.
+#[test]
+fn test_index_based_group_count_saturates_multiplier_overflow() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for _ in 0..2 {
+        let mut doc = HashMap::new();
+        doc.insert("city".to_string(), json!("NYC"));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+    coll.create_index("city".to_string(), false, false).unwrap();
+
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$city", "total": {"$sum": i64::MAX}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get("total").unwrap().as_i64().unwrap(), i64::MAX);
+}
+
 /// REGRESSION (#3): $count over empty input must return [] (MongoDB), not [{n:0}].
 /// Leading $match filters everything → count-only fast path (include_id=false).
 #[test]

@@ -7,11 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed / Changed — $count empty-input MongoDB compat + dead aggregation-planner code removed (mcp-server v1.0.534, core v0.3.340)
+### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
+
+Post-review follow-up on this branch (fresh `/code-review` pass over the full diff).
+
+**Index-based `$group` count overflow.** The v1.0.533 fix made the CountOnly fast path saturate
+`(count as i64).saturating_mul(multiplier)` to match the streaming accumulator — but the **third**
+path with the same `$sum: <constant>` semantics, the index-based `$group` execution
+(`group_stage.rs` `try_index_based_execute_with_context` and the legacy `try_index_based_execute`),
+still used plain `n * count`: debug panic / silent release wrap on
+`[{$group: {_id: "$city", t: {$sum: i64::MAX}}}]` over an indexed field. Both sites now use
+`saturating_mul`; regression test `test_index_based_group_count_saturates_multiplier_overflow`.
+
+**Stale references to the removed planner.** `docs/AGGREGATION_OPTIMIZER_PLAN.md` got a status note
+(Phase 2 cost model implemented, found dead, removed in this branch — do not re-implement);
+the `(but may use CountByField ...)` comment in `aggregation_context_tests.rs` and the
+`LOGICAL PLAN TYPES` banner in `optimizer.rs` no longer name deleted machinery. Re-added the
+unit-level guard deleted with the planner tests: `test_no_count_only_with_field_id` pins that a
+field-`_id` count never takes the CountOnly fast path (`id_kind` guard).
+
+### BREAKING / Fixed — $count empty-input MongoDB compat + dead aggregation-planner code removed (mcp-server v1.0.534, core v0.3.340)
 
 Follow-up to the aggregate-planner review (findings #3–#5).
 
-**#3 — `$count` over empty input now returns `[]` (MongoDB semantics).** `$count` is sugar for
+**#3 — BREAKING: `$count` over empty input now returns `[]` (MongoDB semantics).**
+*Migration:* clients that indexed the result unconditionally (`results[0].n` — including saved Rhai
+scripts using `db_aggregate`) must handle an empty result set when the `$match` filters everything
+out; previously they received `[{<field>: 0}]`. `$count` is sugar for
 `{$group:{_id:null,n:{$sum:1}}},{$project:{_id:0}}`, and a `_id: null` $group emits nothing for zero
 input rows — IronBase's streaming `$group` path already returned `[]`, but the `$count` stage returned
 `[{<field>: 0}]`, an internal inconsistency. Fixed across **all four** materialization sites so they
