@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
+
+Post-review follow-up on this branch (fresh `/code-review` pass over the full diff).
+
+**Index-based `$group` count overflow.** The v1.0.533 fix made the CountOnly fast path saturate
+`(count as i64).saturating_mul(multiplier)` to match the streaming accumulator — but the **third**
+path with the same `$sum: <constant>` semantics, the index-based `$group` execution
+(`group_stage.rs` `try_index_based_execute_with_context` and the legacy `try_index_based_execute`),
+still used plain `n * count`: debug panic / silent release wrap on
+`[{$group: {_id: "$city", t: {$sum: i64::MAX}}}]` over an indexed field. Both sites now use
+`saturating_mul`; regression test `test_index_based_group_count_saturates_multiplier_overflow`.
+
+**Stale references to the removed planner.** `docs/AGGREGATION_OPTIMIZER_PLAN.md` got a status note
+(Phase 2 cost model implemented, found dead, removed in this branch — do not re-implement);
+the `(but may use CountByField ...)` comment in `aggregation_context_tests.rs` and the
+`LOGICAL PLAN TYPES` banner in `optimizer.rs` no longer name deleted machinery. Re-added the
+unit-level guard deleted with the planner tests: `test_no_count_only_with_field_id` pins that a
+field-`_id` count never takes the CountOnly fast path (`id_kind` guard).
+
+### BREAKING / Fixed — $count empty-input MongoDB compat + dead aggregation-planner code removed (mcp-server v1.0.534, core v0.3.340)
+
+Follow-up to the aggregate-planner review (findings #3–#5).
+
+**#3 — BREAKING: `$count` over empty input now returns `[]` (MongoDB semantics).**
+*Migration:* clients that indexed the result unconditionally (`results[0].n` — including saved Rhai
+scripts using `db_aggregate`) must handle an empty result set when the `$match` filters everything
+out; previously they received `[{<field>: 0}]`. `$count` is sugar for
+`{$group:{_id:null,n:{$sum:1}}},{$project:{_id:0}}`, and a `_id: null` $group emits nothing for zero
+input rows — IronBase's streaming `$group` path already returned `[]`, but the `$count` stage returned
+`[{<field>: 0}]`, an internal inconsistency. Fixed across **all four** materialization sites so they
+agree: `CountStage::execute` (Vec path), both streaming `$count` branches in `pipeline.rs`
+(`execute_streaming_with_limits`, `execute_with_context`), and the count-only fast path in
+`collection_core/aggregate.rs` (the `include_id && count == 0` guard became `count == 0`, since the
+`$count` form now also returns `[]`). New tests cover each path
+(`test_count_stage_empty_input`, `test_count_stage_empty_fastpath_returns_no_doc`,
+`test_count_stage_empty_streaming_returns_no_doc`, `test_count_after_empty_group_returns_no_doc`); the
+`prop_aggregate_match_count_matches_count_documents` property test (which already tolerated empty
+results) still passes.
+
+**#4/#5/#6 — removed dead aggregation-planner code (`aggregation/optimizer.rs`).** The entire unused
+"Phase 2" cost model (`LogicalPlan`, `PhysicalPlan`, `select_plan`, `CollectionStats`, `CostEstimate`)
+had no live consumer — only its own unit tests. Likewise the `CountByField` fast-path detection
+(`FastPath::CountByField`, `GroupShape::is_count_by_field`, `is_sort_limit_pattern`,
+`AccumulatorKind::is_index_minmax`) computed a value that `aggregate.rs` immediately discarded; the
+real index-based per-field count is decided independently by `GroupStage::can_use_index` /
+`try_index_based_execute_with_context`, so removing the discarded detection collapses the two sources
+of truth (#6) to one. Net effect: ~200 lines deleted, the discarded `FastPath::CountByField` match arm
+in `aggregate.rs` removed, no behavior change (full suite + clippy + fmt green). The live optimizer
+surface (`analyze_pipeline`, `GroupShape`/`is_count_only`, `FastPath::CountOnly`, the $sort+$limit
+Top-K hint) is unchanged.
+
+### Fixed — aggregate CountOnly fast path: spurious empty-input document + multiplier overflow (mcp-server v1.0.533, core v0.3.339)
+
+Two fast-path/slow-path divergences in the aggregation planner's CountOnly optimization
+(`collection_core/aggregate.rs`), found reviewing `aggregation/optimizer.rs` and its consumers.
+
+1. **Empty input emitted a spurious group document.** For `[{$group: {_id: null, n: {$sum: 1}}}]`
+   the planner takes a `count_documents()` fast path and unconditionally built
+   `[{_id: null, n: 0}]`. But MongoDB — and IronBase's own streaming `$group` path
+   (`group_stage::execute_streaming_with_context`, which iterates an empty `groups` map and
+   returns `[]`) — produce **no** document for a `_id: null` group over zero input rows. So on an
+   empty collection, or when a leading `$match` filters everything out, the fast path returned
+   `[{_id: null, n: 0}]` where the non-optimized path returned `[]`. Fixed by skipping the output
+   document when `include_id && count == 0` (the `$group` form); the `$count` stage keeps
+   `include_id == false` and still emits `{field: 0}`, consistent with the streaming `$count`
+   branch in `pipeline.rs`.
+
+2. **Multiplier could overflow.** `result_count = (count as i64) * multiplier` used plain `*`,
+   which panics in debug builds and silently wraps in release on overflow — e.g.
+   `[{$group: {_id: null, t: {$sum: 9223372036854775807}}}]` over a multi-doc collection. The
+   streaming accumulator path saturates (`saturating_add`/`saturating_mul` in
+   `stages/accumulator.rs`); the fast path now uses `saturating_mul` to match.
+
+New regression tests in `aggregation_accumulator_tests.rs`: `test_count_fastpath_empty_input_returns_no_doc`,
+`test_count_fastpath_empty_input_with_trailing_project`, `test_count_fastpath_saturates_multiplier_overflow`.
+
 ### Fixed — concurrent upsert on the same filter created duplicate documents (audit P2-4) (mcp-server v1.0.532, core v0.3.338)
 
 `update_one_with_options` implements upsert as `update_one()` (the match — which releases all

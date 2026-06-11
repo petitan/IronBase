@@ -597,8 +597,9 @@ impl GroupStage {
             for (acc_name, acc) in &self.accumulators {
                 let value = match acc {
                     Accumulator::Sum(SumExpression::Constant(n)) => {
-                        // $sum: N means multiply by count
-                        json!(n * count)
+                        // $sum: N means multiply by count; saturate to match the
+                        // streaming accumulator and the CountOnly fast path
+                        json!(n.saturating_mul(count))
                     }
                     _ => {
                         // Shouldn't happen if can_use_index() returned Some
@@ -698,7 +699,8 @@ impl GroupStage {
             for (acc_name, acc) in &self.accumulators {
                 let value = match acc {
                     Accumulator::Sum(SumExpression::Constant(n)) => {
-                        json!(n * count)
+                        // Saturate to match the streaming accumulator (see above)
+                        json!(n.saturating_mul(count))
                     }
                     _ => {
                         json!(null)

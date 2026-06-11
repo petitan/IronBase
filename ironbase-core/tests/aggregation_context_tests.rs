@@ -729,7 +729,7 @@ fn test_optimizer_no_fast_path_for_sum_field() {
 #[test]
 fn test_optimizer_no_fast_path_for_field_group() {
     // Test that {$group: {_id: "$group", count: {$sum: 1}}} does NOT use CountOnly fast path
-    // (but may use CountByField or index-based)
+    // (but may use the index-based path: GroupStage::can_use_index)
     let db = create_test_db();
     insert_test_docs(&db, "test_group_field", 30);
 
