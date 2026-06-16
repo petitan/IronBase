@@ -1,0 +1,620 @@
+[
+  {
+    "query": "adj konkrét árakat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "polgar-tibor-ur-reszere-ac-akna-emelok-arajanlat-petitan-kft-26032301-02",
+      "som-janos",
+      "kovecses-service-kft-kts-560"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 4,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "aknaperem emelő",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "testverhegyi-uti-muhely",
+      "10-sz-melleklet-arajanlat",
+      "aknaperem-emelo-piacfelmeres",
+      "10-sz-melleklet-arajanlat-v2"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 4,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "BM3010 emissziómérő",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szolyka-lajos-ur-reszere-mozgatopaddal-bovitett-vezerles-emissziomero-es-vizsgasori-kiegeszitok-arajanlat-petitan-kft-25031701-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "csapos emelő árak",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "ubornyak-laszlo-ur-reszere-szervizberendezes-arajanlat-petitan-kft-25060301-01",
+      "tormay-gabor-ur-reszere-m1-n1-vizsgasori-elozetes-arajanlat-petitan-kft-25081202-01",
+      "belaz-tamas-ur-reszere-petitan-arajanlat-ac-hydraulic-gd100-2-aknaperem-emelo-space-5-5-ketoszlopos-emelo"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "emelő csápkar",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szilagyi-dezso-ur-reszere-csapos-emelok-petitan-kft-arajanlat-25071803-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "fékpad ajánlat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "borics-peter-ur-reszere-at-3-vezerles-es-vizsgasori-berendezes-arajanlat-petitan-kft-25082105-01",
+      "jere-csaba-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25033103-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "fékpad árak",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "angyal-lajos-ur-reszere-pef-35-pel-35-elozetes-arajanlat-petitan-kft-25032401-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "fényszóró beállító",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "i-sz-melleklet-muszaki-leiras-fenyszoro-beallito-eszkozok-beszerzese",
+      "fenyszoro-ellenorzo-piacfelmeres",
+      "denczinger-zsolt-ur-reszere-kombinalt-vizsgasori-berendezes-arajanlat-petitan-kft-26033102-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "gázelemző árak",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "gumi-sped-kft-gazelemzo-petitan-adasveteli-szerzodes-2025-055"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "görgős fékerőmérő ár",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szegvari-istvan-ur-reszere-kombinalt-vizsgasori-berendezes-arajanlat-petitan-kft-25112703-01",
+      "denczinger-zsolt-ur-reszere-kombinalt-vizsgasori-berendezes-arajanlat-petitan-kft-25112702-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "hovány árajánlatok keresése",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szelenyi-erno-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25022501-01",
+      "tormay-gabor-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25031901-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 5,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "kerékszerelő gép",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szegvari-istvan-ur-reszere-kombinalt-vizsgasori-berendezes-arajanlat-petitan-kft-25120101-01",
+      "szegvari-istvan-ur-reszere-kombinalt-vizsgasori-berendezes-arajanlat-petitan-kft-25121901-01",
+      "szegvari-istvan-ur-reszere-szervizberendezes-arajanlat-petitan-kft-26030402-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "klímatöltő berendezés",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "szilardi-richard-arajanlat",
+      "papp-laszlo-arajanlat"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "kombinált vizsgasor felszerelés",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "kis-fruzsina-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25042901-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "lengéscsillapító vizsgáló",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "trapp-gabor-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25021401-01",
+      "balogh-richard-ur-reszere-m1-n1-vizsgasori-elozetes-arajanlat-petitan-kft-25082103-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mekkora egy fékpad?",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "jere-csaba-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25033103-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mennyi egy pef-35 fékpad ára",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "nemes-karoly-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-26021801-01",
+      "trapp-gabor-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25021401-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mennyibe kerül egy fékpad",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "kendl-szabo-noemi-reszere-at-3-vezerles-es-vizsgasori-berendezes-arajanlat-petitan-kft-25071804-01",
+      "borics-peter-ur-reszere-at-3-vezerles-es-vizsgasori-berendezes-arajanlat-petitan-kft-25072903-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mennyibe kerül egy gázelemző",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "nuszpl-csaba-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25031401-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mennyibe kerül egy gázellemző",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "kempf-zoltan-ur-reszere-pef-35-pel-35-pem-35-elozetes-arajanlat-petitan-kft-25042401-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mi a feldolgozott utolsó árajánlat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "balogh-richard-ur-reszere-m1-n1-vizsgasori-elozetes-arajanlat-petitan-kft-25082103-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "milyen adatink vannak a garagent ről",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "statprs-2026-02-01-2026-03-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "ollós emelő árak",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "emelo-es-elszivo",
+      "petitan-eszkozok-hunep"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "PEF-35",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "leadott-bertus-laszlo-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25040402-01",
+      "schottner-norbert-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25061602-01"
+    ],
+    "answerable": true,
+    "source_rating": "like",
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 fákpad ára?",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "kempf-zoltan-ur-reszere-pef-35-pel-35-pem-35-elozetes-arajanlat-petitan-kft-25042401-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "PEF-35 fékpad",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "tormay-gabor-ur-reszere-m1-n1-vizsgasori-elozetes-arajanlat-petitan-kft-25081202-01",
+      "simon-norbert-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25061701-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 fékpad szett ára?",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "bodok-tamas-ur-reszere-fekpad-arajanlat-petitan-kft-25031902-01",
+      "jere-csaba-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25033103-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 fékpad ára?",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "nemes-karoly-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-26021801-01",
+      "pinczehelyi-claudia-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25060407-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 fépad",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "leadott-bertus-laszlo-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25040402-01",
+      "nemes-karoly-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-26021801-01",
+      "simon-norbert-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25061701-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 ára",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "leadott-bertus-laszlo-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25040402-01",
+      "szecsi-norbert-ur-reszere-pef-35-pel-35-elozetes-arajanlat-petitan-kft-25032701-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef-35 árakat adj",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "linartech-autocentrum-kft-pef35-pel35-mechanika-petitan-adasveteli-szerzodes-2025-033"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 4,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pel-35 lengpad",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "kelemen-ervin-ur-reszere-mozgatopad-es-gorgos-fekeromero-arajanlat-petitan-kft-26022703-01",
+      "trapp-gabor-ur-reszere-m1n1-vizsgasori-elozetes-arajanlat-petitan-kft-25021401-01",
+      "gyarmati-sandot-ur-reszere-vizsgasori-berendezes-arajanlat-petitan-kft-25033102-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "scania szerződések",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "adasveteli-szerzodesek-osszesito-2026"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "SICE fékpad",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "tormay-gabor-ur-reszere-m1-n1-vizsgasori-elozetes-arajanlat-petitan-kft-25081202-01"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "SICE PDC 50",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "angyal-lajos-ur-reszere-kombinalt-fekpad-c-elozetes-arajanlat-petitan-kft-25032401-01",
+      "belaz-tamas-ur-reszere-petitan-arajanlat-ac-hydraulic-gd100-2-aknaperem-emelo-space-5-5-ketoszlopos-emelo"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "SICE PDC 50 ajánlat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "angyal-lajos-ur-reszere-kombinalt-fekpad-c-elozetes-arajanlat-petitan-kft-25032401-01",
+      "belaz-tamas-ur-reszere-petitan-arajanlat-ac-hydraulic-gd100-2-aknaperem-emelo-space-5-5-ketoszlopos-emelo"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "SICE PDC 50 árak",
+    "collection": "rdocs",
+    "relevant_doc_ids": [
+      "angyal-lajos-ur-reszere-kombinalt-fekpad-c-elozetes-arajanlat-petitan-kft-25032401-01",
+      "belaz-tamas-ur-reszere-petitan-arajanlat-ac-hydraulic-gd100-2-aknaperem-emelo-space-5-5-ketoszlopos-emelo"
+    ],
+    "answerable": true,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "ADAS eszközök",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Belső csápkarrögzítő rendszer",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 5,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Belső csápkarrögzítő rendszer ára",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Belső csápkarrögzítő rendszerrel rendelkező emelő",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "BM3010 mennyibe kerül",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "BOSCH fékpad gépkönyv",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "c-univerzál árajánlat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 4,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Egyetemi Oktató Kórház ajánlatát keresem",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Emelő adapter Crafter/Sprinter",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 0,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "fékpad árakat kérek",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "hovány kft szerződései",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "hovány kft szerződési",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "keress gázelemző ajánlatokat",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "legutolsó hovány szerződé",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "legutolsó hovány szerződést kérem",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 5,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "mennyibe kerül?",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 1,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "operátor kézikönyv",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 0,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "pef 35",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 2,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "SICEEMELP DC30 ára",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 4,
+    "candidates_unknown": 0
+  },
+  {
+    "query": "Stahlwille 55/10/6 dugókulcskészlet (3/4\")",
+    "collection": "rdocs",
+    "relevant_doc_ids": [],
+    "answerable": false,
+    "source_rating": null,
+    "candidates_judged": 3,
+    "candidates_unknown": 0
+  }
+]
