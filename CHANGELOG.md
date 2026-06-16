@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — PR-2: page-cache-bounded compaction I/O (Fix B) (mcp-server v1.0.539, core v0.3.343)
+
+Completes the host-memory-safe compaction work (PR-1 was the legacy baseline seed + RAM-aware
+auto-compact gate below). A full-file compaction reads the entire source and writes the entire
+target through buffered I/O, so the OS page cache balloons to ~file size and can freeze a
+small-RAM host (the page cache is reclaimable → a cgroup `MemoryMax` does not protect against it).
+
+`compact_scan_standalone` now keeps the resident page-cache footprint bounded to ~`chunk_size`
+regardless of total file size, via Linux page-cache hints (`storage/io.rs`, `#[cfg(target_os =
+"linux")]`; macOS/Windows get no-op fallbacks — `posix_fadvise`/`sync_file_range` are unavailable
+there and the freeze was verified on Linux/WSL2):
+- `advise_sequential` on the source fd at start (keeps readahead effective);
+- after each chunk flush, `flush_range_to_disk` (`sync_file_range` WAIT_BEFORE|WRITE|WAIT_AFTER) +
+  `advise_dontneed(POSIX_FADV_DONTNEED)` on the just-written target range, so dirty pages are
+  written back and dropped instead of accumulating;
+- `advise_dontneed` on the consumed source region up to the current read offset (readahead ahead
+  of it is preserved).
+
+All hints are advisory and best-effort (errors ignored); they never change the bytes written —
+data round-trip is unaffected. With this, a manual `db_compact` (or auto-compaction on a host the
+RAM gate allows) of a 100GB file stays bounded instead of freezing the host. Guard:
+`compaction_many_chunks_preserves_all_data` (2500 docs > default chunk_size → multiple
+flush→sync→DONTNEED cycles, verifies every live doc survives and tombstones are dropped); full
+core compaction suite (14 integration tests) green.
+
 ### Changed — BREAKING: lexical retrieval default is now disjunctive (OR), industry-standard (mcp-server v1.0.537)
 
 The fulltext / hybrid-fusion lexical lane now defaults to **disjunctive (OR)** matching
@@ -64,9 +89,9 @@ config: `[compaction] max_file_to_ram_ratio` (serde default, legacy configs unaf
 unit tests in `compaction::tests` (incl. `should_compact_refuses_oversized_file_even_at_infinite_bloat`
 reproducing the verified WSL case).
 
-Remaining (PR-2, separate): Fix B — page-cache-bounded compaction I/O (`posix_fadvise(DONTNEED)` +
-`sync_file_range`, `#[cfg(unix)]`) so a manual compaction of a 100GB file stays bounded regardless of
-file size.
+PR-2 (Fix B — page-cache-bounded compaction I/O) is now also done: see the entry above
+(`posix_fadvise(DONTNEED)` + `sync_file_range`, `#[cfg(target_os = "linux")]`), so a manual
+compaction of a 100GB file stays bounded regardless of file size.
 
 ### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
 

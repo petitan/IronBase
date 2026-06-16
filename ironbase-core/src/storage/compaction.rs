@@ -632,6 +632,9 @@ pub fn compact_scan_standalone(
 
     // Open a separate read-only handle for pread()
     let source_file = std::fs::File::open(&snapshot.source_path)?;
+    // PR-2 / Fix B: we read the source strictly in catalog order — hint sequential
+    // so readahead stays effective even as we drop consumed pages below.
+    super::io::advise_sequential(&source_file);
 
     // Count total documents for progress reporting
     let total_docs: u64 = snapshot
@@ -718,6 +721,7 @@ pub fn compact_scan_standalone(
                                 || total_memory_bytes >= MAX_COMPACTION_MEMORY_BYTES;
 
                             if should_flush {
+                                let flush_start = write_offset;
                                 for (flush_coll_name, docs) in collection_docs.iter_mut() {
                                     if !docs.is_empty() {
                                         write_offset = flush_compaction_chunk_standalone(
@@ -731,6 +735,22 @@ pub fn compact_scan_standalone(
                                         docs.clear();
                                     }
                                 }
+                                // PR-2 / Fix B: keep the page-cache footprint ~chunk_size,
+                                // not ~file_size. Write back + drop the just-written target
+                                // range, and drop the consumed source region up to the
+                                // current read position (`offset`) — readahead ahead of it
+                                // is preserved. Advisory; data is unaffected.
+                                super::io::flush_range_to_disk(
+                                    &temp_file,
+                                    flush_start,
+                                    write_offset - flush_start,
+                                );
+                                super::io::advise_dontneed(
+                                    &temp_file,
+                                    flush_start,
+                                    write_offset - flush_start,
+                                );
+                                super::io::advise_dontneed(&source_file, 0, offset);
                                 chunk_count = 0;
                                 total_memory_bytes = 0;
                             }
@@ -757,6 +777,7 @@ pub fn compact_scan_standalone(
     }
 
     // Flush remaining documents
+    let final_flush_start = write_offset;
     for (coll_name, docs) in collection_docs.iter_mut() {
         if !docs.is_empty() {
             write_offset = flush_compaction_chunk_standalone(
@@ -769,6 +790,17 @@ pub fn compact_scan_standalone(
             )?;
         }
     }
+    // PR-2 / Fix B: write back + drop the final chunk's target pages too.
+    super::io::flush_range_to_disk(
+        &temp_file,
+        final_flush_start,
+        write_offset - final_flush_start,
+    );
+    super::io::advise_dontneed(
+        &temp_file,
+        final_flush_start,
+        write_offset - final_flush_start,
+    );
 
     temp_file.sync_all()?;
 

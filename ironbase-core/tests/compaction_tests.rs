@@ -502,3 +502,57 @@ fn empty_db_does_not_seed_baseline_on_open() {
         w.estimated_live_bytes
     );
 }
+
+/// PR-2 / Fix B: exercise the IN-LOOP chunk flush+drop path (page-cache-bounded
+/// I/O hints) across MANY chunks by inserting more than the default chunk_size
+/// (1000) docs, so `compact_scan_standalone` runs multiple
+/// flush → sync_file_range → posix_fadvise(DONTNEED) cycles. Proves the advisory
+/// I/O hints never corrupt data: every live document survives with the correct
+/// value and tombstones are dropped. (On non-Linux the hints are no-ops, so this
+/// is a pure round-trip integrity test there.)
+#[test]
+fn compaction_many_chunks_preserves_all_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("compact_many_chunks.mlite");
+
+    let total = 2500i64; // > default chunk_size (1000) → multiple in-loop flushes
+    let deleted: Vec<i64> = (0..total).step_by(5).collect();
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..total {
+            let mut doc = HashMap::new();
+            doc.insert("k".to_string(), json!(i));
+            doc.insert(
+                "payload".to_string(),
+                json!(format!("doc-{i}-{}", "x".repeat(64))),
+            );
+            db.insert_one("c", doc).unwrap();
+        }
+        // Delete every 5th → tombstones to remove during compaction.
+        for &i in &deleted {
+            db.delete_one("c", &json!({ "k": i })).unwrap();
+        }
+        let stats = db.compact().unwrap();
+        assert_eq!(stats.tombstones_removed, deleted.len() as u64);
+        assert_eq!(stats.documents_kept, total as u64 - deleted.len() as u64);
+        db.close().unwrap();
+    }
+
+    // Reopen and verify the surviving docs are intact (not corrupted by the
+    // fadvise/sync_file_range hints across the many flush cycles).
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db2.collection("c").unwrap();
+    assert_eq!(
+        coll.find(&json!({})).unwrap().len(),
+        total as usize - deleted.len()
+    );
+    // A doc that must survive (1234 % 5 != 0) keeps its exact payload.
+    let found = coll.find(&json!({ "k": 1234 })).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].get("payload").unwrap(),
+        &json!(format!("doc-1234-{}", "x".repeat(64)))
+    );
+    // A deleted doc must be gone.
+    assert_eq!(coll.find(&json!({ "k": 1235 })).unwrap().len(), 0);
+}
