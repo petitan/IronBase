@@ -802,13 +802,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
     deduplicate: false,      // MMR diversity reranking (default: false)
     mmr_lambda: 0.7,         // MMR lambda (1.0=relevance, 0.0=diversity, default: 0.7)
     merge_chunks: true,      // Szomszédos chunk összevonás
-    match_scope: "document", // "chunk" (default) | "document" (mode=and + RAG)
+    match_scope: "document", // "document" (default) | "chunk" — csak mode="and" mellett él
     search_mode: "balanced", // "balanced" | "semantic" | "keyword"
     vector_weight: 0.5,      // Explicit vektor súly (felülírja search_mode-ot)
     fulltext_weight: 0.5,    // Explicit fulltext súly
     title_field: "title",    // Cím mező reranking boost-hoz
     text_fields: ["content", "title"], // Multi-field fulltext
-    mode: "and",             // Fulltext mode: "and" (default) | "or"
+    mode: "or",              // Fulltext mode: "or" (default, diszjunktív) | "and" (opt-in precízió)
     group_by_document: true, // Dokumentumok szerinti csoportosítás (default: false)
     filter: #{ year: 2026 }, // Dokumentum szűrő
 });
