@@ -1057,7 +1057,7 @@ mod tests {
         assert!(p.max_chunks_per_doc.is_none()); // default: no cap
         assert!(p.provider.is_none()); // no provider → use collection config
         assert!(p.filter.is_none()); // default: no filter
-        assert!(p.mode.is_none()); // default: None (= "and")
+        assert!(p.mode.is_none()); // default: None (= "or", disjunctive)
         assert!(p.text_fields.is_none()); // default: None (= single text_field)
         assert!(p.vector.is_some()); // explicit vector provided
     }
@@ -1097,7 +1097,7 @@ mod tests {
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.mode.as_deref(), Some("and"));
-        assert!(p.match_scope.is_none()); // default: None (= "document" — doc-level AND)
+        assert!(p.match_scope.is_none()); // default: None (= "document"); applies only under explicit mode="and"
     }
 
     #[test]
@@ -1128,8 +1128,9 @@ mod tests {
     }
 
     #[test]
-    fn test_params_match_scope_without_mode_and() {
-        // match_scope="document" with mode=None (default AND) — doc qualification WILL activate
+    fn test_params_match_scope_without_mode_or_default() {
+        // match_scope="document" with mode=None: the default is now DISJUNCTIVE (OR),
+        // so document-level AND qualification does NOT activate without explicit mode="and".
         let params = json!({
             "collection": "test",
             "vector": [0.1, 0.2],
@@ -1138,7 +1139,7 @@ mod tests {
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.match_scope.as_deref(), Some("document"));
-        assert!(p.mode.is_none()); // None = AND default → doc qualification activates
+        assert!(p.mode.is_none()); // None = OR default → match_scope inert until mode="and"
     }
 
     #[test]
@@ -1692,14 +1693,16 @@ mod pipeline_integration_tests {
             json!({"collection":"kb","type":"fulltext","field":"title"}),
         );
 
-        // BM25-only (vector_weight=0 → skip embedding), multi-field, default
-        // match_scope="document". Doc 1 has ALL query tokens; doc 2 has only one
-        // and must be excluded by document-level AND qualification.
+        // BM25-only (vector_weight=0 → skip embedding), multi-field, explicit
+        // mode="and" + match_scope="document" (document-level AND qualification is
+        // now OPT-IN; the default is disjunctive OR). Doc 1 has ALL query tokens;
+        // doc 2 has only one and must be excluded by document-level AND qualification.
         let (_p, fo) = fuse(
             &a,
             json!({"collection":"kb","query":"fékpad PEF-35",
                 "text_fields":["content","title"], "vector_weight":0.0,
-                "fulltext_weight":1.0, "limit":10}),
+                "fulltext_weight":1.0, "limit":10,
+                "mode":"and", "match_scope":"document"}),
         );
 
         assert!(

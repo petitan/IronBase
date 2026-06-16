@@ -802,13 +802,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
     deduplicate: false,      // MMR diversity reranking (default: false)
     mmr_lambda: 0.7,         // MMR lambda (1.0=relevance, 0.0=diversity, default: 0.7)
     merge_chunks: true,      // Szomszédos chunk összevonás
-    match_scope: "document", // "chunk" (default) | "document" (mode=and + RAG)
+    match_scope: "document", // "document" (default) | "chunk" — csak mode="and" mellett él
     search_mode: "balanced", // "balanced" | "semantic" | "keyword"
     vector_weight: 0.5,      // Explicit vektor súly (felülírja search_mode-ot)
     fulltext_weight: 0.5,    // Explicit fulltext súly
     title_field: "title",    // Cím mező reranking boost-hoz
     text_fields: ["content", "title"], // Multi-field fulltext
-    mode: "and",             // Fulltext mode: "and" (default) | "or"
+    mode: "or",              // Fulltext mode: "or" (default, diszjunktív) | "and" (opt-in precízió)
     group_by_document: true, // Dokumentumok szerinti csoportosítás (default: false)
     filter: #{ year: 2026 }, // Dokumentum szűrő
 });
@@ -875,25 +875,23 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 }
 ```
 
-**Fulltext mode paraméter (45f74bf7, #47, cd70eae4 #61):**
-- `mode`: `"and"` (default) = MINDEN szó kell a dokumentumban, `"or"` = bármely szó elég (deprecated)
-- Elérhető: Rhai `db_hybrid_search` + `fulltext_search` MCP tool — **mindkettő AND default** (v1.0.389+, korábban fulltext_search OR volt). A `search` MCP tool intent-only (a mode-ot a motor dönti).
-- AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
-- `mode` hiánya = `"and"` (v1.0.375+)
+**Fulltext mode paraméter (45f74bf7, #47, cd70eae4 #61, BREAKING: diszjunktív default):**
+- `mode`: **`"or"` (default, v1.0.537+)** = bármely szó elég, BM25 score rangsorol (iparági standard diszjunktív retrieval); `"and"` = MINDEN szó kell (opt-in precízió-szűrő)
+- Elérhető: Rhai `db_hybrid_search` + `fulltext_search` MCP tool — **mindkettő OR default** (v1.0.537+; **korábban AND volt v1.0.389–536**). A `search` MCP tool intent-only (a motor diszjunktívan keres).
+- **BREAKING CHANGE indok:** a bináris AND-overlay a BM25 fölött non-standard RRF-ben — eldobja a graded BM25 scoringot és a top-1 BM25 részleges-egyezést (keyword_buries). A standard: diszjunktív lane + BM25/RRF/rerank dönt. Mérés: specific Recall@10 0.625→0.782. Részletek: `memory/search-fuzzy-coverage-fusion-2026-06-16`.
+- `mode` hiánya = `"or"` (v1.0.537+)
 
 | Fájl | Változás |
 |------|----------|
 | `params.rs` | `pub mode: Option<String>` mindkét struct-ban |
-| `definitions/hybrid.rs` | `"mode"` schema entry (default: "and", "or" deprecated) |
-| `definitions/index.rs` | `"mode"` schema entry (default: "and", v1.0.389+) |
-| `hybrid.rs` | `and_mode: p.mode.as_deref() != Some("or")` |
-| `index.rs` | `and_mode: p.mode.as_deref() != Some("or")` (v1.0.389+) |
+| `definitions/index.rs` | `"mode"` schema entry (default: **"or"**, v1.0.537+) |
+| `fusion.rs` | `resolve_and_mode(mode) = mode == Some("and")` (None→OR, v1.0.537+; egyetlen döntéspont, mindhárom hívóra) |
 
 **Document-level AND mode (0f208d41, #56, cd70eae4 #61):**
-- `match_scope`: `"document"` (default, v1.0.389+) = szavak a dokumentum különböző chunkjaiban is lehetnek, `"chunk"` = minden szó egyetlen chunkban
-- **Keresési logika:** kvalifikáció (AND) → minden query token megjelenik a dokumentumban; chunk retrieval (OR) → bármely tokent tartalmazó chunk visszajön
+- `match_scope`: `"document"` (default) = szavak a dokumentum különböző chunkjaiban is lehetnek, `"chunk"` = minden szó egyetlen chunkban. **Csak `mode="and"` mellett él** (a default OR-ban inert, v1.0.537+).
+- **Keresési logika (mode=and):** kvalifikáció (AND) → minden query token megjelenik a dokumentumban; chunk retrieval (OR) → bármely tokent tartalmazó chunk visszajön
 - Korábban default "chunk" volt, de 3+ szavas query-knél túl szigorú (egyetlen chunk ritkán tartalmaz minden tokent)
-- Aktiválódik: `mode="and"` + `match_scope` != `"chunk"` (v1.0.389+, korábban csak explicit `match_scope="document"` vagy `group_by_document=true`)
+- Aktiválódik: **explicit `mode="and"`** + `match_scope` != `"chunk"` (v1.0.537+, korábban a default AND miatt automatikus volt)
 - Algoritmus: posting list interszekcióval kvalifikálja a dokumentumokat, majd OR módban keres a kvalifikált doc_id-kre szűrve
 - Vektor keresés NEM szűrt (RRF természetesen kezeli)
 - Response: `"match_scope": "document"/"chunk"`, `"qualified_doc_ids": N`

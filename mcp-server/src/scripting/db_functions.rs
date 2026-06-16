@@ -786,13 +786,13 @@ fn register_search_functions(
                 }
             }
 
-            // Mode: "and" (default) or "or"
-            let mut and_mode = true; // AND default — consistent with MCP fulltext_search
+            // Mode: "or" (default, disjunctive — industry standard) or "and" (opt-in precision).
+            // Mirrors fusion::resolve_and_mode (None/non-"and" → OR) so every lexical
+            // entry point shares one default. BREAKING vs the prior AND default (v1.0.537).
+            let mut and_mode = false; // OR default — consistent with fusion::resolve_and_mode
             if let Some(mode_val) = options.get("mode") {
                 if let Ok(mode_str) = mode_val.clone().into_string() {
-                    if mode_str == "or" {
-                        and_mode = false;
-                    }
+                    and_mode = mode_str == "and";
                 }
             }
 
