@@ -438,3 +438,67 @@ fn last_compact_size_persists_across_drop_without_close() {
         w.bloat_ratio
     );
 }
+
+/// Fix C (2026-06-16): a DB that has live data but was NEVER compacted (legacy
+/// pre-v6 file, or any never-compacted DB) persists `last_compact_size = 0`.
+/// Without the seed, `storage_wastage()` returns `bloat_ratio = +inf`, so the
+/// auto-compactor rewrites the whole file ~5 min after every startup — on a
+/// large file that buffered whole-file I/O can freeze the host (verified: a
+/// 7.1GB docs.mlite froze an 11GB WSL2 host 3×). The open path must seed the
+/// baseline from the current file size when live data is present, so bloat
+/// starts finite (~1.0). This guard fails on the unfixed code (bloat = +inf)
+/// and passes after the seed.
+#[test]
+fn never_compacted_db_with_data_seeds_finite_bloat_on_open() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("never_compacted.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..50i64 {
+            let mut doc = HashMap::new();
+            doc.insert("v".to_string(), json!(i));
+            db.insert_one("c", doc).unwrap();
+        }
+        // NO compact() ever — graceful close persists last_compact_size = 0.
+        db.close().unwrap();
+    }
+
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert!(
+        w.estimated_live_bytes > 0,
+        "never-compacted DB with live data must seed a non-zero baseline (got 0 \
+         → bloat_ratio would be +inf → spurious startup compaction)"
+    );
+    assert!(
+        w.bloat_ratio.is_finite(),
+        "bloat_ratio must be finite after the legacy seed, got {}",
+        w.bloat_ratio
+    );
+}
+
+/// Fix C corollary: an empty (or all-tombstone) DB has no live data, so the seed
+/// must NOT fire — `last_compact_size` stays 0. This keeps genuine garbage
+/// eligible for reclaim (the RAM-safety gate then makes that compaction safe) and
+/// proves the seed does not blindly stamp every never-compacted file. Note: an
+/// empty file also trips the min-file-size gate, so leaving bloat = +inf here is
+/// harmless.
+#[test]
+fn empty_db_does_not_seed_baseline_on_open() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("empty_db.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.close().unwrap();
+    }
+
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert_eq!(
+        w.estimated_live_bytes, 0,
+        "empty DB must NOT seed a baseline (no live data); got {}",
+        w.estimated_live_bytes
+    );
+}

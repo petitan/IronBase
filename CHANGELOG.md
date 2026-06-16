@@ -36,6 +36,37 @@ modern BM25+RRF hybrids do not layer on.
 `mode="and"` to preserve the old behavior. Affects `fulltext_search`, the Rhai
 `db_hybrid_search`, and the `search` tool's internal fusion (single decision point:
 `fusion::resolve_and_mode`).
+### Fixed — host-memory-safe auto-compaction: legacy baseline seed + RAM-aware gate (mcp-server v1.0.538, core v0.3.342)
+
+Auto-compaction could freeze the host. Two independent root causes, two layered fixes (PR-1 of the
+plan in `~/.claude/plans/compaction-host-memory-safe.md`).
+
+**Fix C — legacy / never-compacted baseline seed (`database/mod.rs` open path).** A file written
+before P1-7 (Header < v6), or *any* DB that has never been compacted, persists
+`last_compact_size = 0`. With 0, `storage_wastage()` computes `bloat_ratio = +inf`, so
+`should_compact()` fires a full-file compaction ~5 min (`check_interval_secs = 300`) after **every**
+startup. On a large file the buffered whole-file read+write balloons the OS page cache and freezes
+the host — verified 2026-06-16: a 7.1GB legacy `docs.mlite` froze an 11GB WSL2 host three times (the
+page cache is reclaimable, so a cgroup `MemoryMax` does *not* protect against it). The open path now
+seeds the in-memory baseline from the current file size when live data is present, so bloat starts at
+~1.0 instead of `+inf`; it self-corrects at the first real compaction and is persisted on graceful
+close. An empty / all-tombstone file is **not** seeded (stays 0 → genuine garbage remains eligible
+for reclaim). The estimate is logged (`tracing::warn!`), never silent. Guards:
+`never_compacted_db_with_data_seeds_finite_bloat_on_open`, `empty_db_does_not_seed_baseline_on_open`.
+
+**Fix A — RAM-aware auto-compact gate (`compaction.rs`).** New 4th gate in `should_compact`: skip
+auto-compaction when the data file exceeds `max_file_to_ram_ratio` (default `0.5`) of available
+system RAM, since a full compaction's transient page-cache footprint is ~file_size. A 100GB file on
+a 16GB host now never auto-compacts blindly; the operator can still run a manual `db_compact` in a
+maintenance window or on a larger host. `0.0` disables the gate. The warn fires only when bloat +
+min-size gates would otherwise have passed (a compaction was genuinely wanted but refused). New
+config: `[compaction] max_file_to_ram_ratio` (serde default, legacy configs unaffected). Guards: 7
+unit tests in `compaction::tests` (incl. `should_compact_refuses_oversized_file_even_at_infinite_bloat`
+reproducing the verified WSL case).
+
+Remaining (PR-2, separate): Fix B — page-cache-bounded compaction I/O (`posix_fadvise(DONTNEED)` +
+`sync_file_range`, `#[cfg(unix)]`) so a manual compaction of a 100GB file stays bounded regardless of
+file size.
 
 ### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
 

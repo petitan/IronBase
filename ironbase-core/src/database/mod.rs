@@ -424,6 +424,42 @@ impl DatabaseCore<StorageEngine> {
         // reopened DB keeps an accurate bloat_ratio instead of 0 → +inf → a
         // spurious full-file auto-compaction on every restart.
         let stored_compact_size = storage.last_compact_size();
+        // Fix C (legacy pre-v6 baseline seed, 2026-06-16): a file written before
+        // P1-7 (Header < v6) — OR any DB that has simply never been compacted —
+        // has no persisted last_compact_size and loads as 0. With 0,
+        // storage_wastage() yields bloat_ratio = +inf, so should_compact() fires
+        // a full-file compaction ~5 min after every startup. On a large file that
+        // buffered whole-file I/O balloons the host page cache and can freeze the
+        // machine (verified 2026-06-16: a 7.1GB legacy docs.mlite froze an 11GB
+        // WSL2 host 3×). Seed the baseline from the current file size so bloat
+        // starts at ~1.0 instead of +inf; it self-corrects at the first real
+        // compaction. Only seed when live data is actually present: an empty or
+        // all-tombstone file keeps 0 so genuine garbage is still eligible for
+        // reclaim (the RAM-safety gate in compaction.rs then makes that safe).
+        // NOT a silent dummy — the estimate is logged.
+        let stored_compact_size = if stored_compact_size == 0 {
+            let total_live: u64 = storage
+                .collections_ref()
+                .values()
+                .map(|m| m.live_document_count)
+                .sum();
+            let file_size = std::fs::metadata(&path_str).map(|m| m.len()).unwrap_or(0);
+            if total_live > 0 && file_size > 0 {
+                tracing::warn!(
+                    file_size_mb = file_size / (1024 * 1024),
+                    live_documents = total_live,
+                    "Seeding compaction baseline from current file size (legacy pre-v6 \
+                     file or never-compacted DB had no persisted last_compact_size). \
+                     This avoids a spurious full-file auto-compaction on startup; the \
+                     baseline self-corrects at the first real compaction."
+                );
+                file_size
+            } else {
+                0
+            }
+        } else {
+            stored_compact_size
+        };
         let max_recovered = recovered_ops
             .iter()
             .map(|(tx_id, _)| *tx_id)
