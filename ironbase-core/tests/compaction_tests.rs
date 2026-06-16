@@ -438,3 +438,121 @@ fn last_compact_size_persists_across_drop_without_close() {
         w.bloat_ratio
     );
 }
+
+/// Fix C (2026-06-16): a DB that has live data but was NEVER compacted (legacy
+/// pre-v6 file, or any never-compacted DB) persists `last_compact_size = 0`.
+/// Without the seed, `storage_wastage()` returns `bloat_ratio = +inf`, so the
+/// auto-compactor rewrites the whole file ~5 min after every startup — on a
+/// large file that buffered whole-file I/O can freeze the host (verified: a
+/// 7.1GB docs.mlite froze an 11GB WSL2 host 3×). The open path must seed the
+/// baseline from the current file size when live data is present, so bloat
+/// starts finite (~1.0). This guard fails on the unfixed code (bloat = +inf)
+/// and passes after the seed.
+#[test]
+fn never_compacted_db_with_data_seeds_finite_bloat_on_open() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("never_compacted.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..50i64 {
+            let mut doc = HashMap::new();
+            doc.insert("v".to_string(), json!(i));
+            db.insert_one("c", doc).unwrap();
+        }
+        // NO compact() ever — graceful close persists last_compact_size = 0.
+        db.close().unwrap();
+    }
+
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert!(
+        w.estimated_live_bytes > 0,
+        "never-compacted DB with live data must seed a non-zero baseline (got 0 \
+         → bloat_ratio would be +inf → spurious startup compaction)"
+    );
+    assert!(
+        w.bloat_ratio.is_finite(),
+        "bloat_ratio must be finite after the legacy seed, got {}",
+        w.bloat_ratio
+    );
+}
+
+/// Fix C corollary: an empty (or all-tombstone) DB has no live data, so the seed
+/// must NOT fire — `last_compact_size` stays 0. This keeps genuine garbage
+/// eligible for reclaim (the RAM-safety gate then makes that compaction safe) and
+/// proves the seed does not blindly stamp every never-compacted file. Note: an
+/// empty file also trips the min-file-size gate, so leaving bloat = +inf here is
+/// harmless.
+#[test]
+fn empty_db_does_not_seed_baseline_on_open() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("empty_db.mlite");
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.close().unwrap();
+    }
+
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let w = db2.storage_wastage();
+    assert_eq!(
+        w.estimated_live_bytes, 0,
+        "empty DB must NOT seed a baseline (no live data); got {}",
+        w.estimated_live_bytes
+    );
+}
+
+/// PR-2 / Fix B: exercise the IN-LOOP chunk flush+drop path (page-cache-bounded
+/// I/O hints) across MANY chunks by inserting more than the default chunk_size
+/// (1000) docs, so `compact_scan_standalone` runs multiple
+/// flush → sync_file_range → posix_fadvise(DONTNEED) cycles. Proves the advisory
+/// I/O hints never corrupt data: every live document survives with the correct
+/// value and tombstones are dropped. (On non-Linux the hints are no-ops, so this
+/// is a pure round-trip integrity test there.)
+#[test]
+fn compaction_many_chunks_preserves_all_data() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("compact_many_chunks.mlite");
+
+    let total = 2500i64; // > default chunk_size (1000) → multiple in-loop flushes
+    let deleted: Vec<i64> = (0..total).step_by(5).collect();
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        for i in 0..total {
+            let mut doc = HashMap::new();
+            doc.insert("k".to_string(), json!(i));
+            doc.insert(
+                "payload".to_string(),
+                json!(format!("doc-{i}-{}", "x".repeat(64))),
+            );
+            db.insert_one("c", doc).unwrap();
+        }
+        // Delete every 5th → tombstones to remove during compaction.
+        for &i in &deleted {
+            db.delete_one("c", &json!({ "k": i })).unwrap();
+        }
+        let stats = db.compact().unwrap();
+        assert_eq!(stats.tombstones_removed, deleted.len() as u64);
+        assert_eq!(stats.documents_kept, total as u64 - deleted.len() as u64);
+        db.close().unwrap();
+    }
+
+    // Reopen and verify the surviving docs are intact (not corrupted by the
+    // fadvise/sync_file_range hints across the many flush cycles).
+    let db2 = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db2.collection("c").unwrap();
+    assert_eq!(
+        coll.find(&json!({})).unwrap().len(),
+        total as usize - deleted.len()
+    );
+    // A doc that must survive (1234 % 5 != 0) keeps its exact payload.
+    let found = coll.find(&json!({ "k": 1234 })).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].get("payload").unwrap(),
+        &json!(format!("doc-1234-{}", "x".repeat(64)))
+    );
+    // A deleted doc must be gone.
+    assert_eq!(coll.find(&json!({ "k": 1235 })).unwrap().len(), 0);
+}

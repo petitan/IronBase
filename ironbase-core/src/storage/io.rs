@@ -97,6 +97,83 @@ pub(crate) fn read_document_from_file(
     Ok(data)
 }
 
+// =========================================================================
+// Page-cache-bounded I/O hints (PR-2 / Fix B — host-memory-safe compaction)
+//
+// A full-file compaction reads the entire source and writes the entire target
+// through buffered I/O. On a large file the OS page cache balloons to ~file size
+// and can freeze a small-RAM host (the page cache is reclaimable, so a cgroup
+// MemoryMax does NOT protect against it). These hints keep the resident footprint
+// bounded to ~chunk_size regardless of file size, by dropping consumed/flushed
+// ranges from the page cache as the sequential pass advances.
+//
+// Linux-only (`posix_fadvise`/`sync_file_range`): macOS lacks posix_fadvise and
+// sync_file_range, Windows has neither — both get the no-op fallback (the freeze
+// was verified on Linux/WSL2; other platforms manage the unified buffer cache
+// differently). All calls are ADVISORY and best-effort: errors are ignored and
+// never affect the data written (round-trip integrity is unchanged).
+// =========================================================================
+
+/// Hint that `file` will be read sequentially (enables aggressive readahead).
+#[cfg(target_os = "linux")]
+pub(crate) fn advise_sequential(file: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    // offset=0, len=0 → the whole file.
+    unsafe {
+        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+}
+
+/// Drop the page-cache pages backing `[offset, offset+len)` of `file`.
+/// Used after a range has been consumed (read) or flushed (written) so a large
+/// sequential pass does not accumulate the whole file in the page cache.
+#[cfg(target_os = "linux")]
+pub(crate) fn advise_dontneed(file: &std::fs::File, offset: u64, len: u64) {
+    use std::os::unix::io::AsRawFd;
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        libc::posix_fadvise(
+            file.as_raw_fd(),
+            offset as libc::off_t,
+            len as libc::off_t,
+            libc::POSIX_FADV_DONTNEED,
+        );
+    }
+}
+
+/// Write back `[offset, offset+len)` of `file` and BLOCK until those pages are
+/// clean (WAIT_BEFORE | WRITE | WAIT_AFTER), so a following [`advise_dontneed`]
+/// can actually evict them (DONTNEED only drops clean pages). Bounds the dirty
+/// page-cache footprint of the write side to ~one chunk.
+#[cfg(target_os = "linux")]
+pub(crate) fn flush_range_to_disk(file: &std::fs::File, offset: u64, len: u64) {
+    use std::os::unix::io::AsRawFd;
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        libc::sync_file_range(
+            file.as_raw_fd(),
+            offset as libc::off64_t,
+            len as libc::off64_t,
+            libc::SYNC_FILE_RANGE_WAIT_BEFORE
+                | libc::SYNC_FILE_RANGE_WRITE
+                | libc::SYNC_FILE_RANGE_WAIT_AFTER,
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn advise_sequential(_file: &std::fs::File) {}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn advise_dontneed(_file: &std::fs::File, _offset: u64, _len: u64) {}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn flush_range_to_disk(_file: &std::fs::File, _offset: u64, _len: u64) {}
+
 impl StorageEngine {
     /// Write data to end of document region
     /// Returns the offset where data was written

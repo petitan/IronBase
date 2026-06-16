@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — PR-2: page-cache-bounded compaction I/O (Fix B) (mcp-server v1.0.539, core v0.3.343)
+
+Completes the host-memory-safe compaction work (PR-1 was the legacy baseline seed + RAM-aware
+auto-compact gate below). A full-file compaction reads the entire source and writes the entire
+target through buffered I/O, so the OS page cache balloons to ~file size and can freeze a
+small-RAM host (the page cache is reclaimable → a cgroup `MemoryMax` does not protect against it).
+
+`compact_scan_standalone` now keeps the resident page-cache footprint bounded to ~`chunk_size`
+regardless of total file size, via Linux page-cache hints (`storage/io.rs`, `#[cfg(target_os =
+"linux")]`; macOS/Windows get no-op fallbacks — `posix_fadvise`/`sync_file_range` are unavailable
+there and the freeze was verified on Linux/WSL2):
+- `advise_sequential` on the source fd at start (keeps readahead effective);
+- after each chunk flush, `flush_range_to_disk` (`sync_file_range` WAIT_BEFORE|WRITE|WAIT_AFTER) +
+  `advise_dontneed(POSIX_FADV_DONTNEED)` on the just-written target range, so dirty pages are
+  written back and dropped instead of accumulating;
+- `advise_dontneed` on the consumed source region up to the current read offset (readahead ahead
+  of it is preserved).
+
+All hints are advisory and best-effort (errors ignored); they never change the bytes written —
+data round-trip is unaffected. With this, a manual `db_compact` (or auto-compaction on a host the
+RAM gate allows) of a 100GB file stays bounded instead of freezing the host. Guard:
+`compaction_many_chunks_preserves_all_data` (2500 docs > default chunk_size → multiple
+flush→sync→DONTNEED cycles, verifies every live doc survives and tombstones are dropped); full
+core compaction suite (14 integration tests) green.
+
 ### Changed — BREAKING: lexical retrieval default is now disjunctive (OR), industry-standard (mcp-server v1.0.537)
 
 The fulltext / hybrid-fusion lexical lane now defaults to **disjunctive (OR)** matching
@@ -36,6 +61,37 @@ modern BM25+RRF hybrids do not layer on.
 `mode="and"` to preserve the old behavior. Affects `fulltext_search`, the Rhai
 `db_hybrid_search`, and the `search` tool's internal fusion (single decision point:
 `fusion::resolve_and_mode`).
+### Fixed — host-memory-safe auto-compaction: legacy baseline seed + RAM-aware gate (mcp-server v1.0.538, core v0.3.342)
+
+Auto-compaction could freeze the host. Two independent root causes, two layered fixes (PR-1 of the
+plan in `~/.claude/plans/compaction-host-memory-safe.md`).
+
+**Fix C — legacy / never-compacted baseline seed (`database/mod.rs` open path).** A file written
+before P1-7 (Header < v6), or *any* DB that has never been compacted, persists
+`last_compact_size = 0`. With 0, `storage_wastage()` computes `bloat_ratio = +inf`, so
+`should_compact()` fires a full-file compaction ~5 min (`check_interval_secs = 300`) after **every**
+startup. On a large file the buffered whole-file read+write balloons the OS page cache and freezes
+the host — verified 2026-06-16: a 7.1GB legacy `docs.mlite` froze an 11GB WSL2 host three times (the
+page cache is reclaimable, so a cgroup `MemoryMax` does *not* protect against it). The open path now
+seeds the in-memory baseline from the current file size when live data is present, so bloat starts at
+~1.0 instead of `+inf`; it self-corrects at the first real compaction and is persisted on graceful
+close. An empty / all-tombstone file is **not** seeded (stays 0 → genuine garbage remains eligible
+for reclaim). The estimate is logged (`tracing::warn!`), never silent. Guards:
+`never_compacted_db_with_data_seeds_finite_bloat_on_open`, `empty_db_does_not_seed_baseline_on_open`.
+
+**Fix A — RAM-aware auto-compact gate (`compaction.rs`).** New 4th gate in `should_compact`: skip
+auto-compaction when the data file exceeds `max_file_to_ram_ratio` (default `0.5`) of available
+system RAM, since a full compaction's transient page-cache footprint is ~file_size. A 100GB file on
+a 16GB host now never auto-compacts blindly; the operator can still run a manual `db_compact` in a
+maintenance window or on a larger host. `0.0` disables the gate. The warn fires only when bloat +
+min-size gates would otherwise have passed (a compaction was genuinely wanted but refused). New
+config: `[compaction] max_file_to_ram_ratio` (serde default, legacy configs unaffected). Guards: 7
+unit tests in `compaction::tests` (incl. `should_compact_refuses_oversized_file_even_at_infinite_bloat`
+reproducing the verified WSL case).
+
+PR-2 (Fix B — page-cache-bounded compaction I/O) is now also done: see the entry above
+(`posix_fadvise(DONTNEED)` + `sync_file_range`, `#[cfg(target_os = "linux")]`), so a manual
+compaction of a 100GB file stays bounded regardless of file size.
 
 ### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
 
