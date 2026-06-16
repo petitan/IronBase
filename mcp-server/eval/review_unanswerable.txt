@@ -1,0 +1,20 @@
+ 1. ADAS eszközök                                  | returned 1: Zalaegerszegi Szakképzési Centrum - Közb
+ 2. Belső csápkarrögzítő rendszer                  | returned 3: PRS Statisztika 2025-08-01 — 2025-09-01 | StatPRS statisztika 2025-02-01 – 2025-03 | StatPRS 2025-10-01 – 2025-11-01 Statiszt
+ 3. Belső csápkarrögzítő rendszer ára              | returned 2: Ubornyák László - szervizberendezés áraj | Ubornyák László szervizberendezés áraján
+ 4. Belső csápkarrögzítő rendszerrel rendelkező em | returned 2: Zalaegerszegi Szakképzési Centrum - Kieg | Kis Fruzsina szervizberendezés árajánlat
+ 5. BM3010 mennyibe kerül                          | returned 1: Jéré Csaba vizsgasori berendezés árajánl
+ 6. BOSCH fékpad gépkönyv                          | returned 2: StatPRS 2025-09-01 2025-10-01 Statisztik | StatPRS 2026-02-01 — 2026-03-01
+ 7. c-univerzál árajánlat                          | returned 3: Horváth Ádám Gábor M1N1 vizsgasori árajá | Pataki Gábor WT klíma árajánlat | Horváth Tamás - Motorkerékpár fékpad ára
+ 8. Egyetemi Oktató Kórház ajánlatát keresem       | returned 1: Nyíregyházi Szakképzési Centrum - Bánki 
+ 9. Emelő adapter Crafter/Sprinter                 | returned 0: 
+10. fékpad árakat kérek                            | returned 1: PeTitan Vizsgasor kezelési útmutató
+11. hovány kft szerződései                         | returned 2: StatPRS Állapotjelentés 2026. február-má | Trapp Gábor - M1N1 vizsgasori előzetes á
+12. hovány kft szerződési                          | returned 2: StatPRS Állapotjelentés 2026. február-má | Trapp Gábor - M1N1 vizsgasori előzetes á
+13. keress gázelemző ajánlatokat                   | returned 2: Hiánypótlási felhívás és felvilágosítás  | Juhai András úr - kombinált vizsgasori b
+14. legutolsó hovány szerződé                      | returned 2: PRS Statisztika 2025-08-01 — 2025-09-01 | StatPRS 2025-04-01 2025-05-01
+15. legutolsó hovány szerződést kérem              | returned 3: Magyar Zoltán - vizsgasori berendezés ár | Láng Oszkár Gábor - M1, N1 vizsgasori ár | Schnell Miklós úr - SICE PDC40ELX áraján
+16. mennyibe kerül?                                | returned 1: Tihanyi Georgina kombinált vizsgasori be
+17. operátor kézikönyv                             | returned 0: 
+18. pef 35                                         | returned 2: StatPRS statisztika 2025-02-01 – 2025-03 | Horváth Ádám Gábor M1N1 vizsgasori árajá
+19. SICEEMELP DC30 ára                             | returned 3: Kurucz Garage Kft. SICE csápos emelők ár | Sáfár Tibor árajánlat | DENVER LA-460x750 eszterga piacfelmérő
+20. Stahlwille 55/10/6 dugókulcskészlet (3/4")     | returned 3: Specifikáció 2025.02.25 | Specifikáció 2024 | Specifikáció 2025.03.06
