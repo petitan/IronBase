@@ -119,13 +119,13 @@ pub fn tools() -> Vec<Value> {
                     "query": fields::search_query(),
                     "mode": {
                         "type": "string",
-                        "description": "Search mode: 'and' (default) = ALL words must match in document, 'or' = any word matches",
+                        "description": "Search mode: 'or' (default) = any word matches, relevance ranked by BM25 score (industry-standard disjunctive retrieval); 'and' = ALL words must match (opt-in precision filter)",
                         "enum": ["and", "or"],
-                        "default": "and"
+                        "default": "or"
                     },
                     "match_scope": {
                         "type": "string",
-                        "description": "Match scope for AND mode: 'document' (default) = all words must appear across the document's chunks (ideal for RAG), 'chunk' = all words in a single chunk. No effect in 'or' mode.",
+                        "description": "Match scope for 'and' mode only: 'document' (default) = all words must appear across the document's chunks (ideal for RAG), 'chunk' = all words in a single chunk. No effect in the default 'or' mode.",
                         "enum": ["document", "chunk"],
                         "default": "document"
                     },

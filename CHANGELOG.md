@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING: lexical retrieval default is now disjunctive (OR), industry-standard (mcp-server v1.0.537)
+
+The fulltext / hybrid-fusion lexical lane now defaults to **disjunctive (OR)** matching
+instead of conjunctive (AND). This aligns IronBase with the industry-standard hybrid /
+RRF design: the lexical lane retrieves disjunctively and relevance is decided by the
+graded BM25 score + RRF + reranking — not by a binary all-terms gate applied *before*
+fusion.
+
+**Why.** The prior AND default (v1.0.389–536) ran a document-level AND qualification that
+HARD-FILTERED the fulltext lane to documents containing every query token. This dropped
+strong partial matches — a BM25 rank-1 hit could vanish entirely from the fused result
+when the document lacked any single query token (e.g. a synonym: query "légkondi", doc
+"klíma"). Re-binarizing BM25's inherently graded scoring is non-standard for RRF, where
+each retriever is meant to run independently and cover the other's blind spot. Measured on
+the rdocs eval set, switching to OR lifts specific-query Recall@10 from 0.625 → 0.782
+(and Recall@5 0.537 → 0.671) at a small precision cost on high-redundancy browse queries.
+
+A separate fuzzy-coverage membership multiplier was prototyped and **rejected**: a real
+server-side A/B showed it is byte-for-byte identical to plain OR once reranking is on
+(the existing rerank density boost already supplies the graded coverage signal), and the
+literature confirms the classic Fuzzy IR model is a pre-BM25 Boolean-era technique that
+modern BM25+RRF hybrids do not layer on.
+
+**Migration.** `mode="and"` is still available as an explicit opt-in precision filter
+(all query tokens required), and `match_scope` ("document"/"chunk") continues to apply
+**only** under `mode="and"`. Clients that relied on the implicit AND default must now pass
+`mode="and"` to preserve the old behavior. Affects `fulltext_search`, the Rhai
+`db_hybrid_search`, and the `search` tool's internal fusion (single decision point:
+`fusion::resolve_and_mode`).
+
 ### Fixed — index-based $group count path: multiplier overflow + stale planner references (mcp-server v1.0.535, core v0.3.341)
 
 Post-review follow-up on this branch (fresh `/code-review` pass over the full diff).

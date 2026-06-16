@@ -246,11 +246,13 @@ pub struct FulltextSearchParams {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<Value>,
-    /// Search mode: "and" (default) = ALL words must match, "or" = any word matches
+    /// Search mode: "or" (default) = any word matches, ranked by BM25 score
+    /// (industry-standard disjunctive retrieval); "and" = ALL words must match
+    /// (opt-in precision filter).
     pub mode: Option<String>,
-    /// Match scope: "document" (default) = all words must appear across the document's chunks,
-    /// "chunk" = all words must appear in a single chunk. Only relevant for RAG collections
-    /// with chunked documents. Has no effect in "or" mode.
+    /// Match scope for "and" mode only: "document" (default) = all words must appear
+    /// across the document's chunks, "chunk" = all words in a single chunk. Only
+    /// relevant for RAG collections with chunked documents. No effect in default "or" mode.
     pub match_scope: Option<String>,
     /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering).
     /// Use this to combine fulltext search with other query operators (e.g., $regex, $eq)
@@ -658,11 +660,13 @@ pub struct HybridSearchParams {
     /// Optional title field for title match boost in reranking (up to 1.5x)
     pub title_field: Option<String>,
 
-    /// Fulltext search mode: "and" (default) = ALL words must match, "or" (deprecated) = any word matches
+    /// Fulltext/fusion mode: "or" (default) = any word matches, ranked by BM25 +
+    /// RRF (industry-standard disjunctive retrieval); "and" = ALL words must match
+    /// (opt-in precision filter).
     pub mode: Option<String>,
 
-    /// Match scope for AND mode: "chunk" (default) or "document"
-    /// "document" = all words must appear across the document's chunks (not necessarily in one chunk)
+    /// Match scope for "and" mode only: "document" (default) = all words must appear
+    /// across the document's chunks (not necessarily in one chunk), "chunk" = one chunk.
     pub match_scope: Option<String>,
 
     /// Multiple fulltext fields to search across (overrides text_field). Best-field strategy (max score).

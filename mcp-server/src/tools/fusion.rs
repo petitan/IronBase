@@ -704,6 +704,16 @@ pub(crate) struct QualificationOutcome {
     pub qualified_doc_count: Option<usize>,
 }
 
+/// Resolve the lexical retrieval conjunction mode from the `mode` parameter.
+///
+/// Default (None) is DISJUNCTIVE (OR, returns `false`) — the industry-standard
+/// hybrid/RRF design where relevance is ranked by BM25 score, not gated by a
+/// binary all-terms requirement. Only an explicit `mode="and"` opts into the
+/// conjunctive all-terms filter. Any other value (incl. "or") → OR.
+pub(crate) fn resolve_and_mode(mode: Option<&str>) -> bool {
+    mode == Some("and")
+}
+
 /// Apply document-level AND qualification if needed.
 ///
 /// Shared orchestration logic used by both `hybrid_search` and `fulltext_search`.
@@ -723,7 +733,14 @@ pub(crate) fn apply_document_qualification(
 ) -> Result<QualificationOutcome> {
     validate_match_scope(match_scope)?;
 
-    let and_mode = mode != Some("or");
+    // Default = DISJUNCTIVE (OR), aligning with the industry-standard hybrid /
+    // RRF design: the lexical lane retrieves disjunctively and relevance is decided
+    // by the (graded) BM25 score + RRF + rerank — NOT by a binary all-terms gate.
+    // A hard AND qualification before fusion drops strong partial (BM25 rank-1)
+    // matches and is non-standard for RRF (it re-binarizes BM25's graded scoring).
+    // AND is now OPT-IN (`mode="and"`) for callers that explicitly want all-terms
+    // precision. BREAKING CHANGE vs the prior AND default (clients may need updating).
+    let and_mode = resolve_and_mode(mode);
     let is_doc_scope = and_mode && match_scope != Some("chunk");
 
     if !is_doc_scope || fields.is_empty() {
@@ -839,6 +856,15 @@ pub(crate) fn apply_document_qualification(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_resolve_and_mode_default_is_disjunctive() {
+        // Industry-standard default: None → OR (disjunctive). Only explicit "and" → AND.
+        assert!(!resolve_and_mode(None)); // default = OR
+        assert!(!resolve_and_mode(Some("or")));
+        assert!(resolve_and_mode(Some("and"))); // opt-in precision
+        assert!(!resolve_and_mode(Some("anything-else"))); // unknown → OR (safe default)
+    }
 
     #[test]
     fn test_strip_punctuation() {
