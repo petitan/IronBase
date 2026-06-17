@@ -786,15 +786,13 @@ fn register_search_functions(
                 }
             }
 
-            // Mode: "or" (default, disjunctive — industry standard) or "and" (opt-in precision).
-            // Mirrors fusion::resolve_and_mode (None/non-"and" → OR) so every lexical
-            // entry point shares one default. BREAKING vs the prior AND default (v1.0.537).
-            let mut and_mode = false; // OR default — consistent with fusion::resolve_and_mode
-            if let Some(mode_val) = options.get("mode") {
-                if let Ok(mode_str) = mode_val.clone().into_string() {
-                    and_mode = mode_str == "and";
-                }
-            }
+            // Mode default = "or" (disjunctive, industry standard); "and" = opt-in precision.
+            // Single source of truth: delegate to fusion::resolve_and_mode (None/non-"and"
+            // → OR) so every lexical entry point shares one default and cannot drift.
+            let mode_str = options
+                .get("mode")
+                .and_then(|v| v.clone().into_string().ok());
+            let and_mode = crate::tools::fusion::resolve_and_mode(mode_str.as_deref());
 
             // match_scope: "document" (default) or "chunk"
             let mut match_scope = "document";
