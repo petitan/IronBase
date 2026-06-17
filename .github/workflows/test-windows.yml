@@ -126,7 +126,7 @@ jobs:
           echo "  .\\install.ps1 -Uninstall" >> release-windows/README.txt
 
       - name: Upload Windows release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-mcp-server-windows
           path: release-windows/
