@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — compaction source page-cache drop: delta instead of cumulative prefix (core v0.3.344, mcp v1.0.540)
+
+Follow-up to the PR-2 page-cache-bounded compaction I/O (v1.0.539), from a multi-agent
+review. The source-side `posix_fadvise(DONTNEED)` in `compact_scan_standalone` dropped
+`[0, offset)` on every chunk flush — re-walking the whole already-evicted prefix each time
+(cumulative O(chunks · file_size) kernel work) and, because the snapshot collection map is a
+`HashMap` (non-deterministic order), `offset` is not globally monotonic across collections,
+so the "consumed prefix" framing was wrong for multi-collection databases. Now a monotonic
+high-water mark (`src_dropped_upto`) drops only the new delta `[src_dropped_upto, offset)`
+once: O(file_size) total, robust to collection order, never re-dropping or evicting the
+in-progress document's pages. Advisory only — data round-trip unchanged; the full core
+compaction suite (14 integration tests, incl. the multi-chunk guard) stays green.
+
+Also: documented the `[compaction]` section in `mcp-server/config.example.toml` (the
+tracked operator template; the live `config.toml` is gitignored) — including the
+host-memory-safety `max_file_to_ram_ratio` gate, previously only discoverable from source.
+
 ### Fixed — PR-2: page-cache-bounded compaction I/O (Fix B) (mcp-server v1.0.539, core v0.3.343)
 
 Completes the host-memory-safe compaction work (PR-1 was the legacy baseline seed + RAM-aware
