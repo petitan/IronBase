@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — compaction source page-cache drop: final-chunk source tail (K-1) (core v0.3.345, mcp v1.0.541)
+
+Follow-up to the page-cache-bounded compaction I/O (v1.0.539–540), from a multi-agent
+review (K-1, three independent agents). The in-loop source `posix_fadvise(DONTNEED)` in
+`compact_scan_standalone` deliberately stops at the in-progress document's start (`offset`,
+exclusive), so the LAST chunk's source pages are never reached by it — the final-flush branch
+only evicted the *target* (`temp_file`) range, leaving the source tail
+`[src_dropped_upto, snapshot_data_end_offset)` resident in the page cache until the read
+handle is dropped. On a large file that tail can be a full chunk, partly defeating the
+~`chunk_size` footprint goal for the final chunk. After the final flush every document has
+been read and written, so the whole remaining source prefix up to the read boundary is now
+dropped (guarded `if snapshot_data_end_offset > src_dropped_upto`, mirroring the in-loop
+delta). Advisory only — data round-trip unchanged; full core compaction suite (14 integration
+tests, incl. the multi-chunk guard) stays green.
+
 ### Fixed — compaction source page-cache drop: delta instead of cumulative prefix (core v0.3.344, mcp v1.0.540)
 
 Follow-up to the PR-2 page-cache-bounded compaction I/O (v1.0.539), from a multi-agent
@@ -78,7 +93,7 @@ modern BM25+RRF hybrids do not layer on.
 `mode="and"` to preserve the old behavior. Affects `fulltext_search`, the Rhai
 `db_hybrid_search`, and the `search` tool's internal fusion (single decision point:
 `fusion::resolve_and_mode`).
-### Fixed — host-memory-safe auto-compaction: legacy baseline seed + RAM-aware gate (mcp-server v1.0.538, core v0.3.342)
+### Fixed — host-memory-safe auto-compaction: legacy baseline seed + RAM-aware gate (mcp-server v1.0.538 / core v0.3.342 — folded into the v1.0.539 / v0.3.343 build below; no separate tag)
 
 Auto-compaction could freeze the host. Two independent root causes, two layered fixes (PR-1 of the
 plan in `~/.claude/plans/compaction-host-memory-safe.md`).

@@ -3,6 +3,12 @@
 # Each ignored advisory below is documented with WHY it is not actionable for this
 # codebase. These are deliberate, justified exceptions — NOT a blanket silence.
 # Re-evaluate when the listed real remediation lands.
+#
+# RE-EVAL GUARD: the two pyo3 ignores below are safe ONLY while bindings/python does
+# not use the vulnerable APIs. A CI step ("Re-evaluate pyo3 advisory ignores" in
+# .github/workflows/rust.yml) greps bindings/python for `.nth()/.nth_back()` and
+# `new_closure` and fails the build if any appears — forcing this file to be revisited
+# instead of silently extending the silence to newly-vulnerable code.
 
 [advisories]
 ignore = [

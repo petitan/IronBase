@@ -815,6 +815,20 @@ pub fn compact_scan_standalone(
         final_flush_start,
         write_offset - final_flush_start,
     );
+    // PR-2 / Fix B (K-1 follow-up): drop the SOURCE tail too. The in-loop drop
+    // (above) deliberately stops at the in-progress doc's start (`offset`,
+    // exclusive), so the last chunk's source pages are never reached by it.
+    // Every document has now been read and flushed, so the whole remaining
+    // source prefix up to the read boundary is safe to evict — otherwise it
+    // lingers in the page cache until the handle is dropped, defeating the
+    // ~chunk_size footprint goal for the final chunk. Advisory; data unaffected.
+    if snapshot.snapshot_data_end_offset > src_dropped_upto {
+        super::io::advise_dontneed(
+            &source_file,
+            src_dropped_upto,
+            snapshot.snapshot_data_end_offset - src_dropped_upto,
+        );
+    }
 
     temp_file.sync_all()?;
 
