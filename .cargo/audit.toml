@@ -1,0 +1,34 @@
+# cargo-audit configuration (read by `cargo audit` in CI: .github/workflows/rust.yml).
+#
+# Each ignored advisory below is documented with WHY it is not actionable for this
+# codebase. These are deliberate, justified exceptions — NOT a blanket silence.
+# Re-evaluate when the listed real remediation lands.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2025-0141 — bincode is unmaintained (WARNING, not a vulnerability).
+    #   We pin bincode 1.x and use it for the persistent on-disk wire format
+    #   (.mlite header + .hnsw vector index). bincode 2.x/3.x is a full API rewrite
+    #   AND a wire-format change → bumping it (dependabot #28) breaks the build and
+    #   risks making existing databases unreadable. The 1.x line is stable and has
+    #   no known vulnerability. Real remediation (if ever needed): a deliberate,
+    #   tested migration to bincode 2.x serde-compat with config::legacy() + a
+    #   round-trip test against pre-existing files — tracked separately, not a dep bump.
+    "RUSTSEC-2025-0141",
+
+    # RUSTSEC-2026-0176 — pyo3 out-of-bounds read in PyList/PyTuple iterator
+    #   nth()/nth_back() (affects 0.24–0.28; fixed in 0.29.0).
+    #   NOT EXPLOITABLE here: bindings/python/src/lib.rs only iterates Py sequences
+    #   with plain `for x in seq.iter()` (forward iteration) and never calls
+    #   `.nth()` / `.nth_back()` on a PyList/PyTuple iterator, which is the sole
+    #   vulnerable path. Real remediation: upgrade pyo3 to >=0.29 (a separate
+    #   migration — note that dependabot #29's bump to 0.28 would NOT fix this).
+    "RUSTSEC-2026-0176",
+
+    # RUSTSEC-2026-0177 — pyo3 missing Sync bound on PyCFunction::new_closure
+    #   (affects <0.29; fixed in 0.29.0).
+    #   NOT APPLICABLE here: the codebase does not use PyCFunction::new_closure
+    #   (or new_closure_bound) anywhere. Real remediation: upgrade pyo3 to >=0.29
+    #   (same separate migration as RUSTSEC-2026-0176; 0.28 would not fix it).
+    "RUSTSEC-2026-0177",
+]
