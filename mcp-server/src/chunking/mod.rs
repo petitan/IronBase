@@ -300,19 +300,67 @@ pub(crate) fn find_table_header(text: &str) -> Option<String> {
 
 /// Build the text used to embed a chunk.
 ///
-/// Combines the chunk body with its section breadcrumb so the embedding vector
-/// carries hierarchical context (e.g. `"Brakes > PEF-35 > Specs\n\n<body>"`).
+/// Combines the chunk body with an optional document-identity `context`
+/// breadcrumb and its section breadcrumb so the embedding vector carries
+/// document- and hierarchy-level context. Order: context → section_path → body
+/// (e.g. `"customer: Agrovario | title: X\nBrakes > PEF-35 > Specs\n\n<body>"`).
 /// Markdown tables in the body are flattened to plain text for cleaner
 /// tokenization.
 ///
 /// This is used ONLY for embedding — the original chunk text is stored and
 /// returned unchanged. Generic auto-embedding (auto_embed.rs / crud.rs) embeds
 /// the source field verbatim and intentionally does not call this.
-pub fn build_embed_text(body: &str, section_path: Option<&[String]>) -> String {
+pub fn build_embed_text(
+    body: &str,
+    section_path: Option<&[String]>,
+    context: Option<&str>,
+) -> String {
     let clean = strip_markdown_tables(body);
-    match section_path {
-        Some(path) if !path.is_empty() => format!("{}\n\n{}", path.join(" > "), clean),
-        _ => clean,
+    let breadcrumb = match section_path {
+        Some(path) if !path.is_empty() => Some(path.join(" > ")),
+        _ => None,
+    };
+    match (context, breadcrumb) {
+        (Some(ctx), Some(bc)) => format!("{}\n{}\n\n{}", ctx, bc, clean),
+        (Some(ctx), None) => format!("{}\n\n{}", ctx, clean),
+        (None, Some(bc)) => format!("{}\n\n{}", bc, clean),
+        (None, None) => clean,
+    }
+}
+
+/// Build the document-identity context prefix prepended to every chunk's
+/// embed-text (NOT stored) so identical boilerplate across documents gets
+/// distinct vectors.
+///
+/// Formats `"name: value"` pairs in `context_fields` order, joined by ` | `.
+/// String values are used verbatim; numbers/bools are rendered plain (no JSON
+/// quotes); missing, empty, null, or non-scalar (object/array) fields are
+/// skipped. Returns `None` when nothing usable remains.
+pub fn build_context_prefix(
+    context_fields: &[String],
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let parts: Vec<String> = context_fields
+        .iter()
+        .filter_map(|name| {
+            let value = fields.get(name)?;
+            let rendered = match value {
+                serde_json::Value::String(s) => s.trim().to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                // Null / Object / Array are not document-identity scalars → skip.
+                _ => return None,
+            };
+            if rendered.is_empty() {
+                return None;
+            }
+            Some(format!("{}: {}", name, rendered))
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" | "))
     }
 }
 
@@ -596,22 +644,25 @@ mod tests {
     #[test]
     fn test_build_embed_text_with_section_path() {
         let path = vec!["Fékpadok".to_string(), "PEF-35".to_string()];
-        let result = build_embed_text("A műszaki adatok.", Some(&path));
+        let result = build_embed_text("A műszaki adatok.", Some(&path), None);
         assert_eq!(result, "Fékpadok > PEF-35\n\nA műszaki adatok.");
     }
 
     #[test]
     fn test_build_embed_text_without_section_path() {
-        assert_eq!(build_embed_text("Plain body.", None), "Plain body.");
+        assert_eq!(build_embed_text("Plain body.", None, None), "Plain body.");
         // Empty path behaves like None (no breadcrumb prefix)
         let empty: Vec<String> = vec![];
-        assert_eq!(build_embed_text("Plain body.", Some(&empty)), "Plain body.");
+        assert_eq!(
+            build_embed_text("Plain body.", Some(&empty), None),
+            "Plain body."
+        );
     }
 
     #[test]
     fn test_build_embed_text_flattens_table() {
         let body = "| A | B |\n|---|---|\n| 1 | 2 |";
-        assert_eq!(build_embed_text(body, None), "A, B\n1, 2");
+        assert_eq!(build_embed_text(body, None, None), "A, B\n1, 2");
     }
 
     #[test]
@@ -619,8 +670,97 @@ mod tests {
         let path = vec!["Árlista".to_string()];
         let body = "| Megnevezés | Ár |\n|---|---|\n| PEF-35 | 1750000 |";
         assert_eq!(
-            build_embed_text(body, Some(&path)),
+            build_embed_text(body, Some(&path), None),
             "Árlista\n\nMegnevezés, Ár\nPEF-35, 1750000"
         );
+    }
+
+    #[test]
+    fn test_build_embed_text_with_context_only() {
+        let ctx = "customer: Agrovario | title: X";
+        assert_eq!(
+            build_embed_text("Plain body.", None, Some(ctx)),
+            "customer: Agrovario | title: X\n\nPlain body."
+        );
+    }
+
+    #[test]
+    fn test_build_embed_text_with_context_and_breadcrumb() {
+        let ctx = "customer: Agrovario";
+        let path = vec!["Szerződés".to_string(), "Adatkezelés".to_string()];
+        // Order: context → section_path breadcrumb → clean body
+        assert_eq!(
+            build_embed_text("A test.", Some(&path), Some(ctx)),
+            "customer: Agrovario\nSzerződés > Adatkezelés\n\nA test."
+        );
+    }
+
+    #[test]
+    fn test_build_context_prefix_multiple_fields() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("title".to_string(), serde_json::json!("Szerződés"));
+        fields.insert("customer".to_string(), serde_json::json!("Agrovario Kft."));
+        // Output follows context_fields order, not map order.
+        let context_fields = vec!["customer".to_string(), "title".to_string()];
+        assert_eq!(
+            build_context_prefix(&context_fields, &fields),
+            Some("customer: Agrovario Kft. | title: Szerződés".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_context_prefix_skips_missing_and_empty() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("title".to_string(), serde_json::json!("X"));
+        fields.insert("blank".to_string(), serde_json::json!("   "));
+        fields.insert("nullf".to_string(), serde_json::Value::Null);
+        let context_fields = vec![
+            "customer".to_string(), // missing
+            "blank".to_string(),    // whitespace-only → skipped
+            "nullf".to_string(),    // null → skipped
+            "title".to_string(),    // present
+        ];
+        assert_eq!(
+            build_context_prefix(&context_fields, &fields),
+            Some("title: X".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_context_prefix_renders_scalars_plain() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("year".to_string(), serde_json::json!(2026));
+        fields.insert("active".to_string(), serde_json::json!(true));
+        let context_fields = vec!["year".to_string(), "active".to_string()];
+        // Numbers/bools rendered plain, no JSON quotes.
+        assert_eq!(
+            build_context_prefix(&context_fields, &fields),
+            Some("year: 2026 | active: true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_context_prefix_skips_non_scalar() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("obj".to_string(), serde_json::json!({"a": 1}));
+        fields.insert("arr".to_string(), serde_json::json!([1, 2]));
+        let context_fields = vec!["obj".to_string(), "arr".to_string()];
+        // Object/array are not document-identity scalars → None.
+        assert_eq!(build_context_prefix(&context_fields, &fields), None);
+    }
+
+    #[test]
+    fn test_build_context_prefix_all_missing_is_none() {
+        let fields = serde_json::Map::new();
+        let context_fields = vec!["customer".to_string(), "title".to_string()];
+        assert_eq!(build_context_prefix(&context_fields, &fields), None);
+    }
+
+    #[test]
+    fn test_build_context_prefix_empty_fields_list_is_none() {
+        let mut fields = serde_json::Map::new();
+        fields.insert("title".to_string(), serde_json::json!("X"));
+        let context_fields: Vec<String> = vec![];
+        assert_eq!(build_context_prefix(&context_fields, &fields), None);
     }
 }
