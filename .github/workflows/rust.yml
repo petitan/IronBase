@@ -67,6 +67,20 @@ jobs:
       - name: Run security audit
         run: cargo audit
 
+      - name: Re-evaluate pyo3 advisory ignores (.cargo/audit.toml guard)
+        # The pyo3 RUSTSEC-2026-0176 / RUSTSEC-2026-0177 ignores in .cargo/audit.toml
+        # are justified ONLY because bindings/python never uses the vulnerable APIs
+        # (PyList/PyTuple iterator .nth()/.nth_back(); PyCFunction::new_closure). The
+        # ignore silences the advisory for the WHOLE crate, so if any of these symbols
+        # appears here the justification no longer holds — fail loudly so the advisory
+        # is re-evaluated (and the ignore narrowed or pyo3 upgraded to >=0.29).
+        run: |
+          if git grep -nE '\.nth(_back)?\(|new_closure' -- bindings/python; then
+            echo "::error::Silenced pyo3 advisory symbol found in bindings/python — re-evaluate the RUSTSEC-2026-0176 / RUSTSEC-2026-0177 ignore in .cargo/audit.toml."
+            exit 1
+          fi
+          echo "OK: no silenced pyo3 advisory symbols in bindings/python."
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
