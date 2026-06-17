@@ -653,6 +653,11 @@ pub fn compact_scan_standalone(
     let mut chunk_count = 0;
     let mut total_memory_bytes: u64 = 0;
     let mut docs_processed: u64 = 0;
+    // PR-2 / Fix B: high-water mark of the source prefix already dropped from the
+    // page cache. Advances monotonically so each region is dropped at most once
+    // (O(file_size) total, not O(chunks·file_size)) and is robust to the
+    // non-monotonic offset order across collections (snapshot is a HashMap).
+    let mut src_dropped_upto: u64 = 0;
 
     for (coll_name, coll_meta) in snapshot.snapshot_collections.iter() {
         // Check for cancellation at collection boundary
@@ -737,9 +742,11 @@ pub fn compact_scan_standalone(
                                 }
                                 // PR-2 / Fix B: keep the page-cache footprint ~chunk_size,
                                 // not ~file_size. Write back + drop the just-written target
-                                // range, and drop the consumed source region up to the
-                                // current read position (`offset`) — readahead ahead of it
-                                // is preserved. Advisory; data is unaffected.
+                                // range, then drop ONLY the newly-consumed source delta
+                                // [src_dropped_upto, offset) — never re-dropping an already-
+                                // evicted prefix, and never the in-progress doc's pages.
+                                // Readahead ahead of `offset` is preserved. Advisory; data
+                                // is unaffected.
                                 super::io::flush_range_to_disk(
                                     &temp_file,
                                     flush_start,
@@ -750,7 +757,14 @@ pub fn compact_scan_standalone(
                                     flush_start,
                                     write_offset - flush_start,
                                 );
-                                super::io::advise_dontneed(&source_file, 0, offset);
+                                if offset > src_dropped_upto {
+                                    super::io::advise_dontneed(
+                                        &source_file,
+                                        src_dropped_upto,
+                                        offset - src_dropped_upto,
+                                    );
+                                    src_dropped_upto = offset;
+                                }
                                 chunk_count = 0;
                                 total_memory_bytes = 0;
                             }

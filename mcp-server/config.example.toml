@@ -58,3 +58,21 @@ allowed_documents = ["doc_1", "doc_2"]  # Only specific documents
 [api_keys.rate_limit]
 requests_per_minute = 50
 writes_per_minute = 0  # No writes allowed
+
+# Automatic storage compaction (reclaims dead bytes from updates/deletes).
+# The whole section is optional — omitting it uses these same defaults.
+[compaction]
+enabled = true
+# Trigger compaction when file_size / live_bytes reaches this ratio.
+bloat_ratio_threshold = 2.0
+# Never auto-compact files smaller than this (MB).
+min_file_size_mb = 100
+# How often the background timer checks the bloat ratio (seconds).
+check_interval_secs = 300
+# Minimum gap between two auto-compactions (seconds).
+cooldown_secs = 1800
+# HOST-MEMORY SAFETY GATE: skip AUTO-compaction when the data file exceeds this
+# fraction of available RAM (a full compaction's transient page-cache footprint
+# is ~file_size; on a small host this can freeze the machine). Manual db_compact
+# is always allowed. 0.0 disables the gate. Default 0.5.
+max_file_to_ram_ratio = 0.5
