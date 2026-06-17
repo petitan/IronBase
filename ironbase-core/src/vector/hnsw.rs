@@ -679,7 +679,7 @@ impl HnswIndex {
         // (orphan node + new active node with same ID).
         // try_reserve so a huge index fails with a typed OOM error instead of
         // aborting during the rebuild clone (mirrors the insert-path guard).
-        let mut items: Vec<(String, Vec<f32>)> = Vec::new();
+        let mut items: Vec<(usize, String, Vec<f32>)> = Vec::new();
         items.try_reserve(self.id_to_index.len()).map_err(|e| {
             IronBaseError::OutOfMemory(format!(
                 "Failed to reserve {} entries for HNSW rebuild: {}",
@@ -690,8 +690,19 @@ impl HnswIndex {
         items.extend(
             self.id_to_index
                 .iter()
-                .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone())),
+                .map(|(id, &idx)| (idx, id.clone(), self.nodes[idx].vector.clone())),
         );
+        // Re-insert in a DETERMINISTIC order. `id_to_index` is a HashMap, whose
+        // iteration order is randomized per process (RandomState), and HNSW graph
+        // construction is insertion-order dependent — so iterating it directly made
+        // every rebuild produce a different graph, i.e. non-deterministic recall.
+        // That surfaced as a flaky `forced_compact_rebuilds_and_clears_orphans`
+        // self-retrieval (~10% miss; not fixable by widening ef_search, since the
+        // miss is reachability, not ranking). The per-index level RNG is already
+        // deterministic (fixed seed), so a stable insert order makes the whole
+        // rebuild reproducible. Sort by the current node index, which reconstructs
+        // the original insertion order (fresh builds have node index i == vector i).
+        items.sort_by_key(|(idx, _, _)| *idx);
 
         // Floor the effective ceiling at the rebuild population BEFORE clearing:
         // rebuild re-inserts EXISTING active vectors, which must never be
@@ -707,7 +718,7 @@ impl HnswIndex {
         self.max_level = 0;
         self.id_to_index.clear();
 
-        for (id, vector) in items {
+        for (_idx, id, vector) in items {
             self.insert(&id, &vector)?;
         }
 
