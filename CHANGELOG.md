@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — deterministic HNSW rebuild order (flaky self-retrieval) (core v0.3.346, mcp v1.0.542)
+
+`HnswIndex::rebuild()` re-inserted the active vectors in `id_to_index` (a `HashMap`)
+iteration order, which Rust randomizes per process. HNSW graph construction is
+insertion-order dependent, so every rebuild produced a *different* graph → recall
+became non-deterministic. This surfaced as a flaky test,
+`forced_compact_rebuilds_and_clears_orphans`: its post-rebuild `assert_top1`
+self-retrieval missed ~10% of the time on Linux (and intermittently on macOS CI). The
+miss is a reachability artifact (the self vector has cosine 1.0, strictly maximal — it
+fails to be *reached*, not mis-ranked), so it could not be fixed by widening
+`ef_search` (verified: still ~2% at ef=16×N).
+
+Root cause fix: re-insert in a deterministic order (sorted by current node index, which
+reconstructs the original insertion order). The per-index level RNG is already
+deterministically seeded, so a stable insert order makes the whole rebuild reproducible
+— and every rebuild caller (forced `db_compact`, checkpoint orphan rebuild) now produces
+a stable graph. No quality regression: the brute-force recall@10 gates
+(`recall_at10_vs_bruteforce_*`, `hnsw_recall_meets_target`) stay green; the previously
+flaky test now passes 100/100 locally. Behavior-only change, no API/format change.
+
 ### Fixed — compaction source page-cache drop: final-chunk source tail (K-1) (core v0.3.345, mcp v1.0.541)
 
 Follow-up to the page-cache-bounded compaction I/O (v1.0.539–540), from a multi-agent
