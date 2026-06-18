@@ -38,9 +38,6 @@ fn default_check_interval() -> u64 {
 fn default_cooldown() -> u64 {
     1800
 }
-fn default_max_file_to_ram_ratio() -> f64 {
-    0.5
-}
 
 /// Auto-compaction configuration.
 ///
@@ -63,15 +60,6 @@ pub struct AutoCompactConfig {
     /// Minimum seconds between two compactions (default: 1800 = 30 min)
     #[serde(default = "default_cooldown")]
     pub cooldown_secs: u64,
-    /// Skip auto-compact when the data file is larger than this fraction of
-    /// available system RAM (default: 0.5). A full compaction does buffered
-    /// whole-file I/O whose transient page-cache footprint is ~file_size; on a
-    /// host where the file dwarfs free RAM this balloons the (page) cache and
-    /// freezes the machine (verified 2026-06-16: 7.1GB file froze an 11GB WSL2
-    /// 3×). The operator can still run a manual `db_compact` in a maintenance
-    /// window / on a larger host. 0.0 disables the gate.
-    #[serde(default = "default_max_file_to_ram_ratio")]
-    pub max_file_to_ram_ratio: f64,
 }
 
 impl Default for AutoCompactConfig {
@@ -82,7 +70,6 @@ impl Default for AutoCompactConfig {
             min_file_size_mb: default_min_file_mb(),
             check_interval_secs: default_check_interval(),
             cooldown_secs: default_cooldown(),
-            max_file_to_ram_ratio: default_max_file_to_ram_ratio(),
         }
     }
 }
@@ -121,44 +108,22 @@ impl AutoCompactState {
         }
     }
 
-    /// Gate 4 predicate: is the file too large to compact safely on this host?
-    ///
-    /// A full compaction does buffered whole-file I/O (read source + write live
-    /// set) whose transient page-cache footprint is ~file_size. When the file
-    /// dwarfs available RAM this balloons the cache and freezes the host (the
-    /// page cache is reclaimable, so a cgroup `MemoryMax` does NOT protect it —
-    /// verified 2026-06-16). `available_ram_bytes == None` (unknown) → do not
-    /// block (best-effort; the caller logs). `max_file_to_ram_ratio == 0.0`
-    /// disables the gate.
-    pub fn exceeds_memory_safety(
-        &self,
-        file_size_bytes: u64,
-        available_ram_bytes: Option<u64>,
-    ) -> bool {
-        if self.config.max_file_to_ram_ratio <= 0.0 {
-            return false;
-        }
-        match available_ram_bytes {
-            Some(avail) if avail > 0 => {
-                file_size_bytes as f64 > self.config.max_file_to_ram_ratio * avail as f64
-            }
-            _ => false,
-        }
-    }
-
     /// Should we trigger compaction given the current wastage?
     ///
-    /// Four gates:
+    /// Three gates:
     /// 1. bloat_ratio >= threshold
     /// 2. file_size >= min_file_size_mb
     /// 3. cooldown elapsed since last compact
-    /// 4. file_size not too large for available RAM (host-memory safety)
-    pub fn should_compact(
-        &self,
-        bloat_ratio: f64,
-        file_size_bytes: u64,
-        available_ram_bytes: Option<u64>,
-    ) -> bool {
+    ///
+    /// No file-size/RAM gate: the freeze that motivated one (2026-06-16) was a
+    /// page-cache-management bug, fixed structurally by the page-cache-bounded
+    /// compaction I/O (`storage/io.rs`, posix_fadvise(DONTNEED)+sync_file_range)
+    /// which bounds the resident footprint to ~chunk_size regardless of file
+    /// size. A RAM gate on top of that only disabled auto-compaction for large
+    /// files that are now safe to compact — a capability regression. (On
+    /// non-Linux the page-cache hints are no-ops, but those platforms manage the
+    /// unified buffer cache differently and the freeze was never observed there.)
+    pub fn should_compact(&self, bloat_ratio: f64, file_size_bytes: u64) -> bool {
         // Gate 1: bloat ratio
         if bloat_ratio < self.config.bloat_ratio_threshold {
             return false;
@@ -175,11 +140,6 @@ impl AutoCompactState {
             if last.elapsed().as_secs() < self.config.cooldown_secs {
                 return false;
             }
-        }
-
-        // Gate 4: host-memory safety (see exceeds_memory_safety)
-        if self.exceeds_memory_safety(file_size_bytes, available_ram_bytes) {
-            return false;
         }
 
         true
@@ -325,20 +285,10 @@ pub fn auto_compact_check(
     state: &Arc<parking_lot::Mutex<AutoCompactState>>,
 ) -> bool {
     let wastage = adapter.compute_wastage();
-    let available_ram = ironbase_core::aggregation::memory_info::get_available_memory_bytes();
 
-    let (should_compact, blocked_by_memory) = {
+    let should_compact = {
         let state_guard = state.lock();
-        let sc =
-            state_guard.should_compact(wastage.bloat_ratio, wastage.file_size_bytes, available_ram);
-        // The memory gate is the deciding blocker iff the bloat + min-size gates
-        // would otherwise have passed (so we only warn when a compaction was
-        // genuinely wanted but refused for host-memory safety).
-        let blocked_by_memory = !sc
-            && wastage.bloat_ratio >= state_guard.config.bloat_ratio_threshold
-            && wastage.file_size_bytes >= state_guard.config.min_file_size_mb * 1024 * 1024
-            && state_guard.exceeds_memory_safety(wastage.file_size_bytes, available_ram);
-        (sc, blocked_by_memory)
+        state_guard.should_compact(wastage.bloat_ratio, wastage.file_size_bytes)
     };
 
     tracing::debug!(
@@ -351,17 +301,6 @@ pub fn auto_compact_check(
         should_compact,
         "Storage wastage check"
     );
-
-    if blocked_by_memory {
-        tracing::warn!(
-            file_size_mb = wastage.file_size_bytes / (1024 * 1024),
-            available_mb = available_ram.map(|b| b / (1024 * 1024)).unwrap_or(0),
-            bloat_ratio = format!("{:.2}", wastage.bloat_ratio),
-            "Auto-compact skipped: data file too large for available RAM (host-memory \
-             safety gate). Run a manual db_compact in a maintenance window or on a host \
-             with more RAM."
-        );
-    }
 
     if !should_compact {
         return false;
@@ -490,64 +429,31 @@ mod tests {
         AutoCompactState::new(AutoCompactConfig::default())
     }
 
-    // --- Gate 4 predicate (exceeds_memory_safety) ---------------------------
-
-    #[test]
-    fn memory_safety_blocks_file_larger_than_ratio() {
-        let s = state(); // ratio 0.5
-                         // 7.1GB file, 10GB available → 7.1 > 0.5*10=5 → blocked (the verified WSL case)
-        assert!(s.exceeds_memory_safety(7 * GB + GB / 10, Some(10 * GB)));
-    }
-
-    #[test]
-    fn memory_safety_allows_file_within_ratio() {
-        let s = state();
-        // 7GB file, 64GB available → 7 < 0.5*64=32 → allowed
-        assert!(!s.exceeds_memory_safety(7 * GB, Some(64 * GB)));
-        // small file, modest host
-        assert!(!s.exceeds_memory_safety(200 * 1024 * 1024, Some(16 * GB)));
-    }
-
-    #[test]
-    fn memory_safety_unknown_ram_does_not_block() {
-        let s = state();
-        assert!(!s.exceeds_memory_safety(100 * GB, None));
-    }
-
-    #[test]
-    fn memory_safety_disabled_with_zero_ratio() {
-        let cfg = AutoCompactConfig {
-            max_file_to_ram_ratio: 0.0,
-            ..Default::default()
-        };
-        let s = AutoCompactState::new(cfg);
-        assert!(!s.exceeds_memory_safety(100 * GB, Some(GB)));
-    }
-
     // --- should_compact gate composition ------------------------------------
 
     #[test]
-    fn should_compact_refuses_oversized_file_even_at_infinite_bloat() {
+    fn should_compact_allows_oversized_file_at_infinite_bloat() {
         // Legacy v5 docs.mlite reproduction: never-compacted → bloat_ratio=+inf,
-        // file 7.1GB ≥ 100MB min, no cooldown — every prior gate passes, but the
-        // memory gate (7.1GB > 0.5*10GB) must refuse to auto-trigger.
+        // file 7.1GB ≥ 100MB min, no cooldown — all gates pass → auto-compact
+        // fires. The page-cache-bounded compaction I/O makes a large compaction
+        // safe; there is no RAM gate (it was a capability regression).
         let s = state();
-        assert!(!s.should_compact(f64::INFINITY, 7 * GB + GB / 10, Some(10 * GB)));
+        assert!(s.should_compact(f64::INFINITY, 7 * GB + GB / 10));
     }
 
     #[test]
-    fn should_compact_allows_bloated_file_that_fits_ram() {
+    fn should_compact_allows_bloated_file() {
         let s = state();
-        // bloat 3.0 ≥ 2.0, file 7GB ≥ 100MB, fits 64GB host → compact
-        assert!(s.should_compact(3.0, 7 * GB, Some(64 * GB)));
+        // bloat 3.0 ≥ 2.0, file 7GB ≥ 100MB → compact regardless of host RAM
+        assert!(s.should_compact(3.0, 7 * GB));
     }
 
     #[test]
     fn should_compact_still_honors_bloat_and_min_size_gates() {
         let s = state();
-        // low bloat → no compact regardless of RAM
-        assert!(!s.should_compact(1.5, 7 * GB, Some(64 * GB)));
+        // low bloat → no compact
+        assert!(!s.should_compact(1.5, 7 * GB));
         // tiny file (< 100MB) → no compact even at infinite bloat
-        assert!(!s.should_compact(f64::INFINITY, 10 * 1024 * 1024, Some(64 * GB)));
+        assert!(!s.should_compact(f64::INFINITY, 10 * 1024 * 1024));
     }
 }
