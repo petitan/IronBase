@@ -1588,9 +1588,11 @@ fn rag_import_impl(
     }
 
     // Generate embeddings: breadcrumb + cleaned body; stored chunk.text is unchanged.
+    // No document-identity context here (db_rag_import stays verbatim by design — only
+    // rag_document_import wires context_fields); see chunking::build_embed_text.
     let texts: Vec<String> = chunks
         .iter()
-        .map(|c| build_embed_text(&c.text, c.section_path.as_deref()))
+        .map(|c| build_embed_text(&c.text, c.section_path.as_deref(), None))
         .collect();
     let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     let embeddings = match provider.embed_batch(&text_refs) {

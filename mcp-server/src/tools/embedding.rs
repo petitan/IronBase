@@ -272,9 +272,11 @@ fn handle_embed_document(
 
     for batch in chunks.chunks(batch_size) {
         // Embed breadcrumb + cleaned body; the original chunk.text is stored unchanged.
+        // No document-identity context here (embed_document stays verbatim by design —
+        // only rag_document_import wires context_fields); see chunking::build_embed_text.
         let texts: Vec<String> = batch
             .iter()
-            .map(|c| build_embed_text(&c.text, c.section_path.as_deref()))
+            .map(|c| build_embed_text(&c.text, c.section_path.as_deref(), None))
             .collect();
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = provider

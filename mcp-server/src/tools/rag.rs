@@ -45,6 +45,13 @@ pub struct RagConfig {
     /// to multi-field search consistently with how the collection was set up (#66).
     #[serde(default)]
     pub text_fields: Vec<String>,
+    /// Document-identity metadata fields prepended to each chunk's embed-text
+    /// (NOT stored) so identical boilerplate across documents gets distinct
+    /// vectors, e.g. ["customer", "title"]. Empty on legacy configs → verbatim
+    /// embedding (backward compatible). Only the rag_document_import path honors
+    /// this; embed_document/db_rag_import stay verbatim by design.
+    #[serde(default)]
+    pub context_fields: Vec<String>,
     pub provider: String,
     pub language: String,
     pub dimension: usize,
@@ -385,11 +392,13 @@ fn handle_rag_collection_create(
     }
 
     // 4. Save RAG config
+    let context_fields = p.context_fields.clone().unwrap_or_default();
     let config = RagConfig {
         collection: p.collection.clone(),
         embedding_field: p.embedding_field.clone(),
         text_field: p.text_field.clone(),
         text_fields: fulltext_fields.clone(),
+        context_fields: context_fields.clone(),
         provider: provider_name.clone(),
         language: p.language.clone(),
         dimension,
@@ -404,6 +413,7 @@ fn handle_rag_collection_create(
             "embedding_field": p.embedding_field,
             "text_field": p.text_field,
             "text_fields": fulltext_fields,
+            "context_fields": context_fields,
             "provider": provider_name,
             "language": p.language,
             "dimension": dimension
@@ -468,6 +478,43 @@ pub(crate) fn resolve_fulltext_fields(
 // ============================================================================
 // rag_document_import Handler
 // ============================================================================
+
+/// Build the document-identity context prefix for an import (prepended to every
+/// chunk's embed-text, NOT stored). Sources ONLY the declared `context_fields`,
+/// applying the SAME security filter as the stored document: `RESERVED_METADATA_KEYS`
+/// and the embedding/text fields are never sourced into the embed-text (which can
+/// leave the host for an external embedding provider). Cloning only the few declared
+/// values avoids deep-copying the whole metadata. Precedence matches the stored doc:
+/// a metadata value wins, with `title` as the fallback for the "title" field.
+/// Returns `None` for an empty `context_fields` or when nothing usable remains.
+fn build_import_context_prefix(
+    context_fields: &[String],
+    title: Option<&str>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+    embedding_field: &str,
+    text_field: &str,
+) -> Option<String> {
+    if context_fields.is_empty() {
+        return None;
+    }
+    let mut ctx_map = serde_json::Map::new();
+    for name in context_fields {
+        if RESERVED_METADATA_KEYS.contains(&name.as_str())
+            || name == embedding_field
+            || name == text_field
+        {
+            continue;
+        }
+        if let Some(v) = metadata.and_then(|o| o.get(name)) {
+            ctx_map.insert(name.clone(), v.clone());
+        } else if name == "title" {
+            if let Some(t) = title {
+                ctx_map.insert("title".to_string(), json!(t));
+            }
+        }
+    }
+    crate::chunking::build_context_prefix(context_fields, &ctx_map)
+}
 
 fn handle_rag_document_import(
     params: Value,
@@ -555,6 +602,23 @@ fn handle_rag_document_import(
         }
     }
 
+    // Resolve the document-identity context fields: explicit param wins, else the
+    // collection's stored RagConfig. Build the prefix ONCE (same for every chunk in
+    // this import) from the doc-level fields; the prefix is prepended to embed-text
+    // only, the stored chunk.text is unchanged.
+    let resolved_context_fields: Vec<String> = p
+        .context_fields
+        .clone()
+        .or_else(|| rag_config.as_ref().map(|c| c.context_fields.clone()))
+        .unwrap_or_default();
+    let context_prefix = build_import_context_prefix(
+        &resolved_context_fields,
+        p.title.as_deref(),
+        p.metadata.as_ref().and_then(|m| m.as_object()),
+        &embedding_field,
+        &text_field,
+    );
+
     // Generate embeddings in batches (OOM protection)
     let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
     all_embeddings.try_reserve(chunks.len()).map_err(|e| {
@@ -566,10 +630,17 @@ fn handle_rag_document_import(
     })?;
 
     for batch in chunks.chunks(100) {
-        // Embed breadcrumb + cleaned body; the original chunk.text is stored unchanged.
+        // Embed context + breadcrumb + cleaned body; the original chunk.text is stored
+        // unchanged. context_prefix is the same for every chunk in this import.
         let texts: Vec<String> = batch
             .iter()
-            .map(|c| build_embed_text(&c.text, c.section_path.as_deref()))
+            .map(|c| {
+                build_embed_text(
+                    &c.text,
+                    c.section_path.as_deref(),
+                    context_prefix.as_deref(),
+                )
+            })
             .collect();
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let embeddings = provider
@@ -609,6 +680,7 @@ fn handle_rag_document_import(
             embedding_field: embedding_field.clone(),
             text_field: text_field.clone(),
             text_fields: fulltext_fields,
+            context_fields: resolved_context_fields.clone(),
             provider: provider_name.clone(),
             language: p.language.clone(),
             dimension: provider.dimension(),
@@ -640,6 +712,23 @@ fn handle_rag_document_import(
                      has a RAG config. Set text_fields via rag_collection_create.",
                     missing,
                     p.collection
+                );
+            }
+        }
+        // Parity with text_fields: an explicit context_fields applied to a collection
+        // that already has a RAG config is honored for THIS import (via
+        // resolved_context_fields above) but is NOT persisted — the stored config wins
+        // for later param-less imports. Warn when it differs so the divergence is not
+        // silent (set context_fields via rag_collection_create to persist).
+        if let Some(ref requested) = p.context_fields {
+            if *requested != cfg.context_fields {
+                tracing::warn!(
+                    "rag_document_import: explicit 'context_fields' {:?} applied to THIS import \
+                     only — collection '{}' already has a RAG config (stored: {:?}). Set \
+                     context_fields via rag_collection_create to persist.",
+                    requested,
+                    p.collection,
+                    cfg.context_fields
                 );
             }
         }
@@ -829,12 +918,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_build_import_context_prefix_filters_reserved_and_protected() {
+        // A declared context field naming a reserved or protected key must NOT be
+        // sourced into the prefix (it would leak to the embedding provider).
+        let meta = json!({"customer": "Acme", "doc_id": "secret-123", "embedding": [0.1]});
+        let meta = meta.as_object().unwrap();
+        let fields = vec![
+            "customer".to_string(),
+            "doc_id".to_string(),    // reserved → skipped
+            "embedding".to_string(), // protected (embedding_field) → skipped
+        ];
+        let p = build_import_context_prefix(&fields, None, Some(meta), "embedding", "content");
+        assert_eq!(p, Some("customer: Acme".to_string()));
+    }
+
+    #[test]
+    fn test_build_import_context_prefix_title_fallback_and_metadata_wins() {
+        // "title" absent from metadata → falls back to the title param.
+        let meta = json!({"customer": "Acme"});
+        let p = build_import_context_prefix(
+            &["title".to_string(), "customer".to_string()],
+            Some("Q3 Quote"),
+            meta.as_object(),
+            "embedding",
+            "content",
+        );
+        assert_eq!(p, Some("title: Q3 Quote | customer: Acme".to_string()));
+
+        // metadata "title" wins over the title param (matches the stored doc).
+        let meta2 = json!({"title": "Meta Title"});
+        let p2 = build_import_context_prefix(
+            &["title".to_string()],
+            Some("Param Title"),
+            meta2.as_object(),
+            "embedding",
+            "content",
+        );
+        assert_eq!(p2, Some("title: Meta Title".to_string()));
+    }
+
+    #[test]
+    fn test_build_import_context_prefix_empty_fields_is_none() {
+        assert_eq!(
+            build_import_context_prefix(&[], Some("X"), None, "embedding", "content"),
+            None
+        );
+    }
+
+    #[test]
     fn test_rag_config_serialization() {
         let config = RagConfig {
             collection: "test".to_string(),
             embedding_field: "embedding".to_string(),
             text_field: "content".to_string(),
             text_fields: vec!["content".to_string(), "title".to_string()],
+            context_fields: vec!["customer".to_string(), "title".to_string()],
             provider: "ollama".to_string(),
             language: "hungarian".to_string(),
             dimension: 300,
@@ -845,6 +983,7 @@ mod tests {
         assert_eq!(parsed.collection, "test");
         assert_eq!(parsed.dimension, 300);
         assert_eq!(parsed.text_fields, vec!["content", "title"]);
+        assert_eq!(parsed.context_fields, vec!["customer", "title"]);
     }
 
     #[test]
@@ -858,6 +997,8 @@ mod tests {
         let cfg: RagConfig = serde_json::from_value(json).unwrap();
         assert!(cfg.text_fields.is_empty());
         assert_eq!(cfg.effective_text_fields(), vec!["content"]);
+        // Pre-context_fields config → empty (verbatim embedding, backward compatible).
+        assert!(cfg.context_fields.is_empty());
     }
 
     #[test]

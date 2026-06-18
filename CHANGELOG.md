@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — context_fields: document-identity contextual embedding (mcp-server v1.0.543)
+
+Per-collection document-identity breadcrumb prepended to each chunk's *embedding*
+text (the stored chunk text is unchanged — embed-text ≠ store-text, the existing
+contextual-embedding pattern). The breadcrumb is built from declared metadata
+fields, e.g. `"customer: Agrovario Kft. | title: …"`, so the identical boilerplate
+chunks of different documents get *distinct* vectors instead of colliding.
+
+- New `context_fields` parameter on `rag_collection_create` (persisted into the RAG
+  config) and `rag_document_import` (explicit value wins, else falls back to the
+  stored RAG config). Order: context → section breadcrumb → cleaned body.
+- Backward compatible: `RagConfig.context_fields` uses `#[serde(default)]`, so legacy
+  configs deserialize to an empty list → verbatim embedding (no behavior change).
+- Only the `rag_document_import` path honors `context_fields`; `embed_document` and
+  the Rhai `db_rag_import` stay verbatim by design (documented boundary, like the
+  generic auto-embed verbatim convention).
+- Eval-harness A/B (rdocs): nDCG@10 +25%, Recall@10 +13%.
+
 ### Fixed — deterministic HNSW rebuild order (flaky self-retrieval) (core v0.3.346, mcp v1.0.542)
 
 `HnswIndex::rebuild()` re-inserted the active vectors in `id_to_index` (a `HashMap`)

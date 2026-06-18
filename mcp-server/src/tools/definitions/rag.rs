@@ -31,6 +31,11 @@ pub fn tools() -> Vec<Value> {
                         "items": {"type": "string"},
                         "description": "Extra text fields to fulltext-index besides text_field, e.g. [\"title\", \"customer\"]. Each gets its own fulltext index, and the `search` tool then defaults to searching all of them — no manual index_create (type='fulltext') needed."
                     },
+                    "context_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Document-identity metadata fields prepended to the embedding text (not stored) so identical boilerplate across documents gets distinct vectors, e.g. [\"customer\",\"title\"]. Empty = verbatim embedding."
+                    },
                     "provider": {
                         "type": "string",
                         "description": "Embedding provider (ollama, vllm, openai). Defaults to the provider configured in [embedding] section of config.toml."
@@ -110,6 +115,11 @@ pub fn tools() -> Vec<Value> {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Extra metadata text fields to fulltext-index (besides content), e.g. [\"title\", \"customer\"]. Only applies when auto-creating the collection (no RAG config yet)."
+                    },
+                    "context_fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Document-identity metadata fields prepended to the embedding text (not stored) so identical boilerplate across documents gets distinct vectors, e.g. [\"customer\",\"title\"]. Explicit value wins; otherwise the collection's stored RAG config is used. Empty = verbatim embedding."
                     }
                 },
                 "required": ["collection", "content"]

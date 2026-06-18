@@ -811,6 +811,11 @@ pub struct RagCollectionCreateParams {
     /// ["title", "customer"]. When set, hybrid_search defaults to searching all
     /// of them. Omitted → single `text_field` (backward compatible).
     pub text_fields: Option<Vec<String>>,
+    /// Document-identity metadata fields prepended to each chunk's embedding text
+    /// (not stored), e.g. ["customer", "title"]. Stored in the RAG config and used
+    /// by rag_document_import so identical boilerplate gets distinct vectors.
+    /// Omitted → verbatim embedding (backward compatible).
+    pub context_fields: Option<Vec<String>>,
     pub provider: Option<String>,
     #[serde(default = "default_rag_language")]
     pub language: String,
@@ -841,6 +846,15 @@ pub struct RagDocumentImportParams {
     /// (besides `content`), e.g. ["title", "customer"]. Only applies when the
     /// collection has no RAG config yet. Omitted → single content index.
     pub text_fields: Option<Vec<String>>,
+    /// Document-identity metadata fields prepended to each chunk's embedding text
+    /// (not stored), e.g. ["customer", "title"]. Explicit value wins for THIS import;
+    /// otherwise the collection's stored RAG config context_fields is used. Reserved
+    /// (`doc_id`, `chunk_index`, …) and the embedding/text fields are never sourced
+    /// into the prefix. NOTE: an explicit value on a collection that already has a RAG
+    /// config is applied to this import only, NOT persisted (set it via
+    /// rag_collection_create to persist; a warning is logged when it differs).
+    /// Omitted on both → verbatim embedding (backward compatible).
+    pub context_fields: Option<Vec<String>>,
 }
 
 /// Parameters for `rag_collection_stats` tool
