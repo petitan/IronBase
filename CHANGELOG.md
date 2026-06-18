@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed — auto-compaction host-memory RAM gate (mcp-server v1.0.544)
+
+Removes the `max_file_to_ram_ratio` gate (Fix A of the #111 host-memory-safe
+compaction work) that skipped auto-compaction when the data file exceeded a
+fraction (default 0.5) of available RAM. That gate was a wrong call: the freeze it
+guarded against (2026-06-16, a 7.1GB legacy file froze an 11GB WSL2 host) was a
+page-cache-management bug, fixed *structurally* by the page-cache-bounded compaction
+I/O (`storage/io.rs`: `posix_fadvise(DONTNEED)` + `sync_file_range`, #111 PR-2 / #114),
+which bounds the resident footprint to ~`chunk_size` regardless of file size. A RAM
+gate layered on top only *disabled* auto-compaction for large files that are now safe
+to compact — a capability regression (large bloated files would never auto-reclaim).
+Manual `db_compact` was never gated, so large files always compacted manually.
+
+`should_compact` is back to its three gates (bloat ratio, min file size, cooldown);
+`exceeds_memory_safety`, the `max_file_to_ram_ratio` config field, and the
+`available_ram`/`blocked_by_memory` plumbing in `auto_compact_check` are gone. The
+legacy baseline seed (Fix C) and the page-cache-bounded I/O (Fix B) stay — those are
+the actual fixes. Config note: `[compaction] max_file_to_ram_ratio` is no longer
+read; legacy configs that set it are ignored (serde tolerates the unknown key).
+
 ### Added — context_fields: document-identity contextual embedding (mcp-server v1.0.543)
 
 Per-collection document-identity breadcrumb prepended to each chunk's *embedding*
@@ -96,8 +116,8 @@ there and the freeze was verified on Linux/WSL2):
   of it is preserved).
 
 All hints are advisory and best-effort (errors ignored); they never change the bytes written —
-data round-trip is unaffected. With this, a manual `db_compact` (or auto-compaction on a host the
-RAM gate allows) of a 100GB file stays bounded instead of freezing the host. Guard:
+data round-trip is unaffected. With this, a `db_compact` (manual or automatic) of a 100GB file
+stays bounded instead of freezing the host. Guard:
 `compaction_many_chunks_preserves_all_data` (2500 docs > default chunk_size → multiple
 flush→sync→DONTNEED cycles, verifies every live doc survives and tombstones are dropped); full
 core compaction suite (14 integration tests) green.
