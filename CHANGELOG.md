@@ -116,8 +116,8 @@ there and the freeze was verified on Linux/WSL2):
   of it is preserved).
 
 All hints are advisory and best-effort (errors ignored); they never change the bytes written —
-data round-trip is unaffected. With this, a manual `db_compact` (or auto-compaction on a host the
-RAM gate allows) of a 100GB file stays bounded instead of freezing the host. Guard:
+data round-trip is unaffected. With this, a `db_compact` (manual or automatic) of a 100GB file
+stays bounded instead of freezing the host. Guard:
 `compaction_many_chunks_preserves_all_data` (2500 docs > default chunk_size → multiple
 flush→sync→DONTNEED cycles, verifies every live doc survives and tombstones are dropped); full
 core compaction suite (14 integration tests) green.

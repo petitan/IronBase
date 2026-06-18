@@ -120,9 +120,15 @@ impl AutoCompactState {
     /// compaction I/O (`storage/io.rs`, posix_fadvise(DONTNEED)+sync_file_range)
     /// which bounds the resident footprint to ~chunk_size regardless of file
     /// size. A RAM gate on top of that only disabled auto-compaction for large
-    /// files that are now safe to compact — a capability regression. (On
-    /// non-Linux the page-cache hints are no-ops, but those platforms manage the
-    /// unified buffer cache differently and the freeze was never observed there.)
+    /// files that are now safe to compact — a capability regression.
+    ///
+    /// NON-GOAL (known, accepted): on non-Linux the page-cache hints in
+    /// `storage/io.rs` are no-ops, so a large auto-compaction's OS buffer-cache
+    /// footprint is not explicitly bounded there. This is acceptable because the
+    /// freeze was only ever observed on Linux/WSL2 (the prod platform, where Fix B
+    /// applies) and macOS/Windows manage the unified buffer cache differently. If a
+    /// non-Linux host ever runs auto-compaction on a near-RAM-sized file, port the
+    /// hints (F_NOCACHE / Windows cache flush) rather than re-adding a RAM gate.
     pub fn should_compact(&self, bloat_ratio: f64, file_size_bytes: u64) -> bool {
         // Gate 1: bloat ratio
         if bloat_ratio < self.config.bloat_ratio_threshold {
