@@ -1,0 +1,3 @@
+# Runtime agent memory — not source. The memory feature was removed from
+# the read-only auditor; this dir should stay empty and untracked.
+agent-memory/
