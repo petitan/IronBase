@@ -328,6 +328,12 @@ pub fn build_embed_text(
     }
 }
 
+/// Upper bound (bytes) on the document-identity context prefix. The prefix is a
+/// short breadcrumb (a few identity fields); cap it so a pathological metadata
+/// value cannot inflate every chunk's embed-text sent to the embedding provider.
+/// Truncated UTF-8-safely; the breadcrumb stays a hint, not a payload.
+pub const MAX_CONTEXT_PREFIX_BYTES: usize = 512;
+
 /// Build the document-identity context prefix prepended to every chunk's
 /// embed-text (NOT stored) so identical boilerplate across documents gets
 /// distinct vectors.
@@ -335,7 +341,8 @@ pub fn build_embed_text(
 /// Formats `"name: value"` pairs in `context_fields` order, joined by ` | `.
 /// String values are used verbatim; numbers/bools are rendered plain (no JSON
 /// quotes); missing, empty, null, or non-scalar (object/array) fields are
-/// skipped. Returns `None` when nothing usable remains.
+/// skipped. The result is capped at `MAX_CONTEXT_PREFIX_BYTES` (UTF-8-safe).
+/// Returns `None` when nothing usable remains.
 pub fn build_context_prefix(
     context_fields: &[String],
     fields: &serde_json::Map<String, serde_json::Value>,
@@ -358,10 +365,18 @@ pub fn build_context_prefix(
         })
         .collect();
     if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" | "))
+        return None;
     }
+    let mut prefix = parts.join(" | ");
+    if prefix.len() > MAX_CONTEXT_PREFIX_BYTES {
+        // Truncate at the largest char boundary <= the cap (UTF-8-safe).
+        let mut end = MAX_CONTEXT_PREFIX_BYTES;
+        while end > 0 && !prefix.is_char_boundary(end) {
+            end -= 1;
+        }
+        prefix.truncate(end);
+    }
+    Some(prefix)
 }
 
 /// Split content into chunks
@@ -762,5 +777,19 @@ mod tests {
         fields.insert("title".to_string(), serde_json::json!("X"));
         let context_fields: Vec<String> = vec![];
         assert_eq!(build_context_prefix(&context_fields, &fields), None);
+    }
+
+    #[test]
+    fn test_build_context_prefix_caps_length() {
+        // A pathological metadata value must not inflate the prefix unboundedly.
+        let mut fields = serde_json::Map::new();
+        fields.insert("customer".to_string(), serde_json::json!("x".repeat(2000)));
+        let p = build_context_prefix(&["customer".to_string()], &fields).unwrap();
+        assert!(
+            p.len() <= MAX_CONTEXT_PREFIX_BYTES,
+            "prefix must be capped at {MAX_CONTEXT_PREFIX_BYTES}, got {}",
+            p.len()
+        );
+        assert!(p.starts_with("customer: x"));
     }
 }

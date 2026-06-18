@@ -479,6 +479,43 @@ pub(crate) fn resolve_fulltext_fields(
 // rag_document_import Handler
 // ============================================================================
 
+/// Build the document-identity context prefix for an import (prepended to every
+/// chunk's embed-text, NOT stored). Sources ONLY the declared `context_fields`,
+/// applying the SAME security filter as the stored document: `RESERVED_METADATA_KEYS`
+/// and the embedding/text fields are never sourced into the embed-text (which can
+/// leave the host for an external embedding provider). Cloning only the few declared
+/// values avoids deep-copying the whole metadata. Precedence matches the stored doc:
+/// a metadata value wins, with `title` as the fallback for the "title" field.
+/// Returns `None` for an empty `context_fields` or when nothing usable remains.
+fn build_import_context_prefix(
+    context_fields: &[String],
+    title: Option<&str>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+    embedding_field: &str,
+    text_field: &str,
+) -> Option<String> {
+    if context_fields.is_empty() {
+        return None;
+    }
+    let mut ctx_map = serde_json::Map::new();
+    for name in context_fields {
+        if RESERVED_METADATA_KEYS.contains(&name.as_str())
+            || name == embedding_field
+            || name == text_field
+        {
+            continue;
+        }
+        if let Some(v) = metadata.and_then(|o| o.get(name)) {
+            ctx_map.insert(name.clone(), v.clone());
+        } else if name == "title" {
+            if let Some(t) = title {
+                ctx_map.insert("title".to_string(), json!(t));
+            }
+        }
+    }
+    crate::chunking::build_context_prefix(context_fields, &ctx_map)
+}
+
 fn handle_rag_document_import(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
@@ -574,35 +611,13 @@ fn handle_rag_document_import(
         .clone()
         .or_else(|| rag_config.as_ref().map(|c| c.context_fields.clone()))
         .unwrap_or_default();
-    let context_prefix = if resolved_context_fields.is_empty() {
-        None
-    } else {
-        // Build the lookup map with ONLY the declared context fields, applying the
-        // SAME security filter as the stored document (RESERVED_METADATA_KEYS +
-        // embedding_field/text_field): a reserved/protected key must NEVER be sourced
-        // into the embed-text, which can leave the host for an external embedding
-        // provider. Cloning only the few declared values also avoids deep-copying the
-        // whole metadata object. Precedence matches the stored doc: a metadata value
-        // wins, with the `title` param as the fallback for the "title" field.
-        let meta_obj = p.metadata.as_ref().and_then(|m| m.as_object());
-        let mut ctx_map = serde_json::Map::new();
-        for name in &resolved_context_fields {
-            if RESERVED_METADATA_KEYS.contains(&name.as_str())
-                || name == &embedding_field
-                || name == &text_field
-            {
-                continue;
-            }
-            if let Some(v) = meta_obj.and_then(|o| o.get(name)) {
-                ctx_map.insert(name.clone(), v.clone());
-            } else if name == "title" {
-                if let Some(ref title) = p.title {
-                    ctx_map.insert("title".to_string(), json!(title));
-                }
-            }
-        }
-        crate::chunking::build_context_prefix(&resolved_context_fields, &ctx_map)
-    };
+    let context_prefix = build_import_context_prefix(
+        &resolved_context_fields,
+        p.title.as_deref(),
+        p.metadata.as_ref().and_then(|m| m.as_object()),
+        &embedding_field,
+        &text_field,
+    );
 
     // Generate embeddings in batches (OOM protection)
     let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
@@ -901,6 +916,54 @@ fn handle_rag_collection_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_import_context_prefix_filters_reserved_and_protected() {
+        // A declared context field naming a reserved or protected key must NOT be
+        // sourced into the prefix (it would leak to the embedding provider).
+        let meta = json!({"customer": "Acme", "doc_id": "secret-123", "embedding": [0.1]});
+        let meta = meta.as_object().unwrap();
+        let fields = vec![
+            "customer".to_string(),
+            "doc_id".to_string(),    // reserved → skipped
+            "embedding".to_string(), // protected (embedding_field) → skipped
+        ];
+        let p = build_import_context_prefix(&fields, None, Some(meta), "embedding", "content");
+        assert_eq!(p, Some("customer: Acme".to_string()));
+    }
+
+    #[test]
+    fn test_build_import_context_prefix_title_fallback_and_metadata_wins() {
+        // "title" absent from metadata → falls back to the title param.
+        let meta = json!({"customer": "Acme"});
+        let p = build_import_context_prefix(
+            &["title".to_string(), "customer".to_string()],
+            Some("Q3 Quote"),
+            meta.as_object(),
+            "embedding",
+            "content",
+        );
+        assert_eq!(p, Some("title: Q3 Quote | customer: Acme".to_string()));
+
+        // metadata "title" wins over the title param (matches the stored doc).
+        let meta2 = json!({"title": "Meta Title"});
+        let p2 = build_import_context_prefix(
+            &["title".to_string()],
+            Some("Param Title"),
+            meta2.as_object(),
+            "embedding",
+            "content",
+        );
+        assert_eq!(p2, Some("title: Meta Title".to_string()));
+    }
+
+    #[test]
+    fn test_build_import_context_prefix_empty_fields_is_none() {
+        assert_eq!(
+            build_import_context_prefix(&[], Some("X"), None, "embedding", "content"),
+            None
+        );
+    }
 
     #[test]
     fn test_rag_config_serialization() {
