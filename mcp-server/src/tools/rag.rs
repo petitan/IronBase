@@ -567,8 +567,8 @@ fn handle_rag_document_import(
 
     // Resolve the document-identity context fields: explicit param wins, else the
     // collection's stored RagConfig. Build the prefix ONCE (same for every chunk in
-    // this import) from the doc-level fields (title + custom metadata keys); the
-    // prefix is prepended to embed-text only, the stored chunk.text is unchanged.
+    // this import) from the doc-level fields; the prefix is prepended to embed-text
+    // only, the stored chunk.text is unchanged.
     let resolved_context_fields: Vec<String> = p
         .context_fields
         .clone()
@@ -577,13 +577,28 @@ fn handle_rag_document_import(
     let context_prefix = if resolved_context_fields.is_empty() {
         None
     } else {
+        // Build the lookup map with ONLY the declared context fields, applying the
+        // SAME security filter as the stored document (RESERVED_METADATA_KEYS +
+        // embedding_field/text_field): a reserved/protected key must NEVER be sourced
+        // into the embed-text, which can leave the host for an external embedding
+        // provider. Cloning only the few declared values also avoids deep-copying the
+        // whole metadata object. Precedence matches the stored doc: a metadata value
+        // wins, with the `title` param as the fallback for the "title" field.
+        let meta_obj = p.metadata.as_ref().and_then(|m| m.as_object());
         let mut ctx_map = serde_json::Map::new();
-        if let Some(ref title) = p.title {
-            ctx_map.insert("title".to_string(), json!(title));
-        }
-        if let Some(meta_obj) = p.metadata.as_ref().and_then(|m| m.as_object()) {
-            for (k, v) in meta_obj {
-                ctx_map.insert(k.clone(), v.clone());
+        for name in &resolved_context_fields {
+            if RESERVED_METADATA_KEYS.contains(&name.as_str())
+                || name == &embedding_field
+                || name == &text_field
+            {
+                continue;
+            }
+            if let Some(v) = meta_obj.and_then(|o| o.get(name)) {
+                ctx_map.insert(name.clone(), v.clone());
+            } else if name == "title" {
+                if let Some(ref title) = p.title {
+                    ctx_map.insert("title".to_string(), json!(title));
+                }
             }
         }
         crate::chunking::build_context_prefix(&resolved_context_fields, &ctx_map)
@@ -682,6 +697,23 @@ fn handle_rag_document_import(
                      has a RAG config. Set text_fields via rag_collection_create.",
                     missing,
                     p.collection
+                );
+            }
+        }
+        // Parity with text_fields: an explicit context_fields applied to a collection
+        // that already has a RAG config is honored for THIS import (via
+        // resolved_context_fields above) but is NOT persisted — the stored config wins
+        // for later param-less imports. Warn when it differs so the divergence is not
+        // silent (set context_fields via rag_collection_create to persist).
+        if let Some(ref requested) = p.context_fields {
+            if *requested != cfg.context_fields {
+                tracing::warn!(
+                    "rag_document_import: explicit 'context_fields' {:?} applied to THIS import \
+                     only — collection '{}' already has a RAG config (stored: {:?}). Set \
+                     context_fields via rag_collection_create to persist.",
+                    requested,
+                    p.collection,
+                    cfg.context_fields
                 );
             }
         }
