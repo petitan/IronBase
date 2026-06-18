@@ -47,8 +47,9 @@ pipeline-ról. Lezárt issue-k: #67, #64, #65, #63, #66.
 A pipeline minden ágában érvényes alapelvek:
 
 - **Embed-text ≠ store-text.** Amit beágyazol és amit tárolsz, **különböző szöveg**;
-  a tárolt `content` mindig az eredeti chunk-slice, az embed-text breadcrumb-fel és
-  tábla-lapítással gazdagítva. (v1.0.494)
+  a tárolt `content` mindig az eredeti chunk-slice, az embed-text breadcrumb-fel,
+  tábla-lapítással (v1.0.494) és opcionális **dokumentum-identitás kontextussal**
+  (`context_fields`, v1.0.543) gazdagítva. Sorrend: context → section_path → body.
 - **Safe ordering.** Részleges hiba sosem ronthat el meglévő jó adatot — a drága,
   hibázó lépés (embedding) sosem fut a DB-mutáció előtt. (#67)
 - **Silent fallback tilos.** Eldobott paraméter, kihagyott index, csendes degradáció
@@ -197,8 +198,10 @@ impl RagConfig {
 A `#[serde(default)]` garantálja, hogy a 1.0.500 előtt mentett configok hibátlanul
 deszerializálódnak (üres `text_fields` → `effective_text_fields()` fallback).
 
-**Kereséskor** (`hybrid_search` MCP + Rhai `db_hybrid_search`): ha a hívó nem ad
-explicit `text_fields`-et, a tool a config `text_fields`-ére default-ol — de a
+**Kereséskor** (`search` MCP [intent-only, v1.0.504 — a `hybrid_search` utódja] +
+Rhai `db_hybrid_search`): a `search` mindig a config `text_fields`-ére old fel
+(server-owned, nincs explicit param); a `db_hybrid_search` explicit `text_fields`
+híján szintén a config-ra default-ol — a
 közös `resolve_search_text_fields(explicit, config_fields, indexed)` helper
 **metszi a ténylegesen indexelt mezőkkel** (`get_fulltext_field_names`). Egy
 sikertelen index-build vagy egy későbbi `index_drop` után a default keresés
@@ -255,6 +258,7 @@ feloldás kiküszöböli.
 | `text_fields` | string[] | — | **1.0.500** | extra FTS-mezők; primary mindig hozzáadva, dedupolt |
 | `provider` | string | manager default | — | embedding provider |
 | `language` | enum | `"none"` | — | FTS stemming nyelv (none/hungarian/english/german) |
+| `context_fields` | string[] | `[]` | **1.0.543** | dokumentum-identitás mezők (pl. `["customer","title"]`); `"name: value"` breadcrumb (` \| ` join, scalar-only, max 512B) az **embed-text elé** kerül (NEM tárolt) — azonos boilerplate is megkülönböztetett vektort kap; `RagConfig`-ba perzisztálva (#117) |
 
 `rag_document_import`:
 
@@ -267,6 +271,7 @@ feloldás kiküszöböli.
 | `if_exists` | enum | `"replace"` | **1.0.495** | `replace`/`skip`/`error`/`append` (#67) |
 | `language` | enum | `"none"` | **1.0.497** | auto-create FTS nyelve (#65) |
 | `text_fields` | string[] | — | **1.0.500** | auto-create extra FTS mezői (#66) |
+| `context_fields` | string[] | RagConfig-é | **1.0.543** | explicit felülírja az importra a perzisztált `context_fields`-et, de **nem perzisztál** (`tracing::warn!`); perzisztáláshoz `rag_collection_create` (#117) |
 
 `fulltext_analyze`:
 
@@ -410,6 +415,7 @@ felülíró paraméter.
 | 1.0.498 | review | `embed_document` reserved-key filter (metadata.doc_id korábbi kiskapu); shared `RESERVED_METADATA_KEYS`; `should_skip_before_embedding` pre-check; nem-csendes language-drop | `tools/helpers.rs`, 3 import |
 | 1.0.499 | #63 | Tábla-fejléc propagáció (nyers-slice detect, `table_header` mező, heading-reset); merge-dedup pontos prefix-vágással; shared tábla-helperek | `chunking/markdown.rs`, `chunking/mod.rs`, `tools/fusion.rs` |
 | 1.0.500 | #66 | Multi-field FTS (`text_fields` param + `RagConfig.text_fields`); auto multi-field `hybrid_search` default; intersect with indexed (robusztusság); Rhai konzisztencia (5-tuple, `db_hybrid_search`, `db_rag_stats`); shared `resolve_search_text_fields` és `resolve_fulltext_fields` | `tools/rag.rs`, `tools/hybrid.rs`, `scripting/db_functions.rs`, `params.rs`, `definitions/rag.rs` |
+| 1.0.543 | #117 | `context_fields` — dokumentum-identitás kontextuális embedding: `build_context_prefix` (`"name: value"`, ` \| ` join, scalar-only, cap 512B), `build_embed_text` context-paraméter (sorrend context→section_path→body), `RagConfig.context_fields` (`#[serde(default)]`); A/B: nDCG@10 +25% / Recall@10 +13% (rdocs) | `chunking/mod.rs`, `tools/rag.rs` |
 
 ---
 

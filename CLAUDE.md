@@ -505,42 +505,10 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 
 ### Dokumentált Bugok (Referencia)
 
-**Korábbi OOM hibák (commit):**
-`4904ccc9`, `567e0d11`, `e0001bbe`, `49f27a77`, `88f0a79c`, `e445b44e`
+Korábbi OOM hibák: `4904ccc9`, `567e0d11`, `e0001bbe`, `49f27a77`, `88f0a79c`, `e445b44e`.
 
-**Kritikus bugok:**
-
-| Bug | Commit | Tünet | Root Cause | Fix |
-|-----|--------|-------|------------|-----|
-| **WAL Unbounded Growth** | 2026-01-11 | OOM startup, 29GB .wal | `wal.clear()` csak close-kor | Periodikus clear 100 commit után |
-| **Sparse Index []** | a54f29a1 | count 300s+ timeout | `[]` = "hiányzó mező" | `get_nested_value().is_some()` |
-| **Stale Index Loading** | 9ff48302 | Phantom duplikátumok | `.idx` tombstone-okkal | `was_clean` check + Drop fix |
-| **HNSW NaN** | df5cee21 | Rossz heap rendezés | NaN összehasonlítás | NaN → max distance |
-| **Fulltext count** | 169e2e6b | Dupla számolás | Lazy mode bug | HashSet union |
-| **HNSW PRNG race** | b71c5012 | Thread-safety | Random level race | `compare_exchange_weak` |
-| **Index hash collision** | b71c5012 | Fájl ütközés | 32-bit hash | 64-bit hash |
-| **read_data() boundary** | d37e442a | 1 doc különbség count-ban | `file_len` vs `data_end_offset` | `data_end_offset` használata |
-| **Lazy index get_all_entries** | 2026-01-26 | $group/distinct 0 eredmény | `lazy_mode` nem kezelt | Fájlból olvasás lazy mode-ban |
-| **Index building flag** | 9273a19b | explain() 0 availableIndexes | `set_index_ready()` hiányzik rebuild után | `set_index_ready()` hívás rebuild végén |
-| **$eq operator ignored** | 6f537dd5 | `{"field":{"$eq":"x"}}` CollectionScan | `collect_equality_candidates()` skip-elte | `$eq` érték kinyerése |
-| **Checkpoint lock contention** | 9e4499b4 | insert_one 14+ perc blokk | `flush_all_indexes_counted()` 1 lock / 22 index | Per-index flush: 22 lock / 1 index |
-| **Btree delete not dirty** | 265f0c2e | count_documents ~3x túlszámolás | `remove_document_from_indexes` + `batch_update_indexes` nem jelölte dirty-nek a btree indexet → checkpoint nem mentette a törléseket → stale .idx | `dirty_btree_indexes.insert()` 5 helyen |
-| **Fulltext candidate limit** | aa3b8ed5 | Filtrált fulltext 0 eredmény gyakori szóra | `calculate_candidate_limit()` max 300 jelöltet kért, de pl. "ajánlat" 6766 match-ből a year=2026 dokuk a 6735+ pozíción voltak | Filter esetén 100K cap (TF-IDF amúgy is O(N), limit csak output-ot csonkít) |
-| **Fulltext empty collection reject** | #49 | `rag_collection_create` üres collection-re nem hoz létre fulltext indexet | `search.rs:498` validáció `num_documents == 0` → error + cleanup, üres collection is triggereli | `live_document_count == 0` check: üres collection → üres index valid |
-| **Vector count stale metadata** | #50 | `vector_count: 0` a stats-ban működő HNSW index mellett | `VectorIndexMetadata.vector_count` csak creation-kor íródik, auto-indexing nem frissíti | `list_vector_indexes()` az in-memory HNSW `len()`-ből frissíti a clone-t |
-| **HNSW orphan accumulation** | 512990a6, #53 | `vector_count` 2x a valós után delete+reimport; növekvő memória | `batch_update_indexes()` nem kezelte HNSW-t + `remove()` lazy (orphan node marad) + `len()` orphan-okat is számolta | HNSW kezelés `batch_update_indexes`-ben + `len()` = `id_to_index.len()` + orphan rebuild checkpoint/compact-ban |
-| **Fulltext flush dirty flag** | ed9016d3, #54 | fulltext_search dokumentumok nagy része nem kereshető restart után | `commit_fulltext_flush()` feltétel nélkül törölte a dirty flag-et → Phase 2 alatti concurrent insert-ek elvesztek | `has_pending_entries()` check: dirty flag csak akkor törlődik ha `inverted_index` üres |
-| **HNSW rebuild duplicate ID** | d83885bf, #55 | `db_compact` "ID already exists in vector index" hiba | `rebuild()` `nodes` Vec-ből iterált — remove+reinsert után orphan+aktív node ugyanazzal az ID-vel, mindkettő átment a `contains_key` filter-en | `id_to_index` HashMap-ből iterálás (egyedi kulcsok, mindig a helyes node) |
-| **BM25 fails on 4+ words** | cd70eae4, #61 | `hybrid_search` text_score=0 multi-word query-knél | `fulltext_search` OR default vs `hybrid_search` AND default inkonzisztencia + chunk-level AND túl szigorú (1 chunk ritkán tartalmaz 4+ stemelt tokent) | Konzisztens AND default mindkettőnél + `match_scope` default "document" (dok szintű AND kvalifikáció, chunk szintű OR retrieval). ⚠️ **SUPERSEDED v1.0.537 (#109):** az AND default OR-ra váltott (diszjunktív, iparági standard) — lásd a "Fulltext mode paraméter" szekciót lentebb; ez a sor a #61-korabeli állapotot rögzíti |
-| **RAG import not idempotent** | #67 | `rag_document_import` retry-nál duplikált chunkok (éles: ~11K duplikátum) | `insert_many` előtt nincs delete-by-doc_id → ugyanazon doc_id újra-importja hozzáfűz | `if_exists` param (default `replace`) + közös `insert_chunks_idempotent` helper (`helpers.rs`) mind a 3 import-úton (rag/embed_document/db_rag_import). Safe ordering: capture old _ids (proj `_id`) → insert new → delete old → sosem veszít adatot |
-| **merge_chunks title concat** | #64 | `merge_chunks=true` + `text_fields`: a `title` N-szer ismételve, a `content` nem merge-elődik | rag_config nélkül az `effective_text_field` = `get_fulltext_field_names().next()` — `HashMap` sorrend nemdeterminisztikus → `title`-re oldódhat, `merge_adjacent_chunks` azt fűzi | `pick_text_field()` (`hybrid.rs`): determinisztikus, `content`-preferáló mező-feloldás (különben lexikálisan első) |
-| **fulltext_search shape divergence** | #68 | `fulltext_search` hit-alak ≠ `hybrid_search` (`{document:{...},score,matched_tokens}` vs lapos `{<doc fields>, _final_score, _text_score}`) → kliensnek 2 parser | **BREAKING (v1.0.501)** — `fulltext_search` mostantól lapos: doc-mezők top szinten, `_score`/`_matched_tokens`/`_highlights` `_`-prefix metadata. Mindkét tool egy parserrel olvasható |
-| **group_by_document doc fields** | #69 | Csoportosított hibrid-keresés a `title`/`customer`/`year`-t `chunks[0]`-ban hagyta, nem emelte csoport-szintre | **BREAKING (v1.0.501)** — `lift_common_fields()` (`hybrid.rs`): a chunkok közt **azonos értékű** kulcsok automatikusan a csoport top szintjére kerülnek és **kikerülnek a chunk-okból**. Generikus, nincs hardcode mező-lista |
-| **RAG single-field FTS** | #66 | `rag_*` csak a `content`-re hozott FTS indexet; `title`/`customer` indexeletlen → multi-field `hybrid_search` csendben degradál | egyetlen `create_fulltext_index` a `text_field`-re; `RagConfig` csak single `text_field`-et tárolt | `text_fields` param (`rag_collection_create`/`rag_document_import`/Rhai) → FTS minden mezőre, `RagConfig.text_fields`-be mentve (`#[serde(default)]` legacy-safe); `hybrid_search` default-ol rá ha a hívó nem ad explicit `text_fields`-et (`resolve_fulltext_fields`, `effective_text_fields`) |
-| **Markdown table fragmentation** | #63 | nagy/blank-line-os tábla darabolásakor a folytatás-chunk elveszti a fejléc+separator sort → értelmezhetetlen értékek | `MarkdownSplitter` a táblát blank-line-nál és méret-limitnél vágja; a header csak az első szeletben marad | Fejléc-propagáció a **nyers (overlap nélküli) slice**-on detektálva (`markdown.rs`: `current_table_header`, heading-nél reset) → folytatás-chunk elé fűzi ÉS `table_header` mezőbe írja; merge-dedup a **mező** alapján vág pontosan (`fusion.rs`, nincs újraszámolás → CRLF/whitespace-safe). Default overlap=100-zal is működik |
-| **RAG fulltext no stemming** | #65 | RAG import úton nem lehetett magyar stemmelést kérni; `fulltext_analyze` `"None"`-t jelzett hungarian index mellett | `rag_document_import`/`db_rag_import` hardcode `"none"` (nem volt `language` param); `fulltext_analyze` default `"none"` + nem örökölte az index nyelvét | `language` param a RAG import utakra (→ auto-FTS, default `"none"`) + `fulltext_analyze` opcionális `collection`+`field`-del örökli az index valós FtsOptions-ját (`get_fulltext_index_options`) |
-
-**Részletes bug elemzések:** Lásd `memory/critical-bugs.md` (Lazy Index, read_data boundary, Fulltext candidate limit, Fulltext flush dirty flag, Btree delete not dirty, Workaround-ok)
+A kritikus bugok teljes katalógusa (tünet → root cause → fix, #49–#69, WAL/HNSW/fulltext/btree)
+→ **[`docs/DOCUMENTED-BUGS.md`](docs/DOCUMENTED-BUGS.md)**. Részletes elemzések: `memory/critical-bugs.md`.
 
 ### Checkpoint Per-Index Flush (2026-02-01)
 
@@ -708,8 +676,9 @@ coll.update_one_with_options(&filter, &update, opts)?;
 **Egységes referencia:** [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md) — chunkolás,
 contextual embedding, idempotens import, multi-field FTS, hibrid keresés,
 adjacent-chunk merge, konzisztencia/visszamenőleges kompatibilitás, operatív
-ajánlások, verzió-szerinti hozzájárulások (v1.0.494–v1.0.500). Az #67/#64/#65/#63/#66
-issue-k lezárva, részletek a doksiban + a CHANGELOG `[Unreleased]` szekcióban.
+ajánlások, verzió-szerinti hozzájárulások (v1.0.494–v1.0.543). Az #67/#64/#65/#63/#66
+issue-k lezárva; a **`context_fields` dokumentum-identitás kontextuális embedding (#117,
+v1.0.543)** dokumentálva — részletek a doksiban + a CHANGELOG `[Unreleased]` szekcióban.
 
 ### Keresés
 
@@ -817,176 +786,11 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 **Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/fusion.rs` (shared pipeline)
 </details>
 
-<details>
-<summary>Score Fusion Architektúra (2026-01-30)</summary>
+### Score Fusion / hibrid keresés architektúra
 
-**Döntés: Score fusion MCP tool szinten marad, NEM query operátor.**
-
-**Indoklás:**
-- Query operátorok (`OperatorMatcher`) = stateless boolean predikátumok: `fn(doc_value, filter_value) -> bool`
-- Score fusion = ranked retrieval: score-okat ad vissza, nem igaz/hamis
-- Index hozzáférés szükséges (fulltext + HNSW), de operátorok stateless-ek
-
-**Implementáció (2026-02-18 — unified):**
-
-| Felület | Fájl | Algoritmus |
-|------|------|-----------|
-| `search` MCP tool (intent-only) + Rhai `db_hybrid_search` (paraméterezhető) | `mcp-server/src/tools/hybrid.rs` (közös motor: `retrieve_and_fuse`) | RRF fusion (explicit vector VAGY auto-embed) |
-
-> A `hybrid_search` MCP tool megszűnt (v1.0.504, `search` váltotta). Az alábbi paraméterek
-> (mode, match_scope, text_fields, weights, rrf_k, mmr_lambda…) a **közös `hybrid.rs` motoré**:
-> a Rhai `db_hybrid_search` teszi ki őket, a `search` MCP tool NEM (server-owned, intent-only).
-
-**RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
-
-**Reranking pipeline (multiplicatív boost):**
-- Exact phrase match: 1.5x
-- Keyword density: 1.0-1.3x
-- Title match: 1.0-1.5x (ha `title_field` megadva)
-- Short content penalty: 0.8x (<50 char)
-
-**Adjacent chunk merge (afd45313, STEP 5.5):**
-- RAG chunking overlap (~100 char) → szomszédos chunkok duplikálják a határszöveget → top-K helyet pazarolnak
-- `merge_chunks`: `true` (default) — same `doc_id`, consecutive `chunk_index` → összevonás
-- Szöveg: `start_char`/`end_char` alapján overlap levágás, UTF-8 safe
-- Score: max(final_score) a futamból, embedding: legjobb score-ú chunk
-- Metadata: `chunk_merged: true`, `chunks_in_merge: N`, frissített `start_char`/`end_char`/`chunk_index`
-- Elhelyezés: reranking UTÁN, MMR ELŐTT
-- Response: `"chunks_merged": N`
-
-**MMR diversity reranking (deduplication):**
-- Algoritmus: `mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)`
-- `mmr_lambda`: 1.0 = pure relevance, 0.0 = pure diversity, 0.7 = relevance-favoring (default)
-- `deduplicate`: default `false` — hívó döntse el kell-e MMR dedup
-- Cosine similarity: `ironbase_core::vector::simd::cosine_similarity()` (SIMD)
-- Embedding nélküli doc-ok: relevance order (nincs diversity penalty)
-- MMR skip-elve `group_by_document=true` esetén (limit dokumentum szinten alkalmazva)
-
-**Eredmény metadata:**
-```json
-{
-  "_rrf_score": 0.032,
-  "_final_score": 0.041,
-  "_rerank_boost": 1.3,
-  "_vector_rank": 2,
-  "_text_rank": 5,
-  "_vector_score": 0.89,
-  "_text_score": 12.4
-}
-```
-
-**Fulltext mode paraméter (45f74bf7, #47, cd70eae4 #61, BREAKING: diszjunktív default):**
-- `mode`: **`"or"` (default, v1.0.537+)** = bármely szó elég, BM25 score rangsorol (iparági standard diszjunktív retrieval); `"and"` = MINDEN szó kell (opt-in precízió-szűrő)
-- Elérhető: Rhai `db_hybrid_search` + `fulltext_search` MCP tool — **mindkettő OR default** (v1.0.537+; **korábban AND volt v1.0.389–536**). A `search` MCP tool intent-only (a motor diszjunktívan keres).
-- **BREAKING CHANGE indok:** a bináris AND-overlay a BM25 fölött non-standard RRF-ben — eldobja a graded BM25 scoringot és a top-1 BM25 részleges-egyezést (keyword_buries). A standard: diszjunktív lane + BM25/RRF/rerank dönt. Mérés: specific Recall@10 0.625→0.782. Részletek: `memory/search-fuzzy-coverage-fusion-2026-06-16`.
-- `mode` hiánya = `"or"` (v1.0.537+)
-
-| Fájl | Változás |
-|------|----------|
-| `params.rs` | `pub mode: Option<String>` mindkét struct-ban |
-| `definitions/index.rs` | `"mode"` schema entry (default: **"or"**, v1.0.537+) |
-| `fusion.rs` | `resolve_and_mode(mode) = mode == Some("and")` (None→OR, v1.0.537+; egyetlen döntéspont, mindhárom hívóra) |
-
-**Document-level AND mode (0f208d41, #56, cd70eae4 #61):**
-- `match_scope`: `"document"` (default) = szavak a dokumentum különböző chunkjaiban is lehetnek, `"chunk"` = minden szó egyetlen chunkban. **Csak `mode="and"` mellett él** (a default OR-ban inert, v1.0.537+).
-- **Keresési logika (mode=and):** kvalifikáció (AND) → minden query token megjelenik a dokumentumban; chunk retrieval (OR) → bármely tokent tartalmazó chunk visszajön
-- Korábban default "chunk" volt, de 3+ szavas query-knél túl szigorú (egyetlen chunk ritkán tartalmaz minden tokent)
-- Aktiválódik: **explicit `mode="and"`** + `match_scope` != `"chunk"` (v1.0.537+, korábban a default AND miatt automatikus volt)
-- Algoritmus: posting list interszekcióval kvalifikálja a dokumentumokat, majd OR módban keres a kvalifikált doc_id-kre szűrve
-- Vektor keresés NEM szűrt (RRF természetesen kezeli)
-- Response: `"match_scope": "document"/"chunk"`, `"qualified_doc_ids": N`
-
-| Réteg | Változás |
-|-------|----------|
-| `fulltext.rs` | `tokenize_query()`, `token_posting_count()`, `token_chunk_ids()` pub metódusok |
-| `search.rs` | Delegáló metódusok a CollectionCore-on |
-| `adapter.rs` | Adapter metódusok (DocumentId→Value konverzió) |
-| `params.rs` | `pub match_scope: Option<String>`, `pub group_by_document: bool` |
-| `definitions/hybrid.rs` | `"match_scope"` schema (enum: chunk/document), `"group_by_document"` schema |
-| `hybrid.rs` | `qualify_documents()` fn + STEP 1.5 pipeline + STEP 7 grouped response |
-
-```json
-{"collection": "docs", "query": "Ifju János fékpad ár",
- "group_by_document": true}
-```
-
-**Multi-field fulltext (b938c487, #48):**
-- `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
-- Elérhető: Rhai `db_hybrid_search` (a `fulltext_search` MCP tool már korábban támogatta `fields` néven). A `search` MCP tool a RAG-config `text_fields`-éből oldja fel, server-owned.
-- `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
-- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create` `type:"fulltext"`)
-- Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
-
-```json
-{"collection": "docs", "query": "Juhai ajánlat",
- "text_fields": ["content_text", "title", "customer"]}
-```
-
-**Search mode presets (220679f3):**
-- `search_mode`: `"balanced"` (default), `"semantic"`, `"keyword"` — LLM-barát nevesített preset a numerikus weight-ek helyett
-- Elérhető: Rhai `db_hybrid_search` (a `search` MCP tool nem teszi ki — server-owned weights)
-- Explicit `vector_weight`/`fulltext_weight` felülírja a preset-et ha megadva
-
-| Mode | vector_weight | fulltext_weight | Mikor |
-|------|--------------|-----------------|-------|
-| `balanced` | 0.5 | 0.5 | Default, általános keresés |
-| `semantic` | 0.8 | 0.2 | Fogalmi/konceptuális kérdések |
-| `keyword` | 0.2 | 0.8 | Specifikus szó/kifejezés keresés |
-
-Prioritás: explicit weights > search_mode preset > balanced default
-
-**Shared fusion modul (febba776, afd45313):**
-- `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, merge_adjacent_chunks, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
-- hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
-
-**Közös fusion pipeline (hybrid.rs — `search` MCP tool + Rhai `db_hybrid_search`):**
-```
-STEP 1: Resolve vector + field names (explicit vs auto-embed)
-STEP 1.5: Document-level AND qualification             [match_scope=document OR group_by_document + mode=and]
-STEP 2: Vector search → ranks (single-pass HashMap)
-STEP 3: Fulltext search → ranks (single-pass HashMap, OR mode + doc_id filter if STEP 1.5)
-STEP 4: RRF Fusion (drain-based, no cloning)
-STEP 5: Reranking (phrase, density, title, length)    [rerank=true]
-STEP 5.5: Adjacent chunk merge (overlap dedup)        [merge_chunks=true]
-STEP 6: MMR diversity reranking                       [deduplicate=true, skip if group_by_document]
-STEP 7: Projection + response
-        ├─ Flat mode (default): chunks ordered by score, limit = chunk count
-        └─ Grouped mode [group_by_document=true]:
-           Phase 1: Top N doc_ids from fused results
-           Phase 2: Single fulltext OR search filtered to N doc_ids → ALL chunks
-           Group by doc_id, limit = document count
-```
-
-**`group_by_document` paraméter:**
-- Default: `false` — flat chunk lista score sorrendben (hagyományos viselkedés)
-- `true` — eredmények doc_id szerint csoportosítva, dokumentumonként MINDEN releváns chunk visszajön
-- Limit szemantika: flat → max chunk szám, grouped → max dokumentum szám
-- Automatikusan bekapcsolja document-level AND qualification-t (qualify_documents + OR mode)
-- Dokumentum kiválasztás: AND (minden query szó benne van a dokumentumban)
-- Chunk retrieval: OR (bármely query szó → releváns chunk)
-- Phase 2: egyetlen fulltext OR search `doc_id $in` filterrel (nem N külön keresés)
-- MMR deduplicate skip-elve grouped módban
-- Response formátum:
-```json
-{
-  "results": [
-    {"doc_id": "abc", "best_score": 0.039, "chunk_count": 9, "chunks": [...]},
-    {"doc_id": "def", "best_score": 0.028, "chunk_count": 4, "chunks": [...]}
-  ],
-  "count": 2,
-  "total_chunks": 13,
-  "group_by_document": true,
-  "qualified_doc_ids": 359
-}
-```
-
-**Rétegek:**
-```
-Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
-Collection metódusok (fulltext_search...)    → scored results, index-alapú
-MCP tools (search)                           → score fusion, ranked retrieval
-```
-</details>
+RRF fusion, reranking, adjacent-chunk merge, MMR, fulltext mode (OR default v1.0.537+),
+document-level AND, multi-field FTS, search-mode presetek, közös `fusion.rs`/`hybrid.rs` motor.
+→ **[`docs/SCORE_FUSION.md`](docs/SCORE_FUSION.md)** (teljes spec). Operatív: [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md).
 
 ### Auto-Embedding & Cache
 
