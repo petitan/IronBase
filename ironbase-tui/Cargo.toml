@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # TUI framework
 ratatui = "0.28"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # CLI
 clap = { workspace = true }
