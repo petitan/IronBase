@@ -42,7 +42,7 @@ libc = "0.2"       # System info via sysconf (aggregation/memory_info.rs)
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = "1.4"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "benchmarks"
