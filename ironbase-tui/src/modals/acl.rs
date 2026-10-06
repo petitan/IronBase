@@ -14,22 +14,19 @@ pub struct AclRuleInfo {
 
 impl AclRuleInfo {
     pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let principal = if let Some(p) = value.get("principal") {
-            if let Some(ptype) = p.get("type").and_then(|v| v.as_str()) {
-                let pvalue = p
-                    .get("value")
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(|s| s.to_string())
-                            .or_else(|| Some(v.to_string()))
-                    })
-                    .unwrap_or_default();
-                format!("{}:{}", ptype, pvalue)
-            } else {
-                p.to_string()
-            }
+        let p = value.get("principal")?;
+        let principal = if let Some(ptype) = p.get("type").and_then(|v| v.as_str()) {
+            let pvalue = p
+                .get("value")
+                .and_then(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| Some(v.to_string()))
+                })
+                .unwrap_or_default();
+            format!("{}:{}", ptype, pvalue)
         } else {
-            return None;
+            p.to_string()
         };
 
         let permissions = if let Some(perms) = value.get("permissions") {

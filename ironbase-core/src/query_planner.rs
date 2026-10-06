@@ -591,11 +591,8 @@ impl QueryPlanner {
                 Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => value.clone(),
                 // Explicit $eq: {field: {$eq: value}}
                 Value::Object(cond_map) if cond_map.len() == 1 => {
-                    if let Some(v) = cond_map.get("$eq") {
-                        v.clone()
-                    } else {
-                        return None; // Non-equality operator
-                    }
+                    // Non-equality operator -> None
+                    cond_map.get("$eq")?.clone()
                 }
                 _ => return None,
             };

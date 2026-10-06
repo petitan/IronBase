@@ -1274,7 +1274,7 @@ impl IndexManager {
     /// - Time: O(n) per index where n = total keys
     /// - Memory: O(k) per index where k = number of leaf nodes (pointers only)
     pub fn refresh_all_stats(&mut self) {
-        for (_, index) in self.btree_indexes.iter_mut() {
+        for index in self.btree_indexes.values_mut() {
             index.refresh_stats();
         }
     }

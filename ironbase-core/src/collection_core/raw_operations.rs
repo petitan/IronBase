@@ -774,7 +774,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         }
 
         // STREAMING: Process documents one by one - O(1) memory per doc
-        for (_doc_id, &offset) in catalog.iter() {
+        for &offset in catalog.values() {
             if matched > 0 {
                 break; // Only update first match
             }
