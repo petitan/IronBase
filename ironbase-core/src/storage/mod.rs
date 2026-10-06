@@ -1287,31 +1287,38 @@ impl StorageEngine {
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
 
-            // Validate length - reasonable limits
-            if len == 0 || len > MAX_DOCUMENT_SIZE_BYTES || offset + 4 + (len as u64) > file_len {
-                // Hit metadata section or corrupted data - stop scanning
-                break;
-            }
-
-            // Read document data
-            let mut data = vec![0u8; len];
-            if self.file.read_exact(&mut data).is_err() {
-                break;
-            }
-
-            // Try to parse as JSON - if it fails, we've hit metadata
-            let doc_value = match serde_json::from_slice::<serde_json::Value>(&data) {
-                Ok(v) => v,
-                Err(_) => break, // Not valid JSON - hit metadata
-            };
-
-            // Check for _collection field (required for valid documents)
-            let collection_name = match doc_value.get("_collection").and_then(|v| v.as_str()) {
-                Some(name) => name.to_string(),
-                None => {
-                    // No _collection field - likely hit metadata
+            // Every flush appends a metadata block at data_end_offset and later
+            // documents are appended after it, so metadata blocks are
+            // interleaved with documents. A record that is not a document is
+            // skipped if it parses as a whole metadata block; otherwise the
+            // scan stops (corrupted or torn data).
+            let doc = if len == 0
+                || len > MAX_DOCUMENT_SIZE_BYTES
+                || offset + 4 + (len as u64) > file_len
+            {
+                None
+            } else {
+                let mut data = vec![0u8; len];
+                if self.file.read_exact(&mut data).is_err() {
                     break;
                 }
+                serde_json::from_slice::<serde_json::Value>(&data)
+                    .ok()
+                    .and_then(|v| {
+                        let name = v.get("_collection")?.as_str()?.to_string();
+                        Some((v, name))
+                    })
+            };
+
+            let (doc_value, collection_name) = match doc {
+                Some(doc) => doc,
+                None => match self.metadata_block_end(offset, file_len)? {
+                    Some(end) => {
+                        offset = end;
+                        continue;
+                    }
+                    None => break,
+                },
             };
 
             // Check if tombstone
@@ -1381,11 +1388,23 @@ impl StorageEngine {
             }
         }
 
+        if offset + 4 < file_len {
+            log_warn!(
+                "[WARN] Document scan stopped at offset {} of {} bytes; records after it \
+                 were not recovered (left untouched on disk)",
+                offset,
+                file_len
+            );
+        }
+
         // Update header
         // CRITICAL: Use HeaderWriter instead of direct assignment
         // flush_metadata() below will call set_after_metadata() which finalizes
         // the header, but it reads data_end_offset to determine metadata position.
-        HeaderWriter::new(&mut self.header, &mut self.file).set_recovery_offset(offset);
+        // The recovered metadata is appended at EOF, never at the scan stop
+        // offset: if the scan stopped early, writing there would overwrite
+        // live documents that come after it.
+        HeaderWriter::new(&mut self.header, &mut self.file).set_recovery_offset(file_len);
         self.header.collection_count = self.collections.len() as u32;
 
         // Write corrected metadata
@@ -1401,6 +1420,54 @@ impl StorageEngine {
         );
 
         Ok(())
+    }
+
+    /// If a complete metadata block (`[count: u32]` followed by `count` ×
+    /// `[len: u32][CollectionMeta JSON]`, see `write_metadata_body`) starts at
+    /// `offset`, return the offset right after it. Used by
+    /// `rebuild_from_documents()` to step over the metadata blocks that every
+    /// flush leaves between documents.
+    ///
+    /// JSON is validated by streaming into `IgnoredAny`, so a large block is
+    /// never loaded into memory.
+    fn metadata_block_end(&mut self, offset: u64, file_len: u64) -> Result<Option<u64>> {
+        use serde::de::{Deserialize, IgnoredAny};
+        use std::io::{BufReader, Read, Seek, SeekFrom};
+
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut reader = BufReader::new(&self.file);
+        let mut pos = offset;
+
+        let mut count_bytes = [0u8; 4];
+        if pos + 4 > file_len || reader.read_exact(&mut count_bytes).is_err() {
+            return Ok(None);
+        }
+        pos += 4;
+        let count = u32::from_le_bytes(count_bytes) as u64;
+        // Each entry needs at least a 4-byte length and a non-empty JSON body
+        if count > (file_len - pos) / 5 {
+            return Ok(None);
+        }
+
+        for _ in 0..count {
+            let mut len_bytes = [0u8; 4];
+            if pos + 4 > file_len || reader.read_exact(&mut len_bytes).is_err() {
+                return Ok(None);
+            }
+            pos += 4;
+            let len = u32::from_le_bytes(len_bytes) as u64;
+            if len == 0 || pos + len > file_len {
+                return Ok(None);
+            }
+
+            let mut de = serde_json::Deserializer::from_reader((&mut reader).take(len));
+            if IgnoredAny::deserialize(&mut de).is_err() || de.end().is_err() {
+                return Ok(None);
+            }
+            pos += len;
+        }
+
+        Ok(Some(pos))
     }
 
     /// Get database statistics
@@ -3340,6 +3407,80 @@ mod tests {
                 storage.collections.contains_key("products"),
                 "Collection should be recovered from WAL or document scan"
             );
+        }
+    }
+
+    /// Audit 2026-10-06 #3: every flush writes a metadata block at data_end_offset and
+    /// later documents are appended after it, so metadata blocks are
+    /// interleaved with documents ([hdr][meta][docs][meta][docs][meta]).
+    /// rebuild_from_documents() used to stop at the first metadata block
+    /// (offset 256) and then write an empty catalog over live documents.
+    #[test]
+    fn test_rebuild_from_documents_skips_interleaved_metadata() {
+        use crate::document::DocumentId;
+        use std::io::{Seek, Write};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let wal_path = temp_dir.path().join("test.wal");
+
+        let mut offsets = Vec::new();
+        {
+            let mut storage = StorageEngine::open(&db_path).unwrap();
+            storage.create_collection("items").unwrap();
+            // Two flushes -> one stale metadata block between the batches
+            for batch in 0..2 {
+                for i in 1..=5i64 {
+                    let id = DocumentId::Int(batch * 5 + i);
+                    let doc = serde_json::json!({"_id": id, "_collection": "items", "v": i});
+                    let bytes = serde_json::to_vec(&doc).unwrap();
+                    offsets.push(storage.write_document("items", &id, &bytes).unwrap());
+                }
+                storage.flush().unwrap();
+            }
+        }
+        // Drop flushes again, so read the live metadata_offset from disk.
+        let live_metadata_offset = {
+            let bytes = fs::read(&db_path).unwrap();
+            let header: Header = bincode::deserialize(&bytes[..HEADER_SIZE as usize]).unwrap();
+            header.metadata_offset
+        };
+        assert!(
+            offsets[0] > HEADER_SIZE,
+            "first metadata block should sit at HEADER_SIZE, before the documents"
+        );
+
+        // Corrupt the live metadata (first collection length > file size) and
+        // drop the WAL, so open() has to fall back to the document scan.
+        if wal_path.exists() {
+            fs::remove_file(&wal_path).unwrap();
+        }
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&db_path)
+                .unwrap();
+            file.seek(std::io::SeekFrom::Start(live_metadata_offset + 4))
+                .unwrap();
+            file.write_all(&u32::MAX.to_le_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        let meta = storage
+            .get_collection_meta("items")
+            .expect("collection must be recovered by the document scan");
+        assert_eq!(meta.document_catalog.len(), 10);
+        assert_eq!(meta.last_id, 10);
+        assert!(
+            storage.header.data_end_offset >= live_metadata_offset,
+            "recovered metadata must not be written inside the existing data region"
+        );
+        for (n, &off) in offsets.iter().enumerate() {
+            let doc: serde_json::Value =
+                serde_json::from_slice(&storage.read_data(off).unwrap()).unwrap();
+            assert_eq!(doc["_id"], serde_json::json!(n as i64 + 1));
         }
     }
 

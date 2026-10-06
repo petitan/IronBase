@@ -32,7 +32,11 @@ pub const MAX_DOCUMENT_SIZE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum metadata méret bájtokban (64 MB)
 ///
 /// Collection metadata (index definíciók, stb.) maximális mérete.
-/// DoS védelem a túlzottan nagy metadata ellen.
+///
+/// ⚠️ A metadata reader (`storage/metadata.rs::read_collection_metas`) ezt
+/// NEM érvényesíti (audit 2026-10-06 #1): a writer sem korlátoz, így a 64 MB
+/// feletti, valid metadata elutasítása a teljes adatbázis csendes elvesztéséhez
+/// vezetett. A DoS védelem a fájlban ténylegesen maradt bájtszámon alapul.
 pub const MAX_METADATA_SIZE: usize = 64 * 1024 * 1024;
 
 // ============================================================================

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — metadata recovery could silently wipe the whole database (mcp-server v1.0.545)
+
+Two storage bugs that, together, made `open()` return `Ok` with **zero
+collections** and persist that empty state (found by the 2026-10-06 correctness
+audit, #1 and #3):
+
+- **>64 MB collection metadata was unreadable.** The writer serialized each
+  `CollectionMeta` with no size limit, but the reader rejected any length above
+  `MAX_METADATA_SIZE` (64 MB) as `Corruption` — reached at roughly 1.6M int ids
+  or a few hundred thousand long string ids. `open()` treated that as
+  recoverable corruption and fell back to the document-scan rebuild below.
+  The reader now bounds each length by the bytes actually left in the file
+  (same DoS protection, no artificial cap; allocation via `try_reserve_exact`),
+  and the writer refuses a length that would overflow the `u32` prefix instead
+  of silently truncating it.
+- **`rebuild_from_documents()` destroyed live data.** Every flush appends a
+  metadata block at `data_end_offset` and later documents follow it, so blocks
+  are interleaved with documents. The scan stopped at the first non-document
+  record — the metadata block at offset 256 — recovered nothing, and wrote the
+  new (empty) metadata *at the scan stop offset*, i.e. over live documents.
+  The scan now steps over complete metadata blocks (`metadata_block_end`,
+  streaming JSON validation, no full load) and the recovered metadata is always
+  appended at EOF, so a scan that stops early can no longer overwrite data.
+
+Regression tests: `test_load_metadata_larger_than_max_metadata_size`,
+`test_rebuild_from_documents_skips_interleaved_metadata`.
+
 ### Removed — auto-compaction host-memory RAM gate (mcp-server v1.0.544)
 
 Removes the `max_file_to_ram_ratio` gate (Fix A of the #111 host-memory-safe
