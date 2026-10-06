@@ -1,6 +1,6 @@
 ---
 name: code-consistency-enforcer
-description: Use PROACTIVELY after writing or modifying code in ironbase-core, bindings/python, IronBase.NET or mcp-server to audit it for consistency with the existing codebase — naming, error handling, memory complexity, layer placement, and Rust↔Python/C# error mapping. Read-only reviewer: it reports findings, it does not edit code or run commands. Tell it which files/functions changed.
+description: "Use PROACTIVELY after writing or modifying code in ironbase-core, bindings/python, IronBase.NET or mcp-server to audit it for consistency with the existing codebase — naming, error handling, memory complexity, layer placement, and Rust↔Python/C# error mapping. Read-only reviewer: it reports findings, it does not edit code or run commands. Tell it which files/functions changed."
 model: opus
 color: blue
 tools: Read, Grep, Glob
@@ -30,7 +30,7 @@ can verify them — not additional rules.
 
 | Area | Pattern baseline |
 |------|------------------|
-| Rust → Python errors | `bindings/python/src/lib.rs` — `ironbase_error_to_pyerr()` and the `create_exception!` hierarchy (`IronBaseException`, `TransactionError`, `CorruptionError`, …). `PyRuntimeError` is the established arm for `Unknown`/`InternalError`. |
+| Rust → Python errors | `bindings/python/src/lib.rs` — `ironbase_error_to_pyerr()` and the `create_exception!` hierarchy (`IronBaseException`, `TransactionError`, `CorruptionError`, …). `IronBaseError::Io` → `PyIOError` and `Unknown`/`InternalError` → `PyRuntimeError` are the established stdlib arms. |
 | Rust → C# errors | `IronBase.NET/src/IronBase/Exceptions/IronBaseException.cs` — `FromErrorCode()` error-code → typed `IronBaseXxxException`; thrown via `Interop/NativeHelper.cs`. |
 | MCP tool schemas | `mcp-server/src/tools/definitions/` — no top-level `oneOf`/`allOf`/`anyOf` in `inputSchema` (see CLAUDE.md → MCP Server). |
 
