@@ -48,9 +48,10 @@
 
 use super::{CollectionMeta, Header, HeaderWriter, StorageEngine};
 use crate::error::{IronBaseError, Result};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
@@ -176,8 +177,9 @@ impl StorageEngine {
     /// the current file position.
     ///
     /// DoS protection: a length field is rejected when it is zero or larger
-    /// than the bytes actually left in the file, so a corrupted length can
-    /// never trigger an allocation beyond the file size. A fixed cap
+    /// than the bytes actually left in the file, and each entry is parsed as a
+    /// stream (never buffered whole), so a corrupted length cannot force a
+    /// large allocation. A fixed cap
     /// (`MAX_METADATA_SIZE`) is NOT used here: the writer has no such cap, so a
     /// large but valid collection (>64 MB catalog, ~1.6M int ids) was rejected
     /// as corruption and `open()` fell back to the destructive document-scan
@@ -207,17 +209,19 @@ impl StorageEngine {
                 )));
             }
 
-            let mut meta_bytes = Vec::new();
-            meta_bytes.try_reserve_exact(len).map_err(|_| {
-                IronBaseError::OutOfMemory(format!(
-                    "Failed to allocate {}MB for collection metadata",
-                    len / (1024 * 1024)
-                ))
-            })?;
-            meta_bytes.resize(len, 0);
-            file.read_exact(&mut meta_bytes)?;
-
-            let meta: CollectionMeta = serde_json::from_slice(&meta_bytes)?;
+            // Parse straight from the file instead of buffering `len` bytes:
+            // a corrupted length that still fits in a large file would
+            // otherwise allocate (and touch) gigabytes before the JSON is
+            // rejected. Memory is bounded by the parsed `CollectionMeta`.
+            let start = file.stream_position()?;
+            let meta = {
+                let mut reader = BufReader::new(&*file).take(len as u64);
+                let mut de = serde_json::Deserializer::from_reader(&mut reader);
+                let meta = CollectionMeta::deserialize(&mut de)?;
+                de.end()?;
+                meta
+            };
+            file.seek(SeekFrom::Start(start + len as u64))?;
             collections.insert(meta.name.clone(), meta);
         }
 

@@ -1290,9 +1290,9 @@ impl StorageEngine {
             // Every flush appends a metadata block at data_end_offset and later
             // documents are appended after it, so metadata blocks are
             // interleaved with documents. A record that is not a document is
-            // skipped if it parses as a whole metadata block; otherwise the
-            // scan stops (corrupted or torn data).
-            let doc = if len == 0
+            // skipped if it is a legacy (v1) metadata entry or parses as a whole
+            // metadata block; otherwise the scan stops (corrupted or torn data).
+            let parsed = if len == 0
                 || len > MAX_DOCUMENT_SIZE_BYTES
                 || offset + 4 + (len as u64) > file_len
             {
@@ -1302,16 +1302,24 @@ impl StorageEngine {
                 if self.file.read_exact(&mut data).is_err() {
                     break;
                 }
-                serde_json::from_slice::<serde_json::Value>(&data)
-                    .ok()
-                    .and_then(|v| {
-                        let name = v.get("_collection")?.as_str()?.to_string();
-                        Some((v, name))
-                    })
+                serde_json::from_slice::<serde_json::Value>(&data).ok()
             };
 
-            let (doc_value, collection_name) = match doc {
-                Some(doc) => doc,
+            let (doc_value, collection_name) = match parsed {
+                Some(v) => match v.get("_collection").and_then(|c| c.as_str()) {
+                    Some(name) => {
+                        let name = name.to_string();
+                        (v, name)
+                    }
+                    // v1 files keep `[len][CollectionMeta JSON]` entries (no
+                    // count prefix) between the header and the documents, framed
+                    // exactly like a document record.
+                    None if v.get("name").is_some() && v.get("document_catalog").is_some() => {
+                        offset += 4 + len as u64;
+                        continue;
+                    }
+                    None => break,
+                },
                 None => match self.metadata_block_end(offset, file_len)? {
                     Some(end) => {
                         offset = end;
@@ -3482,6 +3490,42 @@ mod tests {
                 serde_json::from_slice(&storage.read_data(off).unwrap()).unwrap();
             assert_eq!(doc["_id"], serde_json::json!(n as i64 + 1));
         }
+    }
+
+    /// Sourcery review on #137: v1 files store `[len][CollectionMeta JSON]`
+    /// entries right after the header with no count prefix; the scan must step
+    /// over them to reach the documents.
+    #[test]
+    fn test_rebuild_from_documents_skips_legacy_v1_metadata() {
+        use crate::document::DocumentId;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        storage.create_collection("items").unwrap();
+        let meta_json = serde_json::to_vec(storage.get_collection_meta("items").unwrap()).unwrap();
+
+        // [header][len][meta][doc 1][doc 2][doc 3], written in place so the
+        // engine's file handle sees it.
+        let mut bytes = fs::read(&db_path).unwrap()[..HEADER_SIZE as usize].to_vec();
+        bytes.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&meta_json);
+        for i in 1..=3i64 {
+            let doc = serde_json::json!({"_id": DocumentId::Int(i), "_collection": "items"});
+            let doc = serde_json::to_vec(&doc).unwrap();
+            bytes.extend_from_slice(&(doc.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&doc);
+        }
+        fs::write(&db_path, &bytes).unwrap();
+
+        storage.rebuild_from_documents().unwrap();
+
+        let meta = storage
+            .get_collection_meta("items")
+            .expect("documents after the v1 metadata must be recovered");
+        assert_eq!(meta.document_catalog.len(), 3);
+        assert_eq!(meta.last_id, 3);
     }
 
     #[test]

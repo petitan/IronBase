@@ -30,9 +30,15 @@ audit, #1 and #3):
   The scan now steps over complete metadata blocks (`metadata_block_end`,
   streaming JSON validation, no full load) and the recovered metadata is always
   appended at EOF, so a scan that stops early can no longer overwrite data.
+  The scan also steps over legacy v1 `[len][CollectionMeta]` entries (no count
+  prefix) that sit between the header and the documents.
+- Collection metadata entries are parsed as a stream from the file instead of
+  being buffered whole, so a corrupted length that still fits in a large file
+  cannot force a multi-GB allocation during `open()`.
 
 Regression tests: `test_load_metadata_larger_than_max_metadata_size`,
-`test_rebuild_from_documents_skips_interleaved_metadata`.
+`test_rebuild_from_documents_skips_interleaved_metadata`,
+`test_rebuild_from_documents_skips_legacy_v1_metadata`.
 
 ### Removed — auto-compaction host-memory RAM gate (mcp-server v1.0.544)
 
