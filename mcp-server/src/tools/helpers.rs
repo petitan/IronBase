@@ -136,13 +136,13 @@ pub fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
                 }
             })
             .collect()
-    } else if let Some(obj) = sort_value.as_object() {
+    } else {
         // Object format: {"field": 1, "field2": -1}
-        obj.iter()
+        sort_value
+            .as_object()?
+            .iter()
             .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(1) as i32))
             .collect()
-    } else {
-        return None;
     };
 
     // Empty → None (enables O(1) skip/limit)

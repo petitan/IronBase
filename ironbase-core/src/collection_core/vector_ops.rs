@@ -808,11 +808,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 for v in arr {
                     match v {
                         Value::Number(n) => {
-                            if let Some(f) = n.as_f64() {
-                                vector.push(f as f32);
-                            } else {
-                                return None;
-                            }
+                            vector.push(n.as_f64()? as f32);
                         }
                         _ => return None,
                     }

@@ -159,8 +159,8 @@ Metadata at END → no race conditions, no truncation.
 
 ### Error Handling (API)
 - Rust: `Result<T>` with `IronBaseError` (thiserror)
-- Python: Map to PyIOError, PyRuntimeError, PyValueError
-- C#: Map to appropriate .NET exceptions
+- Python: `ironbase_error_to_pyerr()` (`bindings/python/src/lib.rs`) → saját hierarchia (`IronBaseException` + `TransactionError`, `CorruptionError`, `OutOfMemoryError`, …); stdlib csak `Io` → `PyIOError` és `Unknown`/`InternalError` → `PyRuntimeError`
+- C#: `IronBaseException.FromErrorCode()` (`IronBase.NET/src/IronBase/Exceptions/`) → típusos `IronBaseXxxException`
 
 ### Kód Konzisztencia Protokoll
 
