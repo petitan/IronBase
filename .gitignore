@@ -92,3 +92,6 @@ reimport_tales.py
 recover_ironbase.py
 scripts/benchmark_preprocessing.py
 scripts/mesek_embeddings.py
+
+# Local RAG import dump (26 MB), not part of the repo
+PeTitanKalimpalo.Documents.chunks.json
