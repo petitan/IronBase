@@ -42,6 +42,12 @@ use std::path::Path;
 /// let storage = MemoryStorage::new();
 /// ```
 pub trait Storage: Send + Sync {
+    /// Give up the orderly shutdown: on drop, do not flush, clear the WAL or
+    /// mark a clean shutdown, so the next open recovers from the WAL as after
+    /// a crash. Used when index state could not be persisted (audit
+    /// 2026-10-06 #30). Storages without a WAL ignore it.
+    fn abandon_shutdown(&mut self) {}
+
     // ========================================================================
     // DOCUMENT OPERATIONS
     // ========================================================================

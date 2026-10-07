@@ -749,7 +749,41 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         index_manager: &mut IndexManager,
         recovered_ops: &[(TransactionId, Operation)],
         persisted_btree: &[crate::index::IndexMetadata],
+        id_index: Option<&str>,
     ) -> Result<bool> {
+        // The _id index is loaded from its own .idx on the same fast path but
+        // is not in `meta.indexes`, so it was never replayed: after a crash it
+        // missed every post-checkpoint insert and accepted duplicate _id
+        // inserts (audit 2026-10-06 #27). Its key is the op's doc_id.
+        if let Some(id_index_name) = id_index {
+            if let Some(idx) = index_manager.get_btree_index_mut(id_index_name) {
+                let watermark = idx.last_flushed_tx_id();
+                if watermark == 0 && idx.size() > 0 && !recovered_ops.is_empty() {
+                    return Ok(false); // legacy .idx without watermark
+                }
+                for (tx_id, op) in recovered_ops {
+                    if *tx_id <= watermark {
+                        continue;
+                    }
+                    match op {
+                        Operation::Insert { doc_id, .. } => {
+                            let key = id_index_key(doc_id);
+                            if idx.search(&key).as_ref() != Some(doc_id)
+                                && idx.insert(key, doc_id.clone()).is_err()
+                            {
+                                return Ok(false);
+                            }
+                        }
+                        Operation::Delete { doc_id, .. } => {
+                            idx.delete(&id_index_key(doc_id), doc_id)?;
+                        }
+                        Operation::Update { .. } => {} // _id is immutable
+                    }
+                }
+                index_manager.mark_btree_dirty(id_index_name);
+            }
+        }
+
         for bt_meta in persisted_btree {
             let watermark = match index_manager.get_btree_index(&bt_meta.name) {
                 Some(idx) => {
@@ -1110,6 +1144,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 &mut index_manager,
                 &recovered_ops_for_collection,
                 &persisted_indexes,
+                id_index_loaded.then_some(id_index_name.as_str()),
             ) {
                 Ok(true) => {
                     log_debug!(
@@ -1491,6 +1526,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // storage.drop_collection clears the whole WAL: persist every
+        // collection's dirty indexes first, with writers held off (audit
+        // 2026-10-06 #28)
+        let _persist_gate = self.persist_gate.write();
+        self.flush_all_index_managers()?;
+
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
@@ -1522,6 +1563,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         if old_name == new_name {
             return Ok(());
         }
+
+        // The storage rename clears the whole WAL, and the old IndexManager is
+        // dropped and its files reloaded under the new name: persist every
+        // dirty index first, with writers held off, so the moved files are
+        // current (audit 2026-10-06 #28, #29)
+        let _persist_gate = self.persist_gate.write();
+        self.flush_all_index_managers()?;
 
         // Validate existence + protection, and capture the db file path. The
         // new-name conflict is also enforced by the storage layer.
@@ -1659,8 +1707,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         name: &str,
         flags: crate::storage::CollectionFlags,
     ) -> Result<()> {
-        // storage.flush() clears the WAL (audit 2026-10-06 #8, see persist_gate)
+        // storage.flush() clears the WAL: indexes go to disk first, with
+        // writers held off (audit 2026-10-06 #8, #28)
         let _persist_gate = self.persist_gate.write();
+        self.flush_all_index_managers()?;
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta_mut(name)
@@ -1699,6 +1749,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // storage.drop_collection clears the whole WAL: persist every
+        // collection's dirty indexes first, with writers held off (audit
+        // 2026-10-06 #28)
+        let _persist_gate = self.persist_gate.write();
+        self.flush_all_index_managers()?;
+
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
@@ -1784,5 +1840,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 );
             }
         }
+    }
+}
+
+/// `_id` index key of a document id (same mapping as the live index paths).
+fn id_index_key(doc_id: &crate::document::DocumentId) -> crate::index::IndexKey {
+    use crate::document::DocumentId;
+    use crate::index::IndexKey;
+    match doc_id {
+        DocumentId::Int(i) => IndexKey::Int(*i),
+        DocumentId::String(s) => IndexKey::String(s.clone()),
+        DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
     }
 }

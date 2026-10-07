@@ -578,6 +578,8 @@ pub struct StorageEngine {
     /// Indicates whether the database was cleanly shut down last time
     /// If true, indexes can be trusted from .idx files without rebuild
     was_clean_shutdown: bool,
+    /// Set by `abandon_shutdown`: Drop only releases the file lock.
+    shutdown_abandoned: bool,
 }
 
 impl StorageEngine {
@@ -755,6 +757,7 @@ impl StorageEngine {
             lock_file,
             wal_ops_since_clear: 0,
             was_clean_shutdown: was_clean,
+            shutdown_abandoned: false,
         };
 
         let migrated = Self::rebuild_document_order_if_needed(storage.collections_mut());
@@ -2342,6 +2345,17 @@ impl StorageEngine {
 // Automatic cleanup on drop
 impl Drop for StorageEngine {
     fn drop(&mut self) {
+        if self.shutdown_abandoned {
+            // Index state could not be persisted: keep the WAL and the dirty
+            // marker so the next open replays/rebuilds (audit 2026-10-06 #30).
+            log_error!(
+                "StorageEngine::drop: shutdown abandoned, leaving WAL and dirty flag for recovery"
+            );
+            if let Err(e) = self.lock_file.unlock() {
+                log_error!("StorageEngine::drop unlock failed: {}", e);
+            }
+            return;
+        }
         // CRITICAL: mark_clean_shutdown() ONLY if BOTH flush and checkpoint succeed.
         // If either fails, metadata/indexes may not be persisted — marking clean
         // would cause the next open() to trust stale .idx files (see #9ff48302).
@@ -2386,6 +2400,10 @@ impl Drop for StorageEngine {
 // ============================================================================
 
 impl Storage for StorageEngine {
+    fn abandon_shutdown(&mut self) {
+        self.shutdown_abandoned = true;
+    }
+
     fn write_document(&mut self, collection: &str, doc: &serde_json::Value) -> Result<u64> {
         // Parse document to extract ID
         let doc_id: DocumentId = if let Some(id_val) = doc.get("_id") {

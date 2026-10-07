@@ -317,8 +317,13 @@ impl DatabaseCore<StorageEngine> {
         self.is_closed.store(true, Ordering::SeqCst);
 
         // Checkpoint: flush indexes + metadata + clear WAL
-        // This ensures all data is persisted and WAL is empty
-        self.checkpoint()?;
+        // This ensures all data is persisted and WAL is empty. On failure the
+        // shutdown is abandoned so the storage's Drop neither clears the WAL
+        // nor marks a clean shutdown (audit 2026-10-06 #30).
+        if let Err(e) = self.checkpoint() {
+            self.storage.write().abandon_shutdown();
+            return Err(e);
+        }
 
         // Mark as clean shutdown BEFORE releasing lock
         // This enables fast startup next time (indexes can be trusted)
@@ -843,36 +848,20 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             return;
         }
 
-        // 1. Get db_path for index persistence
-        let db_path = {
-            if let Some(storage) = self.storage.try_read() {
-                storage.get_file_path().to_string()
-            } else {
-                String::new()
+        // 1. Flush all indexes to disk (B+ tree + fulltext + fuzzy + vector).
+        // If that fails, the shutdown must not clear the WAL or be marked
+        // clean: the next open would trust the stale index files (audit
+        // 2026-10-06 #30). Leave everything as after a crash instead.
+        if let Err(e) = self.flush_all_index_managers() {
+            log_warn!(
+                "Failed to flush indexes on drop, leaving WAL for recovery: {}",
+                e
+            );
+            if let Some(mut storage) = self.storage.try_write() {
+                storage.abandon_shutdown();
             }
-        };
-
-        // 2. Flush all indexes to disk (B+ tree + fulltext + fuzzy + vector)
-        let watermark = self.watermark_tx_id();
-        let index_managers = self.index_managers.read();
-        for index_manager in index_managers.values() {
-            let mut manager = index_manager.write();
-            if let Err(e) = manager.flush_fulltext_indexes(watermark) {
-                log_warn!("Failed to flush fulltext indexes on drop: {}", e);
-            }
-            if let Err(e) = manager.flush_fuzzy_indexes(watermark) {
-                log_warn!("Failed to flush fuzzy indexes on drop: {}", e);
-            }
-            if !db_path.is_empty() {
-                if let Err(e) = manager.flush_btree_indexes(&db_path, watermark) {
-                    log_warn!("Failed to flush btree indexes on drop: {}", e);
-                }
-                if let Err(e) = manager.flush_vector_indexes(&db_path, watermark) {
-                    log_warn!("Failed to flush vector indexes on drop: {}", e);
-                }
-            }
+            return;
         }
-        drop(index_managers); // Release lock before storage flush
 
         // 3. Flush storage (metadata + sync)
         // Note: Batch mode pending operations are NOT flushed here because
@@ -912,10 +901,41 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Ensure any pending batch operations are flushed before metadata sync
         self.flush_pending_batch()?;
 
-        // storage.flush() clears the WAL (audit 2026-10-06 #8, see persist_gate)
+        // storage.flush() clears the WAL: indexes go to disk first, with
+        // writers held off (audit 2026-10-06 #8, #28)
         let _persist_gate = self.persist_gate.write();
+        self.flush_all_index_managers()?;
         let mut storage = self.storage.write();
         storage.flush()
+    }
+
+    /// Flush every dirty index (B+ tree, fulltext, fuzzy, vector) of every
+    /// collection. Tries all of them and returns the first error.
+    ///
+    /// Every path that clears the whole WAL outside a checkpoint calls this
+    /// first (holding `persist_gate` exclusively), because the WAL is what
+    /// brings dirty indexes forward after a crash (audit 2026-10-06 #28).
+    pub(crate) fn flush_all_index_managers(&self) -> Result<()> {
+        let db_path = self.storage.read().get_file_path().to_string();
+        let watermark = self.watermark_tx_id();
+        let mut first_error = None;
+        for index_manager in self.index_managers.read().values() {
+            let mut manager = index_manager.write();
+            let mut results = vec![
+                manager.flush_fulltext_indexes(watermark),
+                manager.flush_fuzzy_indexes(watermark),
+            ];
+            if !db_path.is_empty() {
+                results.push(manager.flush_btree_indexes(&db_path, watermark));
+                results.push(manager.flush_vector_indexes(&db_path, watermark));
+            }
+            for result in results {
+                if let Err(e) = result {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Get database path
