@@ -398,10 +398,13 @@ fn test_recovery_wal_ahead_of_storage() {
         let mut storage = StorageEngine::open(&db_path).unwrap();
         let (_recovered_txs, _index_changes, _applied_ops) = storage.recover_from_wal().unwrap();
 
-        // WAL should be cleared after recovery
+        // Recovery keeps the committed transaction in the WAL (its index
+        // changes reach the index files only at the next checkpoint, which
+        // then drops it); it must not be replayed as anything else.
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         let remaining = wal.recover().unwrap();
-        assert_eq!(remaining.len(), 0, "WAL should be cleared after recovery");
+        assert_eq!(remaining.len(), 1, "only the committed transaction is kept");
+        assert_eq!(remaining[0][0].transaction_id, 100);
     }
 }
 

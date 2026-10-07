@@ -277,14 +277,16 @@ impl DatabaseCore<StorageEngine> {
     /// ```
     pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
         // 1. Flush all indexes to disk first (like MongoDB's checkpoint)
-        let indexes_flushed = self.flush_all_indexes_counted()?;
+        let (indexes_flushed, watermark) = self.flush_all_indexes_with_watermark()?;
 
         // 2. Flush metadata and clear WAL. The exclusive persist gate waits for
         // auto-commits that are already in the WAL but not yet in storage
-        // (audit 2026-10-06 #8).
+        // (audit 2026-10-06 #8). Writes that landed after the index flush took
+        // its watermark may exist only in the in-memory indexes, so their WAL
+        // entries are kept for index replay after a crash.
         let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
-        let mut stats = storage.checkpoint()?;
+        let mut stats = storage.checkpoint_keeping_wal_after(watermark)?;
 
         // 3. Add index count to stats
         stats.indexes_flushed = indexes_flushed;
@@ -403,6 +405,9 @@ impl DatabaseCore<StorageEngine> {
         let t = std::time::Instant::now();
         let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
+        // Keep the WAL entries the last index flush may not contain.
+        let index_watermark = self.index_flush_watermark.load(Ordering::SeqCst);
+        let keep_after = Some(index_watermark);
         let lock_wait_ms = t.elapsed().as_millis() as u64;
         tracing::info!(
             lock_wait_ms,
@@ -428,7 +433,7 @@ impl DatabaseCore<StorageEngine> {
                 // to HEADER_SIZE). This is safe because: (a) v3+ databases always have
                 // HEADER_SIZE after any previous flush, and (b) create_collection()
                 // calls flush() which normalizes immediately.
-                storage.checkpoint_with_preserialized(metadata_bytes)
+                storage.checkpoint_with_preserialized(metadata_bytes, keep_after)
             }
             None => {
                 // Metadata was clean at Phase A, but Phase A released
@@ -442,7 +447,7 @@ impl DatabaseCore<StorageEngine> {
                 if storage.is_metadata_dirty() {
                     // Dirtied between phases → full checkpoint flushes the
                     // catalog to the main file BEFORE clearing the WAL.
-                    storage.checkpoint()
+                    storage.checkpoint_keeping_wal_after(index_watermark)
                 } else {
                     // Truly clean (no mutations since the last flush): the
                     // catalog is already durable, so a full checkpoint would
@@ -450,14 +455,14 @@ impl DatabaseCore<StorageEngine> {
                     // checkpoint (audit P1-3). Clear the WAL only — in this
                     // state it holds no un-checkpointed ops, so it is a cheap
                     // no-op.
-                    storage.checkpoint_wal_clear_only()
+                    storage.checkpoint_wal_clear_only(keep_after)
                 }
             }
             Some(_) => {
                 // Guard FAIL: mutations happened between Phase A and B (or a v2
                 // database needing migration). Fall back to a full checkpoint
                 // under lock (serialize + write + fsync) — same as before.
-                storage.checkpoint()
+                storage.checkpoint_keeping_wal_after(index_watermark)
             }
         }
     }
@@ -488,6 +493,25 @@ impl DatabaseCore<StorageEngine> {
     /// Btree/fuzzy/vector flushes remain sequential (< 300ms each, lock contention
     /// dominates over I/O — parallelizing would just serialize on the write lock).
     pub fn flush_all_indexes_counted(&self) -> Result<usize> {
+        Ok(self.flush_all_indexes_with_watermark()?.0)
+    }
+
+    /// [`flush_all_indexes_counted`](Self::flush_all_indexes_counted), also
+    /// returning the watermark the pass stamped into the index files. On
+    /// success it is recorded in `index_flush_watermark` for the next
+    /// `checkpoint_wal_only`.
+    fn flush_all_indexes_with_watermark(&self) -> Result<(usize, u64)> {
+        // Every transaction <= this watermark has reached the in-memory
+        // indexes, so this pass writes it into the index files (a non-dirty
+        // index has no change since its last flush).
+        let watermark = self.watermark_tx_id();
+        let total = self.flush_all_indexes_at(watermark)?;
+        self.index_flush_watermark
+            .store(watermark, Ordering::SeqCst);
+        Ok((total, watermark))
+    }
+
+    fn flush_all_indexes_at(&self, watermark: u64) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
@@ -506,7 +530,6 @@ impl DatabaseCore<StorageEngine> {
             if cpus > 1 && index_managers.len() > 1 {
                 use rayon::prelude::*;
 
-                let watermark = self.watermark_tx_id();
                 let results: Vec<Result<usize>> = index_managers
                     .par_iter()
                     .map(|(collection_name, index_manager)| {
@@ -529,7 +552,6 @@ impl DatabaseCore<StorageEngine> {
 
         // Sequential fallback: single collection, single core, or no parallel feature
         let mut total_flushed = 0;
-        let watermark = self.watermark_tx_id();
         for (collection_name, index_manager) in index_managers.iter() {
             total_flushed += Self::flush_collection_indexes(
                 collection_name,
