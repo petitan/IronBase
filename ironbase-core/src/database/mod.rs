@@ -2730,7 +2730,7 @@ mod wal_replay_tests {
 
         // Plant an orphan `.fzidx.tmp` (mimics a fuzzy flush that crashed
         // mid-rename). Same dir as the .mlite, arbitrary content.
-        let orphan = tmp.path().join("docs_collection_field_fuzzy.fzidx.tmp");
+        let orphan = tmp.path().join("orphan_docs_field_fuzzy.fzidx.tmp");
         std::fs::write(&orphan, b"crash-leftover").unwrap();
         assert!(orphan.exists());
 
@@ -2756,6 +2756,23 @@ mod wal_replay_tests {
 
         let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         assert!(!orphan.exists(), ".hnsw.tmp should be removed on open");
+    }
+
+    /// Opening a database must not delete another database's in-flight
+    /// index temp file in the same directory (its save then failed with
+    /// NotFound on the rename).
+    #[test]
+    fn orphan_cleanup_keeps_other_databases_temp_files() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("a.mlite");
+        let own = tmp.path().join("a_c_k_0123456789abcdef.idx.tmp");
+        let other = tmp.path().join("b_c_k_0123456789abcdef.idx.tmp");
+        std::fs::write(&own, b"crash-leftover").unwrap();
+        std::fs::write(&other, b"in-flight").unwrap();
+
+        let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!own.exists(), "own orphan .idx.tmp should be removed");
+        assert!(other.exists(), "another database's .idx.tmp was deleted");
     }
 
     /// Task #18: HNSW flush should leave NO `.hnsw.tmp` behind (atomic
@@ -3272,7 +3289,7 @@ mod wal_replay_tests {
             .close()
             .unwrap();
 
-        let orphan = tmp.path().join("foo_content_fts.ftidx.tmp");
+        let orphan = tmp.path().join("orphan_ft_content_fts.ftidx.tmp");
         std::fs::write(&orphan, b"crash-leftover").unwrap();
         assert!(orphan.exists());
 
