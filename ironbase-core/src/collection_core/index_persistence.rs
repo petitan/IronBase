@@ -73,12 +73,20 @@ where
     F: FnOnce(&mut File) -> Result<T>,
 {
     if let Some(index_file_path) = build_index_file_path(db_file_path, index_name) {
+        // Write a temp file and rename it over the index: a lazy-mode index
+        // still reads its unloaded nodes from the current file while it is
+        // saved, so truncating that file first destroyed the index (audit
+        // 2026-10-06 #22). The rename also makes a crash mid-save harmless.
+        let temp_path = index_file_path.with_extension("idx.tmp");
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&index_file_path)?;
+            .open(&temp_path)?;
         save_fn(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, &index_file_path)?;
     }
     Ok(())
 }

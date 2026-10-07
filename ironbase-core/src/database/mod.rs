@@ -4526,3 +4526,127 @@ mod crud_write_tests {
         assert_eq!(one["b"], ROUNDS, "update_one increments lost: {}", one);
     }
 }
+
+#[cfg(test)]
+mod index_maintenance_tests {
+    //! Audit 2026-10-06 #23, #24, #25: fulltext and vector index maintenance.
+
+    use super::*;
+    use crate::vector::{DistanceMetric, VectorIndexConfig};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn hits(db: &DatabaseCore<StorageEngine>, word: &str) -> Vec<serde_json::Value> {
+        let mut ids: Vec<_> = db
+            .collection("a")
+            .unwrap()
+            .fulltext_search("content", word, Some(10), None, None, None)
+            .unwrap()
+            .into_iter()
+            .map(|(doc, _, _)| doc["_id"].clone())
+            .collect();
+        ids.sort_by_key(|v| v.to_string());
+        ids
+    }
+
+    /// #23 + #25: updates after a checkpoint (two-phase flush, lazy index)
+    /// must replace the old postings, also after another flush and reopen.
+    #[test]
+    fn fulltext_updates_after_checkpoint_replace_old_postings() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("f.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.collection("a")
+                .unwrap()
+                .create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            db.insert_one("a", fields(json!({"_id": "d1", "content": "apple banana"})))
+                .unwrap();
+            db.insert_one("a", fields(json!({"_id": "d2", "content": "grape melon"})))
+                .unwrap();
+            db.checkpoint().unwrap();
+
+            db.update_one(
+                "a",
+                &json!({"_id": "d2"}),
+                &json!({"$set": {"content": "kiwi"}}),
+            )
+            .unwrap();
+            db.update_one(
+                "a",
+                &json!({"_id": "d1"}),
+                &json!({"$set": {"content": "cherry"}}),
+            )
+            .unwrap();
+
+            assert_eq!(hits(&db, "kiwi"), vec![json!("d2")]);
+            assert_eq!(hits(&db, "cherry"), vec![json!("d1")]);
+            assert!(hits(&db, "grape").is_empty(), "old postings of d2");
+            assert!(hits(&db, "apple").is_empty(), "old postings of d1");
+
+            db.checkpoint().unwrap();
+            assert!(hits(&db, "apple").is_empty());
+            db.close().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert!(hits(&db, "apple").is_empty());
+        assert!(hits(&db, "grape").is_empty());
+        assert_eq!(hits(&db, "kiwi"), vec![json!("d2")]);
+        assert_eq!(hits(&db, "cherry"), vec![json!("d1")]);
+    }
+
+    /// #24: live inserts/updates/deletes must use the same vector node ids as
+    /// create_vector_index.
+    #[test]
+    fn vector_index_live_updates_match_created_nodes() {
+        let temp = TempDir::new().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(temp.path().join("v.mlite")).unwrap();
+        db.insert_one("v", fields(json!({"_id": "x", "emb": [1.0, 0.0]})))
+            .unwrap();
+        db.insert_one("v", fields(json!({"_id": "y", "emb": [0.0, 1.0]})))
+            .unwrap();
+        let mut cfg = VectorIndexConfig::new(2);
+        cfg.field = "emb".to_string();
+        cfg.metric = DistanceMetric::Cosine;
+        db.collection("v")
+            .unwrap()
+            .create_vector_index("emb", cfg)
+            .unwrap();
+        db.insert_one("v", fields(json!({"_id": "z", "emb": [0.9, 0.1]})))
+            .unwrap();
+
+        db.update_one(
+            "v",
+            &json!({"_id": "x"}),
+            &json!({"$set": {"emb": [-1.0, 0.0]}}),
+        )
+        .unwrap();
+        db.delete_one("v", &json!({"_id": "y"})).unwrap();
+
+        let results = db
+            .collection("v")
+            .unwrap()
+            .vector_search("emb", &[1.0, 0.0], 10)
+            .unwrap();
+        let ids: Vec<_> = results.iter().map(|(d, _)| d["_id"].clone()).collect();
+        assert_eq!(
+            ids.iter().filter(|id| **id == json!("x")).count(),
+            1,
+            "x must appear once: {:?}",
+            results
+        );
+        assert!(
+            !ids.contains(&json!("y")),
+            "deleted y returned: {:?}",
+            results
+        );
+        let x_score = results.iter().find(|(d, _)| d["_id"] == "x").unwrap().1;
+        assert!(x_score < 0.0, "stale vector of x: {:?}", results);
+        assert_eq!(ids[0], json!("z"));
+    }
+}

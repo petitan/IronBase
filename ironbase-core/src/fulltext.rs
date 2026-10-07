@@ -913,6 +913,11 @@ pub(crate) struct FulltextFlushResult {
     /// uses this to prune the live `deleted_doc_ids` set — those entries
     /// no longer need filtering because they're gone from disk.
     pub durably_deleted: HashSet<DocumentId>,
+    /// `(doc_id, offset in the OLD file, offset in the NEW file)` for every
+    /// doc_tokens record copied into the new file. commit_flush installs the
+    /// new offset only if the doc still has the old one (not removed or
+    /// re-inserted during Phase 2).
+    pub moved_doc_tokens: Vec<(DocumentId, u64, u64)>,
 }
 
 /// Search result with score and matched tokens
@@ -1856,10 +1861,16 @@ impl FulltextIndex {
                 merged.push(entry.clone());
             }
         }
+        // `deleted_doc_ids` marks docs whose frozen/disk postings are stale.
+        // Their current postings (after a re-insert) are in memory, so the
+        // filter applies to the frozen and disk sources only (audit
+        // 2026-10-06 #25: an update used to clear the marker, and postings of
+        // tokens only in the OLD text came back from disk).
+        let stale = |doc_id: &DocumentId| self.deleted_doc_ids.contains(doc_id);
         // Frozen entries next (snapshot from current flush, also accurate TF)
         if let Some(frozen) = frozen_entries {
             for entry in frozen {
-                if !seen_doc_ids.contains(&entry.0) {
+                if !seen_doc_ids.contains(&entry.0) && !stale(&entry.0) {
                     seen_doc_ids.insert(entry.0.clone());
                     merged.push(entry.clone());
                 }
@@ -1868,29 +1879,16 @@ impl FulltextIndex {
         // Disk entries last (from previous flush)
         if let Some(disk) = disk_entries {
             for (doc_id, tf) in disk {
-                if !seen_doc_ids.contains(&doc_id) {
+                if !seen_doc_ids.contains(&doc_id) && !stale(&doc_id) {
                     merged.push((doc_id, tf));
                 }
             }
         }
 
         if merged.is_empty() {
-            return None;
-        }
-
-        // Filter out deleted documents (important for lazy mode correctness)
-        if self.deleted_doc_ids.is_empty() {
-            Some(merged)
+            None
         } else {
-            let filtered: Vec<_> = merged
-                .into_iter()
-                .filter(|(doc_id, _)| !self.deleted_doc_ids.contains(doc_id))
-                .collect();
-            if filtered.is_empty() {
-                None
-            } else {
-                Some(filtered)
-            }
+            Some(merged)
         }
     }
 
@@ -1949,11 +1947,9 @@ impl FulltextIndex {
         if self.doc_tokens_offsets.contains_key(doc_id) {
             self.remove(doc_id)?;
         }
-        // Clear any prior deletion marker. Without this, a remove() followed
-        // by insert() (on the same doc_id, within a lazy-mode window)
-        // would leave the doc in `deleted_doc_ids`, so search would still
-        // filter it out despite the fresh posting-list entries.
-        self.deleted_doc_ids.remove(doc_id);
+        // The deletion marker (if any) stays: it hides this doc's stale
+        // frozen/disk postings, while the fresh postings below are in memory
+        // and not filtered (see get_token_entries_merged).
 
         // Count token frequencies for this document
         let mut token_counts: HashMap<String, u32> = HashMap::new();
@@ -2861,9 +2857,30 @@ impl FulltextIndex {
         tokens.sort();
         tokens.dedup();
 
-        // Write doc_tokens offset table starting right after the header.
-        let offsets_offset = FTIDX_HEADER_SIZE;
-        let offsets_vec: Vec<(&DocumentId, &u64)> = snapshot.doc_tokens_offsets.iter().collect();
+        // Copy every on-disk doc_tokens record into the new file. The new
+        // file replaces the old one, so offsets into the old layout would
+        // point at the offset table / token entries of the new file and
+        // remove()/update() would read garbage (audit 2026-10-06 #23).
+        // Offset 0 means the tokens are in memory (doc_tokens_memory).
+        let mut moved_doc_tokens: Vec<(DocumentId, u64, u64)> = Vec::new();
+        let mut new_doc_offsets: HashMap<DocumentId, u64> =
+            HashMap::with_capacity(snapshot.doc_tokens_offsets.len());
+        let mut copy_offset = FTIDX_HEADER_SIZE;
+        for (doc_id, &old_offset) in &snapshot.doc_tokens_offsets {
+            if old_offset == 0 {
+                new_doc_offsets.insert(doc_id.clone(), 0);
+                continue;
+            }
+            let record = Self::read_doc_tokens_record(&mut old_file, old_offset)?;
+            temp.write_all(&record)?;
+            new_doc_offsets.insert(doc_id.clone(), copy_offset);
+            moved_doc_tokens.push((doc_id.clone(), old_offset, copy_offset));
+            copy_offset += record.len() as u64;
+        }
+
+        // Write doc_tokens offset table after the copied records.
+        let offsets_offset = copy_offset;
+        let offsets_vec: Vec<(&DocumentId, &u64)> = new_doc_offsets.iter().collect();
         let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
         temp.write_all(&offsets_bytes)?;
 
@@ -2981,6 +2998,7 @@ impl FulltextIndex {
             new_token_offsets,
             new_write_offset,
             durably_deleted: snapshot.deleted_doc_ids.clone(),
+            moved_doc_tokens,
         })
     }
 
@@ -3014,6 +3032,17 @@ impl FulltextIndex {
         //    next full flush().
         for doc_id in &result.durably_deleted {
             self.deleted_doc_ids.remove(doc_id);
+        }
+
+        // 2b. Point doc_tokens offsets at the records copied into the new
+        //     file, unless the doc changed during Phase 2 (removed, or
+        //     re-inserted into doc_tokens_memory with offset 0).
+        for (doc_id, old_offset, new_offset) in result.moved_doc_tokens {
+            if let Some(offset) = self.doc_tokens_offsets.get_mut(&doc_id) {
+                if *offset == old_offset {
+                    *offset = new_offset;
+                }
+            }
         }
 
         // 3. Re-open file_handle for subsequent writes.
@@ -3112,6 +3141,23 @@ impl FulltextIndex {
         }
         // Re-open file_handle (best effort — if this fails, next insert uses memory)
         let _ = self.open_storage_file_rw();
+    }
+
+    /// Read one raw `[len][doc_id][len][tokens]` doc_tokens record at `offset`.
+    fn read_doc_tokens_record(file: &mut File, offset: u64) -> Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(offset))?;
+        let mut record = Vec::new();
+        for part in ["doc_id", "doc_tokens"] {
+            let mut len_buf = [0u8; 4];
+            file.read_exact(&mut len_buf)?;
+            let len = u32::from_le_bytes(len_buf) as usize;
+            validate_read_len(len, part)?;
+            record.extend_from_slice(&len_buf);
+            let start = record.len();
+            record.resize(start + len, 0);
+            file.read_exact(&mut record[start..])?;
+        }
+        Ok(record)
     }
 
     /// Read token entries from a file at a given offset (standalone, no &self).

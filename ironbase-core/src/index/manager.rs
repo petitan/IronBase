@@ -1580,11 +1580,9 @@ impl IndexManager {
 
                         // Check dimension matches
                         if vector.len() == index.config().dim {
-                            let id_str = match doc_id {
-                                DocumentId::Int(i) => i.to_string(),
-                                DocumentId::String(s) => s.clone(),
-                                DocumentId::ObjectId(oid) => oid.clone(),
-                            };
+                            // Same prefixed node id as create/rebuild/search
+                            // (audit 2026-10-06 #24)
+                            let id_str = crate::collection_core::doc_id_to_string(doc_id);
                             // Vector overflow is SWALLOWED (log-and-continue),
                             // NOT propagated — and must stay that way. The durable
                             // and batch insert paths write the document to storage
@@ -1725,12 +1723,10 @@ impl IndexManager {
             }
 
             if let Some(index) = self.vector_indexes.get_mut(&index_name) {
-                let id_str = match doc_id {
-                    DocumentId::Int(i) => i.to_string(),
-                    DocumentId::String(s) => s.clone(),
-                    DocumentId::ObjectId(oid) => oid.clone(),
-                };
-                index.remove(&id_str);
+                // Prefixed node id (audit 2026-10-06 #24), plus the legacy
+                // unprefixed id that older live inserts stored
+                index.remove(&crate::collection_core::doc_id_to_string(doc_id));
+                index.remove(&crate::collection_core::legacy_hnsw_id(doc_id));
                 self.dirty_vector_indexes.insert(index_name.clone());
             }
         }
