@@ -329,6 +329,14 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
 
     /// Get end offset of data region (next writable position)
     fn data_end_offset(&self) -> u64;
+
+    /// Generation of the file layout. It changes whenever document offsets are
+    /// relocated (compaction), so an offset taken under one lock must only be
+    /// used under a later lock if the generation is unchanged. Storages that
+    /// never relocate documents keep the default.
+    fn layout_generation(&self) -> u64 {
+        0
+    }
 }
 
 // ============================================================================

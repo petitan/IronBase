@@ -2458,7 +2458,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // MEMORY OPTIMIZATION: Don't clone entire catalog HashMap!
         // Only extract what we need: Vec<(DocumentId, u64)> for offsets
-        let (catalog_entries, catalog_len, live_count) = {
+        let (catalog_entries, catalog_len, live_count, layout_generation) = {
             let storage = self.storage.read();
             let meta = storage
                 .get_collection_meta(&self.name)
@@ -2491,7 +2491,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 .collect();
             let len = entries.len();
             let live = storage.get_live_count(&self.name).unwrap_or(0);
-            (entries, len, live)
+            (entries, len, live, storage.layout_generation())
         };
 
         // 🚀 FAST PATH: Empty query - skip directly from catalog without disk I/O
@@ -2648,10 +2648,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             // Read document from storage (brief read lock per document,
-            // released before parsing to allow concurrent inserts)
+            // released before parsing to allow concurrent inserts).
+            // If a compaction swapped the file since the catalog snapshot, the
+            // snapshot offset points into the old layout: look the document
+            // up again by id (audit 2026-10-06 #5).
             let read_result = {
                 let storage = self.storage.read();
-                storage.read_data_at(offset)
+                if storage.layout_generation() == layout_generation {
+                    storage.read_data_at(offset)
+                } else {
+                    match storage
+                        .get_collection_meta(&self.name)
+                        .and_then(|m| m.document_catalog.get(&doc_id).copied())
+                    {
+                        Some(current) => storage.read_data_at(current),
+                        None => continue, // deleted since the snapshot
+                    }
+                }
             };
             let doc_bytes = match read_result {
                 Ok(bytes) => bytes,
