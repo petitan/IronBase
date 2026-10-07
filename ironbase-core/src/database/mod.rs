@@ -4394,3 +4394,135 @@ mod transaction_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod crud_write_tests {
+    //! Audit 2026-10-06 #15, #16, #17, #19: auto-commit CRUD writes.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn open(temp: &TempDir) -> DatabaseCore<StorageEngine> {
+        DatabaseCore::<StorageEngine>::open(temp.path().join("c.mlite")).unwrap()
+    }
+
+    /// #15: a duplicate _id must be rejected without touching the original.
+    #[test]
+    fn duplicate_id_insert_keeps_original() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.insert_one("c", fields(json!({"_id": 1, "name": "orig"})))
+            .unwrap();
+        assert!(db
+            .insert_one("c", fields(json!({"_id": 1, "name": "dup"})))
+            .is_err());
+        assert!(db
+            .insert_many(
+                "c",
+                vec![
+                    fields(json!({"_id": 2})),
+                    fields(json!({"_id": 2, "name": "dup"}))
+                ]
+            )
+            .is_err());
+
+        let all = db.find("c", &json!({})).unwrap();
+        assert_eq!(all, vec![json!({"_id": 1, "name": "orig"})]);
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 1);
+    }
+
+    /// #16: a failed insert_many must not leave index entries behind.
+    #[test]
+    fn failed_insert_many_leaves_no_phantom_index_entries() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.collection("c")
+            .unwrap()
+            .create_index("tags".to_string(), true, false)
+            .unwrap();
+        // Overlapping array elements under a unique multikey index
+        assert!(db
+            .insert_many(
+                "c",
+                vec![
+                    fields(json!({"_id": 10, "tags": ["a", "b"]})),
+                    fields(json!({"_id": 11, "tags": ["b", "c"]})),
+                ]
+            )
+            .is_err());
+        assert!(db.find("c", &json!({})).unwrap().is_empty());
+
+        db.insert_one("c", fields(json!({"_id": 10, "tags": ["a"]})))
+            .unwrap();
+        db.insert_one("c", fields(json!({"_id": 11, "tags": ["c"]})))
+            .unwrap();
+        assert_eq!(db.find("c", &json!({})).unwrap().len(), 2);
+    }
+
+    /// #17: _id is immutable.
+    #[test]
+    fn update_cannot_change_id() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.insert_one("c", fields(json!({"_id": 1, "name": "orig"})))
+            .unwrap();
+        db.insert_one("c", fields(json!({"_id": 2, "name": "two"})))
+            .unwrap();
+
+        assert!(db
+            .update_one("c", &json!({"_id": 1}), &json!({"$set": {"_id": 2}}))
+            .is_err());
+        assert!(db
+            .update_one("c", &json!({"_id": 1}), &json!({"$unset": {"_id": ""}}))
+            .is_err());
+        // Setting _id to its current value is allowed
+        db.update_one(
+            "c",
+            &json!({"_id": 1}),
+            &json!({"$set": {"_id": 1, "x": 1}}),
+        )
+        .unwrap();
+
+        let one = db.find("c", &json!({"_id": 1})).unwrap();
+        assert_eq!(one, vec![json!({"_id": 1, "name": "orig", "x": 1})]);
+        assert_eq!(db.find("c", &json!({"_id": 2})).unwrap().len(), 1);
+    }
+
+    /// #19: concurrent update_many and update_one must not lose updates.
+    #[test]
+    fn concurrent_update_many_and_update_one_keep_all_updates() {
+        const ROUNDS: i64 = 100;
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        for id in 1..=3 {
+            db.insert_one("c", fields(json!({"_id": id, "a": 0, "b": 0})))
+                .unwrap();
+        }
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..ROUNDS {
+                    db.update_many("c", &json!({}), &json!({"$inc": {"a": 1}}))
+                        .unwrap();
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..ROUNDS {
+                    db.update_one("c", &json!({"_id": 1}), &json!({"$inc": {"b": 1}}))
+                        .unwrap();
+                }
+            });
+        });
+
+        for doc in db.find("c", &json!({})).unwrap() {
+            assert_eq!(doc["a"], ROUNDS, "update_many increments lost: {}", doc);
+        }
+        let one = db.find_one("c", &json!({"_id": 1})).unwrap().unwrap();
+        assert_eq!(one["b"], ROUNDS, "update_one increments lost: {}", one);
+    }
+}
