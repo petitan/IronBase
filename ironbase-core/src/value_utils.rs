@@ -410,6 +410,25 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     }
 }
 
+/// MongoDB value equality: numbers compare by value (`1 == 1.0`), arrays
+/// element-wise and objects key-by-key with the same rule; everything else
+/// by JSON equality. Used by the query matcher (`$eq`, `$ne`, `$in`, `$nin`,
+/// `$all`) so equality agrees with `compare_values` used by ranges.
+pub fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(_), Value::Number(_)) => compare_values(a, b) == Some(Ordering::Equal),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| values_equal(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| values_equal(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
 /// Compare two optional JSON values with None handling
 ///
 /// Used for sorting where missing values need consistent ordering.

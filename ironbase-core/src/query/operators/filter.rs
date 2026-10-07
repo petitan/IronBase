@@ -141,7 +141,7 @@ pub fn matches_filter_value(
         Ok(true)
     } else {
         // Direct value comparison (implicit $eq)
-        Ok(doc_value == Some(filter_value))
+        EqOperator.matches(doc_value, filter_value, document)
     }
 }
 

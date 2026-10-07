@@ -3,6 +3,7 @@
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
+use crate::value_utils::values_equal;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -32,12 +33,19 @@ fn value_to_hashable(v: &Value) -> Option<HashableValue> {
         Value::Null => Some(HashableValue::Null),
         Value::Bool(b) => Some(HashableValue::Bool(*b)),
         Value::Number(n) => {
-            // Prefer integer representation for whole numbers
+            // Prefer integer representation for whole numbers, so that `1`
+            // and `1.0` hash alike (MongoDB compares numbers by value)
             if let Some(i) = n.as_i64() {
                 Some(HashableValue::Int(i))
             } else {
-                // Use bit representation for floats (handles NaN, Inf correctly)
-                n.as_f64().map(|f| HashableValue::Float(f.to_bits()))
+                n.as_f64().map(|f| {
+                    if f.fract() == 0.0 && f.abs() < 9.2e18 {
+                        HashableValue::Int(f as i64)
+                    } else {
+                        // Bit representation for other floats (NaN, Inf, fractions)
+                        HashableValue::Float(f.to_bits())
+                    }
+                })
             }
         }
         Value::String(s) => Some(HashableValue::String(s.clone())),
@@ -69,9 +77,24 @@ fn value_in_array(v: &Value, filter_arr: &[Value], hash_set: &HashSet<HashableVa
     }
     // Fallback to O(n) for non-hashable types (arrays, objects)
     if matches!(v, Value::Array(_) | Value::Object(_)) {
-        filter_arr.contains(v)
+        filter_arr.iter().any(|f| values_equal(v, f))
     } else {
         false
+    }
+}
+
+/// `$in` semantics shared with `$nin` (its negation): a missing field
+/// matches a `null` in the list; an array field matches if the array itself
+/// or any element is in the list.
+fn in_matches(doc_value: Option<&Value>, filter_arr: &[Value]) -> bool {
+    let hash_set = build_hash_set(filter_arr);
+    match doc_value {
+        None => filter_arr.iter().any(Value::is_null),
+        Some(v) => {
+            value_in_array(v, filter_arr, &hash_set)
+                || matches!(v, Value::Array(doc_arr)
+                    if doc_arr.iter().any(|elem| value_in_array(elem, filter_arr, &hash_set)))
+        }
     }
 }
 
@@ -97,32 +120,11 @@ impl OperatorMatcher for InOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        match doc_value {
-            None => Ok(false),
-            Some(v) => {
-                if let Value::Array(filter_arr) = filter_value {
-                    // Build HashSet once for O(1) lookups
-                    let hash_set = build_hash_set(filter_arr);
-
-                    // Direct check: is doc_value in the filter array? O(1)
-                    if value_in_array(v, filter_arr, &hash_set) {
-                        return Ok(true);
-                    }
-                    // MongoDB array element matching: if doc_value is an array,
-                    // check if ANY element of doc_value matches ANY value in filter_arr
-                    if let Value::Array(doc_arr) = v {
-                        Ok(doc_arr
-                            .iter()
-                            .any(|elem| value_in_array(elem, filter_arr, &hash_set)))
-                    } else {
-                        Ok(false)
-                    }
-                } else {
-                    Err(IronBaseError::InvalidQuery(
-                        "$in operator requires an array".to_string(),
-                    ))
-                }
-            }
+        match filter_value {
+            Value::Array(filter_arr) => Ok(in_matches(doc_value, filter_arr)),
+            _ => Err(IronBaseError::InvalidQuery(
+                "$in operator requires an array".to_string(),
+            )),
         }
     }
 }
@@ -135,7 +137,8 @@ impl OperatorMatcher for InOperator {
 /// { field: { $nin: [value1, value2, ...] } }
 /// ```
 ///
-/// **Note**: Returns true if field doesn't exist
+/// **Note**: the negation of `$in`: a missing field is "not in" the list
+/// unless the list contains `null`.
 ///
 /// # Complexity: CC = 4
 pub struct NinOperator;
@@ -151,32 +154,11 @@ impl OperatorMatcher for NinOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        if let Value::Array(filter_arr) = filter_value {
-            // Build HashSet once for O(1) lookups
-            let hash_set = build_hash_set(filter_arr);
-
-            match doc_value {
-                None => Ok(true), // Field doesn't exist - not in
-                Some(v) => {
-                    // Direct check: is doc_value in the filter array? O(1)
-                    if value_in_array(v, filter_arr, &hash_set) {
-                        return Ok(false);
-                    }
-                    // MongoDB array element matching: if doc_value is an array,
-                    // return false if ANY element of doc_value matches ANY value in filter_arr
-                    if let Value::Array(doc_arr) = v {
-                        Ok(!doc_arr
-                            .iter()
-                            .any(|elem| value_in_array(elem, filter_arr, &hash_set)))
-                    } else {
-                        Ok(true)
-                    }
-                }
-            }
-        } else {
-            Err(IronBaseError::InvalidQuery(
+        match filter_value {
+            Value::Array(filter_arr) => Ok(!in_matches(doc_value, filter_arr)),
+            _ => Err(IronBaseError::InvalidQuery(
                 "$nin operator requires an array".to_string(),
-            ))
+            )),
         }
     }
 }

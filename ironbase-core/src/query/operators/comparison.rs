@@ -7,6 +7,21 @@ use serde_json::Value;
 
 use super::helpers::compare_with_predicate;
 use super::traits::OperatorMatcher;
+use crate::value_utils::values_equal;
+
+/// MongoDB `$eq` semantics shared by `$eq`, `$ne`, `$in` and `$nin`:
+/// - a missing field equals `null` (`{f: null}` matches null and missing);
+/// - numbers compare by value (`1 == 1.0`), also inside arrays/objects;
+/// - an array field matches if the array itself or any element is equal.
+pub(crate) fn eq_matches(doc_value: Option<&Value>, filter_value: &Value) -> bool {
+    match doc_value {
+        None => filter_value.is_null(),
+        Some(v) => {
+            values_equal(v, filter_value)
+                || matches!(v, Value::Array(arr) if arr.iter().any(|e| values_equal(e, filter_value)))
+        }
+    }
+}
 
 /// $eq operator: Matches values that are equal to a specified value
 ///
@@ -31,22 +46,7 @@ impl OperatorMatcher for EqOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        match doc_value {
-            None => Ok(false),
-            Some(v) => {
-                // Direct equality check
-                if v == filter_value {
-                    return Ok(true);
-                }
-                // MongoDB array element matching: if doc_value is an array,
-                // check if any element equals filter_value
-                if let Value::Array(arr) = v {
-                    Ok(arr.iter().any(|elem| elem == filter_value))
-                } else {
-                    Ok(false)
-                }
-            }
-        }
+        Ok(eq_matches(doc_value, filter_value))
     }
 }
 
@@ -58,7 +58,8 @@ impl OperatorMatcher for EqOperator {
 /// { field: { $ne: value } }
 /// ```
 ///
-/// **Note**: Returns true if field doesn't exist
+/// **Note**: the negation of `$eq`: a missing field is not equal to a
+/// value, but it IS equal to `null` (`{f: {$ne: null}}` = "has a value").
 ///
 /// # Complexity: CC = 2
 pub struct NeOperator;
@@ -74,22 +75,7 @@ impl OperatorMatcher for NeOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        match doc_value {
-            None => Ok(true), // Field doesn't exist - not equal
-            Some(v) => {
-                // Direct inequality check
-                if v == filter_value {
-                    return Ok(false);
-                }
-                // MongoDB array element matching: if doc_value is an array,
-                // return false if ANY element equals filter_value
-                if let Value::Array(arr) = v {
-                    Ok(!arr.iter().any(|elem| elem == filter_value))
-                } else {
-                    Ok(true)
-                }
-            }
-        }
+        Ok(!eq_matches(doc_value, filter_value))
     }
 }
 

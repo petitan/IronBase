@@ -111,14 +111,27 @@ impl PlanRanges {
             QueryPlan::IndexScan {
                 key, is_compound, ..
             } => {
-                let (start, end) = if *is_compound {
-                    // Compound prefix: [prefix..Null, prefix..MaxKey].
-                    index.build_prefix_range(key.clone())
-                } else {
-                    // Single-field equality point lookup.
-                    (key.clone(), key.clone())
-                };
-                PlanRanges::single(index_name, start, end, true, true, true)
+                // A number equals its twin in the other numeric bucket
+                // (`1 == 1.0`), so look up both keys (audit 2026-10-07 O5).
+                let sub_ranges = numeric_twins(key)
+                    .into_iter()
+                    .map(|k| {
+                        let (start, end) = if *is_compound {
+                            // Compound prefix: [prefix..Null, prefix..MaxKey].
+                            index.build_prefix_range(k)
+                        } else {
+                            // Single-field equality point lookup.
+                            (k.clone(), k)
+                        };
+                        SubRange {
+                            start,
+                            end,
+                            inclusive_start: true,
+                            inclusive_end: true,
+                        }
+                    })
+                    .collect();
+                PlanRanges::multi(index_name, sub_ranges, true)
             }
 
             QueryPlan::IndexRangeScan {
@@ -269,11 +282,17 @@ impl PlanRanges {
                 // O(k) point lookups for `$in`. The planner dedups the keys, so
                 // disjoint point ranges sum without double-counting (the multikey
                 // gate handles array-valued docs separately).
-                let sub_ranges = keys
-                    .iter()
+                let mut point_keys: Vec<IndexKey> = Vec::with_capacity(keys.len());
+                for k in keys.iter().flat_map(numeric_twins) {
+                    if !point_keys.contains(&k) {
+                        point_keys.push(k);
+                    }
+                }
+                let sub_ranges = point_keys
+                    .into_iter()
                     .map(|k| SubRange {
                         start: k.clone(),
-                        end: k.clone(),
+                        end: k,
                         inclusive_start: true,
                         inclusive_end: true,
                     })
@@ -281,6 +300,28 @@ impl PlanRanges {
                 PlanRanges::multi(index_name, sub_ranges, true)
             }
         }
+    }
+}
+
+/// The key itself plus, for a number, the equal key in the other numeric
+/// bucket: `Int(1)` ⇄ `Float(1.0)`. The B+ tree orders every `Int` below every
+/// `Float`, so an equality lookup must probe both (MongoDB compares numbers by
+/// value). A float without an exact integer value has no twin.
+fn numeric_twins(key: &IndexKey) -> Vec<IndexKey> {
+    use super::key::OrderedFloat;
+    match key {
+        IndexKey::Int(n) => {
+            let f = *n as f64;
+            if f as i64 == *n && f.abs() < 9.2e18 {
+                vec![key.clone(), IndexKey::Float(OrderedFloat(f))]
+            } else {
+                vec![key.clone()]
+            }
+        }
+        IndexKey::Float(OrderedFloat(f)) if f.fract() == 0.0 && f.abs() < 9.2e18 => {
+            vec![IndexKey::Int(*f as i64), key.clone()]
+        }
+        _ => vec![key.clone()],
     }
 }
 
@@ -405,7 +446,7 @@ mod tests {
         let plan = QueryPlan::IndexScan {
             index_name: "idx".to_string(),
             field: "f".to_string(),
-            key: IndexKey::Int(7),
+            key: IndexKey::String("x".into()),
             is_compound: false,
         };
         let r = PlanRanges::from_plan(&plan, &tree());
@@ -414,9 +455,38 @@ mod tests {
         assert!(r.exact);
         assert!(r.single_contiguous());
         let sr = &r.sub_ranges[0];
-        assert_eq!(sr.start, IndexKey::Int(7));
-        assert_eq!(sr.end, IndexKey::Int(7));
+        assert_eq!(sr.start, IndexKey::String("x".into()));
+        assert_eq!(sr.end, IndexKey::String("x".into()));
         assert!(sr.inclusive_start && sr.inclusive_end);
+    }
+
+    /// `1 == 1.0`: a numeric equality probes the Int AND the Float bucket.
+    #[test]
+    fn numeric_index_scan_probes_both_buckets() {
+        for (key, twin) in [
+            (IndexKey::Int(7), IndexKey::Float(OrderedFloat(7.0))),
+            (IndexKey::Float(OrderedFloat(7.0)), IndexKey::Int(7)),
+        ] {
+            let plan = QueryPlan::IndexScan {
+                index_name: "idx".to_string(),
+                field: "f".to_string(),
+                key: key.clone(),
+                is_compound: false,
+            };
+            let r = PlanRanges::from_plan(&plan, &tree());
+            assert!(r.exact);
+            let points: Vec<&IndexKey> = r.sub_ranges.iter().map(|sr| &sr.start).collect();
+            assert_eq!(points.len(), 2);
+            assert!(points.contains(&&key) && points.contains(&&twin));
+        }
+        // A fractional float has no Int twin.
+        let plan = QueryPlan::IndexScan {
+            index_name: "idx".to_string(),
+            field: "f".to_string(),
+            key: IndexKey::Float(OrderedFloat(2.5)),
+            is_compound: false,
+        };
+        assert_eq!(PlanRanges::from_plan(&plan, &tree()).sub_ranges.len(), 1);
     }
 
     #[test]
@@ -436,12 +506,14 @@ mod tests {
             is_compound: true,
         };
         let r = PlanRanges::from_plan(&plan, &compound);
-        assert_eq!(r.sub_ranges.len(), 1);
-        assert!(r.single_contiguous() && r.exact);
+        // Int(1) and its Float(1.0) twin each get a prefix range.
+        assert_eq!(r.sub_ranges.len(), 2);
+        assert!(r.exact);
         // build_prefix_range wraps the key in a Compound with Null/MaxKey tail.
-        let sr = &r.sub_ranges[0];
-        assert!(matches!(sr.start, IndexKey::Compound(_)));
-        assert!(matches!(sr.end, IndexKey::Compound(_)));
+        for sr in &r.sub_ranges {
+            assert!(matches!(sr.start, IndexKey::Compound(_)));
+            assert!(matches!(sr.end, IndexKey::Compound(_)));
+        }
     }
 
     #[test]
@@ -621,7 +693,11 @@ mod tests {
         let plan = QueryPlan::MultiValueScan {
             index_name: "idx".to_string(),
             field: "f".to_string(),
-            keys: vec![IndexKey::Int(1), IndexKey::Int(2), IndexKey::Int(3)],
+            keys: vec![
+                IndexKey::String("a".into()),
+                IndexKey::String("b".into()),
+                IndexKey::String("c".into()),
+            ],
         };
         let r = PlanRanges::from_plan(&plan, &tree());
         assert_eq!(r.sub_ranges.len(), 3);
@@ -638,11 +714,23 @@ mod tests {
         let plan = QueryPlan::MultiValueScan {
             index_name: "idx".to_string(),
             field: "f".to_string(),
-            keys: vec![IndexKey::Int(42)],
+            keys: vec![IndexKey::String("x".into())],
         };
         let r = PlanRanges::from_plan(&plan, &tree());
         assert_eq!(r.sub_ranges.len(), 1);
         assert!(r.single_contiguous());
+    }
+
+    /// Numeric `$in` keys probe both buckets, without duplicate points.
+    #[test]
+    fn numeric_in_keys_probe_both_buckets_once() {
+        let plan = QueryPlan::MultiValueScan {
+            index_name: "idx".to_string(),
+            field: "f".to_string(),
+            keys: vec![IndexKey::Int(1), IndexKey::Float(OrderedFloat(1.0))],
+        };
+        let r = PlanRanges::from_plan(&plan, &tree());
+        assert_eq!(r.sub_ranges.len(), 2);
     }
 
     #[test]
