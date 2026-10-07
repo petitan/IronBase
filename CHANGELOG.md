@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: random replay order, checkpoint dropping acknowledged writes, index watermark (mcp-server v1.0.548)
+
+Audit 2026-10-06 #7, #8, #10 (high).
+
+- **#7 — crash recovery replayed transactions in random order.**
+  `WriteAheadLog::recover` grouped entries in a `HashMap` and returned them by
+  iterating it. Replay writes full document images, so after a crash deleted
+  documents came back and updates were lost, differently on every run. A
+  transaction is now emitted when its COMMIT is read (log order).
+- **#8 — a checkpoint could clear an acknowledged write from the WAL.** A
+  Safe-mode auto-commit writes the WAL and the storage under two separate
+  lock acquisitions. A checkpoint in between flushed metadata without the
+  document and cleared the WAL, so a crash before the next checkpoint lost the
+  write. Auto-commits now hold a shared `persist_gate` from the WAL commit
+  until the storage write is done; every WAL-clearing path (`checkpoint`,
+  `checkpoint_wal_only`, `flush`, `set_collection_flags`) takes it exclusively.
+- **#10 — the index watermark could pass a write that was not indexed yet.**
+  `max_committed_tx_id` moves at the WAL commit, before the document reaches
+  the indexes, and ids are assigned before commit order is known. An index
+  flush in between was stamped past the write, so crash recovery never
+  replayed it into the index. Auto-transactions are now registered in an
+  in-flight set from id allocation until they are persisted and indexed, and
+  `watermark_tx_id()` stays below the oldest of them.
+
+Not fixed here: audit #9 (Batch mode WAL images taken from a stale snapshot) is
+deferred, and a checkpoint still clears the whole WAL after its index flush, so
+a write indexed between the two is only in the in-memory index until the next
+flush (same class as audit #28).
+
+Regression tests: `crash_recovery_replays_in_commit_order`,
+`checkpoint_waits_for_committed_but_unpersisted_write`,
+`index_watermark_stays_below_unindexed_write`.
+
 ### Fixed — compaction: double-counted updates, scans dropping documents, concurrent compact() corrupting the file (mcp-server v1.0.547)
 
 Audit 2026-10-06 #4, #5, #6 (high).

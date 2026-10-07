@@ -268,6 +268,20 @@ impl BatchDocBuffer {
 /// db.insert_one("users", [("name".to_string(), serde_json::json!("Alice"))].into())?;
 /// # Ok::<(), ironbase_core::IronBaseError>(())
 /// ```
+/// Registration of one auto-transaction in `DatabaseCore::in_flight_tx_ids`.
+/// Dropping it (after the writes are persisted and indexed, or on any error)
+/// lets the index watermark move past the transaction.
+pub(crate) struct InFlightTx<'a> {
+    set: &'a Mutex<std::collections::BTreeSet<u64>>,
+    tx_id: u64,
+}
+
+impl Drop for InFlightTx<'_> {
+    fn drop(&mut self) {
+        self.set.lock().remove(&self.tx_id);
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub struct DatabaseCore<S: Storage + RawStorage> {
     pub(crate) storage: Arc<RwLock<S>>,
@@ -280,6 +294,15 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     /// `last_flushed_tx_id` into the index file metadata so that on
     /// crash recovery, only ops with `tx_id > watermark` need replay.
     pub(crate) max_committed_tx_id: AtomicU64,
+    /// Auto-transaction ids that were begun but whose writes are not yet
+    /// persisted to storage and the indexes. The index watermark never passes
+    /// the smallest of them (audit 2026-10-06 #10). See `InFlightTx`.
+    pub(crate) in_flight_tx_ids: Mutex<std::collections::BTreeSet<u64>>,
+    /// Held shared from an auto-commit's WAL commit until its storage write is
+    /// done, and exclusively by every path that clears the WAL, so a WAL clear
+    /// never drops the only durable record of a committed write that is not
+    /// in storage yet (audit 2026-10-06 #8).
+    pub(crate) persist_gate: RwLock<()>,
     pub(crate) active_transactions:
         Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
 
@@ -507,6 +530,8 @@ impl DatabaseCore<StorageEngine> {
             db_path: path_str,
             next_tx_id: AtomicU64::new(initial_watermark.saturating_add(1)),
             max_committed_tx_id: AtomicU64::new(initial_watermark),
+            in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            persist_gate: RwLock::new(()),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -629,6 +654,8 @@ impl DatabaseCore<MemoryStorage> {
             db_path: String::new(), // No file path for memory storage
             next_tx_id: AtomicU64::new(1),
             max_committed_tx_id: AtomicU64::new(0),
+            in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            persist_gate: RwLock::new(()),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(),
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -670,8 +697,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Index flushes stamp this value into their file metadata as
     /// `last_flushed_tx_id`. On crash recovery, only committed Operations
     /// with `tx_id > last_flushed_tx_id` need replay into the index.
+    ///
+    /// An auto-transaction advances `max_committed_tx_id` at its WAL commit,
+    /// before its document reaches the indexes, and ids are assigned before
+    /// commit order is known. The watermark is therefore capped just below
+    /// the oldest in-flight auto-transaction, so an index flush never stamps
+    /// past an op it does not contain (audit 2026-10-06 #10).
     pub fn watermark_tx_id(&self) -> u64 {
-        self.max_committed_tx_id.load(Ordering::SeqCst)
+        let in_flight = self.in_flight_tx_ids.lock();
+        let committed = self.max_committed_tx_id.load(Ordering::SeqCst);
+        match in_flight.iter().next() {
+            Some(&oldest) => committed.min(oldest.saturating_sub(1)),
+            None => committed,
+        }
     }
 
     /// Take (remove and return) the WAL-recovered operations for a single
@@ -4025,14 +4063,118 @@ mod wal_replay_tests {
 }
 
 #[cfg(test)]
-mod wal_recovery_order_tests {
-    //! Audit 2026-10-06 #7: crash recovery must replay committed transactions
-    //! in log order. Replay writes full document images, so a random order
-    //! resurrects deleted documents and loses updates.
+mod wal_durability_tests {
+    //! Audit 2026-10-06 #7, #8, #10: WAL recovery order, WAL clears racing an
+    //! auto-commit, and the index watermark.
 
     use super::*;
+    use crate::collection_core::RawOperations;
+    use crate::transaction::Operation;
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
+
+    fn doc(k: i64) -> HashMap<String, serde_json::Value> {
+        HashMap::from([("k".to_string(), json!(k))])
+    }
+
+    /// Run a Safe-mode `insert_one` up to (and including) the WAL commit, the
+    /// way `durability.rs` does, and return what the persist step needs.
+    fn commit_without_persist<'a>(
+        db: &'a DatabaseCore<StorageEngine>,
+        k: i64,
+    ) -> (
+        crate::collection_core::InsertOnePrepared,
+        parking_lot::RwLockReadGuard<'a, ()>,
+        InFlightTx<'a>,
+        u64,
+    ) {
+        let coll = db.collection("c").unwrap();
+        let prepared = coll.insert_one_prepare(doc(k)).unwrap();
+        let gate = db.persist_gate.read();
+        let (mut tx, in_flight) = db.begin_auto_transaction();
+        let tx_id = tx.id;
+        tx.add_operation(Operation::Insert {
+            collection: "c".to_string(),
+            doc_id: prepared.doc_id.clone(),
+            doc: prepared.wal_doc.clone(),
+        })
+        .unwrap();
+        tx.mark_operations_applied();
+        db.commit_auto_transaction(tx).unwrap();
+        (prepared, gate, in_flight, tx_id)
+    }
+
+    /// #8: a checkpoint between an auto-commit's WAL commit and its storage
+    /// write must not clear the WAL record of that write.
+    #[test]
+    fn checkpoint_waits_for_committed_but_unpersisted_write() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.insert_one("c", doc(1)).unwrap();
+            let (prepared, gate, in_flight, _) = commit_without_persist(&db, 2);
+
+            let checkpoint_done = AtomicBool::new(false);
+            std::thread::scope(|s| {
+                let checkpoint = s.spawn(|| {
+                    db.checkpoint().unwrap();
+                    checkpoint_done.store(true, Ordering::SeqCst);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                assert!(
+                    !checkpoint_done.load(Ordering::SeqCst),
+                    "checkpoint must wait for the in-flight write"
+                );
+                db.collection("c")
+                    .unwrap()
+                    .insert_one_persist(prepared)
+                    .unwrap();
+                drop(in_flight);
+                drop(gate);
+                checkpoint.join().unwrap();
+            });
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.find("c", &json!({})).unwrap().len(), 2);
+    }
+
+    /// #10: an index flush while a committed write is not indexed yet must not
+    /// stamp the index past that write, so crash recovery replays it.
+    #[test]
+    fn index_watermark_stays_below_unindexed_write() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.collection("c")
+                .unwrap()
+                .create_index("k".to_string(), false, false)
+                .unwrap();
+            db.insert_one("c", doc(1)).unwrap();
+            let (prepared, gate, in_flight, tx_id) = commit_without_persist(&db, 2);
+
+            assert!(db.watermark_tx_id() < tx_id);
+            db.flush_all_indexes_counted().unwrap();
+
+            db.collection("c")
+                .unwrap()
+                .insert_one_persist(prepared)
+                .unwrap();
+            drop(in_flight);
+            drop(gate);
+            assert!(db.watermark_tx_id() >= tx_id);
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            db.find("c", &json!({"k": 2})).unwrap().len(),
+            1,
+            "indexed lookup must find the write committed during the index flush"
+        );
+    }
 
     #[test]
     fn crash_recovery_replays_in_commit_order() {
@@ -4041,11 +4183,9 @@ mod wal_recovery_order_tests {
         {
             let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
             for k in 0..20 {
-                db.insert_one(
-                    "c",
-                    HashMap::from([("k".to_string(), json!(k)), ("v".to_string(), json!(1))]),
-                )
-                .unwrap();
+                let mut fields = doc(k);
+                fields.insert("v".to_string(), json!(1));
+                db.insert_one("c", fields).unwrap();
                 db.update_one("c", &json!({"k": k}), &json!({"$set": {"v": 2}}))
                     .unwrap();
                 if k % 2 == 0 {
