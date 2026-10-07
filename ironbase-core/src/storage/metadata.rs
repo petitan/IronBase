@@ -42,17 +42,16 @@
 //!
 //! # DoS Protection
 //!
-//! Maximum metadata size per collection: 64 MB (allows ~2-4M documents).
-//! Protects against malicious files with corrupted length fields.
+//! A per-collection length field may not exceed the bytes left in the file,
+//! so corrupted length fields cannot trigger oversized allocations. There is
+//! no fixed size cap: the writer has none either (see `read_collection_metas`).
 
 use super::{CollectionMeta, Header, HeaderWriter, StorageEngine};
 use crate::error::{IronBaseError, Result};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
-
-// Re-export from central limits module
-use crate::limits::MAX_METADATA_SIZE;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
@@ -160,29 +159,7 @@ impl StorageEngine {
         file.read_exact(&mut count_bytes)?;
         let collection_count = u32::from_le_bytes(count_bytes);
 
-        // Read each collection
-        let mut collections = HashMap::new();
-        for _ in 0..collection_count {
-            let mut len_bytes = [0u8; 4];
-            file.read_exact(&mut len_bytes)?;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-
-            // DoS protection: validate metadata size before allocation
-            if len == 0 || len > MAX_METADATA_SIZE {
-                return Err(IronBaseError::Corruption(format!(
-                    "Collection metadata size {} exceeds maximum {} bytes",
-                    len, MAX_METADATA_SIZE
-                )));
-            }
-
-            let mut meta_bytes = vec![0u8; len];
-            file.read_exact(&mut meta_bytes)?;
-
-            let meta: CollectionMeta = serde_json::from_slice(&meta_bytes)?;
-            collections.insert(meta.name.clone(), meta);
-        }
-
-        Ok(collections)
+        Self::read_collection_metas(file, collection_count)
     }
 
     /// Load metadata from legacy fixed location (version 1)
@@ -193,24 +170,58 @@ impl StorageEngine {
         // Metadata is right after header in legacy format
         file.seek(SeekFrom::Start(256))?; // After header
 
+        Self::read_collection_metas(file, header.collection_count)
+    }
+
+    /// Read `collection_count` `[len: u32][CollectionMeta JSON]` entries from
+    /// the current file position.
+    ///
+    /// DoS protection: a length field is rejected when it is zero or larger
+    /// than the bytes actually left in the file, and each entry is parsed as a
+    /// stream (never buffered whole), so a corrupted length cannot force a
+    /// large allocation. A fixed cap
+    /// (`MAX_METADATA_SIZE`) is NOT used here: the writer has no such cap, so a
+    /// large but valid collection (>64 MB catalog, ~1.6M int ids) was rejected
+    /// as corruption and `open()` fell back to the destructive document-scan
+    /// rebuild, silently dropping every collection.
+    fn read_collection_metas(
+        file: &mut File,
+        collection_count: u32,
+    ) -> Result<HashMap<String, CollectionMeta>> {
+        let file_len = file.metadata()?.len();
+
         let mut collections = HashMap::new();
-        for _ in 0..header.collection_count {
+        for _ in 0..collection_count {
             let mut len_bytes = [0u8; 4];
             file.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
-            // DoS protection: validate metadata size before allocation
-            if len == 0 || len > MAX_METADATA_SIZE {
+            let remaining = file_len.saturating_sub(file.stream_position()?);
+            if len == 0 {
+                return Err(IronBaseError::Corruption(
+                    "Collection metadata size is 0".into(),
+                ));
+            }
+            if len as u64 > remaining {
                 return Err(IronBaseError::Corruption(format!(
-                    "Collection metadata size {} exceeds maximum {} bytes",
-                    len, MAX_METADATA_SIZE
+                    "Collection metadata size {} exceeds remaining {} bytes in file",
+                    len, remaining
                 )));
             }
 
-            let mut meta_bytes = vec![0u8; len];
-            file.read_exact(&mut meta_bytes)?;
-
-            let meta: CollectionMeta = serde_json::from_slice(&meta_bytes)?;
+            // Parse straight from the file instead of buffering `len` bytes:
+            // a corrupted length that still fits in a large file would
+            // otherwise allocate (and touch) gigabytes before the JSON is
+            // rejected. Memory is bounded by the parsed `CollectionMeta`.
+            let start = file.stream_position()?;
+            let meta = {
+                let mut reader = BufReader::new(&*file).take(len as u64);
+                let mut de = serde_json::Deserializer::from_reader(&mut reader);
+                let meta = CollectionMeta::deserialize(&mut de)?;
+                de.end()?;
+                meta
+            };
+            file.seek(SeekFrom::Start(start + len as u64))?;
             collections.insert(meta.name.clone(), meta);
         }
 
@@ -239,8 +250,7 @@ impl StorageEngine {
         // which preserves DocumentId type info in [type_tag, value, offset] format
         for meta in collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
-            let len = (meta_bytes.len() as u32).to_le_bytes();
-            writer.write_all(&len)?;
+            writer.write_all(&Self::metadata_len_prefix(meta, &meta_bytes)?)?;
             writer.write_all(&meta_bytes)?;
         }
 
@@ -364,12 +374,26 @@ impl StorageEngine {
         // Write each collection metadata
         for meta in collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
-            let len = (meta_bytes.len() as u32).to_le_bytes();
-            writer.write_all(&len)?;
+            writer.write_all(&Self::metadata_len_prefix(meta, &meta_bytes)?)?;
             writer.write_all(&meta_bytes)?;
         }
 
         Ok(())
+    }
+
+    /// Little-endian u32 length prefix for one serialized `CollectionMeta`.
+    ///
+    /// Fails loudly instead of writing a truncated length that would make the
+    /// metadata unreadable on the next open.
+    fn metadata_len_prefix(meta: &CollectionMeta, meta_bytes: &[u8]) -> Result<[u8; 4]> {
+        let len = u32::try_from(meta_bytes.len()).map_err(|_| {
+            IronBaseError::Serialization(format!(
+                "Collection '{}' metadata is {} bytes, exceeds the u32 length prefix",
+                meta.name,
+                meta_bytes.len()
+            ))
+        })?;
+        Ok(len.to_le_bytes())
     }
 
     // =========================================================================
@@ -750,7 +774,7 @@ mod tests {
         let count_bytes = 1u32.to_le_bytes();
         file.write_all(&count_bytes).unwrap();
 
-        // Write invalid metadata length (larger than MAX_METADATA_SIZE)
+        // Write invalid metadata length (larger than the bytes left in the file)
         let huge_len = (100 * 1024 * 1024u32).to_le_bytes(); // 100MB
         file.write_all(&huge_len).unwrap();
         file.sync_all().unwrap();
@@ -759,7 +783,50 @@ mod tests {
         let mut read_file = temp_file.reopen().unwrap();
         let result = StorageEngine::load_metadata(&mut read_file);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds remaining"));
+    }
+
+    /// Audit 2026-10-06 #1: metadata larger than MAX_METADATA_SIZE (64 MB) is written
+    /// without any check, so the reader must accept it as long as the bytes
+    /// are actually present in the file. Rejecting it sent open() into the
+    /// destructive rebuild path and silently wiped the database.
+    #[test]
+    fn test_load_metadata_larger_than_max_metadata_size() {
+        use crate::limits::MAX_METADATA_SIZE;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        let mut header = create_test_header();
+        header.version = 4;
+        header.metadata_offset = 256;
+        header.collection_count = 1;
+
+        let mut meta = create_test_collection("big");
+        meta.schema = Some(serde_json::json!({ "pad": "x".repeat(MAX_METADATA_SIZE + 1024) }));
+        let meta_json = serde_json::to_vec(&meta).unwrap();
+        assert!(meta_json.len() > MAX_METADATA_SIZE);
+        header.metadata_size = (4 + 4 + meta_json.len()) as u64;
+
+        let header_bytes = bincode::serialize(&header).unwrap();
+        let mut padded_header = vec![0u8; 256];
+        padded_header[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded_header).unwrap();
+        file.write_all(&1u32.to_le_bytes()).unwrap();
+        file.write_all(&(meta_json.len() as u32).to_le_bytes())
+            .unwrap();
+        file.write_all(&meta_json).unwrap();
+        file.sync_all().unwrap();
+
+        let mut read_file = temp_file.reopen().unwrap();
+        let (_, collections) = StorageEngine::load_metadata(&mut read_file).unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections["big"].document_catalog.len(), 2);
     }
 
     #[test]
