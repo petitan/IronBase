@@ -279,7 +279,10 @@ impl DatabaseCore<StorageEngine> {
         // 1. Flush all indexes to disk first (like MongoDB's checkpoint)
         let indexes_flushed = self.flush_all_indexes_counted()?;
 
-        // 2. Flush metadata and clear WAL
+        // 2. Flush metadata and clear WAL. The exclusive persist gate waits for
+        // auto-commits that are already in the WAL but not yet in storage
+        // (audit 2026-10-06 #8).
+        let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
         let mut stats = storage.checkpoint()?;
 
@@ -389,8 +392,11 @@ impl DatabaseCore<StorageEngine> {
             }
         }; // storage.read() released — inserts can proceed
 
-        // Phase B: Write + WAL clear under storage.write() (brief)
+        // Phase B: Write + WAL clear under storage.write() (brief). The
+        // exclusive persist gate waits for auto-commits that are already in
+        // the WAL but not yet in storage (audit 2026-10-06 #8).
         let t = std::time::Instant::now();
+        let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
         let lock_wait_ms = t.elapsed().as_millis() as u64;
         tracing::info!(
@@ -906,6 +912,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Ensure any pending batch operations are flushed before metadata sync
         self.flush_pending_batch()?;
 
+        // storage.flush() clears the WAL (audit 2026-10-06 #8, see persist_gate)
+        let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
         storage.flush()
     }

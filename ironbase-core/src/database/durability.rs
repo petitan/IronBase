@@ -207,9 +207,23 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// This is used internally by insert_one/update_one/delete_one when
     /// durability_mode is Safe or Batch. Not exposed to external users.
-    pub(crate) fn begin_auto_transaction(&self) -> Transaction {
+    ///
+    /// The returned `InFlightTx` keeps the index watermark below this
+    /// transaction; hold it until the writes are persisted and indexed. The id
+    /// is allocated and registered under one lock, so a later id can never be
+    /// committed and stamped while this one is allocated but unregistered.
+    pub(crate) fn begin_auto_transaction(&self) -> (Transaction, super::InFlightTx<'_>) {
+        let mut in_flight = self.in_flight_tx_ids.lock();
         let tx_id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
-        Transaction::new(tx_id)
+        in_flight.insert(tx_id);
+        drop(in_flight);
+        (
+            Transaction::new(tx_id),
+            super::InFlightTx {
+                set: &self.in_flight_tx_ids,
+                tx_id,
+            },
+        )
     }
 
     /// Commit auto-transaction with WAL and fsync
@@ -306,7 +320,10 @@ impl DatabaseCore<StorageEngine> {
         }
 
         // 1. Create auto-transaction with all WAL operations
-        let mut auto_tx = self.begin_auto_transaction();
+        // Hold the persist gate until the storage write is done, so a
+        // checkpoint cannot clear this commit from the WAL before then.
+        let _persist_gate = self.persist_gate.read();
+        let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
         let tx_id = auto_tx.id;
 
         for op in batch.iter() {
@@ -465,7 +482,10 @@ impl DatabaseCore<StorageEngine> {
 
                 // 2. Begin auto-transaction and add operation
                 // prepared.wal_doc already contains _id and _collection
-                let mut auto_tx = self.begin_auto_transaction();
+                // Hold the persist gate until the storage write is done, so a
+                // checkpoint cannot clear this commit from the WAL before then.
+                let _persist_gate = self.persist_gate.read();
+                let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
                 let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                 auto_tx.add_operation(Operation::Insert {
                     collection: collection_name.to_string(),
@@ -608,7 +628,10 @@ impl DatabaseCore<StorageEngine> {
 
                 // If modified, add to WAL
                 if prepared.modified > 0 {
-                    let mut auto_tx = self.begin_auto_transaction();
+                    // Hold the persist gate until the storage write is done, so a
+                    // checkpoint cannot clear this commit from the WAL before then.
+                    let _persist_gate = self.persist_gate.read();
+                    let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
 
                     // Extract doc_id - invariant: doc_id is always Some when modified > 0
                     let doc_id = prepared.doc_id.clone().ok_or_else(|| {
@@ -876,7 +899,10 @@ impl DatabaseCore<StorageEngine> {
                 }
 
                 // If deleted, add to WAL
-                let mut auto_tx = self.begin_auto_transaction();
+                // Hold the persist gate until the storage write is done, so a
+                // checkpoint cannot clear this commit from the WAL before then.
+                let _persist_gate = self.persist_gate.read();
+                let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
 
                 // Extract doc_id - invariant: doc_id is always Some when deleted > 0
                 let doc_id = prepared.doc_id.clone().ok_or_else(|| {
@@ -1006,7 +1032,10 @@ impl DatabaseCore<StorageEngine> {
 
                 // 2. Begin auto-transaction and add all operations
                 // Each prepared_doc.wal_doc already contains _id and _collection
-                let mut auto_tx = self.begin_auto_transaction();
+                // Hold the persist gate until the storage write is done, so a
+                // checkpoint cannot clear this commit from the WAL before then.
+                let _persist_gate = self.persist_gate.read();
+                let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
                 let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                 for prep in &prepared.prepared_docs {
                     auto_tx.add_operation(Operation::Insert {
@@ -1157,7 +1186,10 @@ impl DatabaseCore<StorageEngine> {
 
                 if modified > 0 {
                     // PHASE 2: BUILD WAL from prepared results
-                    let mut auto_tx = self.begin_auto_transaction();
+                    // Hold the persist gate until the storage write is done, so a
+                    // checkpoint cannot clear this commit from the WAL before then.
+                    let _persist_gate = self.persist_gate.read();
+                    let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
                     let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                     for (doc_id, old_doc, new_doc) in &prepared.wal_entries {
                         auto_tx.add_operation(Operation::Update {
@@ -1304,7 +1336,10 @@ impl DatabaseCore<StorageEngine> {
 
                 if deleted > 0 {
                     // PHASE 2: BUILD WAL from prepared results
-                    let mut auto_tx = self.begin_auto_transaction();
+                    // Hold the persist gate until the storage write is done, so a
+                    // checkpoint cannot clear this commit from the WAL before then.
+                    let _persist_gate = self.persist_gate.read();
+                    let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
                     let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                     for (doc_id, old_doc) in &prepared.wal_entries {
                         auto_tx.add_operation(Operation::Delete {

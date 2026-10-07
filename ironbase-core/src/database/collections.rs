@@ -1659,6 +1659,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         name: &str,
         flags: crate::storage::CollectionFlags,
     ) -> Result<()> {
+        // storage.flush() clears the WAL (audit 2026-10-06 #8, see persist_gate)
+        let _persist_gate = self.persist_gate.write();
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta_mut(name)
