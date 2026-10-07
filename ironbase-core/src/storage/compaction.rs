@@ -462,15 +462,48 @@ impl StorageEngine {
             }
         }
 
-        // Phase C Step 2: Update document_order to match current state
+        // Phase C Step 2: Take everything except the document layout from the
+        // current metadata. new_collections started as a clone of the Phase-A
+        // snapshot, so last_id, index/schema/flag and auto-embed config changes
+        // made during Phase B would otherwise revert on the swap (audit
+        // 2026-10-06 #2: a reverted last_id makes later inserts reuse _ids and
+        // overwrite documents). Only the catalog, document_order, counters and
+        // data_offset describe the compacted file. The destructuring is
+        // exhaustive so a new CollectionMeta field fails to compile here
+        // instead of silently reverting.
         for (coll_name, coll_meta) in scan_result.new_collections.iter_mut() {
             if let Some(current_meta) = self.collections.get(coll_name) {
-                coll_meta.document_order = current_meta
-                    .document_order
+                let super::CollectionMeta {
+                    name: _,
+                    document_count: _,
+                    live_document_count: _,
+                    data_offset: _,
+                    document_catalog: _,
+                    index_offset,
+                    last_id,
+                    document_order,
+                    indexes,
+                    fuzzy_indexes,
+                    fulltext_indexes,
+                    vector_indexes,
+                    schema,
+                    flags,
+                    auto_embedding_config,
+                } = current_meta;
+                coll_meta.document_order = document_order
                     .iter()
                     .filter(|id| coll_meta.document_catalog.contains_key(id))
                     .cloned()
                     .collect();
+                coll_meta.index_offset = *index_offset;
+                coll_meta.last_id = *last_id;
+                coll_meta.indexes = indexes.clone();
+                coll_meta.fuzzy_indexes = fuzzy_indexes.clone();
+                coll_meta.fulltext_indexes = fulltext_indexes.clone();
+                coll_meta.vector_indexes = vector_indexes.clone();
+                coll_meta.schema = schema.clone();
+                coll_meta.flags = *flags;
+                coll_meta.auto_embedding_config = auto_embedding_config.clone();
             }
         }
 

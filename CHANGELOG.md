@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — non-blocking compaction reverted collection metadata, later inserts overwrote documents (mcp-server v1.0.546)
+
+Audit 2026-10-06 #2 (critical). Phase B of `compact_nonblocking` (the MCP
+auto-compact path) runs without the storage lock and builds the new metadata
+from a clone of the Phase-A snapshot. Phase C reconciled only the document
+catalog and order, so every other per-collection field reverted on the swap:
+
+- `last_id` went back to its snapshot value, so the next auto-id inserts reused
+  the ids of documents inserted during Phase B and overwrote them (the original
+  documents were lost even though the insert returned a duplicate-key error);
+- indexes, fuzzy/fulltext/vector index definitions, schema, flags and the
+  auto-embedding config created or changed during Phase B disappeared from the
+  persisted metadata.
+
+Phase C now takes all non-layout fields from the current metadata. The copy
+destructures `CollectionMeta` exhaustively, so a future field cannot be missed
+silently. Regression test: `compact_nonblocking_keeps_phase_b_metadata`.
+
 ### Fixed — metadata recovery could silently wipe the whole database (mcp-server v1.0.545)
 
 Two storage bugs that, together, made `open()` return `Ok` with **zero
