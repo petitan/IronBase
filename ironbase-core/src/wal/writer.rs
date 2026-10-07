@@ -111,6 +111,7 @@ impl WriteAheadLog {
 
         // Group entries by transaction ID
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
+        let mut committed = Vec::new();
         let mut entry_count: usize = 0;
 
         for entry_result in iter {
@@ -127,20 +128,27 @@ impl WriteAheadLog {
                 )));
             }
 
-            txs.entry(entry.transaction_id).or_default().push(entry);
+            // Emit a transaction when its COMMIT is read, so the result is in
+            // log (commit) order. Replay applies full-image ops, so the order
+            // decides which version of a document wins (audit 2026-10-06 #7:
+            // iterating the HashMap returned transactions in random order).
+            let tx_id = entry.transaction_id;
+            let entry_type = entry.entry_type;
+            txs.entry(tx_id).or_default().push(entry);
+            match entry_type {
+                WALEntryType::Commit => {
+                    if let Some(tx_entries) = txs.remove(&tx_id) {
+                        committed.push(tx_entries);
+                    }
+                }
+                WALEntryType::Abort => {
+                    txs.remove(&tx_id);
+                }
+                _ => {}
+            }
         }
 
-        // Filter to committed transactions only
-        let mut committed = Vec::new();
-        for (_tx_id, tx_entries) in txs {
-            // Check if last entry is COMMIT
-            if let Some(last) = tx_entries.last() {
-                if last.entry_type == WALEntryType::Commit {
-                    committed.push(tx_entries);
-                }
-            }
-            // Else: uncommitted or aborted transaction, discard
-        }
+        // Whatever is left in `txs` is uncommitted - discard
 
         Ok(committed)
     }

@@ -4023,3 +4023,47 @@ mod wal_replay_tests {
         assert!(!fuzzy_phase2.is_empty(), "fuzzy lost Phase 2 names");
     }
 }
+
+#[cfg(test)]
+mod wal_recovery_order_tests {
+    //! Audit 2026-10-06 #7: crash recovery must replay committed transactions
+    //! in log order. Replay writes full document images, so a random order
+    //! resurrects deleted documents and loses updates.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn crash_recovery_replays_in_commit_order() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            for k in 0..20 {
+                db.insert_one(
+                    "c",
+                    HashMap::from([("k".to_string(), json!(k)), ("v".to_string(), json!(1))]),
+                )
+                .unwrap();
+                db.update_one("c", &json!({"k": k}), &json!({"$set": {"v": 2}}))
+                    .unwrap();
+                if k % 2 == 0 {
+                    db.delete_one("c", &json!({"k": k})).unwrap();
+                }
+            }
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 10);
+        assert_eq!(db.find("c", &json!({})).unwrap().len(), 10);
+        assert_eq!(db.find("c", &json!({"v": 1})).unwrap().len(), 0);
+        let deleted: Vec<i64> = (0..20).step_by(2).collect();
+        assert_eq!(
+            db.find("c", &json!({"k": {"$in": deleted}})).unwrap().len(),
+            0,
+            "deleted documents must stay deleted"
+        );
+    }
+}
