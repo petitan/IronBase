@@ -339,7 +339,8 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     )?;
 
     let options = FulltextSearchOptions {
-        limit: p.limit,
+        // Bounded like fuzzy_search: the limit sizes candidate and result sets
+        limit: p.limit.map(|l| l.min(DEFAULT_QUERY_LIMIT)),
         skip: p.skip,
         min_score: p.min_score,
         projection,

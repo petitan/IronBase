@@ -649,6 +649,18 @@ pub fn tokenize(text: &str, options: &FtsOptions) -> Vec<String> {
         .collect()
 }
 
+/// Tokenize a search query: like [`tokenize`], with repeated tokens removed
+/// (first occurrence kept). Each query term is scored and reported once, so a
+/// query repeating one word thousands of times does not multiply posting-list
+/// work and per-document match lists (audit 2026-10-07 M4).
+pub fn tokenize_unique(text: &str, options: &FtsOptions) -> Vec<String> {
+    let mut seen = HashSet::new();
+    tokenize(text, options)
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
+}
+
 /// Tokenize without stemming (for getting display tokens)
 pub fn tokenize_raw(text: &str, options: &FtsOptions) -> Vec<String> {
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
@@ -2113,7 +2125,7 @@ impl FulltextIndex {
         if self.building {
             return Vec::new();
         }
-        let query_tokens = tokenize(query, &self.options);
+        let query_tokens = tokenize_unique(query, &self.options);
         if query_tokens.is_empty() {
             return Vec::new();
         }
@@ -2177,9 +2189,7 @@ impl FulltextIndex {
     /// Tokenize query using this index's config (accent folding + stop words + stemming).
     /// Returns unique tokens — same processing as search() uses for posting list lookup.
     pub fn tokenize_query(&self, query: &str) -> Vec<String> {
-        let tokens = tokenize(query, &self.options);
-        let unique: HashSet<String> = tokens.into_iter().collect();
-        unique.into_iter().collect()
+        tokenize_unique(query, &self.options)
     }
 
     /// Get posting list size for a stemmed token (for rarity ordering).
@@ -2211,7 +2221,7 @@ impl FulltextIndex {
         if self.building {
             return Ok(Vec::new());
         }
-        let query_tokens = tokenize(query, &self.options);
+        let query_tokens = tokenize_unique(query, &self.options);
         if query_tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -2304,7 +2314,7 @@ impl FulltextIndex {
             return self.search_with_ctx(query, limit, skip, min_score, ctx);
         }
 
-        let query_tokens = tokenize(query, &self.options);
+        let query_tokens = tokenize_unique(query, &self.options);
         if query_tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -2398,7 +2408,7 @@ impl FulltextIndex {
         min_score: Option<f64>,
         ctx: Option<&crate::execution::ExecutionContext>,
     ) -> Result<Vec<FtsSearchResult>> {
-        let query_tokens = tokenize(query, &self.options);
+        let query_tokens = tokenize_unique(query, &self.options);
 
         // Single token or empty: no intersection possible, use standard path
         if query_tokens.len() <= 1 {

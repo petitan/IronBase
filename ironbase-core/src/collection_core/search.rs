@@ -8,8 +8,8 @@ use crate::document::Document;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
 use crate::fulltext::{
-    build_phrase_regex_cached, generate_highlights, parse_query, tokenize, FulltextIndexMetadata,
-    FulltextSearchOptions, FulltextSearchResultExt,
+    build_phrase_regex_cached, generate_highlights, parse_query, tokenize_unique,
+    FulltextIndexMetadata, FulltextSearchOptions, FulltextSearchResultExt,
 };
 use crate::index::{FuzzyAlgorithm, FuzzySearchOptions, FuzzySearchResult};
 use crate::log_error;
@@ -689,7 +689,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Prepare highlight tokenization if enabled
         let query_tokens = if options.highlight {
-            tokenize(query, &fts_options)
+            tokenize_unique(query, &fts_options)
         } else {
             Vec::new()
         };
@@ -699,7 +699,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // AND mode: tokenize query to know required token count
         let and_mode = options.and_mode;
         let required_token_count = if and_mode {
-            tokenize(query, &fts_options).len()
+            tokenize_unique(query, &fts_options).len()
         } else {
             0
         };
@@ -986,7 +986,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 field_fts_options.insert(field.to_string(), fulltext_index.options.clone());
 
                 let required_token_count = if and_mode {
-                    tokenize(query, &fulltext_index.options).len()
+                    tokenize_unique(query, &fulltext_index.options).len()
                 } else {
                     0
                 };
@@ -1094,7 +1094,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             field_fts_options
                 .values()
                 .next()
-                .map(|fts_opts| tokenize(query, fts_opts))
+                .map(|fts_opts| tokenize_unique(query, fts_opts))
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -1164,7 +1164,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         if !field_value.is_empty() {
-                            let tokens = tokenize(query, fts_opts);
+                            let tokens = tokenize_unique(query, fts_opts);
                             let result = generate_highlights(
                                 field_value,
                                 &tokens,

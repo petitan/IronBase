@@ -238,8 +238,13 @@ fn handle_find(
     // Apply limit: user's limit capped at max_limit, or max_limit if not specified
     let effective_limit = p.limit.map(|l| l.min(max_limit)).or(Some(max_limit));
 
-    // Get max_result_size from ScriptLimits for OOM protection
-    let max_response_bytes = limits.map(|l| l.max_result_size);
+    // Get max_result_size from ScriptLimits for OOM protection; without
+    // ScriptLimits (stdio transport) fall back to the RAM-based default
+    let max_response_bytes = Some(
+        limits
+            .map(|l| l.max_result_size)
+            .unwrap_or_else(ironbase_core::calculate_safe_response_limit),
+    );
 
     let options = FindOptions {
         projection: p.projection,
