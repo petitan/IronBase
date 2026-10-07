@@ -288,7 +288,6 @@ impl StorageEngine {
                 coll_name: String,
                 doc_id: crate::document::DocumentId,
                 offset: u64,
-                is_update: bool,
             },
             Delete {
                 coll_name: String,
@@ -319,7 +318,6 @@ impl StorageEngine {
                                     coll_name: coll_name.clone(),
                                     doc_id: doc_id.clone(),
                                     offset: current_offset,
-                                    is_update: false,
                                 });
                             }
                             Some(&snap_offset) if snap_offset != current_offset => {
@@ -327,7 +325,6 @@ impl StorageEngine {
                                     coll_name: coll_name.clone(),
                                     doc_id: doc_id.clone(),
                                     offset: current_offset,
-                                    is_update: true,
                                 });
                             }
                             _ => {}
@@ -378,18 +375,13 @@ impl StorageEngine {
                     coll_name,
                     doc_id,
                     offset,
-                    is_update,
                 } => {
                     // read_data_at uses pread — &self, no seek
+                    // An updated doc keeps its catalog entry: write_doc_to_temp
+                    // just repoints it, so the counters are not bumped twice
+                    // (audit 2026-10-06 #4).
                     match self.read_data_at(offset) {
                         Ok(doc_bytes) => {
-                            if is_update {
-                                if let Some(coll_meta) =
-                                    scan_result.new_collections.get_mut(&coll_name)
-                                {
-                                    coll_meta.document_catalog.remove(&doc_id);
-                                }
-                            }
                             scan_result.write_offset = write_doc_to_temp(
                                 &mut scan_result.temp_file,
                                 &mut scan_result.new_collections,
@@ -551,8 +543,7 @@ impl StorageEngine {
         // Write each collection metadata
         for meta in new_collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
-            let len = (meta_bytes.len() as u32).to_le_bytes();
-            metadata_buffer.write_all(&len)?;
+            metadata_buffer.write_all(&Self::metadata_len_prefix(meta, &meta_bytes)?)?;
             metadata_buffer.write_all(&meta_bytes)?;
         }
 
@@ -592,6 +583,7 @@ impl StorageEngine {
         self.file = file;
         self.header = header;
         self.collections = Arc::new(collections);
+        self.layout_generation += 1;
 
         Ok(())
     }

@@ -552,6 +552,11 @@ pub struct StorageEngine {
     wal: WriteAheadLog,
     metadata_dirty: bool,
     metadata_snapshot_pending: bool,
+    /// Incremented every time compaction swaps in a new file layout. Document
+    /// offsets taken before a change are invalid afterwards; readers that
+    /// release the lock between taking an offset and reading it compare this
+    /// value (audit 2026-10-06 #5).
+    layout_generation: u64,
     /// Separate lock file to allow other processes to read the DB during backup
     /// On Windows, file locks are mandatory and prevent ALL access including reads
     lock_file: File,
@@ -732,6 +737,7 @@ impl StorageEngine {
             wal,
             metadata_dirty: false,
             metadata_snapshot_pending: false,
+            layout_generation: 0,
             lock_file,
             wal_ops_since_clear: 0,
             was_clean_shutdown: was_clean,
@@ -2567,6 +2573,10 @@ impl RawStorage for StorageEngine {
 
     fn data_end_offset(&self) -> u64 {
         self.header.data_end_offset
+    }
+
+    fn layout_generation(&self) -> u64 {
+        self.layout_generation
     }
 }
 

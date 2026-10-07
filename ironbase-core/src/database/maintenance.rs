@@ -122,6 +122,11 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// Also flushes all indexes to disk (B+ tree and fulltext).
     pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
+        // Same guard as compact_nonblocking: both use the fixed `<db>.compact`
+        // temp path, so a blocking compact during a non-blocking Phase B would
+        // truncate the file Phase B is still writing (audit 2026-10-06 #6).
+        let _guard = CompactionGuard::acquire(&self.is_compacting)?;
+
         // Rebuild HNSW indexes to remove orphan nodes before flush
         {
             let index_managers = self.index_managers.read();
@@ -170,25 +175,11 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<crate::storage::CompactionStats> {
         // Guard: prevent concurrent compaction at DatabaseCore level
         // (MCP adapter has its own guard; this protects direct Rust callers)
-        if self
-            .is_compacting
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_err()
-        {
-            return Err(crate::error::IronBaseError::OperationNotAllowed(
-                "Compaction already in progress".to_string(),
-            ));
-        }
+        let guard = CompactionGuard::acquire(&self.is_compacting)?;
 
-        // Ensure flag is cleared on all exit paths (success, error, panic)
+        // The guard clears the flag on all exit paths (success, error, panic)
         let result = self.compact_nonblocking_inner(config, progress_callback);
-        self.is_compacting
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(guard);
         // Calibrate last_compact_size on success
         if let Ok(ref stats) = result {
             self.set_last_compact_size(stats.size_after);
@@ -930,6 +921,33 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     }
 }
 
+/// Holds `DatabaseCore::is_compacting` for the duration of one compaction and
+/// clears it on drop, so the flag is released on error and panic too.
+struct CompactionGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> CompactionGuard<'a> {
+    fn acquire(flag: &'a std::sync::atomic::AtomicBool) -> Result<Self> {
+        flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .map_err(|_| {
+            crate::error::IronBaseError::OperationNotAllowed(
+                "Compaction already in progress".to_string(),
+            )
+        })?;
+        Ok(CompactionGuard(flag))
+    }
+}
+
+impl Drop for CompactionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod compact_vector_rebuild_tests {
     //! Verifies the `force_vector_rebuild` dispatch in `compact_nonblocking`.
@@ -1148,5 +1166,105 @@ mod compact_metadata_catchup_tests {
         let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
         assert!(has_index(&db), "index metadata must be persisted");
         assert_eq!(db.count_documents("c", &json!({})).unwrap(), 11);
+    }
+    /// Audit 2026-10-06 #4: a document updated during Phase B must be counted
+    /// once, not twice, in the compacted metadata.
+    #[test]
+    fn compact_nonblocking_counts_phase_b_updates_once() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        for n in 0..100 {
+            db.insert_one("c", doc(n)).unwrap();
+        }
+
+        let mutated = AtomicBool::new(false);
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {
+            if !mutated.swap(true, Ordering::SeqCst) {
+                for n in 0..10 {
+                    db.update_one("c", &json!({"n": n}), &json!({"$set": {"x": 1}}))
+                        .unwrap();
+                }
+            }
+        })
+        .unwrap();
+        assert!(mutated.load(Ordering::SeqCst), "callback must have run");
+
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 100);
+        assert_eq!(db.find("c", &json!({"x": 1})).unwrap().len(), 10);
+        db.close().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 100);
+    }
+
+    /// Audit 2026-10-06 #6: a blocking compact() while a non-blocking
+    /// compaction is in Phase B must be rejected, not truncate the shared
+    /// temp file that Phase B is still writing.
+    #[test]
+    fn blocking_compact_rejected_during_nonblocking_compaction() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        for n in 0..200 {
+            db.insert_one("c", doc(n)).unwrap();
+        }
+        db.delete_many("c", &json!({"n": {"$lt": 100}})).unwrap();
+
+        let rejected = AtomicBool::new(false);
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {
+            if let Err(crate::IronBaseError::OperationNotAllowed(_)) = db.compact() {
+                rejected.store(true, Ordering::SeqCst);
+            }
+        })
+        .unwrap();
+        assert!(
+            rejected.load(Ordering::SeqCst),
+            "compact() during Phase B must be rejected"
+        );
+
+        // The guard is released afterwards (also on the error path).
+        db.compact().unwrap();
+        db.close().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.find("c", &json!({})).unwrap().len(), 100);
+    }
+
+    /// Audit 2026-10-06 #5: a collection scan that overlaps a compaction swap
+    /// must not silently drop documents (old offsets read from the new file).
+    #[test]
+    fn collection_scan_concurrent_with_compaction_returns_all_documents() {
+        const DOCS: i64 = 3000;
+        let temp = TempDir::new().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(temp.path().join("c.mlite")).unwrap();
+        for n in 0..DOCS {
+            db.insert_one("c", doc(n)).unwrap();
+        }
+
+        for _ in 0..5 {
+            // Leave old versions behind so compaction moves every document.
+            db.update_many("c", &json!({}), &json!({"$inc": {"w": 1}}))
+                .unwrap();
+            let done = AtomicBool::new(false);
+            let incomplete = std::thread::scope(|s| {
+                let reader = s.spawn(|| {
+                    let coll = db.collection("c").unwrap();
+                    let mut incomplete = 0;
+                    let mut k = 0i64;
+                    while !done.load(Ordering::SeqCst) {
+                        // Unindexed filter -> collection scan; k defeats the query cache.
+                        k += 1;
+                        let found = coll.find(&json!({"n": {"$gte": -k}})).unwrap().len();
+                        if found as i64 != DOCS {
+                            incomplete += 1;
+                        }
+                    }
+                    incomplete
+                });
+                db.compact().unwrap();
+                done.store(true, Ordering::SeqCst);
+                reader.join().unwrap()
+            });
+            assert_eq!(incomplete, 0, "scan returned incomplete results");
+        }
     }
 }

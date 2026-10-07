@@ -385,7 +385,7 @@ impl StorageEngine {
     ///
     /// Fails loudly instead of writing a truncated length that would make the
     /// metadata unreadable on the next open.
-    fn metadata_len_prefix(meta: &CollectionMeta, meta_bytes: &[u8]) -> Result<[u8; 4]> {
+    pub(super) fn metadata_len_prefix(meta: &CollectionMeta, meta_bytes: &[u8]) -> Result<[u8; 4]> {
         let len = u32::try_from(meta_bytes.len()).map_err(|_| {
             IronBaseError::Serialization(format!(
                 "Collection '{}' metadata is {} bytes, exceeds the u32 length prefix",

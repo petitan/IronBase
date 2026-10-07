@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — compaction: double-counted updates, scans dropping documents, concurrent compact() corrupting the file (mcp-server v1.0.547)
+
+Audit 2026-10-06 #4, #5, #6 (high).
+
+- **#4 — `count_documents({})` inflated after compaction.** For a document
+  updated during Phase B, Phase C removed its catalog entry before writing the
+  new version, so `write_doc_to_temp` counted it as new: `document_count` and
+  `live_document_count` grew by one per updated document and were persisted.
+  The catalog entry is now just repointed.
+- **#5 — collection scans silently dropped documents during a compaction.**
+  `scan_documents_with_early_termination` snapshots catalog offsets, releases
+  the lock and reads each document under a fresh short lock. After a
+  compaction swap the old offsets point into the new file, and the scan
+  skipped the unreadable entries without an error. `StorageEngine` now keeps a
+  `layout_generation` (bumped on every swap, exposed through
+  `RawStorage::layout_generation`); when it changed, the scan looks the offset
+  up again by `_id`.
+- **#6 — `compact()` during `compact_nonblocking()` corrupted the live file.**
+  The blocking `compact()` did not check the `is_compacting` guard, truncated
+  the shared `<db>.compact` temp file under the running Phase B, and the
+  Phase-B file handle then wrote into the live database. Both entry points now
+  take the same RAII guard (also released on panic); the second caller gets
+  `OperationNotAllowed`.
+- The compacted metadata writer now uses the same checked `u32` length prefix
+  as the regular metadata writer instead of a silent truncating cast.
+
+Regression tests: `compact_nonblocking_counts_phase_b_updates_once`,
+`collection_scan_concurrent_with_compaction_returns_all_documents`,
+`blocking_compact_rejected_during_nonblocking_compaction`.
+
 ### Fixed — non-blocking compaction reverted collection metadata, later inserts overwrote documents (mcp-server v1.0.546)
 
 Audit 2026-10-06 #2 (critical). Phase B of `compact_nonblocking` (the MCP
