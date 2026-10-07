@@ -380,7 +380,7 @@ impl StorageEngine {
                     // An updated doc keeps its catalog entry: write_doc_to_temp
                     // just repoints it, so the counters are not bumped twice
                     // (audit 2026-10-06 #4).
-                    match self.read_data_at(offset) {
+                    match self.read_data_at_raw(offset) {
                         Ok(doc_bytes) => {
                             scan_result.write_offset = write_doc_to_temp(
                                 &mut scan_result.temp_file,
@@ -425,7 +425,7 @@ impl StorageEngine {
                         .insert(coll_name.clone(), new_coll_meta);
 
                     for (doc_id, offset) in docs {
-                        match self.read_data_at(offset) {
+                        match self.read_data_at_raw(offset) {
                             Ok(doc_bytes) => {
                                 scan_result.write_offset = write_doc_to_temp(
                                     &mut scan_result.temp_file,
@@ -896,7 +896,9 @@ fn flush_compaction_chunk_standalone(
 
         // Write document to new file
         let doc_offset = write_offset;
-        let doc_bytes = serde_json::to_vec(doc)?;
+        // Re-serialization sorts the keys: put the collection mark first again.
+        let doc_bytes =
+            super::io::mark_document_collection(coll_name, &serde_json::to_vec(doc)?)?.into_owned();
         let len = doc_bytes.len() as u32;
 
         new_file.write_all(&len.to_le_bytes())?;

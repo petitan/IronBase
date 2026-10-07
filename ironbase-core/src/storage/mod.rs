@@ -1348,6 +1348,7 @@ impl StorageEngine {
         let mut offset = HEADER_SIZE;
         let mut max_ids_by_collection: HashMap<String, u64> = HashMap::new();
         let mut documents_found = 0u64;
+        let mut unattributed = 0u64;
 
         while offset + 4 < file_len {
             // Read document length (4 bytes)
@@ -1389,10 +1390,29 @@ impl StorageEngine {
                         offset += 4 + len as u64;
                         continue;
                     }
-                    None => break,
+                    // A document written without the collection mark (before
+                    // it existed): it can only be an update of a document the
+                    // last metadata block already places in one collection.
+                    None => match Self::collection_holding(&self.collections, &v) {
+                        Some(name) => (v, name),
+                        None => {
+                            unattributed += 1;
+                            offset += 4 + len as u64;
+                            continue;
+                        }
+                    },
                 },
                 None => match self.metadata_block_end(offset, file_len)? {
                     Some(end) => {
+                        // Each flush writes a complete snapshot of every
+                        // collection (catalog, indexes, schema): take the
+                        // latest readable one as the base, and apply the
+                        // documents that follow it on top.
+                        // max_ids_by_collection keeps the ids seen before it:
+                        // a block's last_id may lag behind explicit `_id`s.
+                        if let Some(base) = self.read_metadata_block(offset)? {
+                            *self.collections_mut() = base;
+                        }
                         offset = end;
                         continue;
                     }
@@ -1432,14 +1452,23 @@ impl StorageEngine {
                         });
 
                     if is_tombstone {
-                        meta.document_catalog.remove(&doc_id);
+                        if meta.document_catalog.remove(&doc_id).is_some() {
+                            meta.live_document_count = meta.live_document_count.saturating_sub(1);
+                        }
                         meta.document_order.retain(|id| id != &doc_id);
                     } else {
-                        meta.document_catalog.insert(doc_id.clone(), offset);
+                        // A later version of a known document replaces it
+                        // (count it live once, not once per version).
+                        if meta
+                            .document_catalog
+                            .insert(doc_id.clone(), offset)
+                            .is_none()
+                        {
+                            meta.live_document_count += 1;
+                        }
                         meta.document_order.retain(|id| id != &doc_id);
                         meta.document_order.push(doc_id.clone());
                         meta.document_count += 1;
-                        meta.live_document_count += 1;
                         documents_found += 1;
 
                         // Track max ID for last_id
@@ -1460,11 +1489,19 @@ impl StorageEngine {
             offset += 4 + len as u64;
         }
 
-        // Update last_id for each collection
+        // Update last_id for each collection (never below a base block's)
         for (collection_name, max_id) in max_ids_by_collection {
             if let Some(meta) = self.collections_mut().get_mut(&collection_name) {
-                meta.last_id = max_id;
+                meta.last_id = meta.last_id.max(max_id);
             }
+        }
+
+        if unattributed > 0 {
+            log_warn!(
+                "[WARN] {} document record(s) without a collection mark and unknown to \
+                 the last readable metadata block were not recovered",
+                unattributed
+            );
         }
 
         if offset + 4 < file_len {
@@ -1493,12 +1530,48 @@ impl StorageEngine {
         self.file.sync_all()?;
 
         log_info!(
-            "[INFO] Rebuilt metadata: {} collections, {} documents from file scan",
+            "[INFO] Rebuilt metadata: {} collections, {} documents ({} found after the last \
+             readable metadata block) from file scan",
             self.collections.len(),
+            self.collections
+                .values()
+                .map(|m| m.live_document_count)
+                .sum::<u64>(),
             documents_found
         );
 
         Ok(())
+    }
+
+    /// Load the metadata block at `offset` (already validated by
+    /// [`metadata_block_end`](Self::metadata_block_end)); `None` if it does not
+    /// deserialize as collection metadata.
+    fn read_metadata_block(
+        &mut self,
+        offset: u64,
+    ) -> Result<Option<HashMap<String, CollectionMeta>>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut count_bytes = [0u8; 4];
+        self.file.read_exact(&mut count_bytes)?;
+        let count = u32::from_le_bytes(count_bytes);
+        Ok(Self::read_collection_metas(&mut self.file, count).ok())
+    }
+
+    /// The one collection whose catalog holds the `_id` of `doc`, if exactly
+    /// one does.
+    fn collection_holding(
+        collections: &HashMap<String, CollectionMeta>,
+        doc: &serde_json::Value,
+    ) -> Option<String> {
+        let doc_id: crate::document::DocumentId =
+            serde_json::from_value(doc.get("_id")?.clone()).ok()?;
+        let mut holders = collections
+            .values()
+            .filter(|meta| meta.document_catalog.contains_key(&doc_id));
+        let first = holders.next()?;
+        holders.next().is_none().then(|| first.name.clone())
     }
 
     /// If a complete metadata block (`[count: u32]` followed by `count` ×

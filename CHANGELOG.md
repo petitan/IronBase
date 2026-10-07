@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Metadata rebuild recovers documents written through the API (mcp-server v1.0.559)
+
+- **Symptom:** when both the metadata and the WAL were unreadable, the
+  last-resort `rebuild_from_documents` scan recovered no collection at all
+  for documents written through the normal API (insert/update); documents
+  replayed from the WAL came back with an internal `_collection` field.
+- **Root cause:** the scan attributes a record to a collection through its
+  `_collection` field (`None => break`), but only WAL images and tombstones
+  carried it — `write_document` stored the user document without it, so the
+  scan stopped at the first document. WAL replay wrote the image (with
+  `_collection`) as the stored document and reads returned it verbatim.
+- **Fix:**
+  - Every document record is stored with the collection mark as its first
+    key (`{"_collection":"<name>",...}`, `mark_document_collection` in
+    `write_document` / `write_document_full`, and in compaction, which
+    re-serializes documents with sorted keys); `read_data` / `read_data_at`
+    strip it by a byte-prefix check, so callers never see it. Compaction
+    catch-up copies records with the raw readers.
+  - The rebuild takes the latest readable metadata block as its base (each
+    flush writes a full snapshot: catalog, indexes, schema) and applies only
+    the records after it. A record without the mark (written before this
+    change) is attributed through that base when exactly one collection
+    knows its `_id`; otherwise it is counted, logged and skipped instead of
+    stopping the scan. `live_document_count` no longer counts every version
+    of an updated document, and `last_id` never drops below the base's.
+- **Compatibility:** `_collection` is now a reserved top-level field (an
+  existing value is replaced by the mark). Old files are read unchanged
+  (unmarked records are returned as-is). Each stored document grows by
+  `len(name) + 17` bytes.
+
+Regression tests (`database::metadata_rebuild_tests`):
+`rebuild_recovers_documents_written_through_the_api`,
+`rebuild_after_compaction`, `compaction_keeps_collection_mark_first`,
+`unmarked_record_attributed_through_earlier_metadata_block`,
+`replayed_documents_have_no_collection_field`; `storage::io` unit tests for
+the mark helpers.
+
 ### Fixed — Batch mode: updates and deletes no longer buffered out of order (mcp-server v1.0.558)
 
 Audit 2026-10-06 #9, #18, #20 (high).
