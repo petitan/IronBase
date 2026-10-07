@@ -116,6 +116,98 @@ pub(crate) fn read_document_from_file(
 }
 
 // =========================================================================
+// Collection mark on stored documents
+// =========================================================================
+
+/// JSON prefix of a stored document record that names its collection.
+const COLLECTION_MARK_PREFIX: &[u8] = b"{\"_collection\":";
+
+/// Put `"_collection":<collection>` first in a stored document's JSON.
+///
+/// Metadata rebuild (`rebuild_from_documents`) attributes documents to
+/// collections by this field; documents written without it could not be
+/// recovered when the metadata was lost. It is always the first key, so the
+/// read path strips it with a prefix check ([`strip_collection_mark`]) instead
+/// of a JSON parse. `_collection` is a reserved field: a value already in the
+/// document (e.g. from a WAL image) is replaced.
+pub(crate) fn mark_document_collection<'a>(
+    collection: &str,
+    data: &'a [u8],
+) -> crate::error::Result<std::borrow::Cow<'a, [u8]>> {
+    use std::borrow::Cow;
+
+    if data.first() != Some(&b'{') {
+        return Ok(Cow::Borrowed(data));
+    }
+    let name = serde_json::to_vec(collection)?;
+    let body: Cow<'a, [u8]> = if contains_subslice(data, b"\"_collection\"") {
+        // Rare (WAL replay images, or the text in a value): drop the key
+        // wherever it is, then mark as usual.
+        match serde_json::from_slice::<serde_json::Value>(data)? {
+            serde_json::Value::Object(mut map) => {
+                map.remove("_collection");
+                Cow::Owned(serde_json::to_vec(&serde_json::Value::Object(map))?)
+            }
+            _ => return Ok(Cow::Borrowed(data)),
+        }
+    } else {
+        Cow::Borrowed(data)
+    };
+
+    let rest = &body[1..]; // after '{'
+    let mut out = Vec::with_capacity(COLLECTION_MARK_PREFIX.len() + name.len() + body.len() + 1);
+    out.extend_from_slice(COLLECTION_MARK_PREFIX);
+    out.extend_from_slice(&name);
+    if rest != b"}" {
+        out.push(b',');
+    }
+    out.extend_from_slice(rest);
+    Ok(Cow::Owned(out))
+}
+
+/// Remove the leading `"_collection"` mark (see [`mark_document_collection`])
+/// from a stored record, so callers get the user's document back. Records
+/// without the mark are returned unchanged.
+pub(crate) fn strip_collection_mark(mut data: Vec<u8>) -> Vec<u8> {
+    if !data.starts_with(COLLECTION_MARK_PREFIX) {
+        return data;
+    }
+    let value_start = COLLECTION_MARK_PREFIX.len();
+    if data.get(value_start) != Some(&b'"') {
+        return data;
+    }
+    // Find the closing quote of the JSON string value
+    let mut i = value_start + 1;
+    let mut escaped = false;
+    while i < data.len() {
+        match data[i] {
+            _ if escaped => escaped = false,
+            b'\\' => escaped = true,
+            b'"' => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    match data.get(i + 1) {
+        // `{"_collection":"c",...}` -> `{...}`
+        Some(b',') => {
+            data.drain(1..i + 2);
+            data
+        }
+        // `{"_collection":"c"}` -> `{}`
+        Some(b'}') => {
+            data.drain(1..i + 1);
+            data
+        }
+        _ => data,
+    }
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+// =========================================================================
 // Page-cache-bounded I/O hints (PR-2 / Fix B — host-memory-safe compaction)
 //
 // A full-file compaction reads the entire source and writes the entire target
@@ -252,7 +344,14 @@ impl StorageEngine {
     ///
     /// Documents are always stored BEFORE `data_end_offset`, so using it as the
     /// boundary is equivalent to (and faster than) querying actual file length.
+    /// Read the record at `offset` without the collection mark
+    /// (see [`mark_document_collection`]).
     pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+        self.read_data_raw(offset).map(strip_collection_mark)
+    }
+
+    /// [`read_data`](Self::read_data) keeping the stored record as is.
+    pub(crate) fn read_data_raw(&mut self, offset: u64) -> Result<Vec<u8>> {
         use crate::error::IronBaseError;
 
         // Use cached data_end_offset instead of file.metadata()?.len()
@@ -331,7 +430,15 @@ impl StorageEngine {
     ///
     /// # Thread Safety
     /// Safe to call from multiple threads simultaneously.
+    /// Positioned read of the record at `offset` without the collection mark
+    /// (see [`mark_document_collection`]).
     pub fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
+        self.read_data_at_raw(offset).map(strip_collection_mark)
+    }
+
+    /// [`read_data_at`](Self::read_data_at) keeping the stored record as is
+    /// (compaction copies records verbatim, mark included).
+    pub(crate) fn read_data_at_raw(&self, offset: u64) -> Result<Vec<u8>> {
         // PERF FIX: Use cached header values instead of syscall per read!
         // data_end_offset is updated after document writes (not metadata flush)
         // This enables reading documents that were written but not yet flushed
@@ -351,6 +458,10 @@ impl StorageEngine {
         data: &[u8],
     ) -> Result<u64> {
         use crate::error::IronBaseError;
+
+        // Name the collection in the record itself (metadata rebuild).
+        let marked = mark_document_collection(collection, data)?;
+        let data: &[u8] = &marked;
 
         // Validate document size (must match read-side checks in read_data/read_data_at)
         if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
@@ -431,6 +542,10 @@ impl StorageEngine {
         data: &[u8],
     ) -> Result<u64> {
         use crate::error::IronBaseError;
+
+        // Name the collection in the record itself (metadata rebuild).
+        let marked = mark_document_collection(collection, data)?;
+        let data: &[u8] = &marked;
 
         // Validate document size (must match read-side checks in read_data/read_data_at)
         if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
@@ -638,5 +753,54 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let result = read_document_from_file(&file, 0, 104);
         assert!(result.is_err(), "short read returned {:?}", result);
+    }
+
+    use super::{mark_document_collection, strip_collection_mark};
+
+    fn roundtrip(collection: &str, doc: &str) -> (String, String) {
+        let marked = mark_document_collection(collection, doc.as_bytes())
+            .unwrap()
+            .into_owned();
+        let stripped = strip_collection_mark(marked.clone());
+        (
+            String::from_utf8(marked).unwrap(),
+            String::from_utf8(stripped).unwrap(),
+        )
+    }
+
+    #[test]
+    fn collection_mark_is_first_key_and_stripped_on_read() {
+        let (marked, stripped) = roundtrip("users", r#"{"_id":1,"name":"a"}"#);
+        assert_eq!(marked, r#"{"_collection":"users","_id":1,"name":"a"}"#);
+        assert_eq!(stripped, r#"{"_id":1,"name":"a"}"#);
+
+        let (marked, stripped) = roundtrip("e", "{}");
+        assert_eq!(marked, r#"{"_collection":"e"}"#);
+        assert_eq!(stripped, "{}");
+
+        // escaped collection name
+        let (marked, stripped) = roundtrip(r#"we"ird\name"#, r#"{"_id":1}"#);
+        assert!(marked.starts_with(r#"{"_collection":"we\"ird\\name","#));
+        assert_eq!(stripped, r#"{"_id":1}"#);
+    }
+
+    #[test]
+    fn existing_collection_field_is_replaced_by_the_mark() {
+        // WAL images carry `_collection` (not necessarily first)
+        let (marked, stripped) = roundtrip("c", r#"{"A":1,"_collection":"old","_id":2}"#);
+        assert!(marked.starts_with(r#"{"_collection":"c","#));
+        assert_eq!(marked.matches("_collection").count(), 1);
+        let value: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(value, serde_json::json!({"A": 1, "_id": 2}));
+    }
+
+    #[test]
+    fn unmarked_and_non_object_records_are_untouched() {
+        let doc = br#"{"_id":1}"#.to_vec();
+        assert_eq!(strip_collection_mark(doc.clone()), doc);
+        assert_eq!(
+            mark_document_collection("c", b"[1,2]").unwrap().as_ref(),
+            b"[1,2]"
+        );
     }
 }

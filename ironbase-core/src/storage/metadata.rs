@@ -184,7 +184,7 @@ impl StorageEngine {
     /// large but valid collection (>64 MB catalog, ~1.6M int ids) was rejected
     /// as corruption and `open()` fell back to the destructive document-scan
     /// rebuild, silently dropping every collection.
-    fn read_collection_metas(
+    pub(super) fn read_collection_metas(
         file: &mut File,
         collection_count: u32,
     ) -> Result<HashMap<String, CollectionMeta>> {

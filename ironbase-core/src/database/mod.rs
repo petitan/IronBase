@@ -5167,3 +5167,176 @@ mod batch_mode_tests {
         assert_eq!(by_b.len(), 1, "doc 2 lost from the email index");
     }
 }
+
+#[cfg(test)]
+mod metadata_rebuild_tests {
+    //! Metadata rebuild (`rebuild_from_documents`) must recover documents
+    //! written through the public API: they carried no `_collection` field,
+    //! so a database whose metadata was lost opened empty.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// Overwrite the start of the live metadata block and drop the WAL, so
+    /// the next open has to rebuild from the file.
+    fn lose_metadata(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let meta_off = u64::from_le_bytes(bytes[36..44].try_into().unwrap()) as usize;
+        for b in &mut bytes[meta_off..meta_off + 16] {
+            *b = 0xFF;
+        }
+        std::fs::write(path, &bytes).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("wal"));
+    }
+
+    fn all_docs(db: &DatabaseCore<StorageEngine>, coll: &str) -> Vec<serde_json::Value> {
+        let mut docs = db.collection(coll).unwrap().find(&json!({})).unwrap();
+        docs.sort_by_key(|d| d["_id"].to_string());
+        docs
+    }
+
+    #[test]
+    fn rebuild_recovers_documents_written_through_the_api() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            for i in 0..5 {
+                db.insert_one("c", fields(json!({"_id": i, "v": "x"})))
+                    .unwrap();
+            }
+            db.insert_one("d", fields(json!({"_id": 1, "w": 1})))
+                .unwrap();
+            db.update_one("c", &json!({"_id": 1}), &json!({"$set": {"v": "y"}}))
+                .unwrap();
+            db.delete_one("c", &json!({"_id": 4})).unwrap();
+            db.close().unwrap();
+        }
+        lose_metadata(&path);
+
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            all_docs(&db, "c"),
+            vec![
+                json!({"_id": 0, "v": "x"}),
+                json!({"_id": 1, "v": "y"}),
+                json!({"_id": 2, "v": "x"}),
+                json!({"_id": 3, "v": "x"}),
+            ]
+        );
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 4);
+        assert_eq!(all_docs(&db, "d"), vec![json!({"_id": 1, "w": 1})]);
+    }
+
+    /// Compaction copies records verbatim, so the mark survives it.
+    #[test]
+    fn rebuild_after_compaction() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            for i in 0..20 {
+                db.insert_one("c", fields(json!({"_id": i}))).unwrap();
+            }
+            db.delete_many("c", &json!({"_id": {"$gte": 10}})).unwrap();
+            db.compact().unwrap();
+            db.close().unwrap();
+        }
+        lose_metadata(&path);
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 10);
+    }
+
+    /// Compaction re-serializes documents (sorted keys): the mark must stay
+    /// the first key even when a field sorts before `_collection`.
+    #[test]
+    fn compaction_keeps_collection_mark_first() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            for i in 0..4 {
+                db.insert_one("c", fields(json!({"_id": i, "Alpha": i, "$x": 1})))
+                    .unwrap();
+            }
+            db.delete_one("c", &json!({"_id": 3})).unwrap();
+            db.compact().unwrap();
+            assert_eq!(
+                all_docs(&db, "c")[0],
+                json!({"_id": 0, "Alpha": 0, "$x": 1})
+            );
+            db.close().unwrap();
+        }
+        lose_metadata(&path);
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 3);
+        assert_eq!(
+            all_docs(&db, "c")[2],
+            json!({"_id": 2, "Alpha": 2, "$x": 1})
+        );
+    }
+
+    /// A record written before the mark existed is attributed through the
+    /// last readable metadata block (an update of a document it knows).
+    #[test]
+    fn unmarked_record_attributed_through_earlier_metadata_block() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        let legacy: &[u8] = br#"{"_id":1,"v":"legacy-update"}"#;
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.insert_one("c", fields(json!({"_id": 1, "v": "old"})))
+                .unwrap();
+            db.checkpoint().unwrap(); // metadata block knows c/_id 1
+            db.close().unwrap();
+        }
+        // A legacy (unmarked) newer version of _id 1 follows the last block,
+        // then the metadata write that should have recorded it is torn.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&(legacy.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(legacy);
+        let torn = bytes.len() as u64;
+        bytes.extend_from_slice(&[0xFF; 16]);
+        bytes[36..44].copy_from_slice(&torn.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("wal"));
+
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            all_docs(&db, "c"),
+            vec![json!({"_id": 1, "v": "legacy-update"})]
+        );
+    }
+
+    /// Documents replayed from the WAL used to come back with the internal
+    /// `_collection` field.
+    #[test]
+    fn replayed_documents_have_no_collection_field() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.insert_one("c", fields(json!({"_id": 1, "Zeta": 1})))
+                .unwrap();
+            db.checkpoint().unwrap();
+            db.insert_one("c", fields(json!({"_id": 2, "Alpha": 1})))
+                .unwrap();
+            db.update_one("c", &json!({"_id": 1}), &json!({"$set": {"v": 2}}))
+                .unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            all_docs(&db, "c"),
+            vec![
+                json!({"_id": 1, "Zeta": 1, "v": 2}),
+                json!({"_id": 2, "Alpha": 1}),
+            ]
+        );
+    }
+}
