@@ -237,6 +237,7 @@ pub(crate) use self::index_persistence::{
     persist_index_to_disk, try_load_fulltext_index_from_file, try_load_fuzzy_index_from_file,
 };
 use self::schema::CompiledSchema;
+pub(crate) use self::update_operators::{parse_each_modifier, push_with_modifiers};
 
 // Re-export the sealed RawOperations trait for crate-internal use
 pub(crate) use self::raw_operations::RawOperations;

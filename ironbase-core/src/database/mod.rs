@@ -4904,3 +4904,103 @@ mod wal_recovery_tests {
         assert_eq!(db.count_documents("c", &json!({})).unwrap(), 7);
     }
 }
+
+#[cfg(test)]
+mod crud_distinct_tests {
+    //! Audit 2026-10-06 #35-#37: schema-rejected raw update corrupting
+    //! indexes, upsert ignoring `$each`, case-insensitive index used for
+    //! distinct / `$group`.
+
+    use super::*;
+    use crate::storage::MemoryStorage;
+    use crate::update_options::UpdateOptions;
+    use serde_json::json;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn sorted(mut values: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        values.sort_by_key(|v| v.to_string());
+        values
+    }
+
+    /// #35: both update_one_raw paths (`_id` fast path and scan) must
+    /// validate before touching the indexes.
+    #[test]
+    fn schema_rejected_update_keeps_index() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("c").unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
+        db.insert_one("c", fields(json!({"_id": 1, "name": "a", "age": 10})))
+            .unwrap();
+        coll.set_schema(Some(json!({
+            "type": "object",
+            "properties": {"age": {"type": "number", "maximum": 50}}
+        })))
+        .unwrap();
+
+        for filter in [json!({"_id": 1}), json!({"name": "a"})] {
+            let result = db.update_one("c", &filter, &json!({"$set": {"age": 99}}));
+            assert!(result.is_err(), "schema accepted age 99 via {filter}");
+            assert_eq!(
+                db.collection("c")
+                    .unwrap()
+                    .find(&json!({"age": 10}))
+                    .unwrap()
+                    .len(),
+                1,
+                "rejected update via {filter} removed the doc from the age index"
+            );
+        }
+    }
+
+    /// #36: upsert-insert applies `$each` (and `$position`/`$slice`) like
+    /// an update of an existing document.
+    #[test]
+    fn upsert_insert_applies_each_modifier() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        db.collection("c").unwrap();
+        db.update_one_with_options(
+            "c",
+            &json!({"k": 1}),
+            &json!({
+                "$push": {"tags": {"$each": ["a", "b", "c"], "$slice": 2}},
+                "$addToSet": {"s": {"$each": [1, 2, 1]}}
+            }),
+            UpdateOptions::new().with_upsert(true),
+        )
+        .unwrap();
+
+        let coll = db.collection("c").unwrap();
+        let docs = coll.find(&json!({"k": 1})).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0]["tags"], json!(["a", "b"]));
+        assert_eq!(docs[0]["s"], json!([1, 2]));
+        assert_eq!(coll.find(&json!({"tags": "a"})).unwrap().len(), 1);
+    }
+
+    /// #37: a case-insensitive index holds lowercased keys; distinct and
+    /// count-only `$group` must not answer from it.
+    #[test]
+    fn case_insensitive_index_not_used_for_distinct_or_group() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("u").unwrap();
+        db.insert_one("u", fields(json!({"name": "Alice"})))
+            .unwrap();
+        db.insert_one("u", fields(json!({"name": "alice"})))
+            .unwrap();
+        coll.create_ci_index("name".to_string(), false).unwrap();
+
+        assert_eq!(
+            sorted(coll.distinct("name", &json!({})).unwrap()),
+            vec![json!("Alice"), json!("alice")]
+        );
+
+        let groups = coll
+            .aggregate(&json!([{"$group": {"_id": "$name", "n": {"$sum": 1}}}]))
+            .unwrap();
+        let ids = sorted(groups.iter().map(|g| g["_id"].clone()).collect());
+        assert_eq!(ids, vec![json!("Alice"), json!("alice")]);
+    }
+}

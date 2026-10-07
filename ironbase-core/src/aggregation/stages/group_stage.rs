@@ -547,7 +547,9 @@ impl GroupStage {
         let index_infos = indexes.list_indexes_with_compound_info();
         let matching_index = index_infos
             .iter()
-            .find(|info| !info.is_compound && info.prefix_field == field)?;
+            // Case-insensitive indexes hold lowercased keys: grouping by them
+            // would merge and rewrite values (audit 2026-10-06 #37).
+            .find(|info| !info.is_compound && !info.case_insensitive && info.prefix_field == field)?;
 
         // Get the B+ tree index
         let btree = indexes.get_btree_index(&matching_index.index_name)?;
@@ -639,7 +641,9 @@ impl GroupStage {
         let index_infos = indexes.list_indexes_with_compound_info();
         let matching_index = index_infos
             .iter()
-            .find(|info| !info.is_compound && info.prefix_field == field)?;
+            // Case-insensitive indexes hold lowercased keys: grouping by them
+            // would merge and rewrite values (audit 2026-10-06 #37).
+            .find(|info| !info.is_compound && !info.case_insensitive && info.prefix_field == field)?;
 
         // Get the B+ tree index
         let btree = indexes.get_btree_index(&matching_index.index_name)?;

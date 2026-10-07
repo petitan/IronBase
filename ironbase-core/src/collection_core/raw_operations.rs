@@ -740,6 +740,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
                     if was_modified {
                         self.check_index_constraints(&document, Some(&document.id))?;
+                        // Validate before any index or storage change: a
+                        // rejected update must leave no trace (audit
+                        // 2026-10-06 #35).
+                        self.validate_document(&document)?;
                         self.remove_from_indexes(&original_document)?;
                         self.add_to_indexes(&document)?;
 
@@ -751,7 +755,6 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                         let tombstone_json = serde_json::to_string(&tombstone)?;
                         storage.write_data(tombstone_json.as_bytes())?;
 
-                        self.validate_document(&document)?;
                         let updated_json = document.to_json()?;
                         storage.write_document_raw(
                             &self.name,
@@ -834,6 +837,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                     // exclude_id = Some to allow updating same document's non-key fields
                     self.check_index_constraints(&document, Some(&document.id))?;
 
+                    // Validate before any index or storage change: a rejected
+                    // update must leave no trace (audit 2026-10-06 #35).
+                    self.validate_document(&document)?;
+
                     // 🔒 ATOMIC: Keep storage lock held during index operations!
                     // Previously we dropped the lock here, but that created a race condition:
                     // Thread A: reads doc (value=10), applies $inc (value=11), drops lock
@@ -860,8 +867,6 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
                     // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
-
-                    self.validate_document(&document)?;
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
