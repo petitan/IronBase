@@ -153,38 +153,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(storage.get_live_count(&self.name).unwrap_or(0));
         }
 
-        // Fast path: _id query = O(1) lookup
-        // FIX #7: Uses normalize_document_id to handle string/int conversion
-        if let Some(doc_id) = Self::extract_id_query(query_json) {
-            // Try original ID first
-            if self.read_document_by_id(&doc_id)?.is_some() {
-                return Ok(1);
-            }
-            // Try normalized version (string "123" → int 123)
-            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                if self.read_document_by_id(&normalized)?.is_some() {
-                    return Ok(1);
-                }
-            }
-            return Ok(0);
-        }
-
-        // Fast path: _id $in query = O(k) lookups (k = number of IDs)
-        // Note: Uses normalize_document_id to handle string/int conversion
-        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
-            let mut count = 0u64;
-            for doc_id in doc_ids {
-                // Try both the original ID and normalized version
-                // This handles {"$in": ["123"]} matching DocumentId::Int(123)
-                if self.read_document_by_id(&doc_id)?.is_some() {
-                    count += 1;
-                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                    if self.read_document_by_id(&normalized)?.is_some() {
-                        count += 1;
-                    }
-                }
-            }
-            return Ok(count);
+        // Fast path: _id equality / $in = O(k) catalog lookups, shared with
+        // find so both agree (each document counted once)
+        if let Some(docs) = self.find_by_id_fast_path(query_json)? {
+            return Ok(docs.len() as u64);
         }
 
         // Index-aware count with Vec-less fallback
@@ -208,38 +180,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(storage.get_live_count(&self.name).unwrap_or(0));
         }
 
-        // Fast path: _id query = O(1) lookup
-        // FIX #7: Uses normalize_document_id to handle string/int conversion
-        if let Some(doc_id) = Self::extract_id_query(query_json) {
-            // Try original ID first
-            if self.read_document_by_id(&doc_id)?.is_some() {
-                return Ok(1);
-            }
-            // Try normalized version (string "123" → int 123)
-            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                if self.read_document_by_id(&normalized)?.is_some() {
-                    return Ok(1);
-                }
-            }
-            return Ok(0);
-        }
-
-        // Fast path: _id $in query = O(k) lookups (k = number of IDs)
-        // Note: Uses normalize_document_id to handle string/int conversion
-        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
-            let mut count = 0u64;
-            for doc_id in doc_ids {
-                // Try both the original ID and normalized version
-                // This handles {"$in": ["123"]} matching DocumentId::Int(123)
-                if self.read_document_by_id(&doc_id)?.is_some() {
-                    count += 1;
-                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                    if self.read_document_by_id(&normalized)?.is_some() {
-                        count += 1;
-                    }
-                }
-            }
-            return Ok(count);
+        // Fast path: _id equality / $in = O(k) catalog lookups, shared with
+        // find so both agree (each document counted once)
+        if let Some(docs) = self.find_by_id_fast_path(query_json)? {
+            return Ok(docs.len() as u64);
         }
 
         // Index-aware count with Vec-less fallback

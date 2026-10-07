@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — find / find_one / count agree on every execution path (mcp-server v1.0.563)
+
+Audit 2026-10-07 Q5, Q7, Q8, Q9, Q10, Q11.
+
+- **Q5 (high):** `find_one` returned `None` for every `_id` operator query
+  (`$in`, `$gt`, `$ne`, `$exists`): the `_id` fast path fell through to
+  `return Ok(None)` when the value was not a plain id. `find_one` now delegates
+  to `find_one_with_ctx`, which only short-cuts plain `_id` / `$in` lookups.
+- **Q11:** the `_id` fast paths ignored `skip`/`limit` and returned or counted
+  a document once per repeated `$in` id (`[1, 1]`, `[1, "1"]`). One shared
+  `find_by_id_fast_path` (find, find_with_options, find_one, count) returns
+  each document once; `find_with_options` applies skip/limit/projection.
+- **Q7 (high):** the `$and` per-clause path collected each clause with the
+  query limit before intersecting, so `find_one`/`limit` lost matches. Clauses
+  are collected without a limit (ids only); skip/limit apply afterwards.
+- **Q8 (high):** the `$or` per-clause path cut the union at `limit` before
+  `skip` was applied, and `limit(0)` returned nothing. The union keeps
+  `skip + limit` members.
+- **Q9:** a `$regex` prefix with an index and `limit(0)` returned nothing.
+  `collect_doc_ids_with_options` normalises `limit(0)` to "no limit" once.
+- **Q10:** `find_with_hint` returned `[]` for `$eq`, `$in`, `$ne`, `$regex` and
+  `$exists` (any non-range operator object became an equality on the Null
+  key). The hint now uses the regular planner restricted to the hinted index;
+  a predicate the index cannot serve is an explicit `IndexError`.
+
+Regression tests: `tests/find_paths_consistency_tests.rs`.
+
 ### Fixed — MongoDB equality: null matches missing, `1 == 1.0`, index agrees (mcp-server v1.0.562)
 
 Audit 2026-10-07 O4, O5, Q2, Q3, Q4 (high: indexed queries lost or

@@ -842,49 +842,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         log_debug!("find() called with query: {:?}", query_json);
 
         // ====================================================================
-        // FAST PATH: Direct _id lookup O(1)
-        // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
-        // Uses normalize_document_id to handle string/int conversion.
+        // FAST PATH: _id equality / $in = O(k) catalog lookups
+        // FIX #5-6: skip catalog scanning entirely; normalize_document_id
+        // handles string/int conversion.
         // ====================================================================
-        if let Some(doc_id) = Self::extract_id_query(query_json) {
-            // Try original ID first
-            if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                return Ok(vec![doc]);
-            }
-            // Try normalized version (string "123" → int 123)
-            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                if let Some(doc) = self.read_document_by_id(&normalized)? {
-                    return Ok(vec![doc]);
-                }
-            }
-            return Ok(Vec::new());
-        }
-
-        // ====================================================================
-        // FAST PATH: _id $in query = O(k) lookups (k = number of IDs)
-        // FIX #5: Uses normalize_document_id to handle string/int conversion.
-        // ====================================================================
-        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
-            let mut results = Vec::new();
-            results.try_reserve(doc_ids.len()).map_err(|e| {
-                IronBaseError::InvalidQuery(format!(
-                    "Out of memory: cannot allocate space for {} documents ({})",
-                    doc_ids.len(),
-                    e
-                ))
-            })?;
-            for doc_id in doc_ids {
-                // Try original ID first
-                if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                    results.push(doc);
-                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                    // Try normalized version (string "123" → int 123)
-                    if let Some(doc) = self.read_document_by_id(&normalized)? {
-                        results.push(doc);
-                    }
-                }
-            }
-            return Ok(results);
+        if let Some(docs) = self.find_by_id_fast_path(query_json)? {
+            return Ok(docs);
         }
 
         // ====================================================================
@@ -927,57 +890,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // ====================================================================
-        // FAST PATH: Direct _id lookup O(1)
-        // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
-        // Uses normalize_document_id to handle string/int conversion.
-        // Note: _id queries always return max 1 doc, so skip/limit don't matter,
-        // but `projection` still applies — it must match the slow path exactly,
-        // else the same query yields a different shape with vs without a sort.
+        // FAST PATH: _id equality / $in = O(k) catalog lookups
+        // `skip`, `limit` and `projection` apply exactly as on the slow path,
+        // else the same query yields a different result with vs without a sort
+        // (audit 2026-10-07 Q11). With a sort the slow path orders the result.
         // ====================================================================
-        // Single _id query - always fast path (returns 0 or 1 doc)
         if options.sort.is_none() {
-            // Apply the same projection the slow path would (no-op when unset).
-            let project = |doc: Value| -> Result<Value> {
-                match &options.projection {
-                    Some(proj) => crate::find_options::apply_projection(&doc, proj),
-                    None => Ok(doc),
-                }
-            };
-
-            if let Some(doc_id) = Self::extract_id_query(query_json) {
-                // Try original ID first
-                if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                    return Ok(vec![project(doc)?]);
-                }
-                // Try normalized version (string "123" → int 123)
-                if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                    if let Some(doc) = self.read_document_by_id(&normalized)? {
-                        return Ok(vec![project(doc)?]);
-                    }
-                }
-                return Ok(Vec::new());
-            }
-
-            // Fast path for _id $in query
-            if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
-                let mut results = Vec::new();
-                results.try_reserve(doc_ids.len()).map_err(|e| {
-                    IronBaseError::InvalidQuery(format!(
-                        "Out of memory: cannot allocate space for {} documents ({})",
-                        doc_ids.len(),
-                        e
-                    ))
-                })?;
-                for doc_id in doc_ids {
-                    if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                        results.push(project(doc)?);
-                    } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                        if let Some(doc) = self.read_document_by_id(&normalized)? {
-                            results.push(project(doc)?);
-                        }
-                    }
-                }
-                return Ok(results);
+            if let Some(docs) = self.find_by_id_fast_path(query_json)? {
+                let skip = options.skip.unwrap_or(0);
+                let limit = options.limit.filter(|&l| l > 0).unwrap_or(usize::MAX);
+                return docs
+                    .into_iter()
+                    .skip(skip)
+                    .take(limit)
+                    .map(|doc| match &options.projection {
+                        Some(proj) => crate::find_options::apply_projection(&doc, proj),
+                        None => Ok(doc),
+                    })
+                    .collect();
             }
         }
 
@@ -1452,65 +1382,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Uses QueryPlanner for index optimization when available.
     /// For `_id` queries, uses direct O(1) catalog lookup.
     pub fn find_one(&self, query_json: &Value) -> Result<Option<Value>> {
-        self.check_not_closed()?;
-        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
-        // This is faster than going through QueryPlanner for the most common case
-        // FIX #7: Uses normalize_document_id to handle string/int conversion
-        // e.g., {"_id": "123"} should match DocumentId::Int(123)
-        if let Some(query_obj) = query_json.as_object() {
-            if query_obj.len() == 1 && query_obj.contains_key("_id") {
-                if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog
-                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
-                        // Try original ID first
-                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                            // Verify query still matches (for consistency)
-                            let parsed_query = Query::from_json(query_json)?;
-                            // PERF: from_value borrows+clones, still faster than to_string+from_json
-                            let document = Document::from_value(&doc)?;
-
-                            if parsed_query.matches(&document)? {
-                                return Ok(Some(doc));
-                            }
-                        }
-                        // Try normalized version (string "123" → int 123)
-                        if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                            if let Some(doc) = self.read_document_by_id(&normalized)? {
-                                let parsed_query = Query::from_json(query_json)?;
-                                let document = Document::from_value(&doc)?;
-
-                                if parsed_query.matches(&document)? {
-                                    return Ok(Some(doc));
-                                }
-                            }
-                        }
-                    }
-                    return Ok(None);
-                }
-            }
-        }
-
-        // Use QueryPlanner with limit=1 - enables index usage for indexed fields
-        // This was previously a full collection scan (issue #19)
-        let (doc_ids, _) = self.collect_doc_ids_with_options(
-            query_json,
-            None,
-            None,
-            false,
-            0,
-            Some(1),
-            true,
-            0,
-            None,
-            None, // No cancel_flag for find_one
-            None, // No deadline for find_one
-        )?;
-
-        if let Some(doc_id) = doc_ids.first() {
-            self.read_document_by_id(doc_id)
-        } else {
-            Ok(None)
-        }
+        self.find_one_with_ctx(query_json, None)
     }
 
     /// Find one document matching query with execution context for cancellation support.
@@ -1525,35 +1397,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<Option<Value>> {
         self.check_not_closed()?;
 
-        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
-        if let Some(query_obj) = query_json.as_object() {
-            if query_obj.len() == 1 && query_obj.contains_key("_id") {
-                if let Some(id_val) = query_obj.get("_id") {
-                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
-                        // Try original ID first
-                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                            let parsed_query = Query::from_json(query_json)?;
-                            let document = Document::from_value(&doc)?;
-
-                            if parsed_query.matches(&document)? {
-                                return Ok(Some(doc));
-                            }
-                        }
-                        // Try normalized version (string "123" → int 123)
-                        if let Some(normalized) = Self::normalize_document_id(&doc_id) {
-                            if let Some(doc) = self.read_document_by_id(&normalized)? {
-                                let parsed_query = Query::from_json(query_json)?;
-                                let document = Document::from_value(&doc)?;
-
-                                if parsed_query.matches(&document)? {
-                                    return Ok(Some(doc));
-                                }
-                            }
-                        }
-                    }
-                    return Ok(None);
-                }
-            }
+        // FAST PATH: _id equality / $in by catalog lookup. Any other `_id`
+        // query ($gt, $ne, $exists, ...) goes through the planner below —
+        // it used to return None (audit 2026-10-07 Q5).
+        if let Some(docs) = self.find_by_id_fast_path(query_json)? {
+            return Ok(docs.into_iter().next());
         }
 
         // Extract cancel_flag and deadline from ExecutionContext if available
@@ -1695,72 +1543,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         &self,
         query_json: &Value,
         index_name: &str,
-        field: &str,
+        _field: &str,
     ) -> Result<QueryPlan> {
-        // Check if the hinted index is compound
-        let is_compound = {
+        // Plan with the regular planner restricted to the hinted index, so a
+        // hint gets exactly the plans (and safety rules: Null keys, numeric
+        // buckets, compound prefixes) an unhinted query would. The former
+        // hand-rolled parser turned every non-range operator object ($eq,
+        // $in, $ne, $regex, $exists) into an equality on IndexKey::Null and
+        // silently returned [] (audit 2026-10-07 Q10).
+        let hinted: Vec<_> = {
             let indexes = self.indexes.read();
             indexes
-                .get_btree_index(index_name)
-                .map(|idx| idx.metadata.is_compound())
-                .unwrap_or(false)
+                .list_indexes_with_compound_info()
+                .into_iter()
+                .filter(|info| info.index_name == index_name)
+                .collect()
         };
-
-        // Parse the query to understand what we're looking for
-        if let Value::Object(ref map) = query_json {
-            // Check if querying this field
-            if let Some(value) = map.get(field) {
-                // Check for operators
-                if let Value::Object(ref ops) = value {
-                    // Range query
-                    let has_gt = ops.contains_key("$gt");
-                    let has_gte = ops.contains_key("$gte");
-                    let has_lt = ops.contains_key("$lt");
-                    let has_lte = ops.contains_key("$lte");
-
-                    if has_gt || has_gte || has_lt || has_lte {
-                        let start = if has_gte {
-                            ops.get("$gte").map(IndexKey::from)
-                        } else if has_gt {
-                            ops.get("$gt").map(IndexKey::from)
-                        } else {
-                            None
-                        };
-
-                        let end = if has_lte {
-                            ops.get("$lte").map(IndexKey::from)
-                        } else if has_lt {
-                            ops.get("$lt").map(IndexKey::from)
-                        } else {
-                            None
-                        };
-
-                        return Ok(QueryPlan::IndexRangeScan {
-                            index_name: index_name.to_string(),
-                            field: field.to_string(),
-                            start,
-                            end,
-                            inclusive_start: has_gte || (!has_gt && !has_gte),
-                            inclusive_end: has_lte || (!has_lt && !has_lte),
-                        });
-                    }
-                }
-
-                // Equality query
-                let key = IndexKey::from(value);
-                return Ok(QueryPlan::IndexScan {
-                    index_name: index_name.to_string(),
-                    field: field.to_string(),
-                    key,
-                    is_compound,
-                });
-            }
-        }
-
-        Err(IronBaseError::IndexError(format!(
-            "Cannot use index '{}' for this query",
-            index_name
-        )))
+        let candidates = QueryPlanner::collect_candidates(query_json, &hinted);
+        QueryPlanner::select_best_candidate(candidates)
+            .map(|c| c.plan)
+            .ok_or_else(|| {
+                IronBaseError::IndexError(format!(
+                    "Cannot use index '{}' for this query",
+                    index_name
+                ))
+            })
     }
 
     /// Execute query using an index
@@ -2791,6 +2598,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         cancel_flag: Option<&Arc<AtomicBool>>, // For cooperative cancellation
         deadline: Option<std::time::Instant>, // For cooperative timeout
     ) -> Result<(Vec<DocumentId>, bool)> {
+        // MongoDB compatibility: limit(0) means "no limit" — normalize once so
+        // no downstream path (regex pushdown, $or union) reads it as "zero
+        // results" (audit 2026-10-07 Q8, Q9).
+        let limit = limit.filter(|&l| l > 0);
+        let original_limit = original_limit.filter(|&l| l > 0);
         let cache_hash = if use_cache
             && hint.is_none()
             && sort_field.is_none()
@@ -3131,7 +2943,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let candidate_ids = match logical_op {
             LogicalOperator::And => {
-                let target_limit = limit.unwrap_or(usize::MAX);
+                // Each clause is collected WITHOUT a limit: a limit taken
+                // before the intersection drops matches that only later
+                // clause hits would have kept (audit 2026-10-07 Q7). Only
+                // ids are held; skip/limit apply to the intersection below.
                 let mut indexed_sets: Vec<Vec<DocumentId>> = Vec::new();
                 for (clause_query, plan_opt) in &clause_plans {
                     if let Some(plan) = plan_opt.clone() {
@@ -3141,7 +2956,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             None,
                             false,
                             0,
-                            Some(target_limit),
+                            None,
                             cancel_flag,
                             deadline,
                         )?;
@@ -3165,7 +2980,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 base
             }
             LogicalOperator::Or => {
-                let target_limit = limit.unwrap_or(usize::MAX);
+                // Every union member matches the query, and the final filter
+                // applies skip then limit: collect skip + limit members, not
+                // just limit (audit 2026-10-07 Q8).
+                let target_limit = limit.map_or(usize::MAX, |l| l.saturating_add(skip));
                 let mut seen = HashSet::new();
                 let mut union = Vec::new();
 
@@ -3413,6 +3231,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
             _ => None, // Int and ObjectId don't need normalization
         }
+    }
+
+    /// Documents of an `{"_id": x}` / `{"_id": {"$in": [...]}}` query by
+    /// direct catalog lookup (O(k)), or `None` for any other query shape.
+    ///
+    /// Shared by find, find_with_options, find_one and count_documents so they
+    /// agree: each document is returned once even when the `$in` list repeats
+    /// it (`[1, 1]`, or `[1, "1"]` through the string → int normalization), in
+    /// `$in` order (audit 2026-10-07 Q11).
+    fn find_by_id_fast_path(&self, query_json: &Value) -> Result<Option<Vec<Value>>> {
+        let ids = if let Some(id) = Self::extract_id_query(query_json) {
+            vec![id]
+        } else if let Some(ids) = Self::extract_id_in_query(query_json) {
+            ids
+        } else {
+            return Ok(None);
+        };
+        let mut docs = Vec::new();
+        docs.try_reserve(ids.len()).map_err(|e| {
+            IronBaseError::InvalidQuery(format!(
+                "Out of memory: cannot allocate space for {} documents ({})",
+                ids.len(),
+                e
+            ))
+        })?;
+        let mut seen: HashSet<DocumentId> = HashSet::new();
+        for id in ids {
+            // Try the original ID first, then "123" → 123
+            let normalized = Self::normalize_document_id(&id);
+            for candidate in std::iter::once(id).chain(normalized) {
+                if let Some(doc) = self.read_document_by_id(&candidate)? {
+                    if seen.insert(candidate) {
+                        docs.push(doc);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(Some(docs))
     }
 
     /// Extract DocumentId list from {"_id": {"$in": [id1, id2, ...]}} query
