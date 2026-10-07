@@ -10,11 +10,19 @@
 //! 2. Copy document data (immutable - never modified after write)
 //! 3. Check header again to detect concurrent writes
 //! 4. New data written during backup → included in next incremental
+//!
+//! Writes since the last checkpoint are reachable only through the WAL (the
+//! on-disk header and catalog are updated at checkpoint), so the WAL is
+//! stored in the backup too and replayed when the restored database is
+//! opened (audit 2026-10-06 #32).
 
 use crate::chain::{db_name_from_path, Chain};
 use crate::compression::{compress, compress_stream, format_size, DEFAULT_COMPRESSION_LEVEL};
 use crate::error::{BackupError, Result};
-use crate::format::{hash_to_short_hex, BackupFooter, BackupHeader, BackupType, DB_HEADER_SIZE};
+use crate::format::{
+    hash_to_short_hex, BackupFooter, BackupHeader, BackupType, DB_HEADER_SIZE, WAL_SECTION_MAGIC,
+};
+use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -23,6 +31,10 @@ use std::path::{Path, PathBuf};
 
 /// Threshold for using streaming compression (1 GB)
 const STREAMING_THRESHOLD: u64 = 1024 * 1024 * 1024;
+
+/// How often to retry when a checkpoint lands between reading the database
+/// header and its WAL
+const SNAPSHOT_ATTEMPTS: u32 = 5;
 
 /// IronBase header field offsets (see ironbase-core/src/storage/mod.rs)
 /// Header is 256 bytes, bincode-serialized
@@ -97,6 +109,53 @@ impl DbSnapshot {
         Ok(std::io::Cursor::new(&self.header[..])
             .chain(BufReader::new(file).take(self.data_end.saturating_sub(start))))
     }
+}
+
+/// Take a database snapshot together with the WAL that belongs to it.
+///
+/// The snapshot holds the state of the last checkpoint; every later write is
+/// only in the WAL. A checkpoint (or compaction) rewrites the header and then
+/// clears the WAL, so the pair is consistent when the header is unchanged
+/// after the WAL was read. If the WAL was read before a racing checkpoint
+/// cleared it, its operations are already in the snapshot and replaying them
+/// is idempotent (full document images in commit order).
+///
+/// Returns the snapshot and the encoded WAL section (empty if there is no
+/// WAL or it is empty).
+fn capture_snapshot(db_path: &Path) -> Result<(DbSnapshot, Vec<u8>)> {
+    let wal_path = db_path.with_extension("wal");
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        let snapshot = DbSnapshot::open(db_path)?;
+        let wal_section = match File::open(&wal_path) {
+            Ok(wal) => encode_wal_section(wal)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        // Re-read through a fresh open: a compaction renames a new file over
+        // the path, which the snapshot's handle would not see.
+        if DbSnapshot::open(db_path)?.header == snapshot.header {
+            return Ok((snapshot, wal_section));
+        }
+    }
+    Err(BackupError::SnapshotUnstable {
+        attempts: SNAPSHOT_ATTEMPTS,
+    })
+}
+
+/// Encode a WAL as a backup WAL section:
+/// `[zstd(wal)][compressed len u64][raw len u64][WAL_SECTION_MAGIC]`.
+/// An empty WAL gives an empty section (no WAL stored).
+fn encode_wal_section(wal: File) -> Result<Vec<u8>> {
+    let mut section = Vec::new();
+    let raw_len = compress_stream(BufReader::new(wal), &mut section, DEFAULT_COMPRESSION_LEVEL)?;
+    if raw_len == 0 {
+        return Ok(Vec::new());
+    }
+    let compressed_len = section.len() as u64;
+    section.write_u64::<LittleEndian>(compressed_len)?;
+    section.write_u64::<LittleEndian>(raw_len)?;
+    section.extend_from_slice(WAL_SECTION_MAGIC);
+    Ok(section)
 }
 
 /// The IronBase header stored at the start of a backup's payload (a full
@@ -255,7 +314,7 @@ pub fn create_backup(
 
     // Get database name and a consistent snapshot of the file
     let db_name = db_name_from_path(db_path);
-    let snapshot = DbSnapshot::open(db_path)?;
+    let (snapshot, wal_section) = capture_snapshot(db_path)?;
     // Back up exactly the immutable range the snapshot header describes
     // (audit 2026-10-06 #38: size, data_end and header used to be read at
     // three different times).
@@ -359,7 +418,7 @@ pub fn create_backup(
 
     // Create header
     // Note: For incremental backups, data_length includes the 256-byte DB header
-    let header = match backup_type {
+    let mut header = match backup_type {
         BackupType::Full => BackupHeader::new_full(
             &db_name,
             db_size,
@@ -378,6 +437,8 @@ pub fn create_backup(
         ),
     };
 
+    header.includes_wal = !wal_section.is_empty();
+
     // Generate base filename
     let base_filename = generate_filename(&header, &chain);
 
@@ -395,6 +456,7 @@ pub fn create_backup(
                 &base_filename,
                 &header,
                 temp_path,
+                &wal_section,
                 split_size_val,
             )?;
             // Clean up temp file
@@ -403,9 +465,15 @@ pub fn create_backup(
         } else {
             // Single file: read temp file and write final backup
             let compressed_data = fs::read(temp_path)?;
-            let content_hash = calculate_hash(&header, &compressed_data);
+            let content_hash = calculate_hash(&header, &compressed_data, &wal_section);
             let backup_path = output_dir.join(&base_filename);
-            write_backup_file(&backup_path, &header, &compressed_data, content_hash)?;
+            write_backup_file(
+                &backup_path,
+                &header,
+                &compressed_data,
+                &wal_section,
+                content_hash,
+            )?;
             // Clean up temp file
             let _ = fs::remove_file(temp_path);
             (backup_path.clone(), vec![backup_path], content_hash, 1u8)
@@ -421,13 +489,20 @@ pub fn create_backup(
                 &base_filename,
                 &header,
                 compressed_data,
+                &wal_section,
                 split_size_val,
             )?
         } else {
             // Single file backup
-            let content_hash = calculate_hash(&header, compressed_data);
+            let content_hash = calculate_hash(&header, compressed_data, &wal_section);
             let backup_path = output_dir.join(&base_filename);
-            write_backup_file(&backup_path, &header, compressed_data, content_hash)?;
+            write_backup_file(
+                &backup_path,
+                &header,
+                compressed_data,
+                &wal_section,
+                content_hash,
+            )?;
             (backup_path.clone(), vec![backup_path], content_hash, 1u8)
         }
     };
@@ -460,11 +535,13 @@ pub fn create_backup(
     })
 }
 
-/// Calculate SHA256 hash of header + payload
-fn calculate_hash(header: &BackupHeader, payload: &[u8]) -> [u8; 32] {
+/// Calculate SHA256 hash of header + payload + WAL section (everything
+/// before the footer)
+fn calculate_hash(header: &BackupHeader, payload: &[u8], wal_section: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(header.to_bytes());
     hasher.update(payload);
+    hasher.update(wal_section);
     hasher.finalize().into()
 }
 
@@ -490,11 +567,12 @@ fn generate_filename(header: &BackupHeader, chain: &Chain) -> String {
     )
 }
 
-/// Write backup file (header + compressed payload + footer)
+/// Write backup file (header + compressed payload + WAL section + footer)
 fn write_backup_file(
     path: &Path,
     header: &BackupHeader,
     compressed: &[u8],
+    wal_section: &[u8],
     content_hash: [u8; 32],
 ) -> Result<()> {
     let file = File::create(path)?;
@@ -505,6 +583,9 @@ fn write_backup_file(
 
     // Write compressed payload
     writer.write_all(compressed)?;
+
+    // Write WAL section (empty unless header.includes_wal)
+    writer.write_all(wal_section)?;
 
     // Write footer
     let footer = BackupFooter::new(content_hash);
@@ -528,6 +609,7 @@ fn write_split_backup(
     base_filename: &str,
     base_header: &BackupHeader,
     compressed: &[u8],
+    wal_section: &[u8],
     split_size: u64,
 ) -> Result<(PathBuf, Vec<PathBuf>, [u8; 32], u8)> {
     use crate::format::{FOOTER_SIZE, HEADER_SIZE};
@@ -571,8 +653,11 @@ fn write_split_backup(
         // Create part header
         let part_header = base_header.for_part(part_num, total_parts, chunk.len() as u64);
 
+        // The WAL section goes into part 1 only
+        let part_wal = if part_num == 1 { wal_section } else { &[] };
+
         // Calculate hash for this part
-        let part_hash = calculate_hash(&part_header, chunk);
+        let part_hash = calculate_hash(&part_header, chunk, part_wal);
 
         if part_num == 1 {
             first_hash = part_hash;
@@ -583,7 +668,7 @@ fn write_split_backup(
         let part_path = output_dir.join(&part_filename);
 
         // Write part file
-        write_backup_file(&part_path, &part_header, chunk, part_hash)?;
+        write_backup_file(&part_path, &part_header, chunk, part_wal, part_hash)?;
 
         all_paths.push(part_path);
     }
@@ -604,6 +689,7 @@ fn write_split_backup_from_file(
     base_filename: &str,
     base_header: &BackupHeader,
     temp_file_path: &Path,
+    wal_section: &[u8],
     split_size: u64,
 ) -> Result<(PathBuf, Vec<PathBuf>, [u8; 32], u8)> {
     use crate::format::{FOOTER_SIZE, HEADER_SIZE};
@@ -652,8 +738,11 @@ fn write_split_backup_from_file(
         // Create part header
         let part_header = base_header.for_part(part_num, total_parts, chunk_size as u64);
 
+        // The WAL section goes into part 1 only
+        let part_wal = if part_num == 1 { wal_section } else { &[] };
+
         // Calculate hash for this part
-        let part_hash = calculate_hash(&part_header, &chunk);
+        let part_hash = calculate_hash(&part_header, &chunk, part_wal);
 
         if part_num == 1 {
             first_hash = part_hash;
@@ -664,7 +753,7 @@ fn write_split_backup_from_file(
         let part_path = output_dir.join(&part_filename);
 
         // Write part file
-        write_backup_file(&part_path, &part_header, &chunk, part_hash)?;
+        write_backup_file(&part_path, &part_header, &chunk, part_wal, part_hash)?;
 
         all_paths.push(part_path);
     }

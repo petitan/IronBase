@@ -244,6 +244,14 @@ pub fn print_backup_info(path: &Path) -> Result<()> {
         format_size(info.header.original_db_size)
     );
     println!("  Start offset:    {}", info.header.start_offset);
+    println!(
+        "  WAL included:    {}",
+        if info.header.includes_wal {
+            "yes"
+        } else {
+            "no"
+        }
+    );
     println!();
     println!("Integrity:");
     println!("  Content hash:    {}", hash_to_hex(&info.hash));

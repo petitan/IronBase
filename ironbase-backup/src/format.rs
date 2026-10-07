@@ -21,8 +21,13 @@
 //! │ PAYLOAD (variable)                                      │
 //! │ - Compressed data bytes (zstd level 3)                  │
 //! ├─────────────────────────────────────────────────────────┤
+//! │ WAL SECTION (v2, only if flags bit 1; part 1 only)      │
+//! │ - Compressed WAL bytes (zstd)                           │
+//! │ - Compressed length: u64, raw length: u64               │
+//! │ - Magic: "IBAKWAL\0" (8 bytes)                          │
+//! ├─────────────────────────────────────────────────────────┤
 //! │ FOOTER (40 bytes)                                       │
-//! │ - Content Hash: [u8; 32] (SHA256 of header+payload)     │
+//! │ - Content Hash: [u8; 32] (SHA256 of everything before)  │
 //! │ - Footer Magic: "BAKEND\0\0" (8 bytes)                  │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
@@ -37,8 +42,21 @@ pub const MAGIC: &[u8; 8] = b"IRONBAK\0";
 /// Magic number at end of backup file (footer)
 pub const FOOTER_MAGIC: &[u8; 8] = b"BAKEND\0\0";
 
-/// Current backup format version
-pub const VERSION: u16 = 1;
+/// Current backup format version.
+///
+/// v2 adds the optional WAL section (audit 2026-10-06 #32). A v1 reader
+/// would ignore it and silently restore without the WAL, so it must refuse
+/// v2 files; this reader accepts both.
+pub const VERSION: u16 = 2;
+
+/// Oldest backup format version this reader accepts
+pub const MIN_SUPPORTED_VERSION: u16 = 1;
+
+/// Magic number at the end of the WAL section
+pub const WAL_SECTION_MAGIC: &[u8; 8] = b"IBAKWAL\0";
+
+/// WAL section trailer size: compressed length + raw length + magic
+pub const WAL_TRAILER_SIZE: usize = 24;
 
 /// Fixed header size in bytes
 pub const HEADER_SIZE: usize = 128;
@@ -121,6 +139,10 @@ pub struct BackupHeader {
     /// This is where incremental backups should start, NOT original_db_size
     /// because IronBase stores metadata at the END of the file
     pub data_end_offset: u64,
+    /// Whether a WAL section follows the payload (v2+, single file or part 1).
+    /// The WAL holds every write since the database's last checkpoint; the
+    /// on-disk header and catalog in the payload do not (audit 2026-10-06 #32).
+    pub includes_wal: bool,
     /// Part number for multi-part backups (0 = single file, 1-255 = part N)
     pub part_number: u8,
     /// Total number of parts (0 = single file, 1-255 = total parts)
@@ -174,6 +196,7 @@ impl BackupHeader {
             db_name: name_bytes,
             includes_db_header: false, // Full backup already includes header at offset 0
             data_end_offset,           // Where document data ends (before metadata)
+            includes_wal: false,
             part_number,
             total_parts,
         }
@@ -234,6 +257,7 @@ impl BackupHeader {
             db_name: name_bytes,
             includes_db_header: true, // Always include DB header for incremental backups
             data_end_offset,          // Where document data ends (before metadata)
+            includes_wal: false,
             part_number,
             total_parts,
         }
@@ -253,6 +277,8 @@ impl BackupHeader {
     /// Create a copy of this header for a specific part
     pub fn for_part(&self, part_number: u8, total_parts: u8, compressed_length: u64) -> Self {
         let mut header = self.clone();
+        // The WAL section is stored in part 1 only
+        header.includes_wal = self.includes_wal && part_number == 1;
         header.part_number = part_number;
         header.total_parts = total_parts;
         header.compressed_length = compressed_length;
@@ -296,7 +322,8 @@ impl BackupHeader {
 
         // Flags (1 byte) - uses first reserved byte
         // Bit 0: includes_db_header
-        let flags: u8 = if self.includes_db_header { 1 } else { 0 };
+        // Bit 1: includes_wal (v2+)
+        let flags: u8 = u8::from(self.includes_db_header) | (u8::from(self.includes_wal) << 1);
         writer.write_u8(flags)?;
 
         // Data end offset (8 bytes) - where document data ends in DB file
@@ -325,7 +352,7 @@ impl BackupHeader {
 
         // Version (2 bytes)
         let version = reader.read_u16::<LittleEndian>()?;
-        if version != VERSION {
+        if !(MIN_SUPPORTED_VERSION..=VERSION).contains(&version) {
             return Err(BackupError::UnsupportedVersion { version });
         }
 
@@ -361,6 +388,7 @@ impl BackupHeader {
         // Flags (1 byte)
         let flags = reader.read_u8()?;
         let includes_db_header = (flags & 1) != 0;
+        let includes_wal = version >= 2 && (flags & 2) != 0;
 
         // Data end offset (8 bytes) - where document data ends in DB file
         let data_end_offset = reader.read_u64::<LittleEndian>()?;
@@ -385,6 +413,7 @@ impl BackupHeader {
             db_name,
             includes_db_header,
             data_end_offset,
+            includes_wal,
             part_number,
             total_parts,
         })
@@ -493,5 +522,30 @@ mod tests {
         let read_footer = BackupFooter::read_from(&mut cursor).unwrap();
 
         assert_eq!(read_footer.content_hash, hash);
+    }
+
+    /// Audit 2026-10-06 #32: the WAL flag round-trips in v2, v1 files still
+    /// read (never with a WAL), and the WAL section stays in part 1.
+    #[test]
+    fn test_wal_flag_and_v1_compat() {
+        let mut header = BackupHeader::new_full("db", 1000, 900, 1000, 500);
+        header.includes_wal = true;
+        let bytes = header.to_bytes();
+        assert_eq!(bytes.len(), HEADER_SIZE);
+        let read = BackupHeader::read_from(&mut Cursor::new(&bytes)).unwrap();
+        assert!(read.includes_wal);
+        assert!(!read.includes_db_header);
+
+        let mut v1 = bytes.clone();
+        v1[8..10].copy_from_slice(&1u16.to_le_bytes());
+        let read_v1 = BackupHeader::read_from(&mut Cursor::new(&v1)).unwrap();
+        assert!(!read_v1.includes_wal);
+
+        let mut v3 = bytes;
+        v3[8..10].copy_from_slice(&3u16.to_le_bytes());
+        assert!(BackupHeader::read_from(&mut Cursor::new(&v3)).is_err());
+
+        assert!(header.for_part(1, 3, 10).includes_wal);
+        assert!(!header.for_part(2, 3, 10).includes_wal);
     }
 }

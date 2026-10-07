@@ -56,6 +56,12 @@ pub enum BackupError {
     )]
     LayoutChanged,
 
+    #[error(
+        "Could not take a consistent snapshot of the database and its WAL: it was \
+         checkpointed or compacted during each of {attempts} attempts"
+    )]
+    SnapshotUnstable { attempts: u32 },
+
     #[error("No backups found for database: {db_name}")]
     NoBackupsFound { db_name: String },
 }
