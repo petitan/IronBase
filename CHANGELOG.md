@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — explicit transactions: stale indexes, own writes invisible, unique keys, lost updates (mcp-server v1.0.549)
+
+Audit 2026-10-06 #11-#14 (high).
+
+- **#11 — commit never updated the indexes.** Committed transactions wrote
+  their documents but left every in-memory index unchanged, so indexed queries
+  missed committed data, also after a clean restart (the stale index was
+  flushed). Commit now applies the operations to all index types through the
+  same add/remove path as auto-commit writes, while the write lock is held.
+- **#12 — a transaction did not see its own writes.** `update_one_tx` and
+  `delete_one_tx` read committed storage only: a second delete of the same
+  document corrupted the live count, delete-then-update resurrected the
+  document, repeated `$inc` lost increments. They now look the target up in
+  committed storage overlaid with the transaction's buffered operations.
+- **#13 — `insert_one_tx` skipped the unique-index check.** It now runs the
+  same `check_index_constraints` as the auto-commit insert.
+- **#14 — auto-commit writes could be overwritten by a transaction.**
+  Auto-commits only waited for the transaction lock to be free and then
+  wrote without holding it, so a transaction could snapshot a document in the
+  middle of an auto-commit and later write the stale copy back. The lock is
+  now shared/exclusive: auto-commit writes hold it shared for the whole
+  read-modify-write, a transaction holds it exclusively from its first write
+  to commit/rollback, and a waiting transaction blocks new auto-commits so it
+  cannot be starved.
+
+Regression tests: `commit_updates_indexes`, `transaction_reads_its_own_writes`,
+`insert_one_tx_rejects_duplicate_unique_key`,
+`auto_commit_and_transaction_updates_do_not_get_lost`.
+
 ### Fixed — WAL: random replay order, checkpoint dropping acknowledged writes, index watermark (mcp-server v1.0.548)
 
 Audit 2026-10-06 #7, #8, #10 (high).

@@ -462,7 +462,7 @@ impl DatabaseCore<StorageEngine> {
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for any active write transaction to complete (blocking with timeout)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // HYBRID LOCKING: Only acquire collection lock if there are unique indexes
                 // Collections without unique indexes don't need the lock (no constraint races)
@@ -521,7 +521,7 @@ impl DatabaseCore<StorageEngine> {
 
             DurabilityMode::Batch { .. } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // WAL-FIRST BATCH MODE: Guaranteed crash safety
                 //
@@ -571,7 +571,7 @@ impl DatabaseCore<StorageEngine> {
                 auto_checkpoint_ops,
             } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // Unsafe mode: Fast path, optional auto-checkpoint
                 let collection = self.collection(collection_name)?;
@@ -613,7 +613,7 @@ impl DatabaseCore<StorageEngine> {
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
@@ -662,7 +662,7 @@ impl DatabaseCore<StorageEngine> {
 
             DurabilityMode::Batch { .. } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // WAL ORDERING FIX: Use prepare_batch pattern (NO storage write in prepare)
                 // 1. PREPARE: Find doc, compute update, NO storage write
@@ -708,7 +708,7 @@ impl DatabaseCore<StorageEngine> {
                 auto_checkpoint_ops,
             } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
@@ -885,7 +885,7 @@ impl DatabaseCore<StorageEngine> {
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
@@ -927,7 +927,7 @@ impl DatabaseCore<StorageEngine> {
 
             DurabilityMode::Batch { .. } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // WAL ORDERING FIX: Use prepare_batch pattern (NO tombstone write in prepare)
                 // 1. PREPARE: Find doc, NO tombstone write
@@ -971,7 +971,7 @@ impl DatabaseCore<StorageEngine> {
                 auto_checkpoint_ops,
             } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
-                self.wait_for_write_lock_release()?;
+                let _auto_write = self.enter_auto_write()?;
 
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
@@ -1007,7 +1007,7 @@ impl DatabaseCore<StorageEngine> {
         documents: Vec<HashMap<String, Value>>,
     ) -> Result<Vec<DocumentId>> {
         // Wait for active write transaction to complete (Read Committed isolation)
-        self.wait_for_write_lock_release()?;
+        let _auto_write = self.enter_auto_write()?;
 
         match self.durability_mode {
             DurabilityMode::Safe => {
@@ -1169,7 +1169,7 @@ impl DatabaseCore<StorageEngine> {
         update: &Value,
     ) -> Result<(u64, u64)> {
         // Wait for active write transaction to complete (Read Committed isolation)
-        self.wait_for_write_lock_release()?;
+        let _auto_write = self.enter_auto_write()?;
 
         match self.durability_mode {
             DurabilityMode::Safe => {
@@ -1320,7 +1320,7 @@ impl DatabaseCore<StorageEngine> {
     /// Returns deleted_count
     pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
         // Wait for active write transaction to complete (Read Committed isolation)
-        self.wait_for_write_lock_release()?;
+        let _auto_write = self.enter_auto_write()?;
 
         match self.durability_mode {
             DurabilityMode::Safe => {

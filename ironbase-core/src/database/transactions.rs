@@ -36,10 +36,17 @@ impl DatabaseCore<StorageEngine> {
         };
 
         // Commit through storage engine
-        let result = {
+        let mut result = {
             let mut storage = self.storage.write();
             storage.commit_transaction(&mut transaction)
         };
+
+        // Bring the in-memory indexes up to date while the write lock is still
+        // held, so no other writer or transaction sees them stale (audit
+        // 2026-10-06 #11).
+        if result.is_ok() {
+            result = self.apply_committed_transaction_to_indexes(&transaction);
+        }
 
         // Advance watermark on successful commit (for WAL-replay index recovery)
         if result.is_ok() {
@@ -51,6 +58,27 @@ impl DatabaseCore<StorageEngine> {
         self.release_write_lock(tx_id);
 
         result
+    }
+
+    /// Apply a committed transaction's operations to the in-memory indexes of
+    /// every collection it touched.
+    fn apply_committed_transaction_to_indexes(&self, transaction: &Transaction) -> Result<()> {
+        let mut collections: Vec<&str> = Vec::new();
+        for op in transaction.operations() {
+            let name = match op {
+                crate::transaction::Operation::Insert { collection, .. }
+                | crate::transaction::Operation::Update { collection, .. }
+                | crate::transaction::Operation::Delete { collection, .. } => collection.as_str(),
+            };
+            if !collections.contains(&name) {
+                collections.push(name);
+            }
+        }
+        for name in collections {
+            self.collection(name)?
+                .apply_committed_ops_to_indexes(transaction.operations())?;
+        }
+        Ok(())
     }
 
     /// Rollback a transaction (discard all buffered operations) - StorageEngine-specific
@@ -206,42 +234,47 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         timeout: std::time::Duration,
     ) -> Result<()> {
         let mut lock = self.write_transaction_lock.lock();
+        if lock.holder == Some(tx_id) {
+            // This transaction already holds the lock - OK
+            return Ok(());
+        }
 
-        loop {
-            match *lock {
-                None => {
-                    // No transaction holds the lock - acquire it
-                    *lock = Some(tx_id);
-
-                    // Mark transaction as holding write lock
-                    let mut active = self.active_transactions.write();
-                    if let Some(tx) = active.get_mut(&tx_id) {
-                        tx.mark_write_lock_acquired();
-                    }
-
-                    return Ok(());
-                }
-                Some(holder) if holder == tx_id => {
-                    // This transaction already holds the lock - OK
-                    return Ok(());
-                }
-                Some(_) => {
-                    // Another transaction holds the lock — wait for Condvar notification
-                }
+        lock.tx_waiting += 1;
+        let acquired = loop {
+            // Free = no other transaction and no auto-commit write in progress
+            if lock.holder.is_none() && lock.auto_writers == 0 {
+                lock.holder = Some(tx_id);
+                break Ok(());
             }
 
-            // Wait for release_write_lock() to notify us, or timeout
+            // Wait for a release (transaction or auto-commit write), or timeout
             let wait_result = self.write_lock_condvar.wait_for(&mut lock, timeout);
             if wait_result.timed_out() {
-                let holder = *lock;
-                return Err(IronBaseError::TransactionAborted(format!(
-                    "Timeout waiting for write lock after {:?}. Lock held by transaction {}.",
+                break Err(IronBaseError::TransactionAborted(format!(
+                    "Timeout waiting for write lock after {:?}. Lock held by {}.",
                     timeout,
-                    holder.map_or("unknown".to_string(), |h| h.to_string())
+                    match lock.holder {
+                        Some(h) => format!("transaction {}", h),
+                        None => format!("{} auto-commit write(s)", lock.auto_writers),
+                    }
                 )));
             }
-            // Condvar woke us — loop back to check if lock is now free
+        };
+        lock.tx_waiting -= 1;
+        if acquired.is_err() {
+            // Auto-commits blocked on tx_waiting may proceed now
+            self.write_lock_condvar.notify_all();
         }
+        drop(lock);
+
+        if acquired.is_ok() {
+            // Mark transaction as holding write lock
+            let mut active = self.active_transactions.write();
+            if let Some(tx) = active.get_mut(&tx_id) {
+                tx.mark_write_lock_acquired();
+            }
+        }
+        acquired
     }
 
     /// Release the write lock held by a transaction
@@ -250,59 +283,65 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Safe to call even if transaction doesn't hold the lock.
     pub fn release_write_lock(&self, tx_id: TransactionId) {
         let mut lock = self.write_transaction_lock.lock();
-        if *lock == Some(tx_id) {
-            *lock = None;
-            // Wake up one waiter (if any) that's blocked in acquire_write_lock
-            self.write_lock_condvar.notify_one();
+        if lock.holder == Some(tx_id) {
+            lock.holder = None;
+            // Wake every waiter: both transactions and auto-commit writes wait here
+            self.write_lock_condvar.notify_all();
         }
     }
 
     /// Check if a transaction currently holds the write lock
     pub fn holds_write_lock(&self, tx_id: TransactionId) -> bool {
         let lock = self.write_transaction_lock.lock();
-        *lock == Some(tx_id)
+        lock.holder == Some(tx_id)
     }
 
     /// Check if any transaction holds the write lock (for auto-commit conflict check)
     pub fn has_active_write_transaction(&self) -> bool {
         let lock = self.write_transaction_lock.lock();
-        lock.is_some()
+        lock.holder.is_some()
     }
 
     /// Get the ID of the transaction holding the write lock, if any
     pub fn get_write_lock_holder(&self) -> Option<TransactionId> {
         let lock = self.write_transaction_lock.lock();
-        *lock
+        lock.holder
     }
 
-    /// Wait for any active write transaction to complete (for auto-commit operations)
+    /// Enter an auto-commit write (shared hold of the write lock).
     ///
-    /// Uses default timeout of 5 seconds.
-    /// Returns Ok(()) when lock is free, Err on timeout.
-    pub(crate) fn wait_for_write_lock_release(&self) -> Result<()> {
-        self.wait_for_write_lock_release_with_timeout(std::time::Duration::from_secs(5))
+    /// Waits while an explicit transaction holds the lock or is waiting for
+    /// it, then holds the lock shared until the returned guard is dropped.
+    /// The guard must live for the whole read-modify-write, so a transaction
+    /// cannot take a snapshot in the middle of it (audit 2026-10-06 #14).
+    /// Uses a default timeout of 5 seconds.
+    pub(crate) fn enter_auto_write(&self) -> Result<super::AutoWriteGuard<'_>> {
+        self.enter_auto_write_with_timeout(std::time::Duration::from_secs(5))
     }
 
-    /// Wait for any active write transaction to complete with custom timeout
-    pub(crate) fn wait_for_write_lock_release_with_timeout(
+    /// `enter_auto_write` with a custom timeout
+    pub(crate) fn enter_auto_write_with_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<()> {
+    ) -> Result<super::AutoWriteGuard<'_>> {
         let mut lock = self.write_transaction_lock.lock();
 
         loop {
-            if lock.is_none() {
-                return Ok(());
+            if lock.holder.is_none() && lock.tx_waiting == 0 {
+                lock.auto_writers += 1;
+                return Ok(super::AutoWriteGuard {
+                    state: &self.write_transaction_lock,
+                    condvar: &self.write_lock_condvar,
+                });
             }
 
             // Wait for release_write_lock() to notify us, or timeout
             let wait_result = self.write_lock_condvar.wait_for(&mut lock, timeout);
             if wait_result.timed_out() {
-                let holder = *lock;
                 return Err(IronBaseError::TransactionAborted(format!(
                     "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
                     timeout,
-                    holder.map_or("unknown".to_string(), |h| h.to_string())
+                    lock.holder.map_or("unknown".to_string(), |h| h.to_string())
                 )));
             }
             // Condvar woke us — loop back to check if lock is now free

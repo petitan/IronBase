@@ -13,23 +13,20 @@
 //!
 //! **Future work:** Two-phase commit for atomic index updates (see INDEX_CONSISTENCY.md)
 //!
-//! ## B+ Tree Only Index Tracking (TODO N4)
+//! ## Index Maintenance at Commit
 //!
-//! Index change tracking (`add_index_change`) only supports B+ tree indexes because
-//! `IndexChange` uses `IndexKey` which is btree-specific. Fulltext (tokenized text),
-//! fuzzy (similarity strings), and HNSW (vector embeddings) indexes are NOT tracked
-//! in transactions. After commit, these indexes may be stale until the next
-//! `rebuild_indexes` call.
+//! The in-memory indexes (all types) are updated at commit from the committed
+//! operations by `apply_committed_ops_to_indexes`, the same add/remove path as
+//! auto-commit writes (audit 2026-10-06 #11). `add_index_change` still records
+//! B+ tree changes for the WAL; it is not what keeps the live indexes current.
 //!
-//! ## Optimistic Concurrency
+//! ## Isolation
 //!
-//! Update and delete operations use optimistic concurrency:
-//! - `find_one()` locates the document (snapshot taken)
-//! - Changes are prepared based on that snapshot
-//! - Conflict detection happens at commit time
-//!
-//! If another transaction modifies the same document between find and commit,
-//! the behavior depends on the transaction manager's conflict resolution.
+//! - A transaction holds the database write lock exclusively from its first
+//!   write until commit/rollback, and auto-commit writes hold it shared, so the
+//!   committed state a transaction reads cannot change under it (audit #14).
+//! - Update and delete locate their target with `find_one_in_tx`, which sees
+//!   the transaction's own buffered writes (audit #12).
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -90,6 +87,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         doc_with_id.insert("_collection".to_string(), Value::String(self.name.clone()));
 
         let doc_for_validation = Document::new(doc_id.clone(), doc_with_id.clone());
+        // Same unique-index check as the auto-commit insert (audit 2026-10-06 #13)
+        self.check_index_constraints(&doc_for_validation, None)?;
         self.validate_document(&doc_for_validation)?;
 
         // Add operation to transaction
@@ -152,8 +151,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<(u64, u64)> {
         use crate::transaction::Operation;
 
-        // Find the document first
-        let doc = self.find_one(query)?;
+        // Find the document as this transaction sees it
+        let doc = self.find_one_in_tx(query, tx)?;
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
@@ -246,8 +245,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<u64> {
         use crate::transaction::Operation;
 
-        // Find the document first
-        let doc = self.find_one(query)?;
+        // Find the document as this transaction sees it
+        let doc = self.find_one_in_tx(query, tx)?;
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
@@ -291,5 +290,151 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         } else {
             Ok(0)
         }
+    }
+
+    /// Find the first document matching `query` as `tx` sees it: committed
+    /// storage overlaid with the transaction's own buffered inserts, updates
+    /// and deletes. Without the overlay a transaction deleted the same document
+    /// twice, resurrected a document it had deleted and lost repeated updates
+    /// (audit 2026-10-06 #12).
+    fn find_one_in_tx(
+        &self,
+        query: &Value,
+        tx: &crate::transaction::Transaction,
+    ) -> Result<Option<Value>> {
+        use crate::transaction::Operation;
+
+        // Latest buffered version of every document this transaction touched
+        // in this collection (None = deleted), in first-touch order.
+        let mut overlay: HashMap<DocumentId, Option<&Value>> = HashMap::new();
+        let mut order: Vec<&DocumentId> = Vec::new();
+        for op in tx.operations() {
+            let (collection, doc_id, doc) = match op {
+                Operation::Insert {
+                    collection,
+                    doc_id,
+                    doc,
+                } => (collection, doc_id, Some(doc.as_ref())),
+                Operation::Update {
+                    collection,
+                    doc_id,
+                    new_doc,
+                    ..
+                } => (collection, doc_id, Some(new_doc.as_ref())),
+                Operation::Delete {
+                    collection, doc_id, ..
+                } => (collection, doc_id, None),
+            };
+            if collection != &self.name {
+                continue;
+            }
+            if overlay.insert(doc_id.clone(), doc).is_none() {
+                order.push(doc_id);
+            }
+        }
+        if overlay.is_empty() {
+            return self.find_one(query);
+        }
+
+        // A committed match the transaction has not touched. At most
+        // overlay.len() of the first overlay.len() + 1 matches are touched.
+        let options = crate::find_options::FindOptions::new().with_limit(overlay.len() + 1);
+        for doc in self.find_with_options(query, options)? {
+            let touched = match doc.get("_id") {
+                Some(id) => {
+                    overlay.contains_key(&serde_json::from_value::<DocumentId>(id.clone())?)
+                }
+                None => false,
+            };
+            if !touched {
+                return Ok(Some(doc));
+            }
+        }
+
+        // Otherwise the transaction's own version of a document, if it matches
+        let parsed_query = crate::query::Query::from_json(query)?;
+        for doc_id in order {
+            if let Some(Some(doc)) = overlay.get(doc_id) {
+                if parsed_query.matches(&Document::from_value(doc)?)? {
+                    return Ok(Some((*doc).clone()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Apply the operations of a committed transaction to this collection's
+    /// in-memory indexes (every index type), in commit order. Operations on
+    /// other collections are skipped. Called by `DatabaseCore::commit_transaction`
+    /// after the storage commit (audit 2026-10-06 #11: committed transactions
+    /// never updated the indexes, so indexed queries missed committed data).
+    pub(crate) fn apply_committed_ops_to_indexes(
+        &self,
+        operations: &[crate::transaction::Operation],
+    ) -> Result<()> {
+        use crate::transaction::Operation;
+
+        // Build the document from the operation's doc_id: the stored JSON is
+        // not required to carry `_id`. An old image that is not an object
+        // (unknown) has nothing to remove.
+        let as_document = |doc_id: &DocumentId, value: &Value| -> Option<Document> {
+            value.as_object().map(|fields| {
+                Document::new(
+                    doc_id.clone(),
+                    fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                )
+            })
+        };
+
+        // The storage commit is already durable: an index error must not turn
+        // it into a reported failure, so it is logged and the rest applied.
+        let report = |doc_id: &DocumentId, result: Result<()>| {
+            if let Err(e) = result {
+                crate::log_warn!(
+                    "[WARN] Index update after commit failed for {:?} in '{}': {}",
+                    doc_id,
+                    self.name,
+                    e
+                );
+            }
+        };
+
+        for op in operations {
+            match op {
+                Operation::Insert {
+                    collection,
+                    doc_id,
+                    doc,
+                } if collection == &self.name => {
+                    if let Some(document) = as_document(doc_id, doc) {
+                        report(doc_id, self.add_to_indexes(&document));
+                    }
+                }
+                Operation::Update {
+                    collection,
+                    doc_id,
+                    old_doc,
+                    new_doc,
+                } if collection == &self.name => {
+                    if let Some(document) = as_document(doc_id, old_doc) {
+                        report(doc_id, self.remove_from_indexes(&document));
+                    }
+                    if let Some(document) = as_document(doc_id, new_doc) {
+                        report(doc_id, self.add_to_indexes(&document));
+                    }
+                }
+                Operation::Delete {
+                    collection,
+                    doc_id,
+                    old_doc,
+                } if collection == &self.name => {
+                    if let Some(document) = as_document(doc_id, old_doc) {
+                        report(doc_id, self.remove_from_indexes(&document));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }

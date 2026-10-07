@@ -268,6 +268,38 @@ impl BatchDocBuffer {
 /// db.insert_one("users", [("name".to_string(), serde_json::json!("Alice"))].into())?;
 /// # Ok::<(), ironbase_core::IronBaseError>(())
 /// ```
+/// State behind `DatabaseCore::write_transaction_lock`.
+///
+/// An explicit transaction owns the lock exclusively (`holder`) from its first
+/// write until commit or rollback. Auto-commit writes hold it shared
+/// (`auto_writers`) for their whole read-modify-write, so a transaction can
+/// never read a document while an auto-commit is about to change it, and an
+/// auto-commit never runs while a transaction holds a snapshot it will write
+/// back (audit 2026-10-06 #14). A waiting transaction blocks new auto-commits
+/// (`tx_waiting`), so a steady stream of auto-commits cannot starve it.
+#[derive(Debug, Default)]
+pub(crate) struct WriteLockState {
+    pub(crate) holder: Option<TransactionId>,
+    pub(crate) auto_writers: usize,
+    pub(crate) tx_waiting: usize,
+}
+
+/// Shared hold of the write lock by one auto-commit write; released on drop.
+pub(crate) struct AutoWriteGuard<'a> {
+    state: &'a Mutex<WriteLockState>,
+    condvar: &'a Condvar,
+}
+
+impl Drop for AutoWriteGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.lock();
+        state.auto_writers -= 1;
+        if state.auto_writers == 0 {
+            self.condvar.notify_all();
+        }
+    }
+}
+
 /// Registration of one auto-transaction in `DatabaseCore::in_flight_tx_ids`.
 /// Dropping it (after the writes are persisted and indexed, or on any error)
 /// lets the index watermark move past the transaction.
@@ -327,11 +359,10 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Each collection shares its CompiledSchema across all CollectionCore instances
     pub(crate) schema_managers: Arc<RwLock<HashMap<String, Arc<RwLock<Option<CompiledSchema>>>>>>,
 
-    // Transaction-level exclusive write lock for Read Committed isolation
-    // Only one write transaction can be active at a time (SQLite-style)
-    // None = no active write transaction
-    // Some(tx_id) = this transaction holds the exclusive write lock
-    pub(crate) write_transaction_lock: Arc<Mutex<Option<TransactionId>>>,
+    // Transaction-level write lock for Read Committed isolation: one write
+    // transaction at a time (exclusive), auto-commit writes shared. See
+    // WriteLockState.
+    pub(crate) write_transaction_lock: Arc<Mutex<WriteLockState>>,
     // Condvar notified on release_write_lock — waiters wake up instead of polling
     pub(crate) write_lock_condvar: Arc<Condvar>,
 
@@ -539,7 +570,7 @@ impl DatabaseCore<StorageEngine> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
-            write_transaction_lock: Arc::new(Mutex::new(None)),
+            write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
@@ -663,7 +694,7 @@ impl DatabaseCore<MemoryStorage> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
-            write_transaction_lock: Arc::new(Mutex::new(None)),
+            write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
@@ -4204,6 +4235,162 @@ mod wal_durability_tests {
             db.find("c", &json!({"k": {"$in": deleted}})).unwrap().len(),
             0,
             "deleted documents must stay deleted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    //! Audit 2026-10-06 #11-#14: explicit transactions.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn open(temp: &TempDir) -> DatabaseCore<StorageEngine> {
+        DatabaseCore::<StorageEngine>::open(temp.path().join("t.mlite")).unwrap()
+    }
+
+    /// #11: commit must update the indexes.
+    #[test]
+    fn commit_updates_indexes() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.collection("u")
+            .unwrap()
+            .create_index("age".to_string(), false, false)
+            .unwrap();
+        db.insert_one("u", fields(json!({"age": 10}))).unwrap();
+
+        let tx = db.begin_transaction();
+        db.insert_one_tx("u", fields(json!({"age": 30})), tx)
+            .unwrap();
+        db.update_one_tx("u", &json!({"age": 10}), json!({"$set": {"age": 11}}), tx)
+            .unwrap();
+        db.commit_transaction(tx).unwrap();
+
+        assert_eq!(db.find("u", &json!({"age": 30})).unwrap().len(), 1);
+        assert_eq!(db.find("u", &json!({"age": 11})).unwrap().len(), 1);
+        assert_eq!(db.find("u", &json!({"age": 10})).unwrap().len(), 0);
+        assert_eq!(
+            db.count_documents("u", &json!({"age": {"$gte": 0}}))
+                .unwrap(),
+            2
+        );
+
+        db.close().unwrap();
+        drop(db);
+        let db = open(&temp);
+        assert_eq!(db.find("u", &json!({"age": 30})).unwrap().len(), 1);
+        assert_eq!(db.find("u", &json!({"age": 11})).unwrap().len(), 1);
+    }
+
+    /// #12: a transaction must see its own buffered writes.
+    #[test]
+    fn transaction_reads_its_own_writes() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        for name in ["A", "B", "C"] {
+            db.insert_one("u", fields(json!({"name": name, "n": 0})))
+                .unwrap();
+        }
+
+        let tx = db.begin_transaction();
+        assert_eq!(db.delete_one_tx("u", &json!({"name": "A"}), tx).unwrap(), 1);
+        assert_eq!(
+            db.delete_one_tx("u", &json!({"name": "A"}), tx).unwrap(),
+            0,
+            "already deleted in this transaction"
+        );
+        assert_eq!(db.delete_one_tx("u", &json!({"name": "C"}), tx).unwrap(), 1);
+        assert_eq!(
+            db.update_one_tx("u", &json!({"name": "C"}), json!({"$set": {"x": 1}}), tx)
+                .unwrap(),
+            (0, 0),
+            "deleted in this transaction"
+        );
+        for _ in 0..2 {
+            db.update_one_tx("u", &json!({"name": "B"}), json!({"$inc": {"n": 1}}), tx)
+                .unwrap();
+        }
+        let inserted = db
+            .insert_one_tx("u", fields(json!({"name": "D"})), tx)
+            .unwrap();
+        assert_eq!(db.delete_one_tx("u", &json!({"name": "D"}), tx).unwrap(), 1);
+        db.commit_transaction(tx).unwrap();
+
+        let all = db.find("u", &json!({})).unwrap();
+        assert_eq!(all.len(), 1, "only B is left: {:?}", all);
+        assert_eq!(all[0]["name"], "B");
+        assert_eq!(all[0]["n"], 2, "both increments must apply");
+        assert_eq!(db.count_documents("u", &json!({})).unwrap(), 1);
+        assert!(db.find("u", &json!({"_id": inserted})).unwrap().is_empty());
+    }
+
+    /// #13: a transactional insert must respect unique indexes.
+    #[test]
+    fn insert_one_tx_rejects_duplicate_unique_key() {
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.collection("u")
+            .unwrap()
+            .create_index("email".to_string(), true, false)
+            .unwrap();
+        db.insert_one("u", fields(json!({"email": "a@x"}))).unwrap();
+
+        let tx = db.begin_transaction();
+        assert!(db
+            .insert_one_tx("u", fields(json!({"email": "a@x"})), tx)
+            .is_err());
+        db.rollback_transaction(tx).unwrap();
+        assert_eq!(db.find("u", &json!({})).unwrap().len(), 1);
+    }
+
+    /// #14: auto-commit writes and transactions must not overwrite each other.
+    #[test]
+    fn auto_commit_and_transaction_updates_do_not_get_lost() {
+        const ROUNDS: i64 = 200;
+        let temp = TempDir::new().unwrap();
+        let db = open(&temp);
+        db.insert_one("u", fields(json!({"name": "A", "balance": 0, "visits": 0})))
+            .unwrap();
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..ROUNDS {
+                    db.update_one("u", &json!({"name": "A"}), &json!({"$inc": {"balance": 1}}))
+                        .unwrap();
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..ROUNDS {
+                    let tx = db.begin_transaction();
+                    db.update_one_tx(
+                        "u",
+                        &json!({"name": "A"}),
+                        json!({"$inc": {"visits": 1}}),
+                        tx,
+                    )
+                    .unwrap();
+                    db.commit_transaction(tx).unwrap();
+                }
+            });
+        });
+
+        let doc = db.find_one("u", &json!({"name": "A"})).unwrap().unwrap();
+        assert_eq!(
+            doc["balance"], ROUNDS,
+            "auto-commit increments lost: {}",
+            doc
+        );
+        assert_eq!(
+            doc["visits"], ROUNDS,
+            "transaction increments lost: {}",
+            doc
         );
     }
 }
