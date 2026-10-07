@@ -331,7 +331,9 @@ fn apply_push(doc: &mut Map<String, Value>, path: &str, value: Value) {
             .entry(path.to_string())
             .or_insert_with(|| Value::Array(vec![]));
         if let Value::Array(arr) = arr {
-            arr.push(value);
+            // Same modifier handling ($each, $position, $slice) as an update
+            // of an existing document (audit 2026-10-06 #36).
+            crate::collection_core::push_with_modifiers(arr, &value);
         }
     } else {
         let first = parts[0];
@@ -356,10 +358,14 @@ fn apply_add_to_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
             .entry(path.to_string())
             .or_insert_with(|| Value::Array(vec![]));
         if let Value::Array(arr) = arr {
-            // Use json_deep_equal to compare objects ignoring key order
-            let already_exists = arr.iter().any(|existing| json_deep_equal(existing, &value));
-            if !already_exists {
-                arr.push(value);
+            // `$each` adds every item, like an update of an existing
+            // document (audit 2026-10-06 #36).
+            for item in crate::collection_core::parse_each_modifier(&value) {
+                // Use json_deep_equal to compare objects ignoring key order
+                let already_exists = arr.iter().any(|existing| json_deep_equal(existing, &item));
+                if !already_exists {
+                    arr.push(item);
+                }
             }
         }
     } else {

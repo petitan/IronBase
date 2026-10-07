@@ -181,7 +181,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         for info in &index_info {
             // Only use single-field indexes for now
             // The field in index name format is: "{collection}_{field}" or just the field directly
-            if !info.is_compound && info.prefix_field == field {
+            // A case-insensitive index stores lowercased keys, so it cannot
+            // return the original values (audit 2026-10-06 #37).
+            if !info.is_compound && !info.case_insensitive && info.prefix_field == field {
                 // Found a matching index!
                 if let Some(btree) = indexes.get_btree_index(&info.index_name) {
                     // Streaming traversal — O(distinct_keys) memory instead of O(all_entries).

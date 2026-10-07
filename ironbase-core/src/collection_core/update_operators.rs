@@ -164,26 +164,10 @@ fn apply_push(document: &mut Document, fields: &Value) -> Result<bool> {
 
     let mut modified = false;
     for (field, value) in field_values {
-        // Parse modifiers: $each, $position, $slice
-        let (items, position, slice) = parse_push_modifiers(value);
-
         // Get or create array
         let mut array = get_array_field(document, field, "$push")?;
 
-        // Insert items at position or append
-        if let Some(pos) = position {
-            let insert_pos = pos.min(array.len());
-            for (i, item) in items.into_iter().enumerate() {
-                array.insert(insert_pos + i, item);
-            }
-        } else {
-            array.extend(items);
-        }
-
-        // Apply $slice if specified
-        if let Some(slice_val) = slice {
-            apply_slice(&mut array, slice_val);
-        }
+        push_with_modifiers(&mut array, value);
 
         document.set_nested(field, Value::Array(array));
         modified = true;
@@ -305,6 +289,30 @@ fn apply_pop(document: &mut Document, fields: &Value) -> Result<bool> {
 // ============================================================================
 
 /// Parse $push modifiers: $each, $position, $slice
+/// Apply one `$push` value to `array`: `$each` items, `$position` and
+/// `$slice` modifiers, or a plain single value. Shared with the upsert
+/// document builder (`upsert.rs`), which stored the literal modifier object
+/// before (audit 2026-10-06 #36).
+pub(crate) fn push_with_modifiers(array: &mut Vec<Value>, value: &Value) {
+    // Parse modifiers: $each, $position, $slice
+    let (items, position, slice) = parse_push_modifiers(value);
+
+    // Insert items at position or append
+    if let Some(pos) = position {
+        let insert_pos = pos.min(array.len());
+        for (i, item) in items.into_iter().enumerate() {
+            array.insert(insert_pos + i, item);
+        }
+    } else {
+        array.extend(items);
+    }
+
+    // Apply $slice if specified
+    if let Some(slice_val) = slice {
+        apply_slice(array, slice_val);
+    }
+}
+
 fn parse_push_modifiers(value: &Value) -> (Vec<Value>, Option<usize>, Option<i64>) {
     if let Value::Object(ref modifiers) = value {
         let items = if let Some(each_val) = modifiers.get("$each") {
@@ -334,7 +342,7 @@ fn parse_push_modifiers(value: &Value) -> (Vec<Value>, Option<usize>, Option<i64
 }
 
 /// Parse $each modifier for $addToSet
-fn parse_each_modifier(value: &Value) -> Vec<Value> {
+pub(crate) fn parse_each_modifier(value: &Value) -> Vec<Value> {
     if let Value::Object(ref modifiers) = value {
         if let Some(each_val) = modifiers.get("$each") {
             if let Value::Array(ref arr) = each_val {

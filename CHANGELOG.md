@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — rejected raw update corrupting indexes, upsert `$each`, case-insensitive distinct/`$group` (mcp-server v1.0.555)
+
+Audit 2026-10-06 #35-#37 (medium).
+
+- **#35 — `update_one_raw` validated the schema after changing the indexes and
+  writing a tombstone.** A schema-rejected update (Unsafe mode, and every
+  `MemoryStorage` update) left the indexes holding the new value while storage
+  kept the old document, so indexed queries no longer found it. Both the `_id`
+  fast path and the scan path now validate before any change, like the other
+  update paths.
+- **#36 — upsert-insert stored `$push`/`$addToSet` modifiers literally**
+  (`tags: [{"$each": [...]}]`). The upsert document builder now uses the same
+  `$each`/`$position`/`$slice` handling as an update of an existing document
+  (shared `push_with_modifiers` / `parse_each_modifier`).
+- **#37 — `distinct` answered from a case-insensitive index,** returning
+  lowercased values and merging spellings that differ only in case. The
+  count-only `$group` index optimization had the same bug. Both now skip
+  case-insensitive indexes and fall back to the document scan.
+
+Regression tests: `schema_rejected_update_keeps_index`,
+`upsert_insert_applies_each_modifier`,
+`case_insensitive_index_not_used_for_distinct_or_group`.
+
 ### Fixed — WAL recovery: clear only after the replay is durable, stale aborted groups (mcp-server v1.0.554)
 
 Audit 2026-10-06 #33, #34 (medium), #41 (low).
