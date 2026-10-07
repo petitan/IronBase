@@ -4,7 +4,7 @@ use crate::chain::{read_backup_info, Chain};
 use crate::color::{green, red};
 use crate::compression::format_size;
 use crate::error::Result;
-use crate::format::{hash_to_hex, hash_to_short_hex, FOOTER_SIZE, HEADER_SIZE};
+use crate::format::{hash_to_hex, hash_to_short_hex, BackupHeader, FOOTER_SIZE, HEADER_SIZE};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -40,8 +40,7 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
     // Calculate actual hash
     let actual_hash = calculate_backup_hash(path)?;
 
-    let valid = expected_hash == actual_hash;
-    let error = if valid {
+    let mut error = if expected_hash == actual_hash {
         None
     } else {
         Some(format!(
@@ -51,6 +50,16 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
         ))
     };
 
+    // A multi-part backup is only valid if every part is: each part has its
+    // own header and footer hash, but only part 1 was checked, so a corrupt
+    // later part passed verify and was restored (audit 2026-10-06 #39).
+    // The chain check starts from part 1; a later part passed on its own is
+    // checked against its own hash only.
+    if error.is_none() && info.header.total_parts > 1 && info.header.part_number <= 1 {
+        error = verify_later_parts(path, &info.header).err();
+    }
+    let valid = error.is_none();
+
     Ok(VerifyResult {
         filename,
         valid,
@@ -58,6 +67,72 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
         actual_hash,
         error,
     })
+}
+
+/// Whether two part headers belong to the same backup: every field except
+/// the per-part ones (part number, compressed length) comes from one base
+/// header.
+fn same_backup(a: &BackupHeader, b: &BackupHeader) -> bool {
+    a.backup_type == b.backup_type
+        && a.timestamp == b.timestamp
+        && a.parent_hash == b.parent_hash
+        && a.original_db_size == b.original_db_size
+        && a.start_offset == b.start_offset
+        && a.data_length == b.data_length
+        && a.db_name == b.db_name
+        && a.includes_db_header == b.includes_db_header
+        && a.data_end_offset == b.data_end_offset
+}
+
+/// Check parts 2..=total of a multi-part backup whose first part is `first`:
+/// each must exist, belong to the same backup as part 1, carry the matching
+/// part number and total, and hash to its footer.
+fn verify_later_parts(
+    first: &Path,
+    first_header: &BackupHeader,
+) -> std::result::Result<(), String> {
+    let total_parts = first_header.total_parts;
+    let first_str = first.to_string_lossy();
+    let base = first_str.strip_suffix(".001").ok_or_else(|| {
+        format!(
+            "Multi-part backup's first part is not *.001: {}",
+            first.display()
+        )
+    })?;
+    for part_num in 2..=total_parts {
+        let part = std::path::PathBuf::from(format!("{}.{:03}", base, part_num));
+        let info = read_backup_info(&part)
+            .map_err(|e| format!("Part {} of {} unreadable: {}", part_num, total_parts, e))?;
+        // A valid part of another backup has a valid hash of its own
+        if !same_backup(&info.header, first_header) {
+            return Err(format!(
+                "Part {} belongs to a different backup than part 1",
+                part.display()
+            ));
+        }
+        if info.header.part_number != part_num || info.header.total_parts != total_parts {
+            return Err(format!(
+                "Part {} has header part {}/{} (expected {}/{})",
+                part.display(),
+                info.header.part_number,
+                info.header.total_parts,
+                part_num,
+                total_parts
+            ));
+        }
+        let actual = calculate_backup_hash(&part)
+            .map_err(|e| format!("Part {} of {} unreadable: {}", part_num, total_parts, e))?;
+        if actual != info.hash {
+            return Err(format!(
+                "Hash mismatch in part {} of {}: expected {}, got {}",
+                part_num,
+                total_parts,
+                hash_to_hex(&info.hash),
+                hash_to_hex(&actual)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Calculate SHA256 hash of backup content (header + payload)
