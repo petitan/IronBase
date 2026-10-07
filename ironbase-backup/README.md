@@ -99,6 +99,12 @@ IronBase uses **append-only storage**, which enables safe hot backups without lo
 2. `data_end_offset` marks the boundary of immutable data
 3. Backup reads only immutable data - no locks needed
 4. New data written during backup → included in next incremental
+5. Writes since the last checkpoint are reachable only through the WAL
+   (`.wal`), so the backup stores the WAL that belongs to its header snapshot
+   (backup format v2, WAL section after the payload; in part 1 of a split
+   backup). Restore writes it next to the restored `.mlite`, and the first
+   open replays it. If a checkpoint keeps racing the snapshot, the backup
+   fails with `SnapshotUnstable` instead of storing a mismatched pair.
 
 **Concurrent writes detection:**
 ```bash

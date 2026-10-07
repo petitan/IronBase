@@ -142,6 +142,117 @@ fn corrupt_later_part_fails_verification() {
     assert!(!check.valid, "corrupt part 2 passed verification");
 }
 
+fn ids_in(path: &Path) -> Vec<i64> {
+    let db = DatabaseCore::<StorageEngine>::open(path).unwrap();
+    let mut ids: Vec<i64> = db
+        .collection("c")
+        .unwrap()
+        .find(&json!({}))
+        .unwrap()
+        .iter()
+        .map(|d| d["_id"].as_i64().unwrap())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// #32: writes since the last checkpoint live only in the WAL; a hot backup
+/// must carry it so the restored database has them (insert kept, delete not
+/// undone).
+#[test]
+fn hot_backup_includes_writes_since_checkpoint() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert(&db, 0..5);
+    db.checkpoint().unwrap();
+    insert(&db, 100..101);
+    db.delete_one("c", &json!({"_id": 2})).unwrap();
+
+    create_backup(&db_path, &backups, true, None).unwrap();
+    let restored = dir.path().join("restored.mlite");
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(ids_in(&restored), vec![0, 1, 3, 4, 100]);
+
+    // An incremental with no checkpoint in between copies no new file bytes;
+    // the new writes come only from its WAL.
+    insert(&db, 200..202);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    create_backup(&db_path, &backups, false, None).unwrap();
+    let restored2 = dir.path().join("restored2.mlite");
+    restore(&backups, &restored2, None, Some("db")).unwrap();
+    assert_eq!(ids_in(&restored2), vec![0, 1, 3, 4, 100, 200, 201]);
+}
+
+/// #32: the WAL section is stored in part 1 of a multi-part backup.
+#[test]
+fn multipart_hot_backup_restores_wal() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    for i in 0..200 {
+        let mut d = doc(i);
+        // incompressible padding so the payload spans several parts
+        let mut x = (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let noise: String = (0..300)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from(b'a' + (x % 26) as u8)
+            })
+            .collect();
+        d.insert("pad".to_string(), json!(noise));
+        db.insert_one("c", d).unwrap();
+    }
+    db.checkpoint().unwrap();
+    insert(&db, 500..510);
+
+    let result = create_backup(&db_path, &backups, true, Some(16 * 1024)).unwrap();
+    assert!(result.part_count >= 2);
+    let restored = dir.path().join("restored.mlite");
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(count_in(&restored), 210);
+}
+
+/// #32: a WAL already at the restore target belongs to another database
+/// state and must not be replayed into the restored file.
+#[test]
+fn restore_removes_foreign_wal_at_target() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        insert(&db, 0..3);
+        db.close().unwrap();
+    }
+    create_backup(&db_path, &backups, true, None).unwrap();
+
+    // A WAL from another database with a committed insert of _id 99
+    let other = dir.path().join("other.mlite");
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&other).unwrap();
+        insert(&db, 0..3);
+        db.checkpoint().unwrap();
+        insert(&db, 99..100);
+        // "Crash": keep the WAL (Drop would checkpoint and clear it)
+        std::mem::forget(db);
+    }
+    let restored = dir.path().join("restored.mlite");
+    std::fs::copy(other.with_extension("wal"), restored.with_extension("wal")).unwrap();
+
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(ids_in(&restored), vec![0, 1, 2]);
+}
+
 fn insert_incompressible(db: &DatabaseCore<StorageEngine>, n: i64) {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     for i in 0..n {

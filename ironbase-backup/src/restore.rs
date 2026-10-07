@@ -217,6 +217,24 @@ pub fn restore(
     writer.flush()?;
     drop(writer);
 
+    // Install the target backup's WAL next to the restored file: it holds
+    // the writes since the snapshot's checkpoint, replayed on the first open
+    // (audit 2026-10-06 #32). Any other WAL at that path belongs to a
+    // different database state and must not be replayed.
+    let target = &chain.backups[target_idx];
+    let wal_path = output_path.with_extension("wal");
+    match std::fs::remove_file(&wal_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(wal_len) = restore_wal_section(&target.path, &target.header, &wal_path)? {
+        println!(
+            "Restored WAL ({}): writes since the last checkpoint are replayed on first open",
+            format_size(wal_len)
+        );
+    }
+
     // Get final size
     let final_size = std::fs::metadata(output_path)?.len();
     let duration = start_time.elapsed().as_secs_f64();
@@ -228,6 +246,69 @@ pub fn restore(
         index_files_cleaned: idx_cleaned,
         duration_secs: duration,
     })
+}
+
+/// Length of the compressed payload of a backup file (or part).
+///
+/// The header's `compressed_length` is authoritative: a v2 file may carry a
+/// WAL section between the payload and the footer.
+fn payload_len(header: &BackupHeader, file_size: u64) -> Result<u64> {
+    let max = file_size
+        .checked_sub((HEADER_SIZE + FOOTER_SIZE) as u64)
+        .ok_or_else(|| BackupError::InvalidBackupFile {
+            reason: format!("Backup file too small: {} bytes", file_size),
+        })?;
+    if header.compressed_length > max {
+        return Err(BackupError::InvalidBackupFile {
+            reason: format!(
+                "Payload length {} exceeds file contents ({} bytes)",
+                header.compressed_length, max
+            ),
+        });
+    }
+    Ok(header.compressed_length)
+}
+
+/// Write the WAL section of a backup (single file or part 1) to `wal_path`.
+/// Returns the WAL length, or `None` if the backup carries no WAL.
+fn restore_wal_section(path: &Path, header: &BackupHeader, wal_path: &Path) -> Result<Option<u64>> {
+    use crate::format::{WAL_SECTION_MAGIC, WAL_TRAILER_SIZE};
+    use byteorder::{LittleEndian, ReadBytesExt};
+
+    if !header.includes_wal {
+        return Ok(None);
+    }
+    let invalid = |reason: &str| BackupError::InvalidBackupFile {
+        reason: format!("{}: {}", path.display(), reason),
+    };
+
+    let file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+
+    let payload_end = HEADER_SIZE as u64 + payload_len(header, file_size)?;
+    let trailer_start = file_size
+        .checked_sub((FOOTER_SIZE + WAL_TRAILER_SIZE) as u64)
+        .filter(|&t| t >= payload_end)
+        .ok_or_else(|| invalid("WAL section missing"))?;
+    reader.seek(SeekFrom::Start(trailer_start))?;
+    let compressed_len = reader.read_u64::<LittleEndian>()?;
+    let raw_len = reader.read_u64::<LittleEndian>()?;
+    let mut magic = [0u8; 8];
+    reader.read_exact(&mut magic)?;
+    if &magic != WAL_SECTION_MAGIC || payload_end + compressed_len != trailer_start {
+        return Err(invalid("corrupt WAL section"));
+    }
+
+    reader.seek(SeekFrom::Start(payload_end))?;
+    let written = decompress_stream(
+        reader.take(compressed_len),
+        BufWriter::new(File::create(wal_path)?),
+    )?;
+    if written != raw_len {
+        return Err(invalid("WAL section length mismatch"));
+    }
+    Ok(Some(raw_len))
 }
 
 /// Read backup file and decompress payload
@@ -253,8 +334,8 @@ fn read_and_decompress(path: &Path) -> Result<Vec<u8>> {
         // Skip header
         reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
 
-        // Read compressed payload
-        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        // Read compressed payload (a WAL section may follow it)
+        let payload_size = payload_len(&header, file_size)?;
         let mut compressed = vec![0u8; payload_size as usize];
         reader.read_exact(&mut compressed)?;
 
@@ -300,11 +381,11 @@ fn read_multipart_backup(
         let file_size = file.metadata()?.len();
         let mut reader = BufReader::new(file);
 
-        // Skip header
-        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+        // Read the part header (positions the reader after it)
+        let part_header = BackupHeader::read_from(&mut reader)?;
 
-        // Read compressed payload
-        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        // Read compressed payload (part 1 may carry a WAL section after it)
+        let payload_size = payload_len(&part_header, file_size)?;
         let mut part_data = vec![0u8; payload_size as usize];
         reader.read_exact(&mut part_data)?;
 
@@ -350,7 +431,7 @@ fn apply_single_file_streaming<W: Write + Seek>(
     reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
 
     // Create a limited reader for the compressed payload
-    let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+    let payload_size = payload_len(header, file_size)?;
     let limited_reader = reader.take(payload_size);
 
     if header.includes_db_header {
@@ -485,11 +566,11 @@ fn create_multipart_reader(base_path: &str, total_parts: u8) -> Result<impl Read
         let file_size = file.metadata()?.len();
         let mut reader = BufReader::new(file);
 
-        // Skip header
-        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+        // Read the part header (positions the reader after it)
+        let part_header = BackupHeader::read_from(&mut reader)?;
 
-        // Take only the payload
-        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        // Take only the payload (part 1 may carry a WAL section after it)
+        let payload_size = payload_len(&part_header, file_size)?;
         readers.push(Box::new(reader.take(payload_size)));
     }
 

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — hot backup now includes the WAL (backup format v2) (mcp-server v1.0.556)
+
+Audit 2026-10-06 #32 (high).
+
+- **A hot backup silently lost every write since the last checkpoint.** The
+  on-disk header and catalog are updated only at checkpoint; later inserts,
+  updates and deletes are reachable only through the `.wal`, which the backup
+  never copied. A restored database came back up to one checkpoint interval
+  old (deleted documents back, recent inserts gone) while the backup reported
+  success.
+- The backup now stores the WAL that belongs to its header snapshot in a WAL
+  section after the payload (flag bit 1; part 1 of a split backup), covered by
+  the content hash. The snapshot and WAL are taken as a consistent pair: if a
+  checkpoint or compaction changes the header while the WAL is read, the
+  capture is retried (`BackupError::SnapshotUnstable` after 5 attempts).
+- Restore writes the target backup's WAL next to the restored file (and
+  removes any other WAL there); the first open replays it.
+- **Backup format version 2.** A v1 tool would ignore the WAL section, so it
+  now refuses v2 files (`UnsupportedVersion`); this version reads v1 and v2.
+  Payload readers use the header's `compressed_length` instead of "everything
+  up to the footer". `ironbase-backup info` shows whether a WAL is included.
+
+Regression tests (`ironbase-backup/tests/audit_tests.rs`):
+`hot_backup_includes_writes_since_checkpoint` (full + WAL-only incremental),
+`multipart_hot_backup_restores_wal`, `restore_removes_foreign_wal_at_target`;
+`format::tests::test_wal_flag_and_v1_compat`.
+
 ### Fixed — rejected raw update corrupting indexes, upsert `$each`, case-insensitive distinct/`$group` (mcp-server v1.0.555)
 
 Audit 2026-10-06 #35-#37 (medium).
