@@ -1076,3 +1076,77 @@ mod compact_vector_rebuild_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compact_metadata_catchup_tests {
+    //! Audit 2026-10-06 #2: non-blocking compaction must not revert
+    //! per-collection metadata to the Phase-A snapshot. Writes and metadata
+    //! changes made during Phase B (no storage lock) must survive the swap.
+
+    use crate::document::DocumentId;
+    use crate::storage::{CompactionConfig, StorageEngine};
+    use crate::DatabaseCore;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tempfile::TempDir;
+
+    fn doc(n: i64) -> HashMap<String, serde_json::Value> {
+        HashMap::from([("n".to_string(), json!(n))])
+    }
+
+    #[test]
+    fn compact_nonblocking_keeps_phase_b_metadata() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        for n in 0..5 {
+            db.insert_one("c", doc(n)).unwrap();
+        }
+
+        // The progress callback runs during Phase B, without the storage lock.
+        let mutated = AtomicBool::new(false);
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {
+            if !mutated.swap(true, Ordering::SeqCst) {
+                for n in 100..105 {
+                    db.insert_one("c", doc(n)).unwrap();
+                }
+                db.collection("c")
+                    .unwrap()
+                    .create_index("n".to_string(), false, false)
+                    .unwrap();
+            }
+        })
+        .unwrap();
+        assert!(mutated.load(Ordering::SeqCst), "callback must have run");
+
+        // last_id must not go back to the snapshot value: new inserts get fresh
+        // ids instead of overwriting the Phase-B documents.
+        let id = db.insert_one("c", doc(999)).unwrap();
+        assert_eq!(id, DocumentId::Int(11));
+        assert_eq!(
+            db.find("c", &json!({"n": {"$gte": 100, "$lt": 105}}))
+                .unwrap()
+                .len(),
+            5,
+            "documents inserted during Phase B must survive"
+        );
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 11);
+
+        let has_index = |db: &DatabaseCore<StorageEngine>| {
+            db.storage
+                .read()
+                .get_collection_meta("c")
+                .unwrap()
+                .indexes
+                .iter()
+                .any(|i| i.field == "n")
+        };
+        assert!(has_index(&db), "index created during Phase B must be kept");
+
+        db.close().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert!(has_index(&db), "index metadata must be persisted");
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 11);
+    }
+}
