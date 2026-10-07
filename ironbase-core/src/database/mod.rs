@@ -4650,3 +4650,130 @@ mod index_maintenance_tests {
         assert_eq!(ids[0], json!("z"));
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    //! Audit 2026-10-06 #27-#30: index state across crash, drop/rename and
+    //! a failed shutdown.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn with_title_index(path: &std::path::Path) -> DatabaseCore<StorageEngine> {
+        let db = DatabaseCore::<StorageEngine>::open(path).unwrap();
+        db.collection("a")
+            .unwrap()
+            .create_index("title".to_string(), false, false)
+            .unwrap();
+        for i in 0..5 {
+            db.insert_one("a", fields(json!({"_id": i, "title": format!("t{i}")})))
+                .unwrap();
+        }
+        db.checkpoint().unwrap();
+        db
+    }
+
+    /// #27: after a crash the _id index must contain post-checkpoint inserts.
+    #[test]
+    fn id_index_replayed_after_crash() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("l.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            for i in 0..10 {
+                db.insert_one("c", fields(json!({"_id": i}))).unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 10..15 {
+                db.insert_one("c", fields(json!({"_id": i}))).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        db.collection("c").unwrap();
+        let id_index_size = {
+            let managers = db.index_managers.read();
+            let manager = managers.get("c").unwrap().read();
+            manager.get_btree_index("c_id").unwrap().size()
+        };
+        assert_eq!(
+            id_index_size, 15,
+            "_id index misses post-checkpoint inserts"
+        );
+        assert!(
+            db.insert_one("c", fields(json!({"_id": 12}))).is_err(),
+            "duplicate _id accepted after crash"
+        );
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 15);
+    }
+
+    /// #28: dropping another collection clears the WAL; indexes must be
+    /// persisted first.
+    #[test]
+    fn drop_collection_persists_other_indexes() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("l.mlite");
+        {
+            let db = with_title_index(&path);
+            db.collection("z").unwrap();
+            db.insert_one("a", fields(json!({"_id": 50, "title": "late"})))
+                .unwrap();
+            db.drop_collection("z").unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.find("a", &json!({"title": "late"})).unwrap().len(), 1);
+    }
+
+    /// #29: rename must not drop unflushed index changes.
+    #[test]
+    fn rename_collection_keeps_unflushed_index_changes() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("l.mlite");
+        {
+            let db = with_title_index(&path);
+            db.insert_one("a", fields(json!({"_id": 50, "title": "late"})))
+                .unwrap();
+            db.rename_collection("a", "b").unwrap();
+            assert_eq!(db.find("b", &json!({"title": "late"})).unwrap().len(), 1);
+            db.close().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.find("b", &json!({"title": "late"})).unwrap().len(), 1);
+    }
+
+    /// #30: a shutdown whose index flush failed must not be marked clean.
+    #[test]
+    fn failed_index_flush_on_close_keeps_wal_for_recovery() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("l.mlite");
+        let blockers: Vec<std::path::PathBuf>;
+        {
+            let db = with_title_index(&path);
+            db.insert_one("a", fields(json!({"_id": 50, "title": "late"})))
+                .unwrap();
+            // Block every index file's temp path so the flush fails
+            blockers = std::fs::read_dir(temp.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "idx"))
+                .map(|p| p.with_extension("idx.tmp"))
+                .collect();
+            assert!(!blockers.is_empty());
+            for b in &blockers {
+                std::fs::create_dir(b).unwrap();
+            }
+            assert!(db.close().is_err(), "close must report the failed flush");
+        }
+        for b in &blockers {
+            std::fs::remove_dir(b).unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(db.find("a", &json!({"title": "late"})).unwrap().len(), 1);
+    }
+}

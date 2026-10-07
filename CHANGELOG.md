@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — index state across crash, drop/rename and failed shutdown (mcp-server v1.0.552)
+
+Audit 2026-10-06 #27-#30 (high).
+
+- **#27 — the `_id` index was never WAL-replayed on a dirty reopen.** It was
+  loaded from its last-checkpoint `.idx` but, not being in `meta.indexes`,
+  skipped by the B+ tree replay, so it missed every post-checkpoint insert. It
+  is now replayed from the recovered operations like the user indexes.
+- **#28 — `drop_collection`, `force_drop_collection`, `rename_collection`,
+  `set_collection_flags` (and `create_system_collection`) and `flush` cleared
+  the whole WAL without persisting dirty indexes**, so other collections' index
+  changes were lost on the next crash. They now flush every dirty index first
+  (`flush_all_index_managers`) while holding the persist gate exclusively.
+- **#29 — `rename_collection` dropped the in-memory indexes without flushing**
+  and then trusted the moved files. Covered by the same flush.
+- **#30 — a shutdown whose index flush failed was still marked clean**, and the
+  WAL was cleared, so the next open trusted stale index files. `close()` and
+  `Drop` now call `Storage::abandon_shutdown()` in that case: the storage's Drop
+  keeps the WAL and the dirty flag, and the next open recovers as after a crash.
+
+Regression tests: `id_index_replayed_after_crash`,
+`drop_collection_persists_other_indexes`,
+`rename_collection_keeps_unflushed_index_changes`,
+`failed_index_flush_on_close_keeps_wal_for_recovery`.
+
 ### Fixed — index maintenance: ghost B+ tree entries, lazy index destroyed on checkpoint, fulltext and vector index corruption (mcp-server v1.0.551)
 
 Audit 2026-10-06 #21-#26 (high).
