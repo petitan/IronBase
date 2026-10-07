@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Negated operators on array paths and `$elemMatch` sub-queries (mcp-server v1.0.560)
+
+Audit 2026-10-07 O1, O2, O3, O7 (high: `delete_many` removed documents it
+should have kept).
+
+- **Root cause (O1):** for a path that traverses an array (`items.name`,
+  `$**.name`) the matcher evaluated every operator with "any value matches".
+  That is right for positive operators but inverts `$ne`, `$nin` and `$not`:
+  `{"items.name": {"$ne": "a"}}` matched `[{name:"a"},{name:"b"}]` through the
+  `"b"` element, so `delete_many` deleted it.
+- **Root cause (O2/O3):** `$elemMatch` on sub-document elements only looked
+  at `$`-keys of a field condition, so an object-valued condition
+  (`{meta: {c: "red"}}`) matched every element; dotted paths, implicit array
+  matching, `$or`/`$and`/`$nor` and nested `$not` did not work inside it.
+- **Root cause (O7):** `$all` on an array path was checked per flattened value.
+- **Fix:** `check_operator_match` (`query/operators/filter.rs`) requires every
+  value to satisfy `$ne`/`$nin`/`$not` on multi-value paths, and evaluates
+  `$all` as one equality per required value over the whole value set.
+  `$elemMatch` follows MongoDB: a body made only of (non-logical) operators is
+  a condition on each element value; otherwise each sub-document element is
+  matched as a document with the normal matcher.
+- Behaviour change (MongoDB-compatible): `{"tags": {"$all": ["a"]}}` now also
+  matches a scalar `tags: "a"` (`$all` ⇔ `$and` of equalities).
+
+Regression tests: `tests/array_path_negation_tests.rs` (find, count and
+`delete_many`, with and without a multikey index).
+
 ### Fixed — Metadata rebuild recovers documents written through the API (mcp-server v1.0.559)
 
 - **Symptom:** when both the metadata and the WAL were unreadable, the

@@ -10,8 +10,15 @@ use super::helpers::{parse_regex_filter, regex_matches_value};
 use super::traits::OperatorMatcher;
 use super::OPERATOR_REGISTRY;
 
-/// Checks if ANY value from a multi-value list matches an operator condition.
-/// MongoDB semantics: if ANY value matches, the condition is satisfied.
+/// Operators that negate a positive match. On a path that traverses an array
+/// MongoDB requires that NO value matches the positive form, i.e. every value
+/// must satisfy the negated operator (`$ne: x` ⇔ `!any(== x)`).
+const NEGATED_OPERATORS: [&str; 3] = ["$ne", "$nin", "$not"];
+
+/// Checks a multi-value list (array traversal) against an operator condition.
+/// MongoDB semantics: positive operators match if ANY value matches; negated
+/// operators (`$ne`, `$nin`, `$not`) match only if EVERY value satisfies them;
+/// `$all` needs each listed value somewhere in the whole value set.
 ///
 /// # Arguments
 /// - `doc_values`: List of values from document (e.g., from array traversal)
@@ -29,6 +36,36 @@ pub(crate) fn check_operator_match(
     if doc_values.is_empty() {
         // Single value mode
         operator.matches(doc_value, op_value, document)
+    } else if NEGATED_OPERATORS.contains(&operator.name()) {
+        // Multi-value mode, negated operator: EVERY value must satisfy it
+        for dv in doc_values {
+            if !operator.matches(Some(*dv), op_value, document)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    } else if operator.name() == "$all" {
+        // `{"a.b": {$all: [x, y]}}` ⇔ `{$and: [{"a.b": x}, {"a.b": y}]}`:
+        // each required value may come from a different element.
+        let required = op_value.as_array().ok_or_else(|| {
+            IronBaseError::InvalidQuery("$all operator requires an array".to_string())
+        })?;
+        if required.is_empty() {
+            return Ok(false);
+        }
+        for req in required {
+            let mut found = false;
+            for dv in doc_values {
+                if EqOperator.matches(Some(*dv), req, document)? {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     } else {
         // Multi-value mode: ANY match is success
         for dv in doc_values {
