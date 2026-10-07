@@ -462,7 +462,7 @@ impl DatabaseCore<StorageEngine> {
         let mut storage = StorageEngine::open(&path_str)?;
 
         // Recover from WAL (includes both data and index changes + applied ops for per-index replay)
-        let (recovered_tx_count, recovered_index_changes, recovered_ops) =
+        let (_recovered_tx_count, recovered_index_changes, recovered_ops) =
             storage.recover_from_wal()?;
 
         // Initial transaction-id watermark (task #26 R1):
@@ -534,22 +534,10 @@ impl DatabaseCore<StorageEngine> {
                 .push((tx_id, op));
         }
 
-        // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
-        //
-        // Scenario without this fix:
-        // 1. flush() writes MetadataSnapshot to WAL, flush_metadata(), wal.clear()
-        // 2. New writes update data_end_offset IN MEMORY ONLY
-        // 3. Crash (no flush happened)
-        // 4. Restart: load_metadata() succeeds (file metadata intact) → no WAL metadata recovery
-        // 5. recover_from_wal() replays ops, updates data_end_offset in memory, then wal.clear()
-        // 6. Second crash before next flush
-        // 7. Restart: WAL is EMPTY, file has OLD data_end_offset → CORRUPTION!
-        //
-        // The fix: flush_metadata() after WAL recovery ensures data_end_offset is persisted
-        // before clearing the WAL. (Bug found 2024-12-26)
-        if recovered_tx_count > 0 {
-            storage.flush_metadata()?;
-        }
+        // recover_from_wal() persisted the replayed state (flush_metadata,
+        // fsynced) before clearing the WAL, so a second crash right after
+        // open cannot leave an empty WAL with the old data_end_offset
+        // (bug found 2024-12-26; ordering fixed by audit 2026-10-06 #33).
 
         // NOTE: WAL recovery now uses write_document() which updates the catalog.
         // The document_catalog is loaded from metadata by StorageEngine::open(),
@@ -2730,7 +2718,7 @@ mod wal_replay_tests {
 
         // Plant an orphan `.fzidx.tmp` (mimics a fuzzy flush that crashed
         // mid-rename). Same dir as the .mlite, arbitrary content.
-        let orphan = tmp.path().join("docs_collection_field_fuzzy.fzidx.tmp");
+        let orphan = tmp.path().join("orphan_docs_field_fuzzy.fzidx.tmp");
         std::fs::write(&orphan, b"crash-leftover").unwrap();
         assert!(orphan.exists());
 
@@ -2756,6 +2744,23 @@ mod wal_replay_tests {
 
         let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         assert!(!orphan.exists(), ".hnsw.tmp should be removed on open");
+    }
+
+    /// Opening a database must not delete another database's in-flight
+    /// index temp file in the same directory (its save then failed with
+    /// NotFound on the rename).
+    #[test]
+    fn orphan_cleanup_keeps_other_databases_temp_files() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("a.mlite");
+        let own = tmp.path().join("a_c_k_0123456789abcdef.idx.tmp");
+        let other = tmp.path().join("b_c_k_0123456789abcdef.idx.tmp");
+        std::fs::write(&own, b"crash-leftover").unwrap();
+        std::fs::write(&other, b"in-flight").unwrap();
+
+        let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!own.exists(), "own orphan .idx.tmp should be removed");
+        assert!(other.exists(), "another database's .idx.tmp was deleted");
     }
 
     /// Task #18: HNSW flush should leave NO `.hnsw.tmp` behind (atomic
@@ -3272,7 +3277,7 @@ mod wal_replay_tests {
             .close()
             .unwrap();
 
-        let orphan = tmp.path().join("foo_content_fts.ftidx.tmp");
+        let orphan = tmp.path().join("orphan_ft_content_fts.ftidx.tmp");
         std::fs::write(&orphan, b"crash-leftover").unwrap();
         assert!(orphan.exists());
 
@@ -4775,5 +4780,127 @@ mod lifecycle_tests {
         }
         let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
         assert_eq!(db.find("a", &json!({"title": "late"})).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod wal_recovery_tests {
+    //! Audit 2026-10-06 #33, #34: WAL cleared before the replayed state was
+    //! durable, and stale aborted/torn WAL groups merging into reused tx ids.
+
+    use super::*;
+    use crate::wal::{WALEntry, WALEntryType, WriteAheadLog};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn append_insert(wal: &mut WriteAheadLog, tx_id: u64, collection: &str, id: i64, tag: &str) {
+        let op = Operation::Insert {
+            collection: collection.to_string(),
+            doc_id: crate::document::DocumentId::Int(id),
+            doc: std::sync::Arc::new(json!({"_id": id, "_collection": collection, "tag": tag})),
+        };
+        wal.append(&WALEntry::new(tx_id, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(
+            tx_id,
+            WALEntryType::Operation,
+            serde_json::to_vec(&op).unwrap(),
+        ))
+        .unwrap();
+        wal.append(&WALEntry::new(tx_id, WALEntryType::Commit, vec![]))
+            .unwrap();
+    }
+
+    /// #33: when recovery returns, the replayed documents must already be
+    /// reachable from the on-disk metadata, because the WAL is gone. The
+    /// process "dies" right after `recover_from_wal` (no later flush).
+    #[test]
+    fn replayed_state_is_durable_before_wal_is_cleared() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("r.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.insert_one("c", fields(json!({"_id": 1, "tag": "base"})))
+                .unwrap();
+            db.close().unwrap();
+        }
+        {
+            let mut wal = WriteAheadLog::open(path.with_extension("wal")).unwrap();
+            // "n" is not in the on-disk metadata: replay has to create it.
+            append_insert(&mut wal, 10, "n", 1, "new-coll");
+            append_insert(&mut wal, 11, "c", 2, "replayed");
+            wal.flush().unwrap();
+        }
+        {
+            let mut storage = StorageEngine::open(&path).unwrap();
+            let (count, _, _) = storage.recover_from_wal().unwrap();
+            assert_eq!(count, 2);
+            assert_eq!(
+                std::fs::metadata(path.with_extension("wal")).unwrap().len(),
+                0
+            );
+            let _ = storage.release_lock();
+            std::mem::forget(storage);
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            db.count_documents("c", &json!({})).unwrap(),
+            2,
+            "replayed insert lost: WAL cleared before metadata was persisted"
+        );
+        assert_eq!(db.count_documents("n", &json!({})).unwrap(), 1);
+    }
+
+    /// #34 (+ the commit-order replay of #7): a transaction whose persist
+    /// failed after its WAL commit is marked with ABORT. It must not be
+    /// replayed, neither on the next open nor after its tx id is reused.
+    #[test]
+    fn aborted_commit_not_resurrected_after_tx_id_reuse() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("a.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            db.insert_one("c", fields(json!({"_id": 1, "tag": "A"})))
+                .unwrap();
+            db.close().unwrap();
+        }
+        {
+            let mut wal = WriteAheadLog::open(path.with_extension("wal")).unwrap();
+            append_insert(&mut wal, 5, "c", 9999, "X_ABORTED");
+            wal.append(&WALEntry::new(5, WALEntryType::Abort, vec![]))
+                .unwrap();
+            wal.flush().unwrap();
+        }
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+            assert_eq!(
+                db.count_documents("c", &json!({"tag": "X_ABORTED"}))
+                    .unwrap(),
+                0,
+                "aborted transaction replayed on open"
+            );
+            assert_eq!(
+                std::fs::metadata(path.with_extension("wal")).unwrap().len(),
+                0,
+                "stale WAL kept after a recovery with nothing to replay"
+            );
+            for i in 2..8 {
+                db.insert_one("c", fields(json!({"_id": i, "tag": "Y"})))
+                    .unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(
+            db.count_documents("c", &json!({"tag": "X_ABORTED"}))
+                .unwrap(),
+            0,
+            "aborted insert resurrected through a reused tx id"
+        );
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 7);
     }
 }

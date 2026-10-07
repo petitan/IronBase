@@ -11,19 +11,37 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Positioned read without changing the file descriptor's seek position.
 /// Uses `pread()` on Unix and `seek_read()` on Windows.
+///
+/// Fills the whole buffer or fails with `UnexpectedEof`: a single
+/// `read_at` may return fewer bytes, which left the rest of the buffer
+/// zero-filled (audit 2026-10-06 #41).
 #[cfg(unix)]
 fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
-    file.read_at(buf, offset)?;
-    Ok(())
+    file.read_exact_at(buf, offset)
 }
 
 /// Positioned read without changing the file descriptor's seek position.
-/// Uses `seek_read()` on Windows.
+/// Uses `seek_read()` on Windows (loops until the buffer is full).
 #[cfg(windows)]
-fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+fn read_exact_at(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
-    file.seek_read(buf, offset)?;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ))
+            }
+            Ok(n) => {
+                buf = &mut std::mem::take(&mut buf)[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -598,5 +616,27 @@ impl StorageEngine {
 
         // data_end = offset + 4 (length header) + doc_len
         Ok(max_doc_offset + 4 + doc_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_document_from_file;
+    use std::io::Write;
+
+    /// Audit 2026-10-06 #41: a document cut short by EOF must fail, not come
+    /// back zero-padded.
+    #[test]
+    fn truncated_document_is_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("short.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&100u32.to_le_bytes()).unwrap();
+        file.write_all(br#"{"_id":1"#).unwrap();
+        drop(file);
+
+        let file = std::fs::File::open(&path).unwrap();
+        let result = read_document_from_file(&file, 0, 104);
+        assert!(result.is_err(), "short read returned {:?}", result);
     }
 }

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL recovery: clear only after the replay is durable, stale aborted groups (mcp-server v1.0.554)
+
+Audit 2026-10-06 #33, #34 (medium), #41 (low).
+
+- **#33 — recovery truncated the WAL before the replayed state was durable.**
+  `recover_from_wal` cleared the WAL right after replaying into unsynced
+  storage; the metadata that makes the replayed documents reachable was
+  written only later by the caller. A failure or crash in that window lost the
+  committed transactions for good. `recover_from_wal` now runs
+  `flush_metadata()` (fsynced) before `wal.clear()`; replay is idempotent, so
+  a WAL that survives is simply replayed again. Replay also no longer calls
+  `create_collection` (which flushed and cleared the WAL mid-replay) for a
+  collection missing from the metadata.
+- **#34 — a WAL with no committed transaction was never cleared.** Its aborted
+  or torn groups stayed, and after a crash the tx-id watermark can restart
+  below their ids, so a reused id merged them into a new transaction. Recovery
+  now clears such a WAL, and `WriteAheadLog::recover` starts a fresh group on
+  every BEGIN.
+- **ABORT after COMMIT was ignored since the commit-order replay (#7).** A
+  transaction is now emitted at its COMMIT, so the ABORT written by
+  `abort_committed_transaction` after a failed persist could no longer retract
+  it, and a write the caller saw fail was replayed. `recover` now removes the
+  already emitted transaction in that case.
+- **Opening a database deleted other databases' in-flight index temp files.**
+  The orphan cleanup in `StorageEngine::open` removed every `*.idx.tmp`,
+  `*.fzidx.tmp` and `*.ftidx.tmp` in the directory. Since B+ tree saves go
+  through a temp file (#22), another open database's index save in the same
+  directory could fail with `NotFound` on the rename (seen as intermittent
+  `create_index` failures in `collection_core_tests`). Only files with this
+  database's `{stem}_` prefix are removed now; `.hnsw.tmp` (no database
+  prefix in its name) is still swept directory-wide.
+- **#41 — `read_exact_at` ignored the byte count of `pread`/`seek_read`,** so a
+  short read returned a zero-padded document. It now fills the whole buffer or
+  fails with `UnexpectedEof`.
+
+Regression tests: `replayed_state_is_durable_before_wal_is_cleared`,
+`aborted_commit_not_resurrected_after_tx_id_reuse`,
+`commit_then_abort_is_not_recovered`, `torn_group_does_not_merge_into_reused_id`,
+`truncated_document_is_an_error`, `orphan_cleanup_keeps_other_databases_temp_files`.
+
 ### Fixed — hot backup: incremental after compaction, torn snapshot, unverified parts (mcp-server v1.0.553)
 
 Audit 2026-10-06 #31, #38-#40 (high/medium/low).
