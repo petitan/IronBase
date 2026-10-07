@@ -78,10 +78,18 @@ where
         // saved, so truncating that file first destroyed the index (audit
         // 2026-10-06 #22). The rename also makes a crash mid-save harmless.
         let temp_path = index_file_path.with_extension("idx.tmp");
+        // A leftover temp file is stale (one writer per database). Remove it
+        // and create the temp file exclusively: O_EXCL never follows a
+        // symlink, so a planted `.idx.tmp` link cannot redirect the write or
+        // truncate its target.
+        match std::fs::remove_file(&temp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         let mut file = OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
+            .create_new(true)
             .open(&temp_path)?;
         save_fn(&mut file)?;
         file.sync_all()?;
