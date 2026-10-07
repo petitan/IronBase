@@ -614,6 +614,12 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 let _auto_write = self.enter_auto_write()?;
+                // One writer per collection: these paths read the target documents
+                // and write them back under separate lock acquisitions, so a
+                // concurrent update/delete was overwritten or resurrected (audit
+                // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+                let collection_write_lock = self.get_collection_write_lock(collection_name);
+                let _collection_guard = collection_write_lock.lock();
 
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
@@ -709,6 +715,12 @@ impl DatabaseCore<StorageEngine> {
             } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 let _auto_write = self.enter_auto_write()?;
+                // One writer per collection: these paths read the target documents
+                // and write them back under separate lock acquisitions, so a
+                // concurrent update/delete was overwritten or resurrected (audit
+                // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+                let collection_write_lock = self.get_collection_write_lock(collection_name);
+                let _collection_guard = collection_write_lock.lock();
 
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
@@ -886,6 +898,12 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 let _auto_write = self.enter_auto_write()?;
+                // One writer per collection: these paths read the target documents
+                // and write them back under separate lock acquisitions, so a
+                // concurrent update/delete was overwritten or resurrected (audit
+                // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+                let collection_write_lock = self.get_collection_write_lock(collection_name);
+                let _collection_guard = collection_write_lock.lock();
 
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
@@ -972,6 +990,12 @@ impl DatabaseCore<StorageEngine> {
             } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 let _auto_write = self.enter_auto_write()?;
+                // One writer per collection: these paths read the target documents
+                // and write them back under separate lock acquisitions, so a
+                // concurrent update/delete was overwritten or resurrected (audit
+                // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+                let collection_write_lock = self.get_collection_write_lock(collection_name);
+                let _collection_guard = collection_write_lock.lock();
 
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
@@ -1170,6 +1194,12 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<(u64, u64)> {
         // Wait for active write transaction to complete (Read Committed isolation)
         let _auto_write = self.enter_auto_write()?;
+        // One writer per collection: these paths read the target documents
+        // and write them back under separate lock acquisitions, so a
+        // concurrent update/delete was overwritten or resurrected (audit
+        // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+        let collection_write_lock = self.get_collection_write_lock(collection_name);
+        let _collection_guard = collection_write_lock.lock();
 
         match self.durability_mode {
             DurabilityMode::Safe => {
@@ -1321,6 +1351,12 @@ impl DatabaseCore<StorageEngine> {
     pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
         // Wait for active write transaction to complete (Read Committed isolation)
         let _auto_write = self.enter_auto_write()?;
+        // One writer per collection: these paths read the target documents
+        // and write them back under separate lock acquisitions, so a
+        // concurrent update/delete was overwritten or resurrected (audit
+        // 2026-10-06 #19). Taken after the auto-write guard, like insert_one.
+        let collection_write_lock = self.get_collection_write_lock(collection_name);
+        let _collection_guard = collection_write_lock.lock();
 
         match self.durability_mode {
             DurabilityMode::Safe => {

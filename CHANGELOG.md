@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — CRUD writes: duplicate _id overwrote documents, phantom index entries, mutable _id, lost update_many updates (mcp-server v1.0.550)
+
+Audit 2026-10-06 #15, #16, #17, #19 (high).
+
+- **#15 — inserting a duplicate `_id` replaced the existing document.** The
+  prepare check skips the `_id` index, and the Safe insert path writes storage
+  before the `_id` index would reject it, so the original was overwritten and
+  the caller still got `Duplicate key`. `insert_one`/`insert_many` now reject an
+  `_id` that is live in the catalog (or repeated within the batch) before the
+  WAL commit, and `insert_one_persist` re-checks under the storage lock.
+- **#16 — a failed `insert_many` left phantom index entries.**
+  `batch_add_to_indexes` stopped at the first duplicate and kept the entries of
+  the documents before it (which were never stored), so later inserts of those
+  keys failed. It now rolls back everything the batch added.
+- **#17 — `$set`/`$unset` on `_id` corrupted document identity.** `_id` is now
+  immutable like in MongoDB; `$set` to the current value stays allowed.
+- **#19 — concurrent writers lost `update_many` updates.** `update_many` read
+  its documents and wrote them back under separate lock acquisitions, so a
+  concurrent update was overwritten and a concurrent delete resurrected.
+  `update_one`, `delete_one` (Safe/Unsafe), `update_many` and `delete_many` now
+  hold the per-collection write lock, taken after the auto-write guard like
+  `insert_one`.
+
+Batch-mode findings #18 and #20 are left for the Batch mode rework (with #9).
+
+Regression tests: `duplicate_id_insert_keeps_original`,
+`failed_insert_many_leaves_no_phantom_index_entries`,
+`update_cannot_change_id`,
+`concurrent_update_many_and_update_one_keep_all_updates`.
+
 ### Fixed — explicit transactions: stale indexes, own writes invisible, unique keys, lost updates (mcp-server v1.0.549)
 
 Audit 2026-10-06 #11-#14 (high).

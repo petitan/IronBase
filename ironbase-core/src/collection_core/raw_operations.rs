@@ -1431,6 +1431,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 new_id
             };
 
+            self.ensure_id_not_live(&storage, &id)?;
             id
         }; // Storage lock released here - BEFORE acquiring index lock
 
@@ -1485,6 +1486,9 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                     "insert: storage.write() slow acquire (persist)"
                 );
             }
+            // Re-check under the lock: another insert of the same _id may
+            // have landed since prepare (audit 2026-10-06 #15).
+            self.ensure_id_not_live(&storage, &prepared.doc_id)?;
             let doc_json = prepared.document.to_json()?;
             storage.write_document_raw(
                 &prepared.collection_name,
@@ -1582,6 +1586,19 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // Update last_id with max of manual + auto-generated IDs
             meta.last_id = meta.last_id.max(start_id + auto_id_count);
+
+            // Duplicate _id within the batch or against a live document is
+            // rejected before the WAL commit (audit 2026-10-06 #15/#16).
+            let mut seen = std::collections::HashSet::with_capacity(result.len());
+            for (doc_id, _) in &result {
+                if !seen.insert(doc_id) {
+                    return Err(IronBaseError::IndexError(format!(
+                        "Duplicate key: {:?} (unique index)",
+                        doc_id
+                    )));
+                }
+                self.ensure_id_not_live(&storage, doc_id)?;
+            }
 
             result
         }; // Storage lock released here - BEFORE acquiring index lock

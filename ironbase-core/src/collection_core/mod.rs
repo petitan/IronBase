@@ -2254,24 +2254,79 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
+        let id_key = |doc: &Document| match &doc.id {
+            DocumentId::Int(i) => IndexKey::Int(*i),
+            DocumentId::String(s) => IndexKey::String(s.clone()),
+            DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+        };
 
-        for &doc in docs {
+        for (pos, &doc) in docs.iter().enumerate() {
             // Add to _id index (handled separately due to DocumentId type)
-            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-                let id_key = match &doc.id {
-                    DocumentId::Int(i) => IndexKey::Int(*i),
-                    DocumentId::String(s) => IndexKey::String(s.clone()),
-                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-                };
-                id_index.insert(id_key, doc.id.clone())?;
-            }
+            let id_result = match indexes.get_btree_index_mut(&id_index_name) {
+                Some(id_index) => id_index.insert(id_key(doc), doc.id.clone()),
+                None => Ok(()),
+            };
+
+            let id_added = id_result.is_ok();
 
             // Add to all other indexes - delegate to IndexManager
-            let doc_value = serde_json::to_value(doc)
-                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-            indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
+            let result = id_result.and_then(|()| {
+                let doc_value = serde_json::to_value(doc)
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+                indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))
+            });
+
+            if let Err(e) = result {
+                // All-or-nothing: remove what the earlier documents (and this
+                // one, if its _id went in) added, so a failed batch leaves no
+                // phantom entries that block later inserts (audit 2026-10-06
+                // #16). Entries are removed by (key, doc_id), and these ids are
+                // new (their _id insert succeeded), so no existing document's
+                // entries are touched.
+                let rollback_to = if id_added { pos + 1 } else { pos };
+                for &added in &docs[..rollback_to] {
+                    if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                        let _ = id_index.delete(&id_key(added), &added.id);
+                    }
+                    if let Ok(doc_value) = serde_json::to_value(added) {
+                        let _ = indexes.remove_document_from_indexes(
+                            &doc_value,
+                            &added.id,
+                            Some(&id_index_name),
+                        );
+                    }
+                }
+                indexes.mark_btree_dirty(&id_index_name);
+                return Err(e);
+            }
         }
 
+        Ok(())
+    }
+
+    /// Error if `doc_id` is a live document of this collection: a catalog entry
+    /// that does not point to a tombstone. The insert prepare phases call this
+    /// because `check_index_constraints` skips the `_id` index, and the Safe
+    /// insert path writes storage before the `_id` index would catch it, so a
+    /// duplicate `_id` replaced the existing document (audit 2026-10-06 #15).
+    fn ensure_id_not_live(&self, storage: &S, doc_id: &DocumentId) -> Result<()> {
+        let offset = storage
+            .get_collection_meta(&self.name)
+            .and_then(|m| m.document_catalog.get(doc_id).copied());
+        if let Some(offset) = offset {
+            let bytes = storage.read_data_at(offset)?;
+            let doc: Value = serde_json::from_slice(&bytes)?;
+            let tombstone = doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !tombstone {
+                return Err(IronBaseError::IndexError(format!(
+                    "Duplicate key: {:?} (unique index)",
+                    doc_id
+                )));
+            }
+        }
         Ok(())
     }
 

@@ -26,6 +26,8 @@ pub fn apply_update_operators(document: &mut Document, update_json: &Value) -> R
         return Ok(false);
     };
 
+    reject_id_modification(document, update_ops)?;
+
     for (op, fields) in update_ops {
         match op.as_str() {
             "$set" => {
@@ -59,6 +61,37 @@ pub fn apply_update_operators(document: &mut Document, update_json: &Value) -> R
     }
 
     Ok(was_modified)
+}
+
+/// `_id` is immutable (MongoDB semantics). The operators edit only the field
+/// map, while storage, the catalog and the `_id` index stay keyed by
+/// `Document::id`, so changing `_id` gave two documents the same visible `_id`
+/// and made `_id` lookups hit the wrong document (audit 2026-10-06 #17).
+/// `$set` to the current value is a no-op and stays allowed.
+fn reject_id_modification(
+    document: &Document,
+    update_ops: &serde_json::Map<String, Value>,
+) -> Result<()> {
+    for (op, fields) in update_ops {
+        let Value::Object(field_values) = fields else {
+            continue;
+        };
+        for (field, value) in field_values {
+            if field != "_id" && !field.starts_with("_id.") {
+                continue;
+            }
+            let unchanged = op == "$set"
+                && field == "_id"
+                && serde_json::to_value(&document.id).ok().as_ref() == Some(value);
+            if !unchanged {
+                return Err(IronBaseError::InvalidQuery(format!(
+                    "Performing an update on the path '{}' would modify the immutable field '_id'",
+                    field
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
