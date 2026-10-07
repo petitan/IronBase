@@ -192,7 +192,9 @@ pub fn restore(
 
             // Handle includes_db_header flag for incremental backups
             // When true, payload = [DB header (256)] + [incremental data]
-            if backup.header.includes_db_header && data.len() > DB_HEADER_SIZE {
+            // `>=`: an incremental with no new data is just the DB header and
+            // must still go to offset 0 (audit 2026-10-06 #40)
+            if backup.header.includes_db_header && data.len() >= DB_HEADER_SIZE {
                 // Extract DB header (first 256 bytes) and write at position 0
                 let db_header = &data[..DB_HEADER_SIZE];
                 writer.seek(SeekFrom::Start(0))?;
@@ -425,7 +427,7 @@ fn apply_multipart_streaming<W: Write + Seek>(
     let temp_size = fs::metadata(&temp_path)?.len();
     let mut temp_reader = BufReader::new(File::open(&temp_path)?);
 
-    if backup.header.includes_db_header && temp_size > DB_HEADER_SIZE as u64 {
+    if backup.header.includes_db_header && temp_size >= DB_HEADER_SIZE as u64 {
         // Read and write DB header at position 0
         let mut db_header = vec![0u8; DB_HEADER_SIZE];
         temp_reader.read_exact(&mut db_header)?;

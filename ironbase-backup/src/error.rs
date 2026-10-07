@@ -50,6 +50,12 @@ pub enum BackupError {
     )]
     DatabaseShrunk { expected: u64, actual: u64 },
 
+    #[error(
+        "Cannot create incremental backup: the database file was compacted since the last backup \
+         (its layout changed); create a full backup with --full"
+    )]
+    LayoutChanged,
+
     #[error("No backups found for database: {db_name}")]
     NoBackupsFound { db_name: String },
 }

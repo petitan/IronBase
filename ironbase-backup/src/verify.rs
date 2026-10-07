@@ -40,8 +40,7 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
     // Calculate actual hash
     let actual_hash = calculate_backup_hash(path)?;
 
-    let valid = expected_hash == actual_hash;
-    let error = if valid {
+    let mut error = if expected_hash == actual_hash {
         None
     } else {
         Some(format!(
@@ -51,6 +50,14 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
         ))
     };
 
+    // A multi-part backup is only valid if every part is: each part has its
+    // own header and footer hash, but only part 1 was checked, so a corrupt
+    // later part passed verify and was restored (audit 2026-10-06 #39).
+    if error.is_none() && info.header.total_parts > 1 {
+        error = verify_later_parts(path, info.header.total_parts).err();
+    }
+    let valid = error.is_none();
+
     Ok(VerifyResult {
         filename,
         valid,
@@ -58,6 +65,46 @@ pub fn verify_backup(path: &Path) -> Result<VerifyResult> {
         actual_hash,
         error,
     })
+}
+
+/// Check parts 2..=total of a multi-part backup whose first part is `first`:
+/// each must exist, carry the matching part number and total, and hash to
+/// its footer.
+fn verify_later_parts(first: &Path, total_parts: u8) -> std::result::Result<(), String> {
+    let first_str = first.to_string_lossy();
+    let base = first_str.strip_suffix(".001").ok_or_else(|| {
+        format!(
+            "Multi-part backup's first part is not *.001: {}",
+            first.display()
+        )
+    })?;
+    for part_num in 2..=total_parts {
+        let part = std::path::PathBuf::from(format!("{}.{:03}", base, part_num));
+        let info = read_backup_info(&part)
+            .map_err(|e| format!("Part {} of {} unreadable: {}", part_num, total_parts, e))?;
+        if info.header.part_number != part_num || info.header.total_parts != total_parts {
+            return Err(format!(
+                "Part {} has header part {}/{} (expected {}/{})",
+                part.display(),
+                info.header.part_number,
+                info.header.total_parts,
+                part_num,
+                total_parts
+            ));
+        }
+        let actual = calculate_backup_hash(&part)
+            .map_err(|e| format!("Part {} of {} unreadable: {}", part_num, total_parts, e))?;
+        if actual != info.hash {
+            return Err(format!(
+                "Hash mismatch in part {} of {}: expected {}, got {}",
+                part_num,
+                total_parts,
+                hash_to_hex(&info.hash),
+                hash_to_hex(&actual)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Calculate SHA256 hash of backup content (header + payload)

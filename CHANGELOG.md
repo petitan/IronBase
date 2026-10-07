@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — hot backup: incremental after compaction, torn snapshot, unverified parts (mcp-server v1.0.553)
+
+Audit 2026-10-06 #31, #38-#40 (high/medium/low).
+
+- **#31 — an incremental backup after compaction stitched two file layouts
+  together.** The only lineage check was "the file did not shrink", so once a
+  compacted file grew past the previous backup, the incremental appended the
+  new layout's tail and header to the old layout's prefix; restore and verify
+  still reported success. `create_backup` now compares the DB header's
+  `last_compact_size` with the previous backup's and fails with
+  `BackupError::LayoutChanged` (take a `--full` backup).
+- **#38 — file size, `data_end_offset` and the DB header were read at different
+  times.** A checkpoint in between left bytes out of every backup or produced a
+  header pointing past the copied data (and could underflow
+  `db_size - start_offset`). The backup now reads the header once and copies
+  exactly up to that header's `data_end_offset` through one file handle; a
+  `data_end_offset` behind the previous backup is reported as `DatabaseShrunk`.
+- **#39 — verify and restore never checked parts 2..N of a multi-part backup.**
+  `verify_backup` now checks each later part's part number, part count and
+  content hash.
+- **#40 — restoring an empty incremental wrote the DB header at
+  `data_end_offset` instead of offset 0.** Both restore paths now treat a
+  payload of exactly the header size as header-only.
+
+Not fixed here: #32 (hot backup does not include the WAL) needs a design
+decision.
+
+Regression tests (`ironbase-backup/tests/audit_tests.rs`):
+`incremental_after_compaction_is_rejected`,
+`full_and_incremental_restore_consistent_database`,
+`corrupt_later_part_fails_verification`.
+
 ### Fixed — index state across crash, drop/rename and failed shutdown (mcp-server v1.0.552)
 
 Audit 2026-10-06 #27-#30 (high).

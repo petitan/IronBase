@@ -31,6 +31,84 @@ const STREAMING_THRESHOLD: u64 = 1024 * 1024 * 1024;
 ///         metadata_size(8) + data_end_offset(8)
 const IRONBASE_METADATA_OFFSET_POS: u64 = 36; // Position of metadata_offset in IronBase header
 const IRONBASE_DATA_END_OFFSET_POS: u64 = 52; // Position of data_end_offset in IronBase header
+/// Position of `last_compact_size` in the IronBase header (bincode layout:
+/// ... data_end_offset u64 @52, clean_shutdown bool @60,
+/// last_committed_tx_id u64 @61, last_compact_size u64 @69). It changes only
+/// when the file is compacted into a new layout.
+const IRONBASE_LAST_COMPACT_SIZE_POS: usize = 69;
+
+/// A consistent view of the database file for one backup: the header and
+/// the end of the immutable data it describes, read through one file handle.
+///
+/// The region `[0, data_end)` of an append-only `.mlite` never changes except
+/// the 256-byte header, which every checkpoint rewrites; copying exactly that
+/// range with this header gives a self-consistent file even while the database
+/// keeps writing (audit 2026-10-06 #38).
+struct DbSnapshot {
+    file: File,
+    header: Vec<u8>,
+    data_end: u64,
+}
+
+impl DbSnapshot {
+    fn open(db_path: &Path) -> Result<Self> {
+        let mut file = File::open(db_path)?;
+        let file_size = file.metadata()?.len();
+        let mut header = vec![0u8; DB_HEADER_SIZE.min(file_size as usize)];
+        file.read_exact(&mut header)?;
+
+        let data_end = if header.len() == DB_HEADER_SIZE && &header[..8] == b"MONGOLTE" {
+            let at = |pos: usize| u64::from_le_bytes(header[pos..pos + 8].try_into().unwrap());
+            let data_end = at(IRONBASE_DATA_END_OFFSET_POS as usize);
+            let metadata_offset = at(IRONBASE_METADATA_OFFSET_POS as usize);
+            if data_end >= DB_HEADER_SIZE as u64 && data_end <= file_size {
+                data_end
+            } else if metadata_offset > 0 && metadata_offset <= file_size {
+                metadata_offset
+            } else {
+                file_size
+            }
+        } else {
+            file_size
+        };
+        header.resize(DB_HEADER_SIZE, 0);
+
+        Ok(DbSnapshot {
+            file,
+            header,
+            data_end,
+        })
+    }
+
+    fn last_compact_size(header: &[u8]) -> u64 {
+        u64::from_le_bytes(
+            header[IRONBASE_LAST_COMPACT_SIZE_POS..IRONBASE_LAST_COMPACT_SIZE_POS + 8]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    /// Reader over `[header snapshot][file bytes from `start` to data_end]`
+    /// (for a full backup `start` is the header size: the header itself comes
+    /// from the snapshot, not from the file).
+    fn reader(&self, start: u64) -> Result<impl Read + '_> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(start))?;
+        Ok(std::io::Cursor::new(&self.header[..])
+            .chain(BufReader::new(file).take(self.data_end.saturating_sub(start))))
+    }
+}
+
+/// The IronBase header stored at the start of a backup's payload (a full
+/// backup starts with the DB header; an incremental payload starts with it).
+fn read_backup_db_header(path: &Path) -> Result<Vec<u8>> {
+    let mut file = BufReader::new(File::open(path)?);
+    file.seek(SeekFrom::Start(crate::format::HEADER_SIZE as u64))?;
+    let mut decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut header = vec![0u8; DB_HEADER_SIZE];
+    decoder.read_exact(&mut header)?;
+    Ok(header)
+}
 
 /// Read data_end_offset from IronBase database header with shared lock
 /// This is where document data ends (before metadata at file end)
@@ -175,13 +253,14 @@ pub fn create_backup(
         fs::create_dir_all(output_dir)?;
     }
 
-    // Get database name and current size
+    // Get database name and a consistent snapshot of the file
     let db_name = db_name_from_path(db_path);
-    let db_size = fs::metadata(db_path)?.len();
-
-    // Read data_end_offset from IronBase header
-    // This is where document data ends (metadata is at the END of the file)
-    let current_data_end = read_data_end_offset(db_path)?;
+    let snapshot = DbSnapshot::open(db_path)?;
+    // Back up exactly the immutable range the snapshot header describes
+    // (audit 2026-10-06 #38: size, data_end and header used to be read at
+    // three different times).
+    let db_size = snapshot.data_end;
+    let current_data_end = snapshot.data_end;
 
     // Discover existing chain
     let chain = Chain::discover(output_dir, &db_name)?;
@@ -195,14 +274,6 @@ pub fn create_backup(
     } else {
         let last = chain.last().unwrap();
 
-        // Verify database hasn't shrunk (would indicate compaction or corruption)
-        if db_size < last.header.original_db_size {
-            return Err(BackupError::DatabaseShrunk {
-                expected: last.header.original_db_size,
-                actual: db_size,
-            });
-        }
-
         // Use data_end_offset from last backup as start point for incremental
         // This is where document data ended, NOT where the file ended (which includes metadata)
         let incremental_start = if last.header.data_end_offset > 0 {
@@ -211,6 +282,24 @@ pub fn create_backup(
             // Fallback for backups made before this fix
             last.header.original_db_size
         };
+
+        // Verify database hasn't shrunk (would indicate compaction or corruption)
+        if db_size < incremental_start {
+            return Err(BackupError::DatabaseShrunk {
+                expected: incremental_start,
+                actual: db_size,
+            });
+        }
+
+        // A compaction rewrites the file into a new layout; it can grow past
+        // the previous size again, so a size check alone attached the new
+        // layout's tail to the old prefix (audit 2026-10-06 #31).
+        let last_header = read_backup_db_header(&last.path)?;
+        if DbSnapshot::last_compact_size(&last_header)
+            != DbSnapshot::last_compact_size(&snapshot.header)
+        {
+            return Err(BackupError::LayoutChanged);
+        }
 
         (BackupType::Incremental, incremental_start, last.hash)
     };
@@ -225,6 +314,15 @@ pub fn create_backup(
         incremental_data_length
     };
 
+    // Payload: [DB header snapshot] + [data]. For a full backup the data
+    // starts after the header (the header comes from the snapshot); for an
+    // incremental it starts at start_offset.
+    let data_start = if backup_type == BackupType::Incremental {
+        start_offset
+    } else {
+        (DB_HEADER_SIZE as u64).min(db_size)
+    };
+
     // Use streaming compression for large files to avoid OOM
     let use_streaming = incremental_data_length > STREAMING_THRESHOLD;
 
@@ -234,60 +332,20 @@ pub fn create_backup(
         let temp_path = output_dir.join(format!(".backup_temp_{}.zst", std::process::id()));
         let temp_file = File::create(&temp_path)?;
         let temp_writer = BufWriter::new(temp_file);
-
-        // Open database file for reading
-        let db_file = File::open(db_path)?;
-        let mut reader = BufReader::new(&db_file);
-
-        if backup_type == BackupType::Incremental {
-            // For incremental: create a chained reader [DB header] + [incremental data]
-            reader.seek(SeekFrom::Start(0))?;
-            let mut db_header = vec![0u8; DB_HEADER_SIZE];
-            reader.read_exact(&mut db_header)?;
-
-            reader.seek(SeekFrom::Start(start_offset))?;
-
-            // Chain the DB header with the incremental data
-            let header_reader = std::io::Cursor::new(db_header);
-            let limited_reader = reader.take(incremental_data_length);
-            let chained = header_reader.chain(limited_reader);
-
-            compress_stream(chained, temp_writer, DEFAULT_COMPRESSION_LEVEL)?;
-        } else {
-            // Full backup: stream from start_offset
-            reader.seek(SeekFrom::Start(start_offset))?;
-            let limited_reader = reader.take(incremental_data_length);
-            compress_stream(limited_reader, temp_writer, DEFAULT_COMPRESSION_LEVEL)?;
-        }
-
+        compress_stream(
+            snapshot.reader(data_start)?,
+            temp_writer,
+            DEFAULT_COMPRESSION_LEVEL,
+        )?;
         (None, Some(temp_path))
     } else {
         // In-memory compression for smaller files
-        let db_file = File::open(db_path)?;
-        let mut reader = BufReader::new(&db_file);
-
-        let data = if backup_type == BackupType::Incremental {
-            // Read DB header first (0-255) - contains metadata_offset
-            reader.seek(SeekFrom::Start(0))?;
-            let mut db_header = vec![0u8; DB_HEADER_SIZE];
-            reader.read_exact(&mut db_header)?;
-
-            // Read incremental data (start_offset to end)
-            reader.seek(SeekFrom::Start(start_offset))?;
-            let mut incremental_data = vec![0u8; incremental_data_length as usize];
-            reader.read_exact(&mut incremental_data)?;
-
-            // Concatenate: [db_header] + [incremental_data]
-            db_header.extend(incremental_data);
-            db_header
-        } else {
-            // Full backup: read entire file from offset 0
-            reader.seek(SeekFrom::Start(start_offset))?;
-            let mut data = vec![0u8; incremental_data_length as usize];
-            reader.read_exact(&mut data)?;
-            data
-        };
-
+        let mut data = Vec::new();
+        snapshot.reader(data_start)?.read_to_end(&mut data)?;
+        if backup_type == BackupType::Full {
+            // A file shorter than the header has no separate header part
+            data.truncate(db_size as usize);
+        }
         let compressed_data = compress(&data)?;
         (Some(compressed_data), None)
     };
