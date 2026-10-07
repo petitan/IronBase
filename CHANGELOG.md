@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Batch mode: updates and deletes no longer buffered out of order (mcp-server v1.0.558)
+
+Audit 2026-10-06 #9, #18, #20 (high).
+
+- **Root cause:** in Batch mode, `update_one`, `delete_one`, `update_many` and
+  `delete_many` were prepared against storage, which does not contain the
+  earlier operations still in the batch buffer, and `flush_batch` then persisted
+  the buffer grouped by type (inserts, updates, deletes, update_many,
+  delete_many) instead of in WAL order.
+  - **#9:** the WAL `Update` image came from the stale prepare snapshot while
+    persist re-applied the operators, so crash replay before the next
+    checkpoint lost increments/fields or resurrected a deleted document.
+  - **#18:** `update_many` wrote back its prepare-time snapshot: a buffered
+    delete came back and an earlier buffered `$inc` was lost
+    (`count_documents` and `find` disagreed).
+  - **#20:** the buffered `update_one` skipped the unique check; the flush
+    failed after removing the document from its indexes while the caller had
+    already got `Ok`.
+- **Fix:** Batch mode buffers inserts only. An update or delete first flushes
+  the pending batch (`flush_pending_batch`) and then runs through the Safe path
+  (validation and unique checks before any change, WAL commit, persist). The
+  now-unused batch update/delete plumbing (`*_prepare_batch`,
+  `*_persist_batch`, `UpdateOnePreparedBatch`, `DeleteOnePreparedBatch`, the
+  `BatchDocBuffer` update/delete/_many queues) is removed.
+- Trade-off: Batch-mode updates and deletes are no longer batched (one WAL
+  fsync each); inserts keep the batched throughput. README, CLAUDE.md and the
+  `DurabilityMode::Batch` doc updated.
+
+Regression tests: `crash_replay_matches_acknowledged_updates`,
+`update_many_sees_earlier_writes`,
+`unique_violation_reported_by_update_and_index_intact`.
+
 ### Fixed — WAL cleared while index changes existed only in memory (mcp-server v1.0.557)
 
 - **A write between a checkpoint's index flush and its WAL clear lost its index

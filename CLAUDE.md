@@ -905,7 +905,7 @@ Lock-free: append-only → `data_end_offset`-ig immutable
 | Mode | fsync | ops/sec | Crash loss |
 |------|-------|---------|------------|
 | **Safe** | ✅ | 1-5K | 0 |
-| **Batch** | ✅ | 20-50K | Max N |
+| **Batch** | ✅ | 20-50K (insert) | Max N insert (update/delete: flush + Safe út) |
 | **Unsafe** | ❌ | 50-100K | All |
 
 | Művelet | MemoryStorage |

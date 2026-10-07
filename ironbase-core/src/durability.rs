@@ -52,9 +52,11 @@ pub enum DurabilityMode {
     /// - Slow but guaranteed durability
     Safe,
 
-    /// Batch mode: Operations batched, periodic auto-commit
-    /// - WAL written every N operations
-    /// - Bounded data loss (max N operations)
+    /// Batch mode: inserts batched, periodic auto-commit
+    /// - WAL written every N inserts
+    /// - Bounded data loss (max N inserts)
+    /// - Updates and deletes first flush the pending batch, then commit
+    ///   immediately like Safe mode (consistent with the buffered inserts)
     /// - Good balance of safety and performance
     Batch {
         /// Number of operations before auto-commit
