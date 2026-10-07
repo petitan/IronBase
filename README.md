@@ -305,8 +305,11 @@ All changes are journaled to WAL before commit. On crash, uncommitted transactio
 | Mode | fsync | Throughput | Crash Loss |
 |------|-------|------------|------------|
 | **Safe** (default) | Every op | 1K-5K ops/sec | Zero |
-| **Batch** | Every N ops | 20K-50K ops/sec | Max N ops |
+| **Batch** | Every N inserts | 20K-50K inserts/sec | Max N inserts |
 | **Unsafe** | Manual | 50K-100K ops/sec | Since last checkpoint |
+
+In Batch mode only inserts are buffered; an update or delete first flushes the
+pending inserts and then commits immediately, like Safe mode.
 
 ```python
 # Python

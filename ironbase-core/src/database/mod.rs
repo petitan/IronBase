@@ -55,10 +55,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
-use crate::collection_core::{
-    DeleteManyPrepared, DeleteOnePreparedBatch, InsertOnePrepared, UpdateManyPrepared,
-    UpdateOnePreparedBatch,
-};
+use crate::collection_core::InsertOnePrepared;
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
@@ -75,19 +72,14 @@ pub const MAX_BATCH_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 /// but BEFORE storage write. The actual persist happens in flush_batch()
 /// AFTER WAL commit (fsync), ensuring proper WAL-first ordering.
 ///
-/// WAL ORDERING FIX: Now includes updates and deletes, not just inserts.
+/// Only inserts are buffered: an update or delete flushes the buffer and runs
+/// through the Safe path, because buffered updates/deletes were prepared
+/// against storage without the earlier buffered ops and persisted out of WAL
+/// order (audit 2026-10-06 #9, #18, #20).
 #[derive(Debug, Default)]
 pub struct BatchDocBuffer {
     /// Buffered insert operations by collection name
     pub(crate) inserts: HashMap<String, Vec<InsertOnePrepared>>,
-    /// Buffered update operations by collection name (WAL ORDERING FIX)
-    pub(crate) updates: HashMap<String, Vec<UpdateOnePreparedBatch>>,
-    /// Buffered delete operations by collection name (WAL ORDERING FIX)
-    pub(crate) deletes: HashMap<String, Vec<DeleteOnePreparedBatch>>,
-    /// Buffered update_many operations by collection name (WAL ORDERING FIX for _many)
-    pub(crate) update_many_ops: HashMap<String, Vec<UpdateManyPrepared>>,
-    /// Buffered delete_many operations by collection name (WAL ORDERING FIX for _many)
-    pub(crate) delete_many_ops: HashMap<String, Vec<DeleteManyPrepared>>,
     /// Approximate memory usage in bytes
     pub(crate) memory_bytes: usize,
 }
@@ -97,10 +89,6 @@ impl BatchDocBuffer {
     pub fn new() -> Self {
         Self {
             inserts: HashMap::new(),
-            updates: HashMap::new(),
-            deletes: HashMap::new(),
-            update_many_ops: HashMap::new(),
-            delete_many_ops: HashMap::new(),
             memory_bytes: 0,
         }
     }
@@ -108,29 +96,17 @@ impl BatchDocBuffer {
     /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
         self.inserts.is_empty()
-            && self.updates.is_empty()
-            && self.deletes.is_empty()
-            && self.update_many_ops.is_empty()
-            && self.delete_many_ops.is_empty()
     }
 
     /// Clear all buffered documents
     pub fn clear(&mut self) {
         self.inserts.clear();
-        self.updates.clear();
-        self.deletes.clear();
-        self.update_many_ops.clear();
-        self.delete_many_ops.clear();
         self.memory_bytes = 0;
     }
 
     /// Shrink internal buffers to release memory back to the allocator.
     pub fn shrink_to_fit(&mut self) {
         self.inserts.shrink_to_fit();
-        self.updates.shrink_to_fit();
-        self.deletes.shrink_to_fit();
-        self.update_many_ops.shrink_to_fit();
-        self.delete_many_ops.shrink_to_fit();
     }
 
     /// Clear buffers and optionally shrink if recent usage was high.
@@ -150,57 +126,6 @@ impl BatchDocBuffer {
         self.memory_bytes += doc_size;
 
         self.inserts.entry(collection).or_default().push(prepared);
-    }
-
-    /// Add a prepared update to the buffer (WAL ORDERING FIX)
-    pub fn add_update(&mut self, collection: String, prepared: UpdateOnePreparedBatch) {
-        // Estimate memory usage
-        let doc_size = serde_json::to_string(&prepared.new_doc)
-            .map(|s| s.len())
-            .unwrap_or(100);
-        self.memory_bytes += doc_size;
-
-        self.updates.entry(collection).or_default().push(prepared);
-    }
-
-    /// Add a prepared delete to the buffer (WAL ORDERING FIX)
-    pub fn add_delete(&mut self, collection: String, prepared: DeleteOnePreparedBatch) {
-        // Estimate memory usage
-        let doc_size = serde_json::to_string(&prepared.old_doc)
-            .map(|s| s.len())
-            .unwrap_or(100);
-        self.memory_bytes += doc_size;
-
-        self.deletes.entry(collection).or_default().push(prepared);
-    }
-
-    /// Add a prepared update_many to the buffer (WAL ORDERING FIX for _many)
-    pub fn add_update_many(&mut self, collection: String, prepared: UpdateManyPrepared) {
-        // Estimate memory usage from WAL entries
-        for (_, _, new_doc) in &prepared.wal_entries {
-            let doc_size = serde_json::to_string(new_doc)
-                .map(|s| s.len())
-                .unwrap_or(100);
-            self.memory_bytes += doc_size;
-        }
-
-        self.update_many_ops
-            .entry(collection)
-            .or_default()
-            .push(prepared);
-    }
-
-    /// Add a prepared delete_many to the buffer (WAL ORDERING FIX for _many)
-    pub fn add_delete_many(&mut self, collection: String, prepared: DeleteManyPrepared) {
-        // Rough estimate: persist writes one minimal tombstone per matched doc.
-        // (DeleteManyPrepared no longer precomputes tombstone JSON — persist re-reads
-        // under the lock, audit P2-3 — so estimate a fixed per-doc cost instead.)
-        self.memory_bytes += prepared.deleted as usize * 100;
-
-        self.delete_many_ops
-            .entry(collection)
-            .or_default()
-            .push(prepared);
     }
 
     /// Check if memory limit exceeded
@@ -5123,5 +5048,122 @@ mod checkpoint_wal_tests {
             .unwrap()
             .simulate_crash_for_test();
         assert_eq!(late_found(&path), 1, "index changes lost on second crash");
+    }
+}
+
+#[cfg(test)]
+mod batch_mode_tests {
+    //! Audit 2026-10-06 #9, #18, #20: Batch-mode updates and deletes were
+    //! prepared against storage without the earlier buffered ops and
+    //! persisted out of WAL order.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn batch_db(path: &std::path::Path, batch_size: usize) -> DatabaseCore<StorageEngine> {
+        DatabaseCore::<StorageEngine>::open_with_durability(
+            path,
+            DurabilityMode::Batch { batch_size },
+        )
+        .unwrap()
+    }
+
+    /// Documents sorted by `_id`, without the `_collection` field WAL replay
+    /// writes into replayed documents (independent of these fixes).
+    fn docs(db: &DatabaseCore<StorageEngine>) -> Vec<serde_json::Value> {
+        let mut docs = db.collection("c").unwrap().find(&json!({})).unwrap();
+        for doc in &mut docs {
+            if let Some(map) = doc.as_object_mut() {
+                map.remove("_collection");
+            }
+        }
+        docs.sort_by_key(|d| d["_id"].to_string());
+        docs
+    }
+
+    /// #9: the state after a crash replay equals the acknowledged state.
+    #[test]
+    fn crash_replay_matches_acknowledged_updates() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("b.mlite");
+        {
+            let db = batch_db(&path, 2);
+            db.insert_one("c", fields(json!({"_id": "X", "a": 0})))
+                .unwrap();
+            db.insert_one("c", fields(json!({"_id": "Y", "a": 0})))
+                .unwrap();
+            db.checkpoint().unwrap();
+            db.update_one("c", &json!({"_id": "X"}), &json!({"$inc": {"a": 1}}))
+                .unwrap();
+            db.update_one("c", &json!({"_id": "X"}), &json!({"$inc": {"a": 1}}))
+                .unwrap();
+            db.update_one("c", &json!({"_id": "X"}), &json!({"$set": {"b": 1}}))
+                .unwrap();
+            db.update_one("c", &json!({"_id": "X"}), &json!({"$set": {"c": 1}}))
+                .unwrap();
+            db.delete_one("c", &json!({"_id": "Y"})).unwrap();
+            assert_eq!(
+                db.update_one("c", &json!({"_id": "Y"}), &json!({"$set": {"b": 1}}))
+                    .unwrap(),
+                (0, 0)
+            );
+            db.simulate_crash_for_test();
+        }
+        let db = batch_db(&path, 2);
+        assert_eq!(docs(&db), vec![json!({"_id": "X", "a": 2, "b": 1, "c": 1})]);
+    }
+
+    /// #18: update_many must see a buffered delete and earlier updates.
+    #[test]
+    fn update_many_sees_earlier_writes() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("b.mlite");
+        let db = batch_db(&path, 1000);
+        db.insert_one("c", fields(json!({"_id": 1, "n": 0})))
+            .unwrap();
+        db.insert_one("c", fields(json!({"_id": 2, "n": 0})))
+            .unwrap();
+        db.flush().unwrap();
+        db.delete_one("c", &json!({"_id": 1})).unwrap();
+        db.update_many("c", &json!({}), &json!({"$inc": {"n": 1}}))
+            .unwrap();
+        db.update_many("c", &json!({}), &json!({"$inc": {"n": 1}}))
+            .unwrap();
+        db.flush().unwrap();
+        assert_eq!(docs(&db), vec![json!({"_id": 2, "n": 2})]);
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 1);
+    }
+
+    /// #20: a unique violation is reported by update_one itself and leaves
+    /// the indexes intact.
+    #[test]
+    fn unique_violation_reported_by_update_and_index_intact() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("b.mlite");
+        let db = batch_db(&path, 100);
+        db.collection("c")
+            .unwrap()
+            .create_index("email".to_string(), true, false)
+            .unwrap();
+        db.insert_one("c", fields(json!({"_id": 1, "email": "a"})))
+            .unwrap();
+        db.insert_one("c", fields(json!({"_id": 2, "email": "b"})))
+            .unwrap();
+        db.flush().unwrap();
+        assert!(db
+            .update_one("c", &json!({"_id": 2}), &json!({"$set": {"email": "a"}}))
+            .is_err());
+        db.flush().unwrap();
+        let by_b = db
+            .collection("c")
+            .unwrap()
+            .find(&json!({"email": "b"}))
+            .unwrap();
+        assert_eq!(by_b.len(), 1, "doc 2 lost from the email index");
     }
 }
