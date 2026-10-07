@@ -854,6 +854,17 @@ impl StorageEngine {
             return Err(IronBaseError::CollectionExists(name.to_string()));
         }
 
+        self.insert_empty_collection_meta(name);
+
+        // Mark metadata dirty and flush to persist new collection
+        self.mark_metadata_dirty()?;
+        self.flush()?;
+
+        Ok(())
+    }
+
+    /// Register an empty collection in memory only (the caller persists it).
+    fn insert_empty_collection_meta(&mut self, name: &str) {
         // Create new collection with placeholder offset (will be corrected by flush_metadata)
         let meta = CollectionMeta {
             name: name.to_string(),
@@ -875,12 +886,16 @@ impl StorageEngine {
 
         self.collections_mut().insert(name.to_string(), meta);
         self.header.collection_count += 1;
+    }
 
-        // Mark metadata dirty and flush to persist new collection
-        self.mark_metadata_dirty()?;
-        self.flush()?;
-
-        Ok(())
+    /// Create a collection during WAL replay without flushing: `flush()`
+    /// clears the WAL, which must stay intact until the replayed state is
+    /// durable (audit 2026-10-06 #33).
+    fn ensure_collection_for_replay(&mut self, name: &str) {
+        if !self.collections.contains_key(name) {
+            self.insert_empty_collection_meta(name);
+            self.metadata_dirty = true;
+        }
     }
 
     /// Drop collection
@@ -2010,7 +2025,7 @@ impl StorageEngine {
                 doc,
             } => {
                 // Ensure collection exists (it may not after a crash)
-                let _ = self.create_collection(collection);
+                self.ensure_collection_for_replay(collection);
 
                 // Serialize and write document with FULL metadata update
                 let doc_json = serde_json::to_string(doc.as_ref())
@@ -2024,7 +2039,7 @@ impl StorageEngine {
                 new_doc,
             } => {
                 // Ensure collection exists
-                let _ = self.create_collection(collection);
+                self.ensure_collection_for_replay(collection);
 
                 // Write new version with FULL metadata update
                 let doc_json = serde_json::to_string(new_doc.as_ref())
@@ -2062,6 +2077,13 @@ impl StorageEngine {
         let recovered = self.wal.recover()?;
 
         if recovered.is_empty() {
+            // Only aborted or torn transactions are left. Clear them: the
+            // tx-id watermark can restart below their ids after a crash, and
+            // a reused id would merge them into a new transaction
+            // (audit 2026-10-06 #34).
+            self.wal.clear()?;
+            self.metadata_snapshot_pending = false;
+            self.wal_ops_since_clear = 0;
             return Ok((0, vec![], vec![]));
         }
 
@@ -2142,6 +2164,13 @@ impl StorageEngine {
 
         // Drop recovered entries to free memory before WAL clear I/O
         drop(recovered);
+
+        // Persist the replayed documents' catalog and header (fsynced) BEFORE
+        // clearing the WAL: if this fails or the process dies, the WAL still
+        // holds the transactions and the next open replays them again
+        // (replay is idempotent: full-image writes keyed by `_id`).
+        // Clearing first lost them for good (audit 2026-10-06 #33).
+        self.flush_metadata()?;
 
         // Clear WAL after successful recovery
         self.wal.clear()?;

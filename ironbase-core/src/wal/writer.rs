@@ -134,6 +134,12 @@ impl WriteAheadLog {
             // iterating the HashMap returned transactions in random order).
             let tx_id = entry.transaction_id;
             let entry_type = entry.entry_type;
+            if entry_type == WALEntryType::Begin {
+                // A BEGIN starts a new transaction: drop a torn group left
+                // under the same id, so it cannot merge into this one
+                // (audit 2026-10-06 #34).
+                txs.remove(&tx_id);
+            }
             txs.entry(tx_id).or_default().push(entry);
             match entry_type {
                 WALEntryType::Commit => {
@@ -142,7 +148,20 @@ impl WriteAheadLog {
                     }
                 }
                 WALEntryType::Abort => {
-                    txs.remove(&tx_id);
+                    // An ABORT after COMMIT is written when the persist phase
+                    // failed (`abort_committed_transaction`): the caller got
+                    // an error, so the already emitted transaction must not
+                    // be replayed.
+                    // The ABORT itself was just pushed: a group holding only
+                    // it means no open transaction had this id.
+                    let open_group = txs.remove(&tx_id).is_some_and(|group| group.len() > 1);
+                    if !open_group {
+                        if let Some(pos) = committed.iter().rposition(|tx: &Vec<WALEntry>| {
+                            tx.first().map(|e| e.transaction_id) == Some(tx_id)
+                        }) {
+                            committed.remove(pos);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -380,5 +399,53 @@ mod tests {
             // Transaction 2 has no commit, so it should not be recovered
             assert_eq!(recovered.len(), 0);
         }
+    }
+
+    /// Audit 2026-10-06 #34 / #7: an ABORT written after COMMIT (persist
+    /// failure) retracts the transaction.
+    #[test]
+    fn commit_then_abort_is_not_recovered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wal = WriteAheadLog::open(temp_dir.path().join("a.wal")).unwrap();
+        for (tx, kind) in [
+            (1, WALEntryType::Begin),
+            (1, WALEntryType::Commit),
+            (2, WALEntryType::Begin),
+            (2, WALEntryType::Commit),
+            (1, WALEntryType::Abort),
+        ] {
+            wal.append(&WALEntry::new(tx, kind, vec![])).unwrap();
+        }
+        wal.flush().unwrap();
+        let recovered = wal.recover().unwrap();
+        let ids: Vec<_> = recovered.iter().map(|t| t[0].transaction_id).collect();
+        assert_eq!(ids, vec![2]);
+    }
+
+    /// Audit 2026-10-06 #34: a torn group (BEGIN + OP, no COMMIT) must not
+    /// merge into a later transaction that reuses its id.
+    #[test]
+    fn torn_group_does_not_merge_into_reused_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wal = WriteAheadLog::open(temp_dir.path().join("t.wal")).unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Operation, b"torn".to_vec()))
+            .unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Operation, b"new".to_vec()))
+            .unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Commit, vec![]))
+            .unwrap();
+        wal.flush().unwrap();
+        let recovered = wal.recover().unwrap();
+        assert_eq!(recovered.len(), 1);
+        let ops: Vec<_> = recovered[0]
+            .iter()
+            .filter(|e| e.entry_type == WALEntryType::Operation)
+            .map(|e| e.data.clone())
+            .collect();
+        assert_eq!(ops, vec![b"new".to_vec()]);
     }
 }
