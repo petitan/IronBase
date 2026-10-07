@@ -1064,7 +1064,11 @@ impl HnswIndex {
         let mut w_nav = BinaryHeap::new(); // max-heap: ef nearest navigable (drives stop)
         let mut w_active = BinaryHeap::new(); // max-heap: ef nearest active (results)
 
-        let is_active = |idx: usize| self.id_to_index.contains_key(&self.nodes[idx].id);
+        // A node is active only if its id maps to THIS node: after remove +
+        // re-insert of the same id the old node is an orphan whose id is in
+        // id_to_index again (pointing at the new node) (audit 2026-10-06 #26).
+        let is_active =
+            |idx: usize| self.id_to_index.get(&self.nodes[idx].id).copied() == Some(idx);
 
         // #80 backstop: bound work so an orphan-dense neighborhood can't degrade
         // into a full reachable-graph walk on every query.
@@ -1957,6 +1961,36 @@ mod tests {
         assert!(
             heap.pop().unwrap().distance.is_nan(),
             "NaN (max distance) should pop last"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reinsert_tests {
+    use super::*;
+    use crate::vector::{DistanceMetric, VectorIndexConfig};
+
+    /// Audit 2026-10-06 #26: after remove + re-insert of the same id, the old
+    /// (orphan) node must not be returned.
+    #[test]
+    fn reinserted_id_returns_only_the_new_vector() {
+        let mut cfg = VectorIndexConfig::new(2);
+        cfg.metric = DistanceMetric::Cosine;
+        let mut index = HnswIndex::new(cfg);
+        index.insert("a", &[1.0, 0.0]).unwrap();
+        index.insert("b", &[0.0, 1.0]).unwrap();
+        index.insert("c", &[0.7, 0.7]).unwrap();
+
+        index.remove("a");
+        index.insert("a", &[-1.0, 0.0]).unwrap();
+
+        let results = index.search(&[1.0, 0.0], 3);
+        let a: Vec<_> = results.iter().filter(|r| r.id == "a").collect();
+        assert_eq!(a.len(), 1, "id 'a' returned more than once: {:?}", results);
+        assert!(
+            a[0].score < 0.0,
+            "stale vector of 'a' was used: {:?}",
+            results
         );
     }
 }

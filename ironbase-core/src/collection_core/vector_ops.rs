@@ -39,6 +39,17 @@ pub(crate) fn doc_id_to_string(id: &DocumentId) -> String {
     }
 }
 
+/// The unprefixed HNSW node id that live inserts used before audit 2026-10-06
+/// #24. Only for removing such nodes from existing graphs; new nodes always
+/// use `doc_id_to_string`.
+pub(crate) fn legacy_hnsw_id(id: &DocumentId) -> String {
+    match id {
+        DocumentId::Int(i) => i.to_string(),
+        DocumentId::String(s) => s.clone(),
+        DocumentId::ObjectId(oid) => oid.clone(),
+    }
+}
+
 /// Convert String back to DocumentId
 ///
 /// Recognizes type-prefixed format (`"i:"`, `"s:"`, `"o:"`) for lossless roundtrip.

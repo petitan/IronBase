@@ -216,7 +216,7 @@ mod update_operators;
 mod vector_ops;
 
 pub(crate) use self::context::QueryExecutionContext;
-pub(crate) use self::vector_ops::doc_id_to_string;
+pub(crate) use self::vector_ops::{doc_id_to_string, legacy_hnsw_id};
 
 // Public exports for Top-K algorithm
 pub use topk::{topk_select, topk_select_with_skip};
@@ -2023,11 +2023,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 })
                 .collect();
 
-            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-                id_index.apply_batch_updates(id_updates)?;
+            // Only a real change dirties the index: a dirty lazy-mode index is
+            // fully loaded and rewritten at the next checkpoint (audit
+            // 2026-10-06 #22). _id is immutable, so this is normally empty.
+            let id_changed = id_updates
+                .iter()
+                .any(|(old_key, old_id, new_key, new_id)| old_key != new_key || old_id != new_id);
+            if id_changed {
+                if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                    id_index.apply_batch_updates(id_updates)?;
+                }
+                // Mark _id index dirty for checkpoint persistence
+                indexes.mark_btree_dirty(&id_index_name);
             }
-            // Mark _id index dirty for checkpoint persistence
-            indexes.mark_btree_dirty(&id_index_name);
         }
 
         // --- OTHER INDEXES: multi-key aware updates ---
@@ -2036,6 +2044,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 continue;
             }
 
+            let mut changed = false;
             if let Some(index) = indexes.get_btree_index_mut(index_name) {
                 for (original_doc, updated_doc) in updates {
                     let old_doc_value = match serde_json::to_value(original_doc) {
@@ -2069,6 +2078,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         index.extract_keys(&new_doc_value).into_iter().collect();
 
                     let doc_id = &original_doc.id;
+                    changed |= old_keys != new_keys;
 
                     for key in old_keys.difference(&new_keys) {
                         if let Err(e) = index.delete(key, doc_id) {
@@ -2086,8 +2096,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     }
                 }
             }
-            // Mark dirty for checkpoint persistence
-            indexes.mark_btree_dirty(index_name);
+            // Mark dirty for checkpoint persistence (only on a real change,
+            // see the _id index above)
+            if changed {
+                indexes.mark_btree_dirty(index_name);
+            }
         }
 
         // --- FULLTEXT INDEXES: Update for each document ---
@@ -2197,18 +2210,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 // Only update if the vector field actually changed
                 if old_value != new_value {
                     let doc_id = &original_doc.id;
-                    let id_str = match doc_id {
-                        DocumentId::Int(i) => i.to_string(),
-                        DocumentId::String(s) => s.clone(),
-                        DocumentId::ObjectId(oid) => oid.clone(),
-                    };
+                    // Same prefixed node id as create/rebuild/search (audit
+                    // 2026-10-06 #24)
+                    let id_str = doc_id_to_string(doc_id);
 
                     if let Some(index) =
                         indexes.get_vector_index_for_field_mut(&self.name, &vec_field)
                     {
-                        // Remove old vector if it existed (unconditional - remove() is ID-based)
+                        // Remove old vector if it existed (unconditional - remove() is ID-based),
+                        // also under the legacy unprefixed id older live inserts stored
                         if old_value.and_then(|v| v.as_array()).is_some() {
                             index.remove(&id_str);
+                            index.remove(&legacy_hnsw_id(doc_id));
                         }
 
                         // Insert new vector if it exists with correct dimension

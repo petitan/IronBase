@@ -73,12 +73,28 @@ where
     F: FnOnce(&mut File) -> Result<T>,
 {
     if let Some(index_file_path) = build_index_file_path(db_file_path, index_name) {
+        // Write a temp file and rename it over the index: a lazy-mode index
+        // still reads its unloaded nodes from the current file while it is
+        // saved, so truncating that file first destroyed the index (audit
+        // 2026-10-06 #22). The rename also makes a crash mid-save harmless.
+        let temp_path = index_file_path.with_extension("idx.tmp");
+        // A leftover temp file is stale (one writer per database). Remove it
+        // and create the temp file exclusively: O_EXCL never follows a
+        // symlink, so a planted `.idx.tmp` link cannot redirect the write or
+        // truncate its target.
+        match std::fs::remove_file(&temp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         let mut file = OpenOptions::new()
-            .create(true)
             .write(true)
-            .truncate(true)
-            .open(&index_file_path)?;
+            .create_new(true)
+            .open(&temp_path)?;
         save_fn(&mut file)?;
+        file.sync_all()?;
+        drop(file);
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, &index_file_path)?;
     }
     Ok(())
 }

@@ -1273,18 +1273,19 @@ impl BPlusTree {
                 false
             }
             BTreeNode::Internal(ref mut internal) => {
-                // Find which child might contain the key
-                // B+ tree convention: left child has keys < separator, right child has keys >= separator
-                let child_idx = match internal.keys.binary_search(key) {
-                    Ok(pos) => pos + 1, // Key equals separator: go to right child
-                    Err(pos) => pos,    // Key less than separator: go to left child
-                };
-
-                if child_idx < internal.children.len() {
+                // A leaf split by position keeps equal keys on both sides of
+                // the separator, so in a non-unique index the entry may be in
+                // any child from the first separator >= key to the first one
+                // > key. Routing only to the right child missed entries left
+                // of it (audit 2026-10-06 #21).
+                let first = internal.keys.partition_point(|k| k < key);
+                let last = internal
+                    .keys
+                    .partition_point(|k| k <= key)
+                    .min(internal.children.len().saturating_sub(1));
+                (first..=last).any(|child_idx| {
                     Self::delete_from_node(&mut internal.children[child_idx], key, doc_id)
-                } else {
-                    false
-                }
+                })
             }
         }
     }
@@ -2873,6 +2874,11 @@ impl BPlusTree {
     pub fn save_to_file(&mut self, file: &mut File) -> Result<u64> {
         use std::io::{Seek, SeekFrom, Write};
 
+        // A lazy tree holds only the root; unloaded children are offsets into
+        // the source file, which are meaningless in the file being written.
+        // Load everything first (audit 2026-10-06 #22).
+        self.ensure_fully_loaded()?;
+
         // Reserve first 8 bytes for root offset (will be written at the end)
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&[0u8; 8])?;
@@ -2991,7 +2997,22 @@ impl BPlusTree {
     /// # Arguments
     /// * `path` - Path to the .idx file
     /// * `metadata` - Index metadata from collection catalog
-    pub fn load_from_path(path: PathBuf, mut metadata: IndexMetadata) -> Result<Self> {
+    pub fn load_from_path(path: PathBuf, metadata: IndexMetadata) -> Result<Self> {
+        Self::load_from_path_with(path, metadata, false)
+    }
+
+    /// `load_from_path` that always uses lazy loading (tests of the lazy path
+    /// without a file above the RAM-based threshold).
+    #[cfg(test)]
+    pub(crate) fn load_from_path_lazy(path: PathBuf, metadata: IndexMetadata) -> Result<Self> {
+        Self::load_from_path_with(path, metadata, true)
+    }
+
+    fn load_from_path_with(
+        path: PathBuf,
+        mut metadata: IndexMetadata,
+        force_lazy: bool,
+    ) -> Result<Self> {
         use super::traits::calculate_lazy_threshold;
         use std::io::{Read, Seek, SeekFrom};
 
@@ -3000,7 +3021,7 @@ impl BPlusTree {
         // Get file size for threshold comparison
         let file_size = file.seek(SeekFrom::End(0))?;
         let lazy_threshold = calculate_lazy_threshold();
-        let use_lazy = file_size > lazy_threshold;
+        let use_lazy = force_lazy || file_size > lazy_threshold;
 
         // BTFT footer detection (task #26 R7). If the trailing 4 bytes are
         // the BTFT magic, the file was written by a watermark-aware binary

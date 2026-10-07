@@ -662,16 +662,30 @@ impl StorageEngine {
         // `.fzidx.tmp` — fuzzy flush (fuzzy.rs::flush)
         // `.ftidx.tmp` — fulltext two-phase serialize_flush (fulltext.rs::serialize_flush)
         // `.hnsw.tmp`  — HNSW flush (index/manager.rs::persist_hnsw_to_file)
+        //
+        // The B+ tree / fuzzy / fulltext files are named `{db_stem}_...`; only
+        // this database's temp files are removed. Sweeping every temp file in
+        // the directory deleted another open database's in-flight index save
+        // (its rename then failed with NotFound). HNSW cache files carry no
+        // database prefix, so `.hnsw.tmp` is still swept directory-wide.
         if let Some(db_dir) = Path::new(&path_str).parent() {
+            let own_prefix = format!(
+                "{}_",
+                Path::new(&path_str)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("database")
+            );
             if let Ok(entries) = std::fs::read_dir(db_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    let name = p.to_string_lossy();
-                    if name.ends_with(".idx.tmp")
-                        || name.ends_with(".fzidx.tmp")
-                        || name.ends_with(".ftidx.tmp")
-                        || name.ends_with(".hnsw.tmp")
-                    {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let own_index_tmp = name.starts_with(&own_prefix)
+                        && (name.ends_with(".idx.tmp")
+                            || name.ends_with(".fzidx.tmp")
+                            || name.ends_with(".ftidx.tmp"));
+                    if own_index_tmp || name.ends_with(".hnsw.tmp") {
                         log_warn!(
                             path = %p.display(),
                             "Removing orphaned index temp file from interrupted commit"

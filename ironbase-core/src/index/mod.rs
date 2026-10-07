@@ -1643,3 +1643,123 @@ mod non_unique_delete_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod audit_index_tests {
+    //! Audit 2026-10-06 #21, #22: B+ tree delete with duplicate keys across
+    //! leaves, and saving a lazy-mode tree.
+
+    use super::*;
+    use crate::collection_core::{persist_index_to_disk, try_load_index_from_file};
+    use crate::document::DocumentId;
+    use crate::index::traits::LazyLoadable;
+    use tempfile::TempDir;
+
+    /// #21: entries with the separator key that stay in the left leaf after a
+    /// split must still be deletable.
+    #[test]
+    fn delete_finds_duplicate_keys_left_of_separator() {
+        let mut tree = BPlusTree::new("i".to_string(), "status".to_string(), false, false);
+        for i in 0..300 {
+            tree.insert(IndexKey::Int(5), DocumentId::Int(i)).unwrap();
+        }
+        for i in 0..300 {
+            tree.delete(&IndexKey::Int(5), &DocumentId::Int(i)).unwrap();
+        }
+        let count = tree
+            .range_query(
+                &IndexKey::Int(5),
+                &IndexKey::Int(5),
+                true,
+                true,
+                RangeQueryMode::Count,
+            )
+            .unwrap_count();
+        assert_eq!(count, 0, "ghost entries left after deleting every doc");
+    }
+
+    /// #22: saving a lazy-mode tree must not destroy the index file.
+    #[test]
+    fn saving_lazy_tree_keeps_all_entries() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("t.mlite");
+        let db_path = db_path.to_str().unwrap();
+
+        let mut tree = BPlusTree::new("t_k".to_string(), "k".to_string(), false, false);
+        for i in 0..5000 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        let meta = tree.metadata.clone();
+
+        let idx_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "idx"))
+            .expect("index file written");
+        let mut lazy = BPlusTree::load_from_path_lazy(idx_path, meta.clone()).unwrap();
+        assert!(lazy.is_lazy_mode(), "the reloaded tree must be lazy");
+        persist_index_to_disk(db_path, "t_k", |f| lazy.save_to_file(f)).unwrap();
+
+        let reloaded = try_load_index_from_file(db_path, &meta).unwrap();
+        assert_eq!(
+            reloaded.search(&IndexKey::Int(4321)),
+            Some(DocumentId::Int(4321))
+        );
+        let count = reloaded
+            .range_query(
+                &IndexKey::Int(0),
+                &IndexKey::Int(5000),
+                true,
+                false,
+                RangeQueryMode::Count,
+            )
+            .unwrap_count();
+        assert_eq!(count, 5000);
+    }
+
+    /// Review follow-up on #21: keys beyond every separator live in the
+    /// rightmost child and must still be deletable.
+    #[test]
+    fn delete_key_beyond_all_separators() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        for i in 0..2000 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        tree.delete(&IndexKey::Int(1999), &DocumentId::Int(1999))
+            .unwrap();
+        assert_eq!(tree.search(&IndexKey::Int(1999)), None);
+        assert_eq!(
+            tree.search(&IndexKey::Int(1998)),
+            Some(DocumentId::Int(1998))
+        );
+    }
+
+    /// Review follow-up on #22: a planted `.idx.tmp` symlink must not be
+    /// followed (its target must stay intact) and the save must still work.
+    #[cfg(unix)]
+    #[test]
+    fn persist_does_not_follow_planted_temp_symlink() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("t.mlite");
+        let db_path = db_path.to_str().unwrap();
+
+        let mut tree = BPlusTree::new("t_k".to_string(), "k".to_string(), false, false);
+        tree.insert(IndexKey::Int(1), DocumentId::Int(1)).unwrap();
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        let idx_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "idx"))
+            .expect("index file written");
+
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, idx_path.with_extension("idx.tmp")).unwrap();
+
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        let reloaded = try_load_index_from_file(db_path, &tree.metadata).unwrap();
+        assert_eq!(reloaded.search(&IndexKey::Int(1)), Some(DocumentId::Int(1)));
+    }
+}

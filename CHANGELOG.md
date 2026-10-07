@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — index maintenance: ghost B+ tree entries, lazy index destroyed on checkpoint, fulltext and vector index corruption (mcp-server v1.0.551)
+
+Audit 2026-10-06 #21-#26 (high).
+
+- **#21 — B+ tree delete missed duplicate keys left of a separator.** Leaves
+  split by position keep equal keys on both sides, but delete only followed the
+  right child, so ghost entries piled up and `count_documents` on low-cardinality
+  indexed fields was wrong. Delete now tries every child that can hold the key.
+- **#22 — checkpointing a lazy-mode B+ tree destroyed it.** The index file was
+  truncated before the lazy tree read its unloaded nodes from it, and unloaded
+  children were saved as offsets into the old file. `save_to_file` now loads the
+  tree first, `persist_index_to_disk` writes a temp file and renames it, and
+  `batch_update_indexes` only marks an index dirty when a key really changed.
+- **#23 — the two-phase fulltext flush dropped the per-document token records.**
+  Their offsets then pointed into the new file's tables, so updates and deletes
+  of every document indexed before the first checkpoint failed silently. The
+  records are now copied into the new file and their offsets remapped.
+- **#24 — vector index node ids differed between paths.** Create/rebuild/search
+  used prefixed ids (`s:x`), live insert/update/delete unprefixed ones (`x`), so
+  updates duplicated documents, deletes left them searchable, and filtered
+  search missed live inserts. All paths now use the prefixed id; removals also
+  drop the legacy unprefixed node.
+- **#25 — fulltext update in lazy mode kept the old text's postings.** `insert`
+  cleared the deletion marker, so disk postings of tokens only in the old text
+  came back (and were persisted). The marker now only hides frozen/disk
+  postings and stays until a flush drops them.
+- **#26 — HNSW search returned orphan nodes of re-inserted ids.** A node is now
+  active only if its id maps to that very node.
+
+Regression tests: `delete_finds_duplicate_keys_left_of_separator`,
+`saving_lazy_tree_keeps_all_entries`,
+`fulltext_updates_after_checkpoint_replace_old_postings`,
+`vector_index_live_updates_match_created_nodes`,
+`reinserted_id_returns_only_the_new_vector`.
+
 ### Fixed — CRUD writes: duplicate _id overwrote documents, phantom index entries, mutable _id, lost update_many updates (mcp-server v1.0.550)
 
 Audit 2026-10-06 #15, #16, #17, #19 (high).
