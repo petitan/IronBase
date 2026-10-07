@@ -523,7 +523,7 @@ Régi: 1 write lock → flush 22 index → unlock (percek)
           write lock → flush 1 index → unlock (ms)
 ```
 
-**Race condition:** Ha insert befut két flush között és dirty-re állít egy már flush-ölt indexet, az a KÖVETKEZŐ checkpoint-ban lesz kiírva. Adatvesztés nincs (WAL tartalmazza).
+**Race condition:** Ha insert befut két flush között és dirty-re állít egy már flush-ölt indexet, az a KÖVETKEZŐ checkpoint-ban lesz kiírva. Adatvesztés nincs, mert a WAL-törlés **megtartja** a `tx_id > W` bejegyzéseket (W = az index-flush pass watermarkja, `index_flush_watermark`; `StorageEngine::checkpoint_keeping_wal_after`). A crash-recovery sem törli a WAL-t: csak a commitolt tranzakciókat tartja meg, és megnyitáskor azonnal replay-eli az érintett collectionök indexeit — a következő checkpoint dobja el őket (v1.0.557).
 
 **Key files:**
 - `ironbase-core/src/index/manager.rs` — `dirty_*_index_names()`, `flush_one_*_index()`

@@ -195,6 +195,54 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    /// Clear the WAL but keep every entry of a transaction with id
+    /// `> keep_after`; returns the number of kept entries.
+    ///
+    /// Used by checkpoints: the index files were flushed with watermark
+    /// `keep_after`, so later transactions may be missing from them and their
+    /// WAL entries are still needed for index replay after a crash
+    /// (`tx_id > last_flushed_tx_id`). Clearing the whole WAL lost them.
+    ///
+    /// Streams the kept entries through a temp file (O(1) memory), then
+    /// truncates the WAL the same way as [`clear`](Self::clear) (no rename
+    /// over the open file, which Windows refuses) and appends them back.
+    pub fn retain_after(&mut self, keep_after: TransactionId) -> Result<usize> {
+        use std::io::{BufReader, BufWriter};
+
+        if self.file_size()? == 0 {
+            return Ok(0);
+        }
+        let temp_path = self.path.with_extension("wal.keep");
+        let mut kept = 0usize;
+        {
+            let iter = WALEntryIterator::new(BufReader::new(File::open(&self.path)?))?;
+            let mut temp = BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&temp_path)?,
+            );
+            for entry in iter {
+                let entry = entry?;
+                if entry.transaction_id > keep_after {
+                    temp.write_all(&entry.serialize())?;
+                    kept += 1;
+                }
+            }
+            temp.flush()?;
+        }
+
+        self.clear()?;
+        if kept > 0 {
+            let mut temp = BufReader::new(File::open(&temp_path)?);
+            std::io::copy(&mut temp, &mut self.file)?;
+            self.file.sync_all()?;
+        }
+        let _ = std::fs::remove_file(&temp_path);
+        Ok(kept)
+    }
+
     /// Maximum WAL entries for recovery/checkpoint (OOM protection)
     ///
     /// If WAL has more entries than this, something is very wrong
@@ -447,5 +495,34 @@ mod tests {
             .map(|e| e.data.clone())
             .collect();
         assert_eq!(ops, vec![b"new".to_vec()]);
+    }
+
+    /// `retain_after` keeps exactly the entries of later transactions.
+    #[test]
+    fn retain_after_keeps_later_transactions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wal = WriteAheadLog::open(temp_dir.path().join("r.wal")).unwrap();
+        for tx in [0u64, 3, 4, 5, 6] {
+            wal.append(&WALEntry::new(tx, WALEntryType::Begin, vec![]))
+                .unwrap();
+            wal.append(&WALEntry::new(tx, WALEntryType::Commit, vec![]))
+                .unwrap();
+        }
+        assert_eq!(wal.retain_after(4).unwrap(), 4);
+        let ids: Vec<_> = wal
+            .recover()
+            .unwrap()
+            .iter()
+            .map(|t| t[0].transaction_id)
+            .collect();
+        assert_eq!(ids, vec![5, 6]);
+        // appends still work after the rewrite
+        wal.append(&WALEntry::new(7, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(7, WALEntryType::Commit, vec![]))
+            .unwrap();
+        assert_eq!(wal.recover().unwrap().len(), 3);
+        assert_eq!(wal.retain_after(100).unwrap(), 0);
+        assert_eq!(wal.file_size().unwrap(), 0);
     }
 }

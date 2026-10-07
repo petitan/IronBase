@@ -330,6 +330,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     /// persisted to storage and the indexes. The index watermark never passes
     /// the smallest of them (audit 2026-10-06 #10). See `InFlightTx`.
     pub(crate) in_flight_tx_ids: Mutex<std::collections::BTreeSet<u64>>,
+    /// Watermark of the last successful `flush_all_indexes*` pass: every
+    /// index change of a transaction `<=` it is in the index files. A WAL
+    /// clear keeps the entries after it (`checkpoint_wal_only`), because
+    /// later index changes may exist only in memory.
+    pub(crate) index_flush_watermark: AtomicU64,
     /// Held shared from an auto-commit's WAL commit until its storage write is
     /// done, and exclusively by every path that clears the WAL, so a WAL clear
     /// never drops the only durable record of a committed write that is not
@@ -550,6 +555,7 @@ impl DatabaseCore<StorageEngine> {
             next_tx_id: AtomicU64::new(initial_watermark.saturating_add(1)),
             max_committed_tx_id: AtomicU64::new(initial_watermark),
             in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            index_flush_watermark: AtomicU64::new(0),
             persist_gate: RwLock::new(()),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
@@ -601,6 +607,22 @@ impl DatabaseCore<StorageEngine> {
                     // Mark dirty so WAL-replayed changes are persisted at next checkpoint
                     indexes.mark_btree_dirty(&change.index_name);
                 }
+            }
+        }
+
+        // Replay the indexes of every collection with recovered operations
+        // now instead of on first access: the next checkpoint must find their
+        // changes in memory (dirty) before it drops the recovered WAL entries,
+        // and a collection never opened before a clean close otherwise kept
+        // stale index files that the clean-shutdown flag then trusted.
+        let pending: Vec<String> = db.recovered_operations.read().keys().cloned().collect();
+        for name in pending {
+            if let Err(e) = db.get_or_create_index_manager(&name) {
+                tracing::warn!(
+                    collection = %name,
+                    error = %e,
+                    "Index replay failed at open (retried on first access)"
+                );
             }
         }
 
@@ -674,6 +696,7 @@ impl DatabaseCore<MemoryStorage> {
             next_tx_id: AtomicU64::new(1),
             max_committed_tx_id: AtomicU64::new(0),
             in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            index_flush_watermark: AtomicU64::new(0),
             persist_gate: RwLock::new(()),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(),
@@ -4839,10 +4862,10 @@ mod wal_recovery_tests {
             let mut storage = StorageEngine::open(&path).unwrap();
             let (count, _, _) = storage.recover_from_wal().unwrap();
             assert_eq!(count, 2);
-            assert_eq!(
-                std::fs::metadata(path.with_extension("wal")).unwrap().len(),
-                0
-            );
+            // The committed transactions stay in the WAL until the next
+            // checkpoint has flushed their index changes.
+            let mut wal = WriteAheadLog::open(path.with_extension("wal")).unwrap();
+            assert_eq!(wal.recover().unwrap().len(), 2);
             let _ = storage.release_lock();
             std::mem::forget(storage);
         }
@@ -5002,5 +5025,103 @@ mod crud_distinct_tests {
             .unwrap();
         let ids = sorted(groups.iter().map(|g| g["_id"].clone()).collect());
         assert_eq!(ids, vec![json!("Alice"), json!("alice")]);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_wal_tests {
+    //! A WAL clear must not drop index changes that are not in the index
+    //! files yet: writes between a checkpoint's index flush and its WAL clear,
+    //! and index changes replayed from the WAL at open.
+
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn fields(v: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn indexed_db(path: &std::path::Path) -> DatabaseCore<StorageEngine> {
+        let db = DatabaseCore::<StorageEngine>::open(path).unwrap();
+        db.collection("a")
+            .unwrap()
+            .create_index("title".to_string(), false, false)
+            .unwrap();
+        for i in 0..5 {
+            db.insert_one("a", fields(json!({"_id": i, "title": format!("t{i}")})))
+                .unwrap();
+        }
+        db.checkpoint().unwrap();
+        db
+    }
+
+    fn late_found(path: &std::path::Path) -> usize {
+        let db = DatabaseCore::<StorageEngine>::open(path).unwrap();
+        let found = db
+            .collection("a")
+            .unwrap()
+            .find(&json!({"title": "late"}))
+            .unwrap()
+            .len();
+        db.close().unwrap();
+        found
+    }
+
+    /// The MCP checkpoint runs the index flush and the WAL clear as two calls;
+    /// a write in between must survive a crash in the index.
+    #[test]
+    fn write_between_index_flush_and_wal_clear_survives_crash() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = indexed_db(&path);
+            db.flush_all_indexes_counted().unwrap();
+            db.insert_one("a", fields(json!({"_id": 100, "title": "late"})))
+                .unwrap();
+            db.checkpoint_wal_only().unwrap();
+            db.simulate_crash_for_test();
+        }
+        assert_eq!(late_found(&path), 1, "indexed query misses the write");
+    }
+
+    /// Index changes replayed at open must survive a clean close even if the
+    /// collection was never accessed in that session.
+    #[test]
+    fn recovered_index_changes_survive_clean_close_without_access() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = indexed_db(&path);
+            db.insert_one("a", fields(json!({"_id": 100, "title": "late"})))
+                .unwrap();
+            db.simulate_crash_for_test();
+        }
+        DatabaseCore::<StorageEngine>::open(&path)
+            .unwrap()
+            .close()
+            .unwrap();
+        assert_eq!(
+            late_found(&path),
+            1,
+            "stale index trusted after clean close"
+        );
+    }
+
+    /// ... and a second crash right after the recovering open.
+    #[test]
+    fn recovered_index_changes_survive_second_crash() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("c.mlite");
+        {
+            let db = indexed_db(&path);
+            db.insert_one("a", fields(json!({"_id": 100, "title": "late"})))
+                .unwrap();
+            db.simulate_crash_for_test();
+        }
+        DatabaseCore::<StorageEngine>::open(&path)
+            .unwrap()
+            .simulate_crash_for_test();
+        assert_eq!(late_found(&path), 1, "index changes lost on second crash");
     }
 }

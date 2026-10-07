@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL cleared while index changes existed only in memory (mcp-server v1.0.557)
+
+- **A write between a checkpoint's index flush and its WAL clear lost its index
+  entries on the next crash.** The index flush runs without the persist gate (so
+  inserts are not blocked for minutes); the gate is taken only for the metadata
+  flush + WAL clear, which then cleared the *whole* WAL. A write in that window
+  had its index change only in memory, and after a crash the indexed query
+  missed the document. The MCP server's periodic checkpoint (index flush and
+  `checkpoint_wal_only` as two calls) has the same window. The WAL clear now
+  keeps the entries of transactions after the watermark the index flush stamped
+  (`WriteAheadLog::retain_after`, `StorageEngine::checkpoint_keeping_wal_after`,
+  `DatabaseCore::index_flush_watermark`); index replay at reopen applies only
+  `tx_id > last_flushed_tx_id`, and storage replay is idempotent.
+- **Crash recovery cleared the WAL although index replay is lazy.** Indexes are
+  replayed from the recovered operations when a collection is first opened, but
+  the WAL was cleared at open. A second crash lost those index changes, and a
+  collection not opened before a clean close kept stale index files that the
+  clean-shutdown flag then trusted. Recovery now keeps the committed
+  transactions (aborted/torn ones are dropped), and open replays the indexes of
+  every collection with recovered operations immediately; the next checkpoint
+  drops the entries.
+- `StorageEngine::checkpoint_wal_clear_only` / `checkpoint_with_preserialized`
+  take a `keep_after: Option<TransactionId>` (only called from
+  `DatabaseCore::checkpoint_wal_only`).
+
+Regression tests: `write_between_index_flush_and_wal_clear_survives_crash`,
+`recovered_index_changes_survive_clean_close_without_access`,
+`recovered_index_changes_survive_second_crash`,
+`retain_after_keeps_later_transactions`.
+
 ### Fixed — hot backup now includes the WAL (backup format v2) (mcp-server v1.0.556)
 
 Audit 2026-10-06 #32 (high).

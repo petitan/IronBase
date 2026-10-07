@@ -1106,6 +1106,24 @@ impl StorageEngine {
     ///
     /// Returns checkpoint statistics including WAL size before/after.
     pub fn checkpoint(&mut self) -> Result<compaction::CheckpointStats> {
+        self.checkpoint_inner(None)
+    }
+
+    /// [`checkpoint`](Self::checkpoint) that keeps the WAL entries of
+    /// transactions with id `> keep_after` (the watermark the index files were
+    /// flushed with): their index changes may not be in the index files yet,
+    /// and clearing them lost those changes on the next crash.
+    pub fn checkpoint_keeping_wal_after(
+        &mut self,
+        keep_after: TransactionId,
+    ) -> Result<compaction::CheckpointStats> {
+        self.checkpoint_inner(Some(keep_after))
+    }
+
+    fn checkpoint_inner(
+        &mut self,
+        keep_after: Option<TransactionId>,
+    ) -> Result<compaction::CheckpointStats> {
         // Get WAL size before checkpoint
         let wal_size_before = self.wal.file_size().unwrap_or(0);
         // NOTE: wal_ops_since_clear is always 0 since per-commit increment was removed
@@ -1116,13 +1134,11 @@ impl StorageEngine {
         // NOTE: ensure_metadata_snapshot() intentionally NOT called here.
         // See PERF FIX comment above for rationale.
         self.flush_metadata()?;
-        self.metadata_snapshot_pending = false;
 
         // Then clear the WAL (all operations already in main file)
-        self.wal.clear()?;
-        self.wal_ops_since_clear = 0;
+        self.clear_wal_for_checkpoint(keep_after)?;
 
-        // Get WAL size after (should be 0)
+        // Get WAL size after (0 unless entries were kept)
         let wal_size_after = self.wal.file_size().unwrap_or(0);
 
         Ok(compaction::CheckpointStats {
@@ -1140,17 +1156,14 @@ impl StorageEngine {
     /// would only append the full catalog again and grow the file on every idle
     /// checkpoint (audit P1-3). In that state the WAL holds no un-checkpointed
     /// ops, so clearing it is a cheap no-op.
-    pub fn checkpoint_wal_clear_only(&mut self) -> Result<compaction::CheckpointStats> {
+    ///
+    /// `keep_after`: see [`checkpoint_keeping_wal_after`](Self::checkpoint_keeping_wal_after).
+    pub fn checkpoint_wal_clear_only(
+        &mut self,
+        keep_after: Option<TransactionId>,
+    ) -> Result<compaction::CheckpointStats> {
         let wal_size_before = self.wal.file_size().unwrap_or(0);
-        self.wal.clear()?;
-        // The cleared WAL no longer holds the metadata snapshot, so the next
-        // ensure_metadata_snapshot() must write a fresh one into the now-empty
-        // WAL. Leaving this true would make ensure_metadata_snapshot() early-
-        // return → an empty WAL with no recovery base (PR #89 follow-up,
-        // finding B). Matches every sibling WAL-clearer (flush / checkpoint /
-        // checkpoint_with_preserialized).
-        self.metadata_snapshot_pending = false;
-        self.wal_ops_since_clear = 0;
+        self.clear_wal_for_checkpoint(keep_after)?;
         let wal_size_after = self.wal.file_size().unwrap_or(0);
         Ok(compaction::CheckpointStats {
             wal_size_before,
@@ -1169,9 +1182,12 @@ impl StorageEngine {
     /// The `data_end_offset` and `wal_size` are guard values from the pre-serialize
     /// phase. If they don't match current state, the caller should fall back to
     /// the regular `checkpoint()` method.
+    ///
+    /// `keep_after`: see [`checkpoint_keeping_wal_after`](Self::checkpoint_keeping_wal_after).
     pub fn checkpoint_with_preserialized(
         &mut self,
         metadata_bytes: Vec<u8>,
+        keep_after: Option<TransactionId>,
     ) -> Result<compaction::CheckpointStats> {
         let wal_size_before = self.wal.file_size().unwrap_or(0);
         let wal_ops_cleared = self.wal_ops_since_clear;
@@ -1192,11 +1208,9 @@ impl StorageEngine {
         )?;
 
         self.metadata_dirty = false;
-        self.metadata_snapshot_pending = false;
 
         // Clear WAL (all operations now in main file)
-        self.wal.clear()?;
-        self.wal_ops_since_clear = 0;
+        self.clear_wal_for_checkpoint(keep_after)?;
 
         let wal_size_after = self.wal.file_size().unwrap_or(0);
 
@@ -1206,6 +1220,25 @@ impl StorageEngine {
             wal_ops_cleared: wal_ops_cleared as u64,
             indexes_flushed: 0,
         })
+    }
+
+    /// The WAL-clearing step shared by the checkpoint variants: clear the WAL,
+    /// or keep the entries of transactions after `keep_after`.
+    ///
+    /// The metadata snapshot (tx id 0) is never kept, so the next
+    /// ensure_metadata_snapshot() must write a fresh one; leaving
+    /// `metadata_snapshot_pending` true would leave the WAL without a recovery
+    /// base (PR #89 follow-up, finding B).
+    fn clear_wal_for_checkpoint(&mut self, keep_after: Option<TransactionId>) -> Result<()> {
+        match keep_after {
+            None => self.wal.clear()?,
+            Some(watermark) => {
+                self.wal.retain_after(watermark)?;
+            }
+        }
+        self.metadata_snapshot_pending = false;
+        self.wal_ops_since_clear = 0;
+        Ok(())
     }
 
     /// Recover metadata from WAL if the file's metadata is corrupted
@@ -2162,18 +2195,24 @@ impl StorageEngine {
             }
         }
 
-        // Drop recovered entries to free memory before WAL clear I/O
-        drop(recovered);
-
         // Persist the replayed documents' catalog and header (fsynced) BEFORE
-        // clearing the WAL: if this fails or the process dies, the WAL still
+        // touching the WAL: if this fails or the process dies, the WAL still
         // holds the transactions and the next open replays them again
         // (replay is idempotent: full-image writes keyed by `_id`).
         // Clearing first lost them for good (audit 2026-10-06 #33).
         self.flush_metadata()?;
 
-        // Clear WAL after successful recovery
+        // Keep the committed transactions (and drop aborted or torn ones):
+        // their index changes are replayed into memory only and reach the
+        // index files at the next checkpoint, which then drops them from the
+        // WAL. Clearing the WAL here lost those index changes on a second
+        // crash or, for a collection not opened before a clean close, for good.
         self.wal.clear()?;
+        for entry in recovered.iter().flatten() {
+            self.wal.append(entry)?;
+        }
+        self.wal.flush()?;
+        drop(recovered);
         self.metadata_snapshot_pending = false;
         self.wal_ops_since_clear = 0;
 
@@ -2731,7 +2770,7 @@ mod tests {
             "mark_metadata_dirty should arm metadata_snapshot_pending"
         );
 
-        storage.checkpoint_wal_clear_only().unwrap();
+        storage.checkpoint_wal_clear_only(None).unwrap();
         assert!(
             !storage.metadata_snapshot_pending,
             "checkpoint_wal_clear_only must reset metadata_snapshot_pending after clearing the WAL"
@@ -2817,7 +2856,7 @@ mod tests {
         // Buggy choice: clear the WAL without flushing → the committed insert has
         // no durable record left (empty WAL + stale catalog) → lost on crash.
         let lost = run("clear_only", |s| {
-            s.checkpoint_wal_clear_only().unwrap();
+            s.checkpoint_wal_clear_only(None).unwrap();
         });
         assert_eq!(
             lost, 0,
