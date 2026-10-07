@@ -1717,4 +1717,49 @@ mod audit_index_tests {
             .unwrap_count();
         assert_eq!(count, 5000);
     }
+
+    /// Review follow-up on #21: keys beyond every separator live in the
+    /// rightmost child and must still be deletable.
+    #[test]
+    fn delete_key_beyond_all_separators() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        for i in 0..2000 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        tree.delete(&IndexKey::Int(1999), &DocumentId::Int(1999))
+            .unwrap();
+        assert_eq!(tree.search(&IndexKey::Int(1999)), None);
+        assert_eq!(
+            tree.search(&IndexKey::Int(1998)),
+            Some(DocumentId::Int(1998))
+        );
+    }
+
+    /// Review follow-up on #22: a planted `.idx.tmp` symlink must not be
+    /// followed (its target must stay intact) and the save must still work.
+    #[cfg(unix)]
+    #[test]
+    fn persist_does_not_follow_planted_temp_symlink() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("t.mlite");
+        let db_path = db_path.to_str().unwrap();
+
+        let mut tree = BPlusTree::new("t_k".to_string(), "k".to_string(), false, false);
+        tree.insert(IndexKey::Int(1), DocumentId::Int(1)).unwrap();
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        let idx_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "idx"))
+            .expect("index file written");
+
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, idx_path.with_extension("idx.tmp")).unwrap();
+
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        let reloaded = try_load_index_from_file(db_path, &tree.metadata).unwrap();
+        assert_eq!(reloaded.search(&IndexKey::Int(1)), Some(DocumentId::Int(1)));
+    }
 }

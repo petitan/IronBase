@@ -252,3 +252,55 @@ fn restore_removes_foreign_wal_at_target() {
     restore(&backups, &restored, None, Some("db")).unwrap();
     assert_eq!(ids_in(&restored), vec![0, 1, 2]);
 }
+
+fn insert_incompressible(db: &DatabaseCore<StorageEngine>, n: i64) {
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    for i in 0..n {
+        let pad: String = (0..300)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from_digit((state % 16) as u32, 16).unwrap()
+            })
+            .collect();
+        db.insert_one(
+            "c",
+            HashMap::from([
+                ("_id".to_string(), json!(i)),
+                ("pad".to_string(), json!(pad)),
+            ]),
+        )
+        .unwrap();
+    }
+}
+
+/// Review follow-up on #39: a valid part of a different backup (own hash
+/// fine) must not pass as part of this one; a later part verified on its
+/// own is checked against its own hash only.
+#[test]
+fn substituted_part_from_other_backup_fails_verification() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups_a = dir.path().join("a");
+    let backups_b = dir.path().join("b");
+    std::fs::create_dir(&backups_a).unwrap();
+    std::fs::create_dir(&backups_b).unwrap();
+
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert_incompressible(&db, 400);
+    db.checkpoint().unwrap();
+    let a = create_backup(&db_path, &backups_a, true, Some(16 * 1024)).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let b = create_backup(&db_path, &backups_b, true, Some(16 * 1024)).unwrap();
+    assert!(a.part_count >= 2 && a.part_count == b.part_count);
+
+    assert!(verify_backup(&a.all_paths[1]).unwrap().valid);
+    assert!(verify_backup(&b.all_paths[0]).unwrap().valid);
+
+    std::fs::copy(&a.all_paths[1], &b.all_paths[1]).unwrap();
+    assert!(
+        !verify_backup(&b.all_paths[0]).unwrap().valid,
+        "part 2 of another backup passed verification"
+    );
+}
