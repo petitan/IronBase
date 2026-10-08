@@ -333,7 +333,10 @@ pub(crate) fn retrieve_and_fuse(
 
     // Internal limit: higher when grouping to capture enough chunks per document
     let internal_multiplier = if p.group_by_document { 20 } else { 3 };
-    let internal_limit = (p.limit * internal_multiplier).min(MAX_INTERNAL_LIMIT);
+    let internal_limit = p
+        .limit
+        .saturating_mul(internal_multiplier)
+        .min(MAX_INTERNAL_LIMIT);
 
     // Effective fulltext fields: the caller's explicit text_fields, else the
     // collection's configured multi-field set (#66) so search defaults match how
@@ -648,7 +651,7 @@ pub(crate) fn build_doc_groups(
     // Phase 2: single fulltext OR search for the top doc_ids' chunks
     let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
 
-    let phase2_limit = (limit * 100).min(MAX_INTERNAL_LIMIT);
+    let phase2_limit = limit.saturating_mul(100).min(MAX_INTERNAL_LIMIT);
     let phase2_options = FulltextSearchOptions {
         limit: Some(phase2_limit),
         skip: None,

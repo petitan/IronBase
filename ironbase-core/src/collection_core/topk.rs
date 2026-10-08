@@ -87,7 +87,10 @@ where
         return Vec::new();
     }
 
-    let mut heap: BinaryHeap<Reverse<T, F>> = BinaryHeap::with_capacity(k);
+    // Deliberately NOT `with_capacity(k)`: k comes from a caller's limit
+    // (+ skip) and can be huge (1 << 40); pre-sizing aborted the process on
+    // allocation failure. The heap grows with the items actually seen.
+    let mut heap: BinaryHeap<Reverse<T, F>> = BinaryHeap::new();
 
     for item in items {
         if heap.len() < k {
@@ -132,7 +135,7 @@ where
     }
 
     // Select skip + k elements
-    let mut result = topk_select(items, skip + k, cmp);
+    let mut result = topk_select(items, skip.saturating_add(k), cmp);
 
     // Remove first 'skip' elements
     if skip > 0 && result.len() > skip {

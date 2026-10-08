@@ -1415,3 +1415,65 @@ fn test_search_context_block_format_stage_a() {
         "context_block must not also emit documents"
     );
 }
+
+// ============================================================================
+// Request-controlled limits (audit 2026-10-07 M1, M5)
+// ============================================================================
+
+/// A huge `limit`/`skip` used to pre-size the top-k heap and abort the whole
+/// server on allocation failure (not catchable by catch_unwind).
+#[test]
+fn test_fulltext_search_huge_limit_and_skip() {
+    let (adapter, _tmp) = create_test_adapter();
+    for content in ["apple pie", "apple tart"] {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection":"docs","document":{"content":content}}),
+        );
+    }
+    dispatch_ok(
+        &adapter,
+        "index_create",
+        json!({"type": "fulltext", "collection":"docs","field":"content"}),
+    );
+
+    let res = dispatch_ok(
+        &adapter,
+        "fulltext_search",
+        json!({"collection":"docs","field":"content","query":"apple","limit": 1u64 << 40}),
+    );
+    assert_eq!(res["results"].as_array().unwrap().len(), 2);
+
+    let res = dispatch_ok(
+        &adapter,
+        "fulltext_search",
+        json!({"collection":"docs","field":"content","query":"apple",
+               "limit": u64::MAX, "skip": u64::MAX}),
+    );
+    assert_eq!(res["results"].as_array().unwrap().len(), 0);
+}
+
+/// `vector_search` caps the requested k like `find` caps its limit.
+#[test]
+fn test_vector_search_huge_limit() {
+    let (adapter, _tmp) = create_test_adapter();
+    dispatch_ok(
+        &adapter,
+        "index_create",
+        json!({"type": "vector", "collection": "kb", "field": "embedding", "dim": 2, "metric": "cosine"}),
+    );
+    for v in [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7]] {
+        dispatch_ok(
+            &adapter,
+            "insert_one",
+            json!({"collection":"kb","document":{"embedding": v}}),
+        );
+    }
+    let res = dispatch_ok(
+        &adapter,
+        "vector_search",
+        json!({"collection":"kb","field":"embedding","vector":[1.0, 0.0],"limit": u64::MAX}),
+    );
+    assert_eq!(res["results"].as_array().unwrap().len(), 3);
+}

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::defaults::{default_embedding_field, default_vector_limit, DEFAULT_MAX_VECTORS};
-use super::helpers::{parse_projection_value, validate_collection_name};
+use super::helpers::{parse_projection_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -126,7 +126,9 @@ fn handle_vector_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
 
     let projection = parse_projection_value(p.projection)?;
-    let results = adapter.vector_search(&p.collection, &p.field, &query_vector, p.limit)?;
+    // Bounded like find: a huge k walks the whole graph and loads every document
+    let limit = p.limit.min(DEFAULT_QUERY_LIMIT);
+    let results = adapter.vector_search(&p.collection, &p.field, &query_vector, limit)?;
 
     // Apply projection if specified, or convert to simple format
     let results_json: Vec<Value> = if let Some(proj) = projection {

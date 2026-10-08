@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Request-controlled limits could abort the MCP server (mcp-server v1.0.561)
+
+Audit 2026-10-07 M1, M4, M5, M8, M10.
+
+- **M1 (high):** `topk_select` pre-sized its heap with
+  `BinaryHeap::with_capacity(skip + k)`, where `k` is the caller's limit.
+  `fulltext_search` with `limit: 1 << 40` tried to allocate ~44 TB and the
+  allocation failure aborted the process (not catchable by `catch_unwind`), so
+  one request stopped the server. The heap now grows with the items seen and
+  `skip + k` saturates; MCP `fulltext_search` caps `limit` at
+  `DEFAULT_QUERY_LIMIT` like `fuzzy_search`.
+- **M4 (high):** a query repeating one word (`"apple " × 3000`) multiplied
+  posting-list work and per-document `matched_tokens` (+325 MB for one
+  request). Query tokens are de-duplicated (`tokenize_unique`) on every search
+  path, including AND-mode token counting and highlights.
+- **M5 (high):** MCP `vector_search` passed `limit` uncapped (a huge k walks
+  the whole graph and loads every document); capped at `DEFAULT_QUERY_LIMIT`.
+- **M8:** MCP `find` without `ScriptLimits` (stdio transport) had no response
+  byte cap; it now falls back to `calculate_safe_response_limit()`.
+- **M10:** hybrid search limit multiplications saturate instead of overflowing.
+
+Regression tests: `tests/fulltext_limits_test.rs`,
+`test_fulltext_search_huge_limit_and_skip`, `test_vector_search_huge_limit`.
+
 ### Fixed — Negated operators on array paths and `$elemMatch` sub-queries (mcp-server v1.0.560)
 
 Audit 2026-10-07 O1, O2, O3, O7 (high: `delete_many` removed documents it
