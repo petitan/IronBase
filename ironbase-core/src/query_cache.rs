@@ -2,6 +2,7 @@
 // Query result caching with LRU eviction policy
 
 use crate::document::DocumentId;
+use crate::limits::QUERY_CACHE_MAX_RESULT_IDS;
 use lru::LruCache;
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -41,6 +42,10 @@ pub struct QueryCache {
     cache: RwLock<LruCache<QueryHash, Vec<DocumentId>>>,
     /// Reverse index: collection name → set of query hashes for that collection
     collection_index: RwLock<HashMap<String, HashSet<QueryHash>>>,
+    /// Write generation per collection, bumped by every invalidation. A reader
+    /// takes it before computing a result and stores the result only if it is
+    /// unchanged, so a result computed across a concurrent write is never cached.
+    generations: RwLock<HashMap<String, u64>>,
     capacity: usize,
 }
 
@@ -55,8 +60,36 @@ impl QueryCache {
         QueryCache {
             cache: RwLock::new(LruCache::new(non_zero_capacity)),
             collection_index: RwLock::new(HashMap::new()),
+            generations: RwLock::new(HashMap::new()),
             capacity,
         }
+    }
+
+    /// Current write generation of a collection (see [`Self::insert_if_current`]).
+    pub fn generation(&self, collection: &str) -> u64 {
+        self.generations
+            .read()
+            .get(collection)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Insert a result computed after reading `generation`, unless the
+    /// collection was written (invalidated) in the meantime.
+    pub fn insert_if_current(
+        &self,
+        collection: &str,
+        query_hash: QueryHash,
+        doc_ids: Vec<DocumentId>,
+        generation: u64,
+    ) {
+        // Hold the generation lock across the insert so an invalidation cannot
+        // slip in between the check and the insert.
+        let generations = self.generations.read();
+        if generations.get(collection).copied().unwrap_or(0) != generation {
+            return;
+        }
+        self.insert(collection, query_hash, doc_ids);
     }
 
     /// Get cached result for a query (returns None if not cached)
@@ -77,6 +110,9 @@ impl QueryCache {
     /// Automatically evicts LRU entry if cache is full and maintains
     /// the reverse index for collection-level invalidation.
     pub fn insert(&self, collection: &str, query_hash: QueryHash, doc_ids: Vec<DocumentId>) {
+        if doc_ids.len() > QUERY_CACHE_MAX_RESULT_IDS {
+            return;
+        }
         // BUG #3 fix: Acquire both locks upfront to avoid TOCTOU race condition
         // Lock ordering: always cache first, then collection_index (prevents deadlock)
         let mut cache = self.cache.write();
@@ -108,6 +144,10 @@ impl QueryCache {
     /// Only invalidates queries belonging to the specified collection,
     /// leaving other collections' cached queries intact.
     pub fn invalidate_collection(&self, collection: &str) {
+        // Lock ordering: generations, then cache, then collection_index (the
+        // same order as insert_if_current → insert)
+        let mut generations = self.generations.write();
+        *generations.entry(collection.to_string()).or_default() += 1;
         // BUG #3 fix: Use same lock ordering as insert() to prevent deadlock
         // Lock ordering: always cache first, then collection_index
         let mut cache = self.cache.write();

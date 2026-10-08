@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Query cache shared per database: no stale results on a kept handle (mcp-server v1.0.564)
+
+Audit 2026-10-07 Q6.
+
+- **Root cause:** every `CollectionCore` handle had its own `QueryCache`, and a
+  write invalidated only the cache of the handle that made it. A handle kept
+  across writes made through `DatabaseCore` (which uses a fresh handle per
+  call) or another handle served a stale `find` result — reproduced: after two
+  matching inserts the kept handle still returned 200 hits instead of 202.
+  A committed transaction invalidated no cache at all.
+- **Fix:** one `QueryCache` per `DatabaseCore`, keyed and invalidated per
+  collection, passed to every handle (`with_shared_indexes*`, like the shared
+  IndexManager/Schema). `commit_transaction`, `drop_collection` and
+  `rename_collection` invalidate it. A per-collection write generation
+  (`QueryCache::generation` / `insert_if_current`) keeps a result computed
+  across a concurrent write out of the cache. Results with more than
+  `QUERY_CACHE_MAX_RESULT_IDS` (10 000) ids are not cached, bounding memory.
+- **Speed** (release, 20 000 docs, same machine): repeated identical reads keep
+  the cache gain (unindexed find ~17 ms vs ~69 ms without a cache, indexed
+  ~0.33 ms vs ~0.8 ms); no measurable difference to the previous per-handle
+  cache; write cost unchanged.
+- Known, not changed: in `DurabilityMode::Batch` buffered inserts are not
+  visible to `find` until the batch is flushed (independent of the cache).
+
+Regression tests: `tests/shared_query_cache_tests.rs`.
+
 ### Fixed — find / find_one / count agree on every execution path (mcp-server v1.0.563)
 
 Audit 2026-10-07 Q5, Q7, Q8, Q9, Q10, Q11.

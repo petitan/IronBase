@@ -1426,6 +1426,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             Arc::clone(&self.storage),
             shared_indexes,
             shared_schema,
+            Arc::clone(&self.query_cache),
             Arc::clone(&self.is_closed),
         )
     }
@@ -1461,6 +1462,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         Arc::clone(&self.storage),
                         shared_indexes,
                         shared_schema,
+                        Arc::clone(&self.query_cache),
                         Arc::clone(&self.is_closed),
                     );
                 }
@@ -1474,6 +1476,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             Arc::clone(&self.storage),
             shared_indexes,
             shared_schema,
+            Arc::clone(&self.query_cache),
             Arc::clone(&self.is_closed),
         )
     }
@@ -1538,6 +1541,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
+        self.query_cache.invalidate_collection(name);
         self.collection_write_locks.write().remove(name);
         self.collection_upsert_locks.write().remove(name);
 
@@ -1620,6 +1624,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // 3) Drop the stale in-memory IndexManager (forces a fresh reload from
         //    the renamed files + catalog), and move the schema + write lock.
         self.index_managers.write().remove(old_name);
+        self.query_cache.invalidate_collection(old_name);
+        self.query_cache.invalidate_collection(new_name);
         {
             let mut schemas = self.schema_managers.write();
             if let Some(arc) = schemas.remove(old_name) {
@@ -1761,6 +1767,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
+        self.query_cache.invalidate_collection(name);
         self.collection_write_locks.write().remove(name);
         self.collection_upsert_locks.write().remove(name);
 

@@ -101,6 +101,12 @@ pub const MIN_ENTRIES_FOR_HISTOGRAM: usize = 100_000;
 /// LRU eviction történik, ha megtelik.
 pub const QUERY_CACHE_CAPACITY: usize = 1000;
 
+/// Query cache: legfeljebb ennyi DocumentId-t tartalmazó eredményt tárol
+///
+/// Nagyobb eredményt nem cache-el: 1000 bejegyzés × korlátlan ID-lista sok
+/// RAM lehetne, és nagy eredménynél a dokumentumok betöltése dominál.
+pub const QUERY_CACHE_MAX_RESULT_IDS: usize = 10_000;
+
 /// Regex pattern cache kapacitás
 ///
 /// Maximum ennyi lefordított regex mintát tárol.

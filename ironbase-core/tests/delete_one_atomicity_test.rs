@@ -8,9 +8,9 @@
 //! whole read-modify-write under one storage write lock (re-read + tombstone-check),
 //! mirroring `update_one_prepare`.
 //!
-//! NOTE: counts after a mutation are read through a FRESH collection handle on
-//! purpose — the per-handle QueryCache (audit P2-5) means a reused handle could
-//! otherwise serve a stale count and mask the real storage state.
+//! NOTE: counts after a mutation are read through a FRESH collection handle.
+//! The QueryCache used to be per handle (audit P2-5) and a reused handle could
+//! serve a stale count; it is shared per database since audit 2026-10-07 Q6.
 
 use ironbase_core::storage::MemoryStorage;
 use ironbase_core::{DatabaseCore, DocumentId};
