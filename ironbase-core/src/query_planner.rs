@@ -264,6 +264,34 @@ pub enum QueryPlan {
 }
 
 impl QueryPlan {
+    /// Whether the plan looks up the `Null` key (an `{f: null}` / `$eq: null`
+    /// equality, a `$in` with `null`, or a range bounded by `null`).
+    ///
+    /// MongoDB's `{f: null}` matches null AND missing fields, but a non-unique
+    /// or sparse index stores no key for either, and a unique/compound index
+    /// also files objects and arrays under `Null` (key.rs). The index cannot
+    /// answer such a predicate, so these plans are never used (audit
+    /// 2026-10-07 Q2, Q3).
+    pub(crate) fn uses_null_key(&self) -> bool {
+        fn is_null(k: &IndexKey) -> bool {
+            match k {
+                IndexKey::Null => true,
+                IndexKey::Compound(parts) => parts.first().is_some_and(is_null),
+                _ => false,
+            }
+        }
+        match self {
+            QueryPlan::IndexScan { key, .. } => is_null(key),
+            QueryPlan::IndexRangeScan { start, end, .. } => {
+                start.as_ref().is_some_and(is_null) || end.as_ref().is_some_and(is_null)
+            }
+            QueryPlan::MultiValueScan { keys, .. } => keys.iter().any(is_null),
+            QueryPlan::SparseIndexScan { .. }
+            | QueryPlan::RegexPrefixScan { .. }
+            | QueryPlan::MultiRegexPrefixScan { .. } => false,
+        }
+    }
+
     /// Name of the index this plan scans. Every variant carries one, so this
     /// replaces the 6-arm `match` previously hand-duplicated at each call site.
     pub fn index_name(&self) -> &str {
@@ -737,7 +765,7 @@ impl QueryPlanner {
     /// This version takes IndexPrefixInfo to correctly handle compound indexes
     /// by using them for prefix field queries with range scans.
     ///
-    /// Also handles sparse index optimization for $exists: true queries.
+    /// (`$exists: true` gets no index plan: see `collect_candidates`.)
     pub fn analyze_query_with_fields(
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
@@ -765,8 +793,9 @@ impl QueryPlanner {
             // here, so that indexable fields like "age" in {"age": 25, "$text": "hello"}
             // can still get index plans.
 
-            // Collect candidates from each analyzer
-            Self::collect_exists_candidates(query_json, index_fields, &mut candidates);
+            // Collect candidates from each analyzer. `$exists: true` gets no
+            // index plan: a sparse index omits null, `[]` and object values,
+            // which all exist (audit 2026-10-07 Q4).
             Self::collect_regex_candidates(query_json, index_fields, &mut candidates);
             Self::collect_in_regex_candidates(query_json, index_fields, &mut candidates);
             Self::collect_in_candidates(query_json, index_fields, &mut candidates);
@@ -774,6 +803,7 @@ impl QueryPlanner {
             Self::collect_equality_candidates(query_json, index_fields, &mut candidates);
         }
 
+        candidates.retain(|c| !c.plan.uses_null_key());
         candidates
     }
 
@@ -786,38 +816,6 @@ impl QueryPlanner {
                 .partial_cmp(&b.estimated_cost)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-    }
-
-    /// Collect candidates from $exists: true queries (sparse index optimization)
-    fn collect_exists_candidates(
-        query_json: &Value,
-        index_fields: &[IndexPrefixInfo],
-        candidates: &mut Vec<CandidatePlan>,
-    ) {
-        if let Some((field, plan)) = Self::analyze_exists_query(query_json, index_fields) {
-            // Sparse index scan is very efficient - low cost
-            if let Some(info) = index_fields
-                .iter()
-                .find(|i| i.prefix_field == field && i.sparse && !i.building)
-            {
-                // Dynamic cost based on actual index size (num_keys)
-                // Small sparse index = very cheap, large sparse index = proportionally more expensive
-                let cost = if info.num_keys > 0 {
-                    (info.num_keys as f64).max(1.0)
-                } else {
-                    100.0 // Fallback if num_keys unknown
-                };
-                candidates.push(CandidatePlan::new(
-                    plan,
-                    field,
-                    cost,
-                    format!(
-                        "Sparse index {} for $exists:true (keys: {})",
-                        info.index_name, info.num_keys
-                    ),
-                ));
-            }
-        }
     }
 
     /// Collect candidates from regex prefix queries
@@ -1116,46 +1114,6 @@ impl QueryPlanner {
                 }
             }
         }
-    }
-
-    /// Analyze query for $exists: true with sparse index optimization
-    ///
-    /// For sparse indexes, all doc_ids in the index are documents where the field exists.
-    /// This enables efficient $exists: true queries without full collection scan.
-    fn analyze_exists_query(
-        query_json: &Value,
-        index_fields: &[IndexPrefixInfo],
-    ) -> Option<(String, QueryPlan)> {
-        if let Value::Object(ref map) = query_json {
-            for (field, conditions) in map {
-                if field.starts_with('$') {
-                    continue; // Skip logical operators at root level
-                }
-
-                if let Value::Object(ref cond_map) = conditions {
-                    // Check for $exists: true, but only if it's the sole operator
-                    if let Some(Value::Bool(true)) = cond_map.get("$exists") {
-                        if cond_map.keys().any(|k| k != "$exists") {
-                            continue;
-                        }
-                        // Look for a sparse index on this field (skip building indexes)
-                        if let Some(info) = index_fields.iter().find(|info| {
-                            info.prefix_field == *field && info.sparse && !info.building
-                        }) {
-                            return Some((
-                                field.clone(),
-                                QueryPlan::SparseIndexScan {
-                                    index_name: info.index_name.clone(),
-                                    field: field.clone(),
-                                },
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     /// Analyze query for range operators with compound-index-aware matching

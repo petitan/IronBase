@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — MongoDB equality: null matches missing, `1 == 1.0`, index agrees (mcp-server v1.0.562)
+
+Audit 2026-10-07 O4, O5, Q2, Q3, Q4 (high: indexed queries lost or
+over-counted documents).
+
+- **Behaviour change (MongoDB semantics, decided 2026-10-07):**
+  - `{f: null}`, `{f: {$eq: null}}`, `{f: {$in: [null]}}`, `$gte`/`$lte: null`
+    match null AND missing fields; `{f: {$ne: null}}` / `$nin: [null]` mean
+    "has a non-null value".
+  - Numbers compare by value: `{v: 1}` matches `1.0` (and vice versa), also
+    inside arrays/objects and in `$in`/`$nin`/`$all`/`$pull` conditions.
+- **Root cause (O4/O5):** `$eq`/`$ne`/`$in`/`$nin` used JSON equality
+  (`PosInt(1) != Float(1.0)`) and treated a missing field as "not null", while
+  the range operators already compared numerically.
+- **Root cause (Q2/Q3/Q4):** the planner built index plans on the `Null` key,
+  but a non-unique/sparse index stores no key for null or missing values and a
+  unique/compound index also files objects/arrays under `Null`; the sparse
+  `$exists: true` plan dropped null, `[]` and object values. A numeric
+  equality looked up only one numeric bucket (`Int(1)`, not `Float(1.0)`).
+- **Fix:** shared `eq_matches` / `in_matches` on top of
+  `value_utils::values_equal`; hashed `$in` sets normalise integral floats;
+  `compare_with_predicate` treats a missing field as null for a null bound.
+  The planner drops every plan that uses the `Null` key
+  (`QueryPlan::uses_null_key`) and no longer plans `$exists: true` on a sparse
+  index; `PlanRanges` probes both numeric buckets (`numeric_twins`) for
+  equality and `$in` keys.
+- Not changed: a unique index still treats `1` and `1.0` as different keys;
+  `{"a.b": null}` does not match an array element that lacks `b`.
+
+Regression tests: `tests/null_numeric_equality_tests.rs` (find, count and
+find_one without an index and with single, sparse, unique and compound
+indexes); `plan_ranges` unit tests updated for the two-bucket lookup.
+
 ### Fixed — Request-controlled limits could abort the MCP server (mcp-server v1.0.561)
 
 Audit 2026-10-07 M1, M4, M5, M8, M10.

@@ -3,7 +3,7 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::compare_values;
+use crate::value_utils::{compare_values, values_equal};
 use serde_json::Value;
 use std::cmp::Ordering;
 
@@ -401,8 +401,8 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool>
             // Evaluate query operators
             for (op, op_value) in cond_obj {
                 let matches = match op.as_str() {
-                    "$eq" => value == op_value,
-                    "$ne" => value != op_value,
+                    "$eq" => values_equal(value, op_value),
+                    "$ne" => !values_equal(value, op_value),
                     "$gt" => compare_values(value, op_value)
                         .map(|cmp| cmp == Ordering::Greater)
                         .unwrap_or(false),
@@ -417,14 +417,14 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool>
                         .unwrap_or(false),
                     "$in" => {
                         if let Value::Array(ref arr) = op_value {
-                            arr.contains(value)
+                            arr.iter().any(|v| values_equal(value, v))
                         } else {
                             false
                         }
                     }
                     "$nin" => {
                         if let Value::Array(ref arr) = op_value {
-                            !arr.contains(value)
+                            !arr.iter().any(|v| values_equal(value, v))
                         } else {
                             true
                         }
@@ -445,8 +445,8 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool>
         }
     }
 
-    // Direct equality comparison
-    Ok(value == condition)
+    // Direct equality comparison (numbers by value, like the query matcher)
+    Ok(values_equal(value, condition))
 }
 
 // NOTE: compare_values is now imported from crate::value_utils

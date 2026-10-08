@@ -84,7 +84,9 @@ where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     match doc_value {
-        None => Ok(false),
+        // MongoDB: a missing field compares as null, so `$gte`/`$lte: null`
+        // match it like `{f: null}` does (no other bound can match it)
+        None => Ok(filter_value.is_null() && predicate(std::cmp::Ordering::Equal)),
         Some(v) => {
             // Direct comparison
             if let Some(ordering) = compare_values(v, filter_value) {
