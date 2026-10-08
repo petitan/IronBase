@@ -1,14 +1,13 @@
 // src/query/operators/array.rs
 // Array operators: $in, $nin, $all, $elemMatch, $size
 
-use crate::document::Document;
+use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use super::helpers::{parse_regex_filter, regex_matches_value};
+use super::filter::{matches_filter, matches_filter_value};
 use super::traits::OperatorMatcher;
-use super::OPERATOR_REGISTRY;
 
 // ============================================================================
 // HashableValue - O(1) lookup support for $in/$nin/$all operators
@@ -250,56 +249,20 @@ impl OperatorMatcher for AllOperator {
 /// # Complexity: CC = 8
 pub struct ElemMatchOperator;
 
+/// Top-level operators that make an `$elemMatch` body a sub-query on the
+/// element as a document instead of a condition on the element value.
+const ELEM_MATCH_QUERY_OPERATORS: [&str; 4] = ["$and", "$or", "$nor", "$expr"];
+
 impl ElemMatchOperator {
-    /// Check if operators in condition_obj match the given value
-    /// Handles $regex + $options pair and throws error for unknown operators
-    fn check_operators_match(
-        condition_obj: &serde_json::Map<String, Value>,
-        value: Option<&Value>,
-    ) -> Result<bool> {
-        // Special handling for $regex + $options combination
-        if let Some(parsed) = parse_regex_filter(condition_obj)? {
-            if !regex_matches_value(value, parsed.pattern, parsed.options)? {
-                return Ok(false);
-            }
-
-            // Process remaining operators (excluding $regex and $options)
-            for (op_name, op_value) in condition_obj {
-                if op_name == "$regex" || op_name == "$options" {
-                    continue; // Already handled
-                }
-                if op_name.starts_with('$') {
-                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                        if !operator.matches(value, op_value, None)? {
-                            return Ok(false);
-                        }
-                    } else {
-                        return Err(IronBaseError::InvalidQuery(format!(
-                            "Unknown operator: {}",
-                            op_name
-                        )));
-                    }
-                }
-            }
-        } else {
-            // Standard operator processing (no $regex present)
-            for (op_name, op_value) in condition_obj {
-                if op_name.starts_with('$') {
-                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                        if !operator.matches(value, op_value, None)? {
-                            return Ok(false);
-                        }
-                    } else {
-                        return Err(IronBaseError::InvalidQuery(format!(
-                            "Unknown operator: {}",
-                            op_name
-                        )));
-                    }
-                }
-            }
-        }
-
-        Ok(true)
+    /// MongoDB: when every key of the `$elemMatch` body is a (non-logical)
+    /// operator, the body is a condition on each element value itself
+    /// (`{$elemMatch: {$gt: 80, $lt: 85}}`); otherwise it is a query run
+    /// against each element as a document (`{$elemMatch: {a: 1, b: {$gt: 2}}}`).
+    fn is_value_condition(conditions: &serde_json::Map<String, Value>) -> bool {
+        !conditions.is_empty()
+            && conditions
+                .keys()
+                .all(|k| k.starts_with('$') && !ELEM_MATCH_QUERY_OPERATORS.contains(&k.as_str()))
     }
 }
 
@@ -324,81 +287,39 @@ impl OperatorMatcher for ElemMatchOperator {
             }
         };
 
-        match doc_value {
-            None => Ok(false),
-            Some(Value::Array(arr)) => {
-                // At least one element in the array must match all conditions in filter_value
-                for elem in arr {
-                    if let Value::Object(obj) = elem {
-                        // OBJECT ELEMENT: Check fields within the object
-                        let mut matches_all = true;
+        let arr = match doc_value {
+            Some(Value::Array(arr)) => arr,
+            _ => return Ok(false), // Missing or not an array
+        };
 
-                        for (key, value) in conditions {
-                            if key.starts_with('$') {
-                                // This is a top-level operator applied to the object element itself
-                                // e.g., {$elemMatch: {$gt: 5}} on [{a:1}, {a:10}] doesn't make sense
-                                // but we should handle operators properly
-                                if let Some(operator) = OPERATOR_REGISTRY.get(key.as_str()) {
-                                    if !operator.matches(Some(elem), value, None)? {
-                                        matches_all = false;
-                                        break;
-                                    }
-                                } else {
-                                    return Err(IronBaseError::InvalidQuery(format!(
-                                        "Unknown operator: {}",
-                                        key
-                                    )));
-                                }
-                            } else {
-                                // Field-based condition
-                                let field_value = obj.get(key);
-
-                                // If condition has operators, evaluate them
-                                if let Value::Object(op_obj) = value {
-                                    if !Self::check_operators_match(op_obj, field_value)? {
-                                        matches_all = false;
-                                        break;
-                                    }
-                                } else {
-                                    // Direct equality
-                                    if field_value != Some(value) {
-                                        matches_all = false;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if matches_all {
-                            return Ok(true);
-                        }
-                    } else {
-                        // SCALAR ELEMENT: Apply operators directly to the element value
-                        // E.g., {scores: {$elemMatch: {$gt: 80, $lt: 85}}} with [75, 82, 90]
-                        let mut matches_all = true;
-
-                        // Check for any non-operator keys (field-based conditions on scalar)
-                        let has_field_conditions = conditions.keys().any(|k| !k.starts_with('$'));
-                        if has_field_conditions {
-                            // Can't apply field-based conditions to scalar
-                            // (e.g., {$elemMatch: {field: value}} on [1, 2, 3])
-                            matches_all = false;
-                        } else {
-                            // All keys are operators - apply them to the scalar
-                            if !Self::check_operators_match(conditions, Some(elem))? {
-                                matches_all = false;
-                            }
-                        }
-
-                        if matches_all {
-                            return Ok(true);
-                        }
-                    }
+        if Self::is_value_condition(conditions) {
+            // Value condition: every operator applies to the element itself
+            // (scalars and sub-documents alike). An empty document is the
+            // context, so nested `$not` evaluates instead of erroring.
+            let context = Document::new(DocumentId::Int(0), HashMap::new());
+            for elem in arr {
+                if matches_filter_value(Some(elem), filter_value, Some(&context))? {
+                    return Ok(true);
                 }
-                Ok(false)
             }
-            Some(_) => Ok(false), // Not an array
+            return Ok(false);
         }
+
+        // Sub-query: each sub-document element is matched as a document, so
+        // dotted paths, implicit array matching, deep equality of object
+        // values and logical operators behave as in a top-level query.
+        // Elements that are not documents cannot match a field condition.
+        for elem in arr {
+            if let Value::Object(obj) = elem {
+                let fields: HashMap<String, Value> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let element_doc = Document::new(DocumentId::Int(0), fields);
+                if matches_filter(&element_doc, filter_value)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 }
 

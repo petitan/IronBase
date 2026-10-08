@@ -3046,11 +3046,13 @@ mod wal_replay_tests {
             n_empty
         );
 
-        // Sanity: $all: ["a"] still works for the docs that have "a".
+        // Sanity: $all: ["a"] still works for the docs that have "a" — the
+        // array ["a","b"] and (MongoDB: `$all` ⇔ `$and` of equalities) the
+        // scalar "a".
         let n_a = db
             .count_documents("docs", &serde_json::json!({"tags": {"$all": ["a"]}}))
             .unwrap();
-        assert_eq!(n_a, 1, "$all: [\"a\"] must still match 1 doc; got {}", n_a);
+        assert_eq!(n_a, 2, "$all: [\"a\"] must match 2 docs; got {}", n_a);
     }
 
     /// Audit #28 finding B — `compare_values(Null, Null)` returned `None`
