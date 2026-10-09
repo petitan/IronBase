@@ -36,6 +36,7 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 
 // Re-export public types
+pub(crate) use array::element_matches;
 pub use array::{AllOperator, ElemMatchOperator, InOperator, NinOperator, SizeOperator};
 pub use comparison::{EqOperator, GtOperator, GteOperator, LtOperator, LteOperator, NeOperator};
 pub use element::{ExistsOperator, TypeOperator};

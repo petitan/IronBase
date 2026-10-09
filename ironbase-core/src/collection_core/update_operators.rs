@@ -3,9 +3,8 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{compare_values, values_equal};
+use crate::value_utils::values_equal;
 use serde_json::Value;
-use std::cmp::Ordering;
 
 /// Apply MongoDB-style update operators to a document
 ///
@@ -382,75 +381,28 @@ fn apply_slice(array: &mut Vec<Value>, slice_val: i64) {
     }
 }
 
-/// Check if a value matches a condition (for $pull)
+/// Check if an array element matches a `$pull` condition (MongoDB semantics,
+/// shared with `$elemMatch` via `element_matches`):
 ///
-/// Supports:
-/// - Direct equality: `{"tags": "obsolete"}` removes "obsolete"
-/// - Query operators: `{"score": {"$lt": 5}}` removes items < 5
+/// - Scalar or array condition: equality (numbers by value):
+///   `{"tags": "obsolete"}` removes "obsolete"
+/// - Operator condition: applied to the element value:
+///   `{"scores": {"$lt": 5}}` removes items < 5
+/// - Document condition: a query on each document element, so
+///   `{"items": {"name": "a"}}` removes `{"name": "a", "qty": 2}` too
+///   (it used to require deep equality; audit 2026-10-07 follow-up)
 ///
 /// # Errors
-/// Returns an error if an unknown query operator is used.
-/// This prevents silent failures where typos like `$gtt` are ignored.
+/// Returns an error for an unknown query operator, so a typo like `$gtt`
+/// fails instead of being ignored.
 pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool> {
-    // If condition is an object with operators, evaluate them
-    if let Value::Object(ref cond_obj) = condition {
-        // Check if it contains query operators
-        let has_operators = cond_obj.keys().any(|k| k.starts_with('$'));
-
-        if has_operators {
-            // Evaluate query operators
-            for (op, op_value) in cond_obj {
-                let matches = match op.as_str() {
-                    "$eq" => values_equal(value, op_value),
-                    "$ne" => !values_equal(value, op_value),
-                    "$gt" => compare_values(value, op_value)
-                        .map(|cmp| cmp == Ordering::Greater)
-                        .unwrap_or(false),
-                    "$gte" => compare_values(value, op_value)
-                        .map(|cmp| matches!(cmp, Ordering::Greater | Ordering::Equal))
-                        .unwrap_or(false),
-                    "$lt" => compare_values(value, op_value)
-                        .map(|cmp| cmp == Ordering::Less)
-                        .unwrap_or(false),
-                    "$lte" => compare_values(value, op_value)
-                        .map(|cmp| matches!(cmp, Ordering::Less | Ordering::Equal))
-                        .unwrap_or(false),
-                    "$in" => {
-                        if let Value::Array(ref arr) = op_value {
-                            arr.iter().any(|v| values_equal(value, v))
-                        } else {
-                            false
-                        }
-                    }
-                    "$nin" => {
-                        if let Value::Array(ref arr) = op_value {
-                            !arr.iter().any(|v| values_equal(value, v))
-                        } else {
-                            true
-                        }
-                    }
-                    _ => {
-                        return Err(IronBaseError::InvalidQuery(format!(
-                            "$pull: unknown query operator '{}'. Supported: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin",
-                            op
-                        )));
-                    }
-                };
-
-                if !matches {
-                    return Ok(false);
-                }
-            }
-            return Ok(true); // All operators matched
+    match condition {
+        Value::Object(conditions) => {
+            crate::query::operators::element_matches(value, conditions, condition)
         }
+        _ => Ok(values_equal(value, condition)),
     }
-
-    // Direct equality comparison (numbers by value, like the query matcher)
-    Ok(values_equal(value, condition))
 }
-
-// NOTE: compare_values is now imported from crate::value_utils
-// which has full precision handling for i64/u64/mixed/f64 comparisons
 
 #[cfg(test)]
 mod tests {
@@ -575,7 +527,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("unknown query operator"),
+            err_msg.to_lowercase().contains("unknown operator"),
             "Error should mention unknown operator: {}",
             err_msg
         );
@@ -589,13 +541,38 @@ mod tests {
         let result2 = value_matches_condition(&json!(5), &json!({"$gtt": 3})); // typo: $gtt instead of $gt
         assert!(result2.is_err());
 
-        // $exists is not supported in $pull context
-        let result3 = value_matches_condition(&json!({"a": 1}), &json!({"$exists": true}));
-        assert!(result3.is_err());
+        // The full query operator set applies, as in MongoDB
+        assert!(value_matches_condition(&json!({"a": 1}), &json!({"$exists": true})).unwrap());
+        assert!(value_matches_condition(&json!("hello"), &json!({"$regex": "^hel"})).unwrap());
+        assert!(!value_matches_condition(&json!("hello"), &json!({"$regex": "^x"})).unwrap());
+    }
 
-        // $regex is not supported in $pull context
-        let result4 = value_matches_condition(&json!("hello"), &json!({"$regex": "hel"}));
-        assert!(result4.is_err());
+    #[test]
+    fn test_pull_document_condition_is_a_query_on_each_element() {
+        let mut doc = make_doc(json!({"items": [
+            {"name": "a", "qty": 2},
+            {"name": "b", "qty": 1},
+            {"name": "a", "tags": ["x"]},
+            "a",
+            {"name": "c", "meta": {"color": "red"}}
+        ]}));
+        apply_update_operators(&mut doc, &json!({"$pull": {"items": {"name": "a"}}})).unwrap();
+        assert_eq!(
+            doc.get("items").unwrap(),
+            &json!([{"name": "b", "qty": 1}, "a", {"name": "c", "meta": {"color": "red"}}])
+        );
+        // operators, dotted paths and logical operators inside
+        apply_update_operators(
+            &mut doc,
+            &json!({"$pull": {"items": {"$or": [{"qty": {"$lt": 2}}, {"meta.color": "red"}]}}}),
+        )
+        .unwrap();
+        assert_eq!(doc.get("items").unwrap(), &json!(["a"]));
+        // scalars and arrays: equality
+        let mut doc = make_doc(json!({"xs": [1, [1, 2], 2.0, {"v": 1}]}));
+        apply_update_operators(&mut doc, &json!({"$pull": {"xs": [1, 2]}})).unwrap();
+        apply_update_operators(&mut doc, &json!({"$pull": {"xs": 2}})).unwrap();
+        assert_eq!(doc.get("xs").unwrap(), &json!([1, {"v": 1}]));
     }
 
     #[test]
