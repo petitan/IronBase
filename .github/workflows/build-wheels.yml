@@ -32,7 +32,7 @@ jobs:
           sccache: 'true'
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist
@@ -66,7 +66,7 @@ jobs:
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-${{ matrix.target }}
           path: dist
@@ -94,7 +94,7 @@ jobs:
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist
