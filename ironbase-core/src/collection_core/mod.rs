@@ -239,7 +239,9 @@ pub(crate) use self::index_persistence::{
 };
 pub(crate) use self::pending_writes::PendingWrites;
 use self::schema::CompiledSchema;
-pub(crate) use self::update_operators::{parse_each_modifier, push_with_modifiers};
+pub(crate) use self::update_operators::{
+    parse_each_modifier, push_with_modifiers, value_matches_condition,
+};
 
 // Re-export the sealed RawOperations trait for crate-internal use
 pub(crate) use self::raw_operations::RawOperations;

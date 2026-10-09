@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `$pull` with a document condition is a query on each element (mcp-server v1.0.567)
+
+Follow-up of audit 2026-10-07 (O2/O3 left `$pull` out).
+
+- **Root cause:** `$pull` compared a document condition by deep equality and
+  knew only 8 operators. `{$pull: {items: {name: "a"}}}` kept
+  `{name: "a", qty: 2}`; MongoDB applies the condition "to each element as
+  though it were a top-level object", like `$elemMatch`.
+- **Fix:** `value_matches_condition` uses `element_matches`, extracted from
+  `$elemMatch`: an operator-only condition applies to the element value, any
+  other document condition is a query on each document element (dotted
+  paths, `$or`/`$and`, all query operators incl. `$regex`, `$exists`); a
+  scalar or array condition stays equality. The upsert document builder
+  (`upsert.rs`) used its own exact-equality `$pull`; it now shares the same
+  condition.
+- Behaviour change (MongoDB-compatible): document conditions match elements
+  with extra fields; `$regex` / `$exists` etc. are accepted instead of
+  rejected.
+
+Regression test: `test_pull_document_condition_is_a_query_on_each_element`.
+
 ### Fixed — Indexed sort, range, distinct and $group agree with the scan (mcp-server v1.0.566)
 
 Audit 2026-10-07 Q1, Q12, Q13, Q14, A4.

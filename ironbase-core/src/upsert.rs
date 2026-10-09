@@ -414,7 +414,11 @@ fn apply_pull(doc: &mut Map<String, Value>, path: &str, value: &Value) {
 
     if parts.len() == 1 {
         if let Some(Value::Array(arr)) = doc.get_mut(path) {
-            arr.retain(|item| item != value);
+            // Same condition semantics as the update path; an invalid
+            // condition removes nothing here (the update path reports it)
+            arr.retain(|item| {
+                !crate::collection_core::value_matches_condition(item, value).unwrap_or(false)
+            });
         }
     } else {
         let first = parts[0];

@@ -274,34 +274,42 @@ impl OperatorMatcher for ElemMatchOperator {
             _ => return Ok(false), // Missing or not an array
         };
 
-        if Self::is_value_condition(conditions) {
-            // Value condition: every operator applies to the element itself
-            // (scalars and sub-documents alike). An empty document is the
-            // context, so nested `$not` evaluates instead of erroring.
-            let context = Document::new(DocumentId::Int(0), HashMap::new());
-            for elem in arr {
-                if matches_filter_value(Some(elem), filter_value, Some(&context))? {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
-        }
-
-        // Sub-query: each sub-document element is matched as a document, so
-        // dotted paths, implicit array matching, deep equality of object
-        // values and logical operators behave as in a top-level query.
-        // Elements that are not documents cannot match a field condition.
         for elem in arr {
-            if let Value::Object(obj) = elem {
-                let fields: HashMap<String, Value> =
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                let element_doc = Document::new(DocumentId::Int(0), fields);
-                if matches_filter(&element_doc, filter_value)? {
-                    return Ok(true);
-                }
+            if element_matches(elem, conditions, filter_value)? {
+                return Ok(true);
             }
         }
         Ok(false)
+    }
+}
+
+/// Whether one array element matches an `$elemMatch` body — also the
+/// condition semantics of `$pull` (MongoDB applies both "to each element as
+/// though it were a top-level object").
+///
+/// - A body of (non-logical) operators only is a condition on the element
+///   value itself (scalars and sub-documents alike). An empty document is the
+///   context, so a nested `$not` evaluates instead of erroring.
+/// - Any other body is a query on the element as a document: dotted paths,
+///   implicit array matching, deep equality of object values and logical
+///   operators behave as in a top-level query. An element that is not a
+///   document cannot match a field condition.
+pub(crate) fn element_matches(
+    elem: &Value,
+    conditions: &serde_json::Map<String, Value>,
+    body: &Value,
+) -> Result<bool> {
+    if ElemMatchOperator::is_value_condition(conditions) {
+        let context = Document::new(DocumentId::Int(0), HashMap::new());
+        return matches_filter_value(Some(elem), body, Some(&context));
+    }
+    match elem {
+        Value::Object(obj) => {
+            let fields: HashMap<String, Value> =
+                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            matches_filter(&Document::new(DocumentId::Int(0), fields), body)
+        }
+        _ => Ok(false),
     }
 }
 
