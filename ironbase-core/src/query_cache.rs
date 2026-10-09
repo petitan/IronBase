@@ -46,6 +46,11 @@ pub struct QueryCache {
     /// takes it before computing a result and stores the result only if it is
     /// unchanged, so a result computed across a concurrent write is never cached.
     generations: RwLock<HashMap<String, u64>>,
+    /// Derived per-index facts (e.g. "index covers every document") keyed by
+    /// (collection, fact key), valid only while the collection's write
+    /// generation is unchanged — so a fact costing an index walk is computed
+    /// once per write, not once per query.
+    facts: RwLock<HashMap<(String, String), (u64, bool)>>,
     capacity: usize,
 }
 
@@ -61,8 +66,28 @@ impl QueryCache {
             cache: RwLock::new(LruCache::new(non_zero_capacity)),
             collection_index: RwLock::new(HashMap::new()),
             generations: RwLock::new(HashMap::new()),
+            facts: RwLock::new(HashMap::new()),
             capacity,
         }
+    }
+
+    /// A cached per-collection fact, or `compute()` cached under the write
+    /// generation read before computing it (not cached if a write happened
+    /// meanwhile).
+    pub fn fact(&self, collection: &str, key: &str, compute: impl FnOnce() -> bool) -> bool {
+        let generation = self.generation(collection);
+        let cache_key = (collection.to_string(), key.to_string());
+        if let Some(&(g, value)) = self.facts.read().get(&cache_key) {
+            if g == generation {
+                return value;
+            }
+        }
+        let value = compute();
+        let generations = self.generations.read();
+        if generations.get(collection).copied().unwrap_or(0) == generation {
+            self.facts.write().insert(cache_key, (generation, value));
+        }
+        value
     }
 
     /// Current write generation of a collection (see [`Self::insert_if_current`]).

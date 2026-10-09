@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Indexed sort, range, distinct and $group agree with the scan (mcp-server v1.0.566)
+
+Audit 2026-10-07 Q1, Q12, Q13, Q14, A4.
+
+- **Root cause:** a B+ tree index holds no key for a null / missing / object
+  value (non-unique or sparse; a unique index files all three under `Null`),
+  holds an array once per element (multikey), and orders every `Int` key
+  before every `Float` key. The empty-filter sort, the index distinct and the
+  index `$group` treated it as a complete, value-ordered copy of the field.
+- **Q1 (critical):** an empty filter + sort on an indexed field dropped
+  null/missing/object documents, duplicated multikey documents and ordered
+  `1.5` after `10`. The index sort now runs only if the index holds every live
+  document once under a non-null scalar key (`index_covers_every_doc`) and all
+  keys are one type (`index_keys_single_type`); otherwise memory sort.
+- **Q14:** a filtered sort through a multikey or case-insensitive index used
+  the index order; it now sorts in memory.
+- **Q12:** `{f: {$gt: 5, $lt: 10}}` lost `f: [3, 12]` on a multikey index (two
+  elements satisfy the two bounds). The scan now uses the lower bound only and
+  the post-filter decides.
+- **Q13 / A4:** index distinct and index `$group` dropped null, object and
+  whole-array values; they now run only under the same coverage condition.
+- The coverage facts cost one index walk; `QueryCache::fact` caches them per
+  collection write generation (measured: indexed sort + limit 10 on 50 000
+  docs 0.07 ms/query, recomputed only after a write). A building index is no
+  longer used for the empty-filter sort.
+
+Regression tests: `tests/index_semantics_tests.rs` (every case with and
+without an index).
+
 ### Fixed — Batch mode: read your writes, no lost acknowledged inserts (mcp-server v1.0.565)
 
 Audit 2026-10-08 (found while fixing Q6).

@@ -141,6 +141,13 @@ impl PlanRanges {
                 inclusive_end,
                 ..
             } => {
+                // Multikey index: `{f: {$gt: 5, $lt: 10}}` matches `[3, 12]`
+                // (different elements satisfy the two bounds) although no
+                // element is inside (5, 10). Scan by the lower bound only and
+                // let the caller's post-filter decide (audit 2026-10-07 Q12).
+                let multikey_two_sided =
+                    index.metadata.multikey && start.is_some() && end.is_some();
+                let end = if multikey_two_sided { &None } else { end };
                 if let Some(buckets) = numeric_range_buckets(
                     start.as_ref(),
                     end.as_ref(),
