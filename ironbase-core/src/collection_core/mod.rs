@@ -622,16 +622,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         })
     }
 
-    /// Create a collection with shared IndexManager and Schema
+    /// Create a collection with shared IndexManager, Schema and QueryCache
     ///
-    /// This constructor is used by DatabaseCore to share IndexManagers and Schemas
-    /// across multiple CollectionCore instances, fixing both "stale index" and
-    /// "stale schema" problems.
+    /// This constructor is used by DatabaseCore to share IndexManagers, Schemas
+    /// and the QueryCache across multiple CollectionCore instances, fixing the
+    /// "stale index", "stale schema" and "stale query result" problems (a write
+    /// through one handle invalidates the cache every handle reads; audit
+    /// 2026-10-07 Q6).
     pub(crate) fn with_shared_indexes(
         name: String,
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
+        query_cache: Arc<QueryCache>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
         // Ensure collection exists
@@ -645,9 +648,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(CollectionCore {
             name,
             storage,
-            indexes, // Shared!
-            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
-            schema, // Shared!
+            indexes,     // Shared!
+            query_cache, // Shared!
+            schema,      // Shared!
             is_closed,
         })
     }
@@ -663,6 +666,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
+        query_cache: Arc<QueryCache>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
         // Verify collection exists (READ lock only)
@@ -676,9 +680,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(CollectionCore {
             name,
             storage,
-            indexes, // Shared!
-            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
-            schema, // Shared!
+            indexes,     // Shared!
+            query_cache, // Shared!
+            schema,      // Shared!
             is_closed,
         })
     }
@@ -2614,6 +2618,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             None
         };
 
+        // Generation before computing: a write during the computation makes
+        // the result uncacheable (insert_if_current skips it)
+        let cache_generation = self.query_cache.generation(&self.name);
         if let Some(hash) = cache_hash {
             if let Some(cached) = self.query_cache.get(&hash) {
                 return Ok((cached, false));
@@ -2751,8 +2758,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         if let Some(hash) = cache_hash {
-            self.query_cache
-                .insert(&self.name, hash, doc_ids_vec.clone());
+            self.query_cache.insert_if_current(
+                &self.name,
+                hash,
+                doc_ids_vec.clone(),
+                cache_generation,
+            );
         }
 
         Ok((doc_ids_vec, used_sort))

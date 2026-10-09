@@ -41,6 +41,13 @@ impl DatabaseCore<StorageEngine> {
             storage.commit_transaction(&mut transaction)
         };
 
+        // The commit wrote documents without going through a CollectionCore
+        // write path: invalidate the shared query cache of every touched
+        // collection (also on error — a partial commit may have written).
+        for name in Self::transaction_collections(&transaction) {
+            self.query_cache.invalidate_collection(name);
+        }
+
         // Bring the in-memory indexes up to date while the write lock is still
         // held, so no other writer or transaction sees them stale (audit
         // 2026-10-06 #11).
@@ -63,6 +70,15 @@ impl DatabaseCore<StorageEngine> {
     /// Apply a committed transaction's operations to the in-memory indexes of
     /// every collection it touched.
     fn apply_committed_transaction_to_indexes(&self, transaction: &Transaction) -> Result<()> {
+        for name in Self::transaction_collections(transaction) {
+            self.collection(name)?
+                .apply_committed_ops_to_indexes(transaction.operations())?;
+        }
+        Ok(())
+    }
+
+    /// Distinct collection names a transaction's operations touch, in order.
+    fn transaction_collections(transaction: &Transaction) -> Vec<&str> {
         let mut collections: Vec<&str> = Vec::new();
         for op in transaction.operations() {
             let name = match op {
@@ -74,11 +90,7 @@ impl DatabaseCore<StorageEngine> {
                 collections.push(name);
             }
         }
-        for name in collections {
-            self.collection(name)?
-                .apply_committed_ops_to_indexes(transaction.operations())?;
-        }
-        Ok(())
+        collections
     }
 
     /// Rollback a transaction (discard all buffered operations) - StorageEngine-specific

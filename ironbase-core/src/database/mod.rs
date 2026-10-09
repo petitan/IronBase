@@ -59,6 +59,8 @@ use crate::collection_core::InsertOnePrepared;
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
+use crate::limits::QUERY_CACHE_CAPACITY;
+use crate::query_cache::QueryCache;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
 
@@ -289,6 +291,10 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Each collection shares its CompiledSchema across all CollectionCore instances
     pub(crate) schema_managers: Arc<RwLock<HashMap<String, Arc<RwLock<Option<CompiledSchema>>>>>>,
 
+    // Shared query result cache (fixes stale query result problem): keyed and
+    // invalidated per collection, shared by all CollectionCore instances
+    pub(crate) query_cache: Arc<QueryCache>,
+
     // Transaction-level write lock for Read Committed isolation: one write
     // transaction at a time (exclusive), auto-commit writes shared. See
     // WriteLockState.
@@ -488,6 +494,7 @@ impl DatabaseCore<StorageEngine> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
@@ -629,6 +636,7 @@ impl DatabaseCore<MemoryStorage> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
