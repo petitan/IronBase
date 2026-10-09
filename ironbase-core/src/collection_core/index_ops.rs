@@ -934,3 +934,83 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(())
     }
 }
+
+/// Whether a single-field B+ tree index holds every live document exactly
+/// once, under a non-null scalar key: it is not multikey (an array is held
+/// once per element), not case-insensitive (keys are lowercased) and its
+/// entries outside the `Null` key cover the whole catalog (a non-unique or
+/// sparse index holds no key for a null / missing / object value; a unique
+/// index files all three under `Null`). Only such an index can stand in for
+/// a scan in an empty-filter sort, distinct or `$group` (audit 2026-10-07 Q1,
+/// Q13, A4). O(entries) leaf walk, no document loads.
+pub(crate) fn index_covers_every_doc(
+    index: &crate::index::BPlusTree,
+    catalog: &std::collections::HashMap<crate::document::DocumentId, u64>,
+) -> bool {
+    !index.metadata.multikey
+        && !index.metadata.case_insensitive
+        && !index.metadata.is_compound()
+        && index.count_range_validated(&IndexKey::Null, &IndexKey::MaxKey, false, true, catalog)
+            == catalog.len()
+}
+
+/// Whether every entry of the index lies in one key-type bucket in which the
+/// index order equals the in-memory sort order (`compare_values`): all Int,
+/// all Float, all String or all Bool. Mixed Int/Float fails — the B+ tree
+/// orders every Int before every Float (audit 2026-10-07 Q1).
+pub(crate) fn index_keys_single_type(
+    index: &crate::index::BPlusTree,
+    catalog: &std::collections::HashMap<crate::document::DocumentId, u64>,
+) -> bool {
+    use crate::index::OrderedFloat;
+    let total = catalog.len();
+    let buckets = [
+        (IndexKey::Bool(false), IndexKey::Bool(true), true),
+        (IndexKey::Int(i64::MIN), IndexKey::Int(i64::MAX), true),
+        (
+            IndexKey::Float(OrderedFloat(f64::NEG_INFINITY)),
+            IndexKey::Float(OrderedFloat(f64::INFINITY)),
+            true,
+        ),
+        (IndexKey::String(String::new()), IndexKey::MaxKey, false),
+    ];
+    buckets.iter().any(|(lo, hi, hi_incl)| {
+        index.count_range_validated(lo, hi, true, *hi_incl, catalog) == total
+    })
+}
+
+/// Cache key of a derived index fact: the index name plus the flags the fact
+/// depends on, so a dropped and recreated index of the same name never reuses
+/// a stale entry.
+pub(crate) fn index_fact_key(fact: &str, index: &crate::index::BPlusTree) -> String {
+    let m = &index.metadata;
+    format!(
+        "{fact}:{}:{}{}{}{}",
+        m.name, m.multikey as u8, m.sparse as u8, m.unique as u8, m.case_insensitive as u8
+    )
+}
+
+impl<S: Storage + RawStorage> CollectionCore<S> {
+    /// `index_covers_every_doc` for the index an empty-filter distinct or
+    /// `$group` on `field` would use (first single-field, case-sensitive
+    /// index on it). Lock order: storage, then indexes.
+    pub(crate) fn field_index_covers_every_doc(&self, field: &str) -> bool {
+        let storage = self.storage.read();
+        let Some(meta) = storage.get_collection_meta(&self.name) else {
+            return false;
+        };
+        let indexes = self.indexes.read();
+        indexes
+            .list_indexes_with_compound_info()
+            .iter()
+            .find(|info| !info.is_compound && !info.case_insensitive && info.prefix_field == field)
+            .filter(|info| !info.building)
+            .and_then(|info| indexes.get_btree_index(&info.index_name))
+            .is_some_and(|index| {
+                self.query_cache
+                    .fact(&self.name, &index_fact_key("covers", index), || {
+                        index_covers_every_doc(index, &meta.document_catalog)
+                    })
+            })
+    }
+}

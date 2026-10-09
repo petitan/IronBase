@@ -234,7 +234,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // INDEX-BASED $GROUP OPTIMIZATION
         // Uses context for both entry counting and group cardinality checks
         if !had_match {
-            if let Some(group_stage) = pipeline.peek_leading_group() {
+            // Same index condition as distinct: the null group, object keys
+            // and whole-array keys exist only in the scan (audit 2026-10-07 A4)
+            let index_usable = pipeline
+                .peek_leading_group()
+                .and_then(|g| g.can_use_index())
+                .is_some_and(|field| self.field_index_covers_every_doc(field));
+            if let Some(group_stage) = pipeline.peek_leading_group().filter(|_| index_usable) {
                 let indexes = self.indexes.read();
                 ctx.enter_streaming_group();
                 let indexed_opt = group_stage.try_index_based_execute_with_context(&indexes, ctx);

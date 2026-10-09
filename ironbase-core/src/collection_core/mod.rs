@@ -2853,7 +2853,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // numeric Int/Float buckets, regex prefix, sparse, `$in`/multi-
                     // regex unions — is encoded as one or more sub-ranges.
                     let ranges = PlanRanges::from_plan(&plan, index);
-                    scan_index_ordered = ranges.single_contiguous();
+                    // A multikey index holds a document once per array element
+                    // and a case-insensitive one lowercased keys: neither
+                    // order is the document sort order (audit 2026-10-07 Q14)
+                    scan_index_ordered = ranges.single_contiguous()
+                        && !index.metadata.multikey
+                        && !index.metadata.case_insensitive;
 
                     // Regex limit-pushdown (preserved from the pre-#8 path): a
                     // simple (no other conditions), exact, case-sensitive prefix on
@@ -3371,14 +3376,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         skip: usize,
         limit: Option<usize>,
     ) -> Result<Option<(String, Vec<DocumentId>)>> {
-        // Find an index for the sort field
+        // Find an index for the sort field. Lock order: storage, then indexes.
+        let storage = self.storage.read();
         let indexes = self.indexes.read();
         let index_infos = indexes.list_indexes_with_compound_info();
 
         // Look for a single-field index on the sort field
         let matching_index = index_infos
             .iter()
-            .find(|info| !info.is_compound && info.prefix_field == sort_field);
+            // A building index is incomplete
+            .find(|info| !info.is_compound && !info.building && info.prefix_field == sort_field);
 
         let index_name = match matching_index {
             Some(info) => info.index_name.clone(),
@@ -3396,6 +3403,30 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 return Ok(None);
             }
         };
+
+        // The index order is the sort order only if the index holds every
+        // document once, under keys of one type: null / missing / object
+        // values are not in it, an array is in it once per element, and all
+        // Int keys sort before all Float keys (audit 2026-10-07 Q1).
+        // Otherwise the caller sorts in memory.
+        {
+            let Some(meta) = storage.get_collection_meta(&self.name) else {
+                return Ok(None);
+            };
+            let catalog = &meta.document_catalog;
+            let sortable = self.query_cache.fact(
+                &self.name,
+                &index_ops::index_fact_key("sortable", btree),
+                || {
+                    index_ops::index_covers_every_doc(btree, catalog)
+                        && index_ops::index_keys_single_type(btree, catalog)
+                },
+            );
+            if !sortable {
+                return Ok(None);
+            }
+        }
+        drop(storage);
 
         // 🔧 REFACTORED: Use unified range_query API for both ASC and DESC
         // Both paths now support early termination with O(limit) memory

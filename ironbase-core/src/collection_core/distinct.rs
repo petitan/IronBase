@@ -176,6 +176,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Returns Some(values) if an index was found and used, None otherwise.
     /// This is O(index_entries) which is much faster than loading all documents.
     fn try_index_based_distinct(&self, field: &str) -> Result<Option<Vec<Value>>> {
+        // The index has no null / missing / object values and holds arrays
+        // element by element: it gives the scan's answer only if it holds
+        // every document once under a scalar key (audit 2026-10-07 Q13)
+        if !self.field_index_covers_every_doc(field) {
+            return Ok(None);
+        }
         let indexes = self.indexes.read();
 
         // Find an index that covers this field (single-field index, not compound)
