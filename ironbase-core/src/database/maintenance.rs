@@ -276,6 +276,10 @@ impl DatabaseCore<StorageEngine> {
     /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
+        // 0. Batch mode: acknowledged inserts still in the buffer go to the
+        // WAL and storage first, so the checkpoint covers them
+        self.flush_pending_writes()?;
+
         // 1. Flush all indexes to disk first (like MongoDB's checkpoint)
         let (indexes_flushed, watermark) = self.flush_all_indexes_with_watermark()?;
 
@@ -315,7 +319,12 @@ impl DatabaseCore<StorageEngine> {
     /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn close(&self) -> Result<()> {
-        // Mark as closed FIRST to prevent new operations
+        // Batch mode: persist the acknowledged-but-buffered inserts while the
+        // database is still open (the flush persists through collection
+        // handles, which refuse a closed database)
+        self.flush_pending_writes()?;
+
+        // Mark as closed to prevent new operations
         self.is_closed.store(true, Ordering::SeqCst);
 
         // Checkpoint: flush indexes + metadata + clear WAL
@@ -870,6 +879,19 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             return;
         }
 
+        // 0. Batch mode: persist the acknowledged-but-buffered inserts (WAL
+        // first). On failure leave everything for WAL recovery, like a crash.
+        if let Err(e) = self.flush_pending_writes() {
+            log_warn!(
+                "Failed to flush batch on drop, leaving WAL for recovery: {}",
+                e
+            );
+            if let Some(mut storage) = self.storage.try_write() {
+                storage.abandon_shutdown();
+            }
+            return;
+        }
+
         // 1. Flush all indexes to disk (B+ tree + fulltext + fuzzy + vector).
         // If that fails, the shutdown must not clear the WAL or be marked
         // clean: the next open would trust the stale index files (audit
@@ -886,9 +908,6 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
         }
 
         // 3. Flush storage (metadata + sync)
-        // Note: Batch mode pending operations are NOT flushed here because
-        // flush_batch() requires StorageEngine-specific methods.
-        // For full safety in Batch mode, always call close() explicitly.
         if let Some(mut storage) = self.storage.try_write() {
             if let Err(e) = storage.flush() {
                 log_warn!("Failed to flush storage on drop: {}", e);

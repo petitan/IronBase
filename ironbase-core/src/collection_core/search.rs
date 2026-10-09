@@ -129,6 +129,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         threshold: Option<f64>,
         algorithm: Option<FuzzyAlgorithm>,
     ) -> Result<Vec<(Value, f64)>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let indexes = self.indexes.read();
 
@@ -178,6 +180,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         limit: Option<usize>,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f64)>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let indexes = self.indexes.read();
 
@@ -243,6 +247,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query: &str,
         options: FuzzySearchOptions,
     ) -> Result<Vec<FuzzySearchResult>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Build execution context from options
@@ -581,6 +587,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         min_score: Option<f64>,
         projection: Option<HashMap<String, i32>>,
     ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let indexes = self.indexes.read();
 
@@ -652,6 +660,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<FulltextSearchResultExt>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Build execution context from options
@@ -906,6 +916,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<FulltextSearchResultExt>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Single field → delegate to existing method

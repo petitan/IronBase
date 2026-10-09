@@ -78,11 +78,10 @@ fn memory_handle_sees_every_write() {
 }
 
 #[test]
-fn file_handle_sees_every_write_safe_and_unsafe() {
-    // Batch mode is left out: its buffered inserts are not visible to find
-    // until the batch is flushed, cache or no cache (separate issue)
+fn file_handle_sees_every_write_in_every_durability_mode() {
     for mode in [
         DurabilityMode::Safe,
+        DurabilityMode::Batch { batch_size: 100 },
         DurabilityMode::Unsafe {
             auto_checkpoint_ops: None,
         },

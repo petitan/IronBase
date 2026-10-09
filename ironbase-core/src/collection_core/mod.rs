@@ -206,6 +206,7 @@ mod cursor;
 mod distinct;
 mod index_ops;
 mod index_persistence;
+mod pending_writes;
 mod query_executor;
 mod raw_operations;
 pub(crate) mod schema;
@@ -236,6 +237,7 @@ pub(crate) use self::index_persistence::{
     build_btree_index_file_path, build_fulltext_index_file_path, build_fuzzy_index_file_path,
     persist_index_to_disk, try_load_fulltext_index_from_file, try_load_fuzzy_index_from_file,
 };
+pub(crate) use self::pending_writes::PendingWrites;
 use self::schema::CompiledSchema;
 pub(crate) use self::update_operators::{parse_each_modifier, push_with_modifiers};
 
@@ -286,6 +288,9 @@ pub struct CollectionCore<S: Storage + RawStorage> {
     schema: Arc<RwLock<Option<CompiledSchema>>>,
     /// Reference to database closed flag - prevents writes after db.close()
     is_closed: Arc<AtomicBool>,
+    /// Acknowledged writes not in storage yet (Batch mode), flushed before
+    /// every read so reads see them. `None` outside Batch mode.
+    pending_writes: Option<Arc<dyn PendingWrites<S>>>,
 }
 
 impl<S: Storage + RawStorage> CollectionCore<S> {
@@ -619,6 +624,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema: Arc::new(RwLock::new(compiled_schema)),
             is_closed,
+            pending_writes: None,
         })
     }
 
@@ -635,6 +641,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         indexes: Arc<RwLock<IndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
         query_cache: Arc<QueryCache>,
+        pending_writes: Option<Arc<dyn PendingWrites<S>>>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
         // Ensure collection exists
@@ -652,6 +659,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             query_cache, // Shared!
             schema,      // Shared!
             is_closed,
+            pending_writes, // Shared!
         })
     }
 
@@ -667,6 +675,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         indexes: Arc<RwLock<IndexManager>>,
         schema: Arc<RwLock<Option<CompiledSchema>>>,
         query_cache: Arc<QueryCache>,
+        pending_writes: Option<Arc<dyn PendingWrites<S>>>,
         is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
         // Verify collection exists (READ lock only)
@@ -684,7 +693,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             query_cache, // Shared!
             schema,      // Shared!
             is_closed,
+            pending_writes, // Shared!
         })
+    }
+
+    /// Unique-index validator for this collection's buffered Batch-mode
+    /// inserts (see `BatchDocBuffer::check_and_track_keys`).
+    pub(crate) fn new_batch_validator(&self) -> BatchConstraintValidator {
+        BatchConstraintValidator::new(&self.indexes.read(), &self.name)
+    }
+
+    /// Flush this collection's acknowledged-but-buffered writes (Batch mode)
+    /// so the read that follows sees them. Cheap no-op outside Batch mode or
+    /// with nothing pending. Called at the top of every public read entry.
+    pub(crate) fn flush_pending_writes(&self) -> Result<()> {
+        match &self.pending_writes {
+            Some(pending) if pending.has_pending(&self.name) => pending.flush_for_read(self),
+            _ => Ok(()),
+        }
     }
 
     /// Check if database is closed - prevents writes after db.close()
@@ -842,6 +868,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// For large collections, consider using find_streaming() instead.
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         log_debug!("find() called with query: {:?}", query_json);
 
@@ -886,6 +914,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Validate projection early — fail fast before query execution
@@ -1192,6 +1222,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         options: crate::find_options::FindOptions,
     ) -> Result<crate::find_options::FindResult> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         let include_total = options.include_total;
 
         // Get documents with options
@@ -1229,6 +1261,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// }
     /// ```
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let storage = self.storage.read();
         if storage.get_file_path().is_empty() {
@@ -1300,6 +1334,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         cancel_flag: Option<&Arc<AtomicBool>>,
         deadline: Option<std::time::Instant>,
     ) -> Result<FindCursor<'_, S>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let storage = self.storage.read();
         if storage.get_file_path().is_empty() {
@@ -1399,6 +1435,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Option<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // FAST PATH: _id equality / $in by catalog lookup. Any other `_id`
@@ -1460,6 +1498,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         options: crate::find_options::FindOptions,
     ) -> Result<Option<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         // Get the document using existing find_one logic
         let doc = self.find_one(query_json)?;
 

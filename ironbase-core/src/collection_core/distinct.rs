@@ -49,6 +49,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// into memory at once - causing OOM on large collections (e.g., 21GB emails).
     /// Now uses collect_doc_ids + streaming read - only IDs in memory, docs loaded one by one.
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         // Delegate to ctx version with no context
         self.distinct_with_ctx(field, query_json, None)
     }
@@ -63,6 +65,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Handle _id query optimization

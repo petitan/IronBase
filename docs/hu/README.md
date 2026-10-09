@@ -388,7 +388,9 @@ db = IronBase("app.mlite")
 ```python
 db = IronBase("app.mlite", durability="batch", batch_size=100)
 ```
-- **Korlátozott vesztés** - Max `batch_size` művelet veszhet el
+- **Korlátozott vesztés** - Max `batch_size` művelet veszhet el (csak crash esetén; `close()`, `checkpoint()` és a drop kiüríti a puffert)
+- **Read your writes** - Az olvasás előbb kiüríti a collection pufferét, így minden nyugtázott insertet lát
+- A duplikált `_id` / unique kulcs már beszúráskor hibát ad
 - ~500 ops/sec
 - Használat: Logok, analitika, session tracking
 

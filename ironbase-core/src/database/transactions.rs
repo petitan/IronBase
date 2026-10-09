@@ -285,6 +285,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             if let Some(tx) = active.get_mut(&tx_id) {
                 tx.mark_write_lock_acquired();
             }
+            drop(active);
+
+            // Batch mode: persist buffered inserts now, while we hold the lock
+            // exclusively. No auto-commit can buffer more until the lock is
+            // released, so reads inside the transaction never need to flush
+            // (and never wait for this transaction's own lock).
+            if let Err(e) = self.flush_pending_writes_all() {
+                self.release_write_lock(tx_id);
+                return Err(e);
+            }
         }
         acquired
     }
@@ -336,28 +346,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         &self,
         timeout: std::time::Duration,
     ) -> Result<super::AutoWriteGuard<'_>> {
-        let mut lock = self.write_transaction_lock.lock();
-
-        loop {
-            if lock.holder.is_none() && lock.tx_waiting == 0 {
-                lock.auto_writers += 1;
-                return Ok(super::AutoWriteGuard {
-                    state: &self.write_transaction_lock,
-                    condvar: &self.write_lock_condvar,
-                });
-            }
-
-            // Wait for release_write_lock() to notify us, or timeout
-            let wait_result = self.write_lock_condvar.wait_for(&mut lock, timeout);
-            if wait_result.timed_out() {
-                return Err(IronBaseError::TransactionAborted(format!(
-                    "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
-                    timeout,
-                    lock.holder.map_or("unknown".to_string(), |h| h.to_string())
-                )));
-            }
-            // Condvar woke us — loop back to check if lock is now free
-        }
+        super::enter_auto_write_on(
+            &self.write_transaction_lock,
+            &self.write_lock_condvar,
+            timeout,
+        )
     }
 
     // ========== ACD Transaction API ==========

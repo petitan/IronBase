@@ -145,6 +145,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Uses QueryPlanner for index optimization when available.
     /// Performance optimized: Uses streaming count without Vec allocation for scans.
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Fast path: empty query = count all (O(1))
@@ -172,6 +174,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         ctx: Option<&ExecutionContext>,
     ) -> Result<u64> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Fast path: empty query = count all (O(1))

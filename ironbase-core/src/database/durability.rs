@@ -213,17 +213,7 @@ impl DatabaseCore<StorageEngine> {
     /// is allocated and registered under one lock, so a later id can never be
     /// committed and stamped while this one is allocated but unregistered.
     pub(crate) fn begin_auto_transaction(&self) -> (Transaction, super::InFlightTx<'_>) {
-        let mut in_flight = self.in_flight_tx_ids.lock();
-        let tx_id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
-        in_flight.insert(tx_id);
-        drop(in_flight);
-        (
-            Transaction::new(tx_id),
-            super::InFlightTx {
-                set: &self.in_flight_tx_ids,
-                tx_id,
-            },
-        )
+        super::begin_auto_tx(&self.next_tx_id, &self.in_flight_tx_ids)
     }
 
     /// Commit auto-transaction with WAL and fsync
@@ -255,23 +245,6 @@ impl DatabaseCore<StorageEngine> {
         // Monotonic fetch_max is safe under concurrent commits.
         self.max_committed_tx_id.fetch_max(tx_id, Ordering::SeqCst);
 
-        Ok(())
-    }
-
-    /// Commit auto-transaction for batch mode (skip file sync)
-    /// WAL is synced for durability, but file sync is deferred to batch end.
-    pub(crate) fn commit_auto_transaction_batch(&self, mut transaction: Transaction) -> Result<()> {
-        let mut storage = self.storage.write();
-        let tx_id = transaction.id;
-        storage.commit_transaction_batch(&mut transaction)?;
-        self.max_committed_tx_id.fetch_max(tx_id, Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// Sync the database file to disk (for batch mode)
-    pub(crate) fn sync_storage_file(&self) -> Result<()> {
-        let mut storage = self.storage.write();
-        storage.sync_file()?;
         Ok(())
     }
 
@@ -311,75 +284,7 @@ impl DatabaseCore<StorageEngine> {
     ///    d) Clear buffers
     ///    e) Sync storage file
     pub(crate) fn flush_batch(&self) -> Result<()> {
-        let mut batch = self.batch_buffer.write();
-        let mut doc_buffer = self.batch_doc_buffer.write();
-
-        // Nothing to flush
-        if batch.is_empty() && doc_buffer.is_empty() {
-            return Ok(());
-        }
-
-        // 1. Create auto-transaction with all WAL operations
-        // Hold the persist gate until the storage write is done, so a
-        // checkpoint cannot clear this commit from the WAL before then.
-        let _persist_gate = self.persist_gate.read();
-        let (mut auto_tx, _in_flight) = self.begin_auto_transaction();
-        let tx_id = auto_tx.id;
-
-        for op in batch.iter() {
-            auto_tx.add_operation(op.clone())?;
-        }
-
-        // Mark as already_applied - we'll persist ourselves after WAL commit
-        // This prevents commit_transaction from calling apply_operations()
-        auto_tx.mark_operations_applied();
-
-        // 2. WAL COMMIT FIRST (atomic point)
-        // This writes BEGIN + OPERATIONS + COMMIT to WAL and fsyncs
-        self.commit_auto_transaction_batch(auto_tx)?;
-
-        // 3. PERSIST all buffered operations to storage
-        // At this point, if we crash, recovery will replay from WAL
-        if let Err(e) = self.persist_buffered_operations(&mut doc_buffer) {
-            // Persist failed → write ABORT to WAL
-            // This ensures recovery will skip this transaction
-            if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
-                tracing::warn!(
-                    tx_id = tx_id,
-                    error = %abort_err,
-                    "Failed to write WAL ABORT entry after persist failure — recovery may replay this transaction"
-                );
-            }
-            return Err(e);
-        }
-
-        // 4. Clear buffers
-        batch.clear();
-        let previous_bytes = doc_buffer.memory_bytes;
-        doc_buffer.clear_and_shrink_if_large(previous_bytes);
-
-        // 5. Sync storage file (one fsync per batch - key optimization)
-        drop(batch);
-        drop(doc_buffer);
-        self.sync_storage_file()?;
-
-        Ok(())
-    }
-
-    /// Persist all buffered operations to storage (WAL ORDERING FIX)
-    ///
-    /// Called after WAL commit in flush_batch() to write the buffered inserts
-    /// (the only buffered operation; see `BatchDocBuffer`).
-    fn persist_buffered_operations(&self, doc_buffer: &mut super::BatchDocBuffer) -> Result<()> {
-        // 1. Persist inserts (_one)
-        for (collection_name, prepared_docs) in doc_buffer.inserts.drain() {
-            let collection = self.collection(&collection_name)?;
-            for prepared in prepared_docs {
-                collection.insert_one_persist(prepared)?;
-            }
-        }
-
-        Ok(())
+        self.flush_pending_writes_all()
     }
 
     /// Add operation to batch buffer (for Batch mode)
@@ -492,10 +397,9 @@ impl DatabaseCore<StorageEngine> {
                 // WAL-FIRST BATCH MODE: Guaranteed crash safety
                 //
                 // Documents are buffered and only persisted AFTER WAL commit.
-                // This means documents are NOT visible until flush_batch() is called.
-                //
-                // Trade-off: Delayed visibility for guaranteed durability.
-                // Use Safe mode if you need immediate read-after-write.
+                // A read through any collection handle flushes that
+                // collection's buffer first (PendingWrites), so reads still
+                // see every acknowledged insert.
 
                 let collection = self.collection(collection_name)?;
 
@@ -506,9 +410,16 @@ impl DatabaseCore<StorageEngine> {
                 let doc_id = prepared.doc_id.clone();
                 let wal_doc = prepared.wal_doc.clone();
 
-                // 3. BUFFER phase: store prepared doc for later persist
+                // 3. BUFFER phase: store prepared doc for later persist. A
+                // duplicate `_id` / unique key of a buffered insert is
+                // rejected now (prepare checks storage and indexes only).
                 {
                     let mut doc_buffer = self.batch_doc_buffer.write();
+                    doc_buffer.check_and_track_keys(
+                        collection_name,
+                        std::slice::from_ref(&prepared),
+                        || collection.new_batch_validator(),
+                    )?;
                     doc_buffer.add_insert(collection_name.to_string(), prepared);
                 }
 
@@ -1005,26 +916,35 @@ impl DatabaseCore<StorageEngine> {
                     .map(|p| (p.doc_id.clone(), p.wal_doc.clone()))
                     .collect();
 
-                // 3. BUFFER phase: store each prepared doc for later persist
+                // 3. BUFFER phase: store each prepared doc for later persist,
+                // rejecting (all-or-nothing) a duplicate of a buffered insert.
                 // InsertManyPrepared contains Vec<InsertOnePrepared>, so we buffer individually
                 {
                     let mut doc_buffer = self.batch_doc_buffer.write();
+                    doc_buffer.check_and_track_keys(
+                        collection_name,
+                        &prepared.prepared_docs,
+                        || collection.new_batch_validator(),
+                    )?;
                     for prep in prepared.prepared_docs {
                         doc_buffer.add_insert(collection_name.to_string(), prep);
                     }
                 }
 
-                // 4. Add all WAL operations to batch buffer
+                // 4. Add ALL WAL operations to the batch buffer before any
+                // flush: a flush persists every buffered document, so flushing
+                // midway would persist documents whose WAL operation is not
+                // committed yet (breaking WAL-first ordering)
+                let mut should_flush = false;
                 for (doc_id, wal_doc) in wal_entries {
-                    let should_flush = self.add_to_batch(Operation::Insert {
+                    should_flush |= self.add_to_batch(Operation::Insert {
                         collection: collection_name.to_string(),
                         doc_id,
                         doc: wal_doc,
                     })?;
-
-                    if should_flush {
-                        self.flush_batch()?;
-                    }
+                }
+                if should_flush {
+                    self.flush_batch()?;
                 }
 
                 // 5. Check if memory limit exceeded (early flush trigger)
