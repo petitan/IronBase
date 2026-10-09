@@ -812,13 +812,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let Some(pending) = &self.pending_writes else {
             return Ok(());
         };
-        pending.flush_all(&mut |name, prepared| {
-            let collection = self.collection(name)?;
-            for p in prepared {
-                collection.insert_one_persist(p)?;
-            }
-            Ok(())
-        })
+        pending.flush_all(
+            &mut |name, prepared| {
+                self.collection(name)?
+                    .insert_one_persist(prepared)
+                    .map(|_| ())
+            },
+            &mut |name, doc_id| self.collection(name)?.remove_document_by_id(doc_id),
+        )
     }
 
     /// `flush_pending_writes_all` for a caller that does not hold the write

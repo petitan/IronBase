@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Batch flush is all or nothing (mcp-server v1.0.568)
+
+Follow-up of the 2026-10-08 Batch-mode audit (item B).
+
+- **Root cause:** a flush commits the batch's WAL transaction, then persists
+  the documents one by one. When one failed (I/O error, or a document whose
+  `_id` / unique key was taken meanwhile by a path that bypasses the buffer),
+  the flush wrote a WAL ABORT and stopped — but the documents it had already
+  persisted stayed in storage and the indexes. Storage then disagreed with the
+  WAL (recovery skips the transaction) and the rest of the batch was gone.
+- **Fix:** `BatchFlusher::flush` persists per document and, on a failure,
+  removes the documents it already persisted (`remove_document_by_id`:
+  tombstone + de-index), then writes the ABORT. Storage, indexes and WAL
+  recovery agree that the batch did not happen; the error is returned.
+
+Regression test: `database::batch_flush::tests::persist_failure_rolls_back_the_whole_flush`.
+
 ### Fixed — `$pull` with a document condition is a query on each element (mcp-server v1.0.567)
 
 Follow-up of audit 2026-10-07 (O2/O3 left `$pull` out).

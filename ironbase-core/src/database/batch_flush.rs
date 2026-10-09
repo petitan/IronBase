@@ -8,6 +8,7 @@
 
 use super::{begin_auto_tx, try_enter_auto_write_now, BatchDocBuffer, WriteLockState};
 use crate::collection_core::{CollectionCore, InsertOnePrepared, PendingWrites, RawOperations};
+use crate::document::DocumentId;
 use crate::error::Result;
 use crate::storage::StorageEngine;
 use crate::transaction::Operation;
@@ -33,11 +34,17 @@ impl BatchFlusher {
     /// holding their WAL operations is committed (WAL fsync = atomic point),
     /// then the documents are persisted through `persist`, then the file is
     /// synced. `only` restricts the flush to one collection; the others stay
-    /// buffered. On a persist failure the transaction is aborted in the WAL.
+    /// buffered.
+    ///
+    /// All or nothing: if a document fails to persist, the documents this
+    /// flush already persisted are removed again (`rollback`) and the
+    /// transaction is aborted in the WAL, so storage, indexes and WAL
+    /// recovery agree that none of it happened.
     pub(crate) fn flush(
         &self,
         only: Option<&str>,
-        persist: &mut dyn FnMut(&str, Vec<InsertOnePrepared>) -> Result<()>,
+        persist: &mut dyn FnMut(&str, InsertOnePrepared) -> Result<()>,
+        rollback: &mut dyn FnMut(&str, &DocumentId) -> Result<()>,
     ) -> Result<()> {
         let mut batch = self.batch_buffer.write();
         let mut doc_buffer = self.doc_buffer.write();
@@ -82,17 +89,34 @@ impl BatchFlusher {
 
         // 3. PERSIST the buffered documents. A crash from here on is replayed
         // from the WAL.
+        let mut persisted: Vec<(String, DocumentId)> = Vec::new();
         for (name, prepared) in docs {
-            if let Err(e) = persist(&name, prepared) {
-                // Persist failed → write ABORT so recovery skips this transaction
-                if let Err(abort_err) = self.storage.write().write_abort_entry(tx_id) {
-                    tracing::warn!(
-                        tx_id = tx_id,
-                        error = %abort_err,
-                        "Failed to write WAL ABORT entry after persist failure — recovery may replay this transaction"
-                    );
+            for p in prepared {
+                let doc_id = p.doc_id.clone();
+                if let Err(e) = persist(&name, p) {
+                    // Undo this flush's persisted documents, then ABORT so
+                    // recovery skips the transaction too
+                    for (coll, id) in persisted.iter().rev() {
+                        if let Err(undo_err) = rollback(coll, id) {
+                            tracing::warn!(
+                                tx_id = tx_id,
+                                collection = %coll,
+                                doc_id = ?id,
+                                error = %undo_err,
+                                "Failed to roll back a persisted document of a failed batch flush"
+                            );
+                        }
+                    }
+                    if let Err(abort_err) = self.storage.write().write_abort_entry(tx_id) {
+                        tracing::warn!(
+                            tx_id = tx_id,
+                            error = %abort_err,
+                            "Failed to write WAL ABORT entry after persist failure — recovery may replay this transaction"
+                        );
+                    }
+                    return Err(e);
                 }
-                return Err(e);
+                persisted.push((name.clone(), doc_id));
             }
         }
 
@@ -120,9 +144,10 @@ impl PendingWrites<StorageEngine> for BatchFlusher {
 
     fn flush_all(
         &self,
-        persist: &mut dyn FnMut(&str, Vec<InsertOnePrepared>) -> Result<()>,
+        persist: &mut dyn FnMut(&str, InsertOnePrepared) -> Result<()>,
+        rollback: &mut dyn FnMut(&str, &DocumentId) -> Result<()>,
     ) -> Result<()> {
-        self.flush(None, persist)
+        self.flush(None, persist, rollback)
     }
 
     fn flush_for_read(&self, collection: &CollectionCore<StorageEngine>) -> Result<()> {
@@ -133,11 +158,69 @@ impl PendingWrites<StorageEngine> for BatchFlusher {
         else {
             return Ok(());
         };
-        self.flush(Some(&collection.name), &mut |_, prepared| {
-            for p in prepared {
-                collection.insert_one_persist(p)?;
-            }
-            Ok(())
-        })
+        self.flush(
+            Some(&collection.name),
+            &mut |_, prepared| collection.insert_one_persist(prepared).map(|_| ()),
+            &mut |_, doc_id| collection.remove_document_by_id(doc_id),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::collection_core::RawOperations;
+    use crate::durability::DurabilityMode;
+    use crate::storage::StorageEngine;
+    use crate::DatabaseCore;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    fn f(d: Value) -> HashMap<String, Value> {
+        d.as_object().unwrap().clone().into_iter().collect()
+    }
+
+    fn ids(db: &DatabaseCore<StorageEngine>) -> Vec<i64> {
+        let mut v: Vec<i64> = db
+            .find("c", &json!({}))
+            .unwrap()
+            .iter()
+            .map(|d| d["_id"].as_i64().unwrap())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A persist failure in the middle of a flush leaves no half-applied
+    /// batch: the documents already persisted by that flush are rolled back,
+    /// so storage matches the WAL ABORT, before and after a reopen.
+    #[test]
+    fn persist_failure_rolls_back_the_whole_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.mlite");
+        let open = || {
+            DatabaseCore::<StorageEngine>::open_with_durability(
+                &path,
+                DurabilityMode::Batch { batch_size: 100 },
+            )
+            .unwrap()
+        };
+        {
+            let db = open();
+            db.insert_one("c", f(json!({"_id": 1}))).unwrap();
+            db.insert_one("c", f(json!({"_id": 5}))).unwrap();
+            // A write that bypasses the buffer takes _id 5 first, so the
+            // flush fails on the second buffered document
+            db.collection("c")
+                .unwrap()
+                .insert_one_raw(f(json!({"_id": 5, "raw": true})))
+                .unwrap();
+            assert!(db.flush_batch().is_err());
+            assert_eq!(ids(&db), vec![5]);
+            db.close().unwrap();
+        }
+        let db = open();
+        assert_eq!(ids(&db), vec![5]);
+        let five = db.find_one("c", &json!({"_id": 5})).unwrap().unwrap();
+        assert_eq!(five["raw"], json!(true));
     }
 }

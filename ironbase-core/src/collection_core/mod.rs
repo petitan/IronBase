@@ -1737,6 +1737,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// tombstone, then removes the document from indexes — all in one critical
     /// section. Lock order is storage→indexes (#75), matching `update_one_prepare`.
     ///
+    /// Remove one document by its stored id (tombstone + de-index), without
+    /// WAL. Used to roll back the documents a failed Batch-mode flush had
+    /// already persisted, after which the flush's WAL transaction is aborted.
+    pub(crate) fn remove_document_by_id(&self, doc_id: &DocumentId) -> Result<()> {
+        if self.tombstone_doc_atomic(doc_id, None)?.is_some() {
+            self.query_cache.invalidate_collection(&self.name);
+        }
+        Ok(())
+    }
+
     /// Returns the pre-delete document value, or `None` if the id was missing, was
     /// already tombstoned, or (when `query` is given) no longer matches — e.g. a
     /// concurrent writer won the race. Returning `None` instead of blindly writing
