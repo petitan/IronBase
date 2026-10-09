@@ -31,6 +31,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ])).unwrap();
     /// ```
     pub fn aggregate(&self, pipeline_json: &Value) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.aggregate_with_limits(
             pipeline_json,
             crate::aggregation::AggregationLimits::default(),
@@ -66,6 +68,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         pipeline_json: &Value,
         limits: crate::aggregation::AggregationLimits,
     ) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         let ctx = crate::aggregation::AggregationLimitContext::new(limits);
         self.aggregate_with_context_internal(pipeline_json, &ctx)
     }
@@ -91,6 +95,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// let results = collection.aggregate_with_limits(&pipeline, limits)?;
     /// ```
     pub fn aggregate_auto(&self, pipeline_json: &Value) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         let limits = crate::aggregation::AggregationLimits::from_system_memory();
         self.aggregate_with_limits(pipeline_json, limits)
     }
@@ -124,6 +130,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         pipeline_json: &Value,
         ctx: &crate::aggregation::AggregationLimitContext,
     ) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.aggregate_with_context_internal(pipeline_json, ctx)
     }
 

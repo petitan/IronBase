@@ -440,6 +440,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_vector: &[f32],
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Find the vector index metadata
@@ -507,6 +509,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         filter: &Value,
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         // Find the vector index metadata

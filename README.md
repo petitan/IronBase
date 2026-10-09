@@ -309,7 +309,11 @@ All changes are journaled to WAL before commit. On crash, uncommitted transactio
 | **Unsafe** | Manual | 50K-100K ops/sec | Since last checkpoint |
 
 In Batch mode only inserts are buffered; an update or delete first flushes the
-pending inserts and then commits immediately, like Safe mode.
+pending inserts and then commits immediately, like Safe mode. Reads see every
+acknowledged insert: a read flushes the collection's pending inserts first, so
+interleaving reads and writes on the same collection gives up part of the
+batching gain. A duplicate `_id` or unique key is rejected at insert time, and
+`checkpoint()`, `close()` and dropping the database flush the buffer.
 
 ```python
 # Python

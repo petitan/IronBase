@@ -34,6 +34,7 @@ use serde_json::Value;
 /// ```
 ///
 /// FIX #19: Now properly handles compound unique indexes by tracking all field values
+#[derive(Debug)]
 pub struct BatchConstraintValidator {
     /// Maps index_name -> Set of already-seen values (as serialized key strings)
     pending_values: HashMap<String, HashSet<String>>,
@@ -122,6 +123,22 @@ impl BatchConstraintValidator {
                     "Duplicate key in batch: {:?} in field(s) '{}' (unique index)",
                     key_values, fields_str
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// All-or-nothing `check_and_track` for several documents: either every
+    /// document is unique (against the tracked values and each other) and all
+    /// are tracked, or nothing is tracked and the first duplicate is returned.
+    pub fn check_and_track_all(&mut self, docs: &[&Value]) -> Result<()> {
+        let mut trial = self.pending_values.clone();
+        std::mem::swap(&mut self.pending_values, &mut trial);
+        for doc in docs {
+            if let Err(e) = self.check_and_track(doc) {
+                // restore the state from before this call
+                self.pending_values = trial;
+                return Err(e);
             }
         }
         Ok(())

@@ -106,6 +106,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// For sort/skip/limit/projection support, use `find_with_hint_ext` instead.
     pub fn find_with_hint(&self, query_json: &Value, hint: &str) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         let parsed_query = Query::from_json(query_json)?;
 
         // Verify hint index exists
@@ -166,6 +168,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         hint: &str,
         options: FindOptions,
     ) -> Result<Vec<Value>> {
+        // Batch mode: see the inserts acknowledged before this call
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
 
         let parsed_query = Query::from_json(query_json)?;
@@ -456,6 +460,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         unique: bool,
         sparse: bool,
     ) -> Result<String> {
+        // Batch mode: index (and unique-check) the buffered inserts too
+        self.flush_pending_writes()?;
         if fields.is_empty() {
             return Err(IronBaseError::IndexError(
                 "Compound index must have at least one field".to_string(),
@@ -611,6 +617,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// * `unique` - Whether values must be unique
     /// * `sparse` - If true, documents missing the field are not indexed
     pub fn create_index(&self, field: String, unique: bool, sparse: bool) -> Result<String> {
+        // Batch mode: index (and unique-check) the buffered inserts too
+        self.flush_pending_writes()?;
         self.check_not_closed()?;
         let index_name = format!("{}_{}", self.name, field);
 

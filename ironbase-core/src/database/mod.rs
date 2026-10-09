@@ -41,6 +41,7 @@
 //! - [`maintenance`] - Flush, compact, close, checkpoint operations
 //! - [`transactions`] - Transaction begin/commit/rollback, write lock management
 
+mod batch_flush;
 mod collections;
 mod durability;
 mod maintenance;
@@ -55,7 +56,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
-use crate::collection_core::InsertOnePrepared;
+use crate::collection_core::{
+    BatchConstraintValidator, InsertOnePrepared, PendingWrites, RawOperations,
+};
+use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
@@ -84,6 +88,19 @@ pub struct BatchDocBuffer {
     pub(crate) inserts: HashMap<String, Vec<InsertOnePrepared>>,
     /// Approximate memory usage in bytes
     pub(crate) memory_bytes: usize,
+    /// Per collection: `_id`s and unique-index keys of the buffered inserts.
+    /// `insert_*_prepare` checks storage and the indexes only, which do not
+    /// hold buffered documents yet; without this a duplicate was acknowledged
+    /// and later failed the whole flush, losing other acknowledged inserts
+    /// (audit 2026-10-08).
+    pub(crate) keys: HashMap<String, BufferedKeys>,
+}
+
+/// `_id`s and unique-index keys of one collection's buffered inserts.
+#[derive(Debug)]
+pub(crate) struct BufferedKeys {
+    ids: std::collections::HashSet<DocumentId>,
+    unique: BatchConstraintValidator,
 }
 
 impl BatchDocBuffer {
@@ -92,6 +109,7 @@ impl BatchDocBuffer {
         Self {
             inserts: HashMap::new(),
             memory_bytes: 0,
+            keys: HashMap::new(),
         }
     }
 
@@ -103,12 +121,56 @@ impl BatchDocBuffer {
     /// Clear all buffered documents
     pub fn clear(&mut self) {
         self.inserts.clear();
+        self.keys.clear();
         self.memory_bytes = 0;
+    }
+
+    /// Reject inserts whose `_id` or unique-index key duplicates a buffered
+    /// insert of the same collection (or each other); otherwise remember
+    /// their keys. All-or-nothing. `validator` builds the collection's
+    /// unique-index validator when the collection has nothing buffered.
+    pub(crate) fn check_and_track_keys(
+        &mut self,
+        collection: &str,
+        docs: &[InsertOnePrepared],
+        validator: impl FnOnce() -> BatchConstraintValidator,
+    ) -> Result<()> {
+        let keys = self
+            .keys
+            .entry(collection.to_string())
+            .or_insert_with(|| BufferedKeys {
+                ids: std::collections::HashSet::new(),
+                unique: validator(),
+            });
+        let mut new_ids = std::collections::HashSet::with_capacity(docs.len());
+        for p in docs {
+            if keys.ids.contains(&p.doc_id) || !new_ids.insert(&p.doc_id) {
+                return Err(IronBaseError::IndexError(format!(
+                    "Duplicate key: {:?} (unique index)",
+                    p.doc_id
+                )));
+            }
+        }
+        let values: Vec<&serde_json::Value> = docs.iter().map(|p| p.wal_doc.as_ref()).collect();
+        keys.unique.check_and_track_all(&values)?;
+        keys.ids.extend(docs.iter().map(|p| p.doc_id.clone()));
+        Ok(())
+    }
+
+    /// Remove and return one collection's buffered inserts (and keys).
+    pub(crate) fn take_collection(&mut self, collection: &str) -> Vec<InsertOnePrepared> {
+        self.keys.remove(collection);
+        let taken = self.inserts.remove(collection).unwrap_or_default();
+        if self.inserts.is_empty() {
+            self.memory_bytes = 0;
+        }
+        taken
     }
 
     /// Shrink internal buffers to release memory back to the allocator.
     pub fn shrink_to_fit(&mut self) {
         self.inserts.shrink_to_fit();
+        self.keys.shrink_to_fit();
     }
 
     /// Clear buffers and optionally shrink if recent usage was high.
@@ -217,6 +279,72 @@ pub(crate) struct AutoWriteGuard<'a> {
     condvar: &'a Condvar,
 }
 
+/// Enter an auto-commit write on the write-lock state: wait while an explicit
+/// transaction holds the lock or waits for it, then hold it shared until the
+/// guard drops. Shared by `DatabaseCore::enter_auto_write_with_timeout` and
+/// the Batch-mode read flush.
+pub(crate) fn enter_auto_write_on<'a>(
+    state: &'a Mutex<WriteLockState>,
+    condvar: &'a Condvar,
+    timeout: std::time::Duration,
+) -> Result<AutoWriteGuard<'a>> {
+    let mut lock = state.lock();
+    loop {
+        if lock.holder.is_none() && lock.tx_waiting == 0 {
+            lock.auto_writers += 1;
+            return Ok(AutoWriteGuard { state, condvar });
+        }
+
+        // Wait for release_write_lock() to notify us, or timeout
+        let wait_result = condvar.wait_for(&mut lock, timeout);
+        if wait_result.timed_out() {
+            return Err(IronBaseError::TransactionAborted(format!(
+                "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
+                timeout,
+                lock.holder.map_or("unknown".to_string(), |h| h.to_string())
+            )));
+        }
+        // Condvar woke us — loop back to check if lock is now free
+    }
+}
+
+/// Hold the write lock shared for a Batch-mode read flush without waiting:
+/// `None` while an explicit transaction holds it. A transaction flushes the
+/// batch when it takes the lock and no insert can be buffered while it holds
+/// it, so then there is nothing to flush. Never waiting (not even for a
+/// waiting transaction) means a read issued while the caller already holds an
+/// auto-write guard cannot deadlock.
+pub(crate) fn try_enter_auto_write_now<'a>(
+    state: &'a Mutex<WriteLockState>,
+    condvar: &'a Condvar,
+) -> Option<AutoWriteGuard<'a>> {
+    let mut lock = state.lock();
+    if lock.holder.is_some() {
+        return None;
+    }
+    lock.auto_writers += 1;
+    Some(AutoWriteGuard { state, condvar })
+}
+
+/// Allocate an auto-transaction id and register it as in flight under one
+/// lock (see `DatabaseCore::begin_auto_transaction`).
+pub(crate) fn begin_auto_tx<'a>(
+    next_tx_id: &AtomicU64,
+    in_flight_tx_ids: &'a Mutex<std::collections::BTreeSet<u64>>,
+) -> (Transaction, InFlightTx<'a>) {
+    let mut in_flight = in_flight_tx_ids.lock();
+    let tx_id = next_tx_id.fetch_add(1, Ordering::SeqCst);
+    in_flight.insert(tx_id);
+    drop(in_flight);
+    (
+        Transaction::new(tx_id),
+        InFlightTx {
+            set: in_flight_tx_ids,
+            tx_id,
+        },
+    )
+}
+
 impl Drop for AutoWriteGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.state.lock();
@@ -245,18 +373,18 @@ impl Drop for InFlightTx<'_> {
 pub struct DatabaseCore<S: Storage + RawStorage> {
     pub(crate) storage: Arc<RwLock<S>>,
     pub(crate) db_path: String,
-    pub(crate) next_tx_id: AtomicU64,
+    pub(crate) next_tx_id: Arc<AtomicU64>,
     /// Watermark for WAL-based index recovery: tx_id of the most recent
     /// transaction whose commit has been acknowledged (WAL fsynced and
     /// Operations applied to storage + in-memory indexes). Monotonically
     /// non-decreasing. Used by periodic index flushes to stamp
     /// `last_flushed_tx_id` into the index file metadata so that on
     /// crash recovery, only ops with `tx_id > watermark` need replay.
-    pub(crate) max_committed_tx_id: AtomicU64,
+    pub(crate) max_committed_tx_id: Arc<AtomicU64>,
     /// Auto-transaction ids that were begun but whose writes are not yet
     /// persisted to storage and the indexes. The index watermark never passes
     /// the smallest of them (audit 2026-10-06 #10). See `InFlightTx`.
-    pub(crate) in_flight_tx_ids: Mutex<std::collections::BTreeSet<u64>>,
+    pub(crate) in_flight_tx_ids: Arc<Mutex<std::collections::BTreeSet<u64>>>,
     /// Watermark of the last successful `flush_all_indexes*` pass: every
     /// index change of a transaction `<=` it is in the index files. A WAL
     /// clear keeps the entries after it (`checkpoint_wal_only`), because
@@ -266,7 +394,7 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     /// done, and exclusively by every path that clears the WAL, so a WAL clear
     /// never drops the only durable record of a committed write that is not
     /// in storage yet (audit 2026-10-06 #8).
-    pub(crate) persist_gate: RwLock<()>,
+    pub(crate) persist_gate: Arc<RwLock<()>>,
     pub(crate) active_transactions:
         Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
 
@@ -294,6 +422,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Shared query result cache (fixes stale query result problem): keyed and
     // invalidated per collection, shared by all CollectionCore instances
     pub(crate) query_cache: Arc<QueryCache>,
+
+    // Batch mode: flushes the acknowledged-but-buffered inserts of a
+    // collection before a read through any CollectionCore handle (read your
+    // writes). `None` outside Batch mode (nothing is ever buffered).
+    pub(crate) pending_writes: Option<Arc<dyn PendingWrites<S>>>,
 
     // Transaction-level write lock for Read Committed isolation: one write
     // transaction at a time (exclusive), auto-commit writes shared. See
@@ -480,14 +613,14 @@ impl DatabaseCore<StorageEngine> {
         // and recover_from_wal() properly updates it for any recovered operations.
 
         // Create DatabaseCore instance with specified mode
-        let db = DatabaseCore {
+        let mut db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
             db_path: path_str,
-            next_tx_id: AtomicU64::new(initial_watermark.saturating_add(1)),
-            max_committed_tx_id: AtomicU64::new(initial_watermark),
-            in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            next_tx_id: Arc::new(AtomicU64::new(initial_watermark.saturating_add(1))),
+            max_committed_tx_id: Arc::new(AtomicU64::new(initial_watermark)),
+            in_flight_tx_ids: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             index_flush_watermark: AtomicU64::new(0),
-            persist_gate: RwLock::new(()),
+            persist_gate: Arc::new(RwLock::new(())),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -495,6 +628,7 @@ impl DatabaseCore<StorageEngine> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            pending_writes: None,
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
@@ -505,6 +639,22 @@ impl DatabaseCore<StorageEngine> {
             last_compact_size: AtomicU64::new(stored_compact_size),
             recovered_operations: Arc::new(RwLock::new(recovered_ops_by_collection)),
         };
+
+        // Batch mode: every handle flushes its collection's buffered inserts
+        // before a read (read your writes)
+        if matches!(mode, DurabilityMode::Batch { .. }) {
+            db.pending_writes = Some(Arc::new(batch_flush::BatchFlusher {
+                storage: Arc::clone(&db.storage),
+                batch_buffer: Arc::clone(&db.batch_buffer),
+                doc_buffer: Arc::clone(&db.batch_doc_buffer),
+                persist_gate: Arc::clone(&db.persist_gate),
+                next_tx_id: Arc::clone(&db.next_tx_id),
+                in_flight_tx_ids: Arc::clone(&db.in_flight_tx_ids),
+                max_committed_tx_id: Arc::clone(&db.max_committed_tx_id),
+                write_transaction_lock: Arc::clone(&db.write_transaction_lock),
+                write_lock_condvar: Arc::clone(&db.write_lock_condvar),
+            }));
+        }
 
         // Apply recovered index changes to collections
         // Group index changes by collection name
@@ -625,11 +775,11 @@ impl DatabaseCore<MemoryStorage> {
         Ok(DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
             db_path: String::new(), // No file path for memory storage
-            next_tx_id: AtomicU64::new(1),
-            max_committed_tx_id: AtomicU64::new(0),
-            in_flight_tx_ids: Mutex::new(std::collections::BTreeSet::new()),
+            next_tx_id: Arc::new(AtomicU64::new(1)),
+            max_committed_tx_id: Arc::new(AtomicU64::new(0)),
+            in_flight_tx_ids: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             index_flush_watermark: AtomicU64::new(0),
-            persist_gate: RwLock::new(()),
+            persist_gate: Arc::new(RwLock::new(())),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(),
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -637,6 +787,7 @@ impl DatabaseCore<MemoryStorage> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            pending_writes: None,
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(Mutex::new(WriteLockState::default())),
             write_lock_condvar: Arc::new(Condvar::new()),
@@ -655,6 +806,35 @@ impl DatabaseCore<MemoryStorage> {
 // ============================================================================
 
 impl<S: Storage + RawStorage> DatabaseCore<S> {
+    /// Flush every buffered Batch-mode insert (WAL commit, then storage).
+    /// No-op outside Batch mode. The caller holds the write lock.
+    pub(crate) fn flush_pending_writes_all(&self) -> Result<()> {
+        let Some(pending) = &self.pending_writes else {
+            return Ok(());
+        };
+        pending.flush_all(&mut |name, prepared| {
+            let collection = self.collection(name)?;
+            for p in prepared {
+                collection.insert_one_persist(p)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `flush_pending_writes_all` for a caller that does not hold the write
+    /// lock (checkpoint, close, drop): holds it shared for the flush. While an
+    /// explicit transaction holds it there is nothing buffered (the
+    /// transaction flushed when it took the lock), so the flush is skipped.
+    pub(crate) fn flush_pending_writes(&self) -> Result<()> {
+        if self.pending_writes.is_none() {
+            return Ok(());
+        }
+        match try_enter_auto_write_now(&self.write_transaction_lock, &self.write_lock_condvar) {
+            Some(_auto_write) => self.flush_pending_writes_all(),
+            None => Ok(()),
+        }
+    }
+
     /// Check if database is closed, return error if so
     pub(crate) fn check_not_closed(&self) -> Result<()> {
         if self.is_closed.load(Ordering::SeqCst) {

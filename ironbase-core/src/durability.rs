@@ -57,6 +57,10 @@ pub enum DurabilityMode {
     /// - Bounded data loss (max N inserts)
     /// - Updates and deletes first flush the pending batch, then commit
     ///   immediately like Safe mode (consistent with the buffered inserts)
+    /// - Reads see every acknowledged insert: a read through any collection
+    ///   handle flushes that collection's pending inserts first
+    /// - A duplicate `_id` / unique key of a pending insert is rejected at once
+    /// - `checkpoint()`, `close()` and drop flush the pending inserts
     /// - Good balance of safety and performance
     Batch {
         /// Number of operations before auto-commit

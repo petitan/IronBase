@@ -1427,6 +1427,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             shared_indexes,
             shared_schema,
             Arc::clone(&self.query_cache),
+            self.pending_writes.clone(),
             Arc::clone(&self.is_closed),
         )
     }
@@ -1463,6 +1464,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         shared_indexes,
                         shared_schema,
                         Arc::clone(&self.query_cache),
+                        self.pending_writes.clone(),
                         Arc::clone(&self.is_closed),
                     );
                 }
@@ -1477,6 +1479,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             shared_indexes,
             shared_schema,
             Arc::clone(&self.query_cache),
+            self.pending_writes.clone(),
             Arc::clone(&self.is_closed),
         )
     }

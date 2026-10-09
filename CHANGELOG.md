@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Batch mode: read your writes, no lost acknowledged inserts (mcp-server v1.0.565)
+
+Audit 2026-10-08 (found while fixing Q6).
+
+- **Data loss (high):** a buffered insert was checked against storage and the
+  indexes only, not against the other buffered inserts. A duplicate `_id` or
+  unique key was acknowledged (`Ok`), and the next flush failed: the WAL
+  transaction was aborted after part of the batch was already in storage, and
+  the rest of the batch — other acknowledged inserts — was lost. The error
+  surfaced on an unrelated later write. Now `BatchDocBuffer::check_and_track_keys`
+  rejects the duplicate at insert time (all-or-nothing for `insert_many`).
+- **Data loss (high):** `close()`, `checkpoint()` and dropping the database did
+  not flush the buffer: acknowledged inserts still buffered were silently
+  dropped on a clean shutdown. All three flush it now (before closing).
+- **Read your writes:** buffered inserts were invisible to every read until
+  the batch filled. Every `CollectionCore` handle now holds the database's
+  `PendingWrites` (Batch mode only) and its read entry points (`find*`,
+  `count_documents*`, `distinct*`, `aggregate*`, fuzzy/fulltext/vector search,
+  `find_with_hint*`) flush that collection's pending inserts first — WAL
+  first, then storage. Index creation flushes too. A transaction flushes the
+  batch when it takes the write lock.
+- `insert_many` over the batch size flushed midway after buffering every
+  document but before adding all WAL operations — documents could be
+  persisted ahead of their WAL commit. All WAL operations are added first now.
+- Refactor: the flush lives in `database/batch_flush.rs` (`BatchFlusher`),
+  shared by `DatabaseCore::flush_batch` and the per-collection read flush;
+  `enter_auto_write_on` / `begin_auto_tx` are shared helpers.
+- Speed (release, same machine): pure Batch inserts unchanged (~37K ops/s);
+  interleaved insert + read on the same collection pays a flush per read.
+
+Regression tests: `tests/batch_mode_read_your_writes_tests.rs`; Batch mode
+added to `shared_query_cache_tests.rs`; `test_auto_commit::test_batch_mode`
+updated to the new visibility contract.
+
 ### Fixed — Query cache shared per database: no stale results on a kept handle (mcp-server v1.0.564)
 
 Audit 2026-10-07 Q6.
