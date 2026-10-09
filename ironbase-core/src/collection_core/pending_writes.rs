@@ -7,6 +7,7 @@
 //! write acknowledged before it ("read your writes", audit 2026-10-08).
 
 use super::{CollectionCore, InsertOnePrepared};
+use crate::document::DocumentId;
 use crate::error::Result;
 use crate::storage::{RawStorage, Storage};
 
@@ -18,11 +19,13 @@ pub(crate) trait PendingWrites<S: Storage + RawStorage>: Send + Sync {
     /// the WAL and persist them through `collection`.
     fn flush_for_read(&self, collection: &CollectionCore<S>) -> Result<()>;
 
-    /// Flush every collection's pending writes; `persist` writes one
-    /// collection's documents to storage after the WAL commit. The caller
+    /// Flush every collection's pending writes; `persist` writes one document
+    /// to storage after the WAL commit, `rollback` removes a persisted one
+    /// again when a later one fails (the flush is all or nothing). The caller
     /// holds the write lock (an auto-write guard or a transaction's lock).
     fn flush_all(
         &self,
-        persist: &mut dyn FnMut(&str, Vec<InsertOnePrepared>) -> Result<()>,
+        persist: &mut dyn FnMut(&str, InsertOnePrepared) -> Result<()>,
+        rollback: &mut dyn FnMut(&str, &DocumentId) -> Result<()>,
     ) -> Result<()>;
 }
