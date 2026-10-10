@@ -143,18 +143,9 @@ pub fn compare_docs_by_sort(a: &Value, b: &Value, sort: &[(String, i32)]) -> Ord
         let a_val = value_utils::get_nested_value(a, field);
         let b_val = value_utils::get_nested_value(b, field);
 
-        // Match find_options::apply_sort EXACTLY: missing < present, compatible
-        // types use the core comparator, and incompatible/mixed types fall back to
-        // a stable type rank. This must agree with the full in-memory sort, or the
-        // top-k heap would evict the wrong documents on a mixed-type field (P1-5).
-        let cmp = match (a_val, b_val) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(av), Some(bv)) => value_utils::compare_values(av, bv).unwrap_or_else(|| {
-                value_utils::type_priority(av).cmp(&value_utils::type_priority(bv))
-            }),
-        };
+        // Same total order as find_options::apply_sort, or the top-k heap
+        // would evict the wrong documents on a mixed-type field (P1-5).
+        let cmp = value_utils::compare_for_sort(a_val, b_val);
 
         if cmp != Ordering::Equal {
             // Reverse comparison for descending order

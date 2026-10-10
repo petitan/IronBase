@@ -8,7 +8,7 @@
 
 use crate::aggregation::types::{SortDirection, SortStage};
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{compare_values as compare_values_core, get_nested_value};
+use crate::value_utils::{compare_for_sort, get_nested_value};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -61,8 +61,7 @@ impl PartialOrd for SortableDoc {
 impl Ord for SortableDoc {
     fn cmp(&self, other: &Self) -> Ordering {
         for i in 0..self.sort_keys.len() {
-            let cmp =
-                compare_optional_values(self.sort_keys[i].as_ref(), other.sort_keys[i].as_ref());
+            let cmp = compare_values(self.sort_keys[i].as_ref(), other.sort_keys[i].as_ref());
 
             // Apply direction
             let cmp = if self.directions[i] {
@@ -156,11 +155,11 @@ impl SortStage {
                     SortDirection::Descending => cmp.reverse(),
                 };
 
-                if cmp != std::cmp::Ordering::Equal {
+                if cmp != Ordering::Equal {
                     return cmp;
                 }
             }
-            std::cmp::Ordering::Equal
+            Ordering::Equal
         });
 
         Ok(docs)
@@ -215,23 +214,7 @@ impl SortStage {
     }
 }
 
-/// Compare optional values for SortableDoc (used by Ord impl)
-fn compare_optional_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (Some(a_val), Some(b_val)) => compare_values_core(a_val, b_val).unwrap_or(Ordering::Equal),
-    }
-}
-
-fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
-    match (a, b) {
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(a_val), Some(b_val)) => {
-            compare_values_core(a_val, b_val).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    }
+/// Compare optional values: the total order `find` sorts with (A2)
+fn compare_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
+    compare_for_sort(a, b)
 }
