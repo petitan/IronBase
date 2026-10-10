@@ -118,3 +118,40 @@ fn match_after_group_on_any_id_type() {
         .unwrap();
     assert!(no_id.is_empty(), "{no_id:?}");
 }
+
+/// A3: a multi-key $sort applies its keys in the order written, not in
+/// alphabetical order (serde_json `preserve_order`).
+#[test]
+fn multi_key_sort_keeps_key_order() {
+    let db = db_with(&[
+        json!({"n": 1, "a": 2, "b": 1}),
+        json!({"n": 2, "a": 1, "b": 2}),
+        json!({"n": 3, "a": 1, "b": 1}),
+    ]);
+    let c = db.collection("c").unwrap();
+    let pipeline: Value = serde_json::from_str(r#"[{"$sort": {"b": 1, "a": 1}}]"#).unwrap();
+    let full = c.aggregate(&pipeline).unwrap();
+    assert_eq!(values(&full, "n"), vec![json!(3), json!(1), json!(2)]);
+    let pipeline: Value =
+        serde_json::from_str(r#"[{"$sort": {"b": 1, "a": 1}}, {"$limit": 2}]"#).unwrap();
+    let top = c.aggregate(&pipeline).unwrap();
+    assert_eq!(values(&top, "n"), vec![json!(3), json!(1)]);
+}
+
+/// With `preserve_order`, `$unset` of a nested field keeps the order of the
+/// remaining fields (`Map::remove` would be a swap_remove).
+#[test]
+fn unset_keeps_nested_field_order() {
+    let db =
+        db_with(&[serde_json::from_str(r#"{"_id": 1, "o": {"a": 1, "b": 2, "c": 3}}"#).unwrap()]);
+    db.update_one("c", &json!({"_id": 1}), &json!({"$unset": {"o.a": ""}}))
+        .unwrap();
+    let doc = db
+        .collection("c")
+        .unwrap()
+        .find(&json!({"_id": 1}))
+        .unwrap()
+        .remove(0);
+    let keys: Vec<&String> = doc["o"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["b", "c"]);
+}

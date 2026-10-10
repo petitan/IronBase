@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.371"
+version = "0.3.372"
 edition = "2021"
 authors = ["Petitan"]
 repository = "https://github.com/petitan/IronBase"
@@ -24,7 +24,7 @@ license = "MIT"
 [workspace.dependencies]
 # Shared dependencies
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 parking_lot = "0.12"
 ahash = "0.8"

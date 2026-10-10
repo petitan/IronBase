@@ -139,7 +139,7 @@ pub(crate) fn lift_common_fields(chunks: &mut [Value]) -> serde_json::Map<String
     for chunk in chunks.iter_mut() {
         if let Value::Object(obj) = chunk {
             for key in lifted.keys() {
-                obj.remove(key);
+                obj.shift_remove(key);
             }
         }
     }

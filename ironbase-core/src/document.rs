@@ -416,7 +416,7 @@ impl Document {
 
         if parts.len() == 1 {
             match current {
-                Value::Object(map) => map.remove(parts[0]),
+                Value::Object(map) => map.shift_remove(parts[0]),
                 Value::Array(arr) => {
                     if let Ok(index) = parts[0].parse::<usize>() {
                         if index < arr.len() {

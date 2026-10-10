@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — multi-key `$sort` keeps its key order (mcp-server v1.0.570)
+
+Audit 2026-10-07 A3.
+
+- **Root cause:** without serde_json's `preserve_order` feature a JSON
+  object is a `BTreeMap`, so `{$sort: {b: 1, a: 1}}` already had its keys in
+  alphabetical order when the pipeline was parsed: it sorted by `a`, then `b`.
+- **Fix:** the workspace enables `preserve_order` (`serde_json::Map` is an
+  `IndexMap`). Object keys keep the order they were written in: the `$sort`
+  keys, and fields of nested objects in stored and returned documents.
+  Top-level document fields still go through `Document.fields` (a `HashMap`).
+  Map equality stays order-independent.
+- Field removals use `shift_remove` (`$unset`, `delete_nested_value`,
+  upsert `$unset`, `_collection` stripping, hybrid chunk metadata lifting):
+  under `preserve_order`, `Map::remove` is a `swap_remove` and would move the
+  last field into the removed one's place.
+
+Regression tests: `multi_key_sort_keeps_key_order`,
+`unset_keeps_nested_field_order` in `tests/aggregation_sort_match_tests.rs`.
+
 ### Fixed — aggregation `$sort` on mixed types, `$match` after `$group` (mcp-server v1.0.569)
 
 Audit 2026-10-07 A1, A2.

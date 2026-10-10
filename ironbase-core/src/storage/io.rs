@@ -145,7 +145,7 @@ pub(crate) fn mark_document_collection<'a>(
         // wherever it is, then mark as usual.
         match serde_json::from_slice::<serde_json::Value>(data)? {
             serde_json::Value::Object(mut map) => {
-                map.remove("_collection");
+                map.shift_remove("_collection");
                 Cow::Owned(serde_json::to_vec(&serde_json::Value::Object(map))?)
             }
             _ => return Ok(Cow::Borrowed(data)),
