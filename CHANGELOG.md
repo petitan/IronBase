@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — aggregation `$sort` on mixed types, `$match` after `$group` (mcp-server v1.0.569)
+
+Audit 2026-10-07 A1, A2.
+
+- **A2 root cause:** the aggregation `$sort` compared values of different
+  types as equal. That comparator is not transitive (`1 = "a"`, `"a" = 2`,
+  but `1 < 2`), so the order was wrong and `sort_by` may panic on an
+  inconsistent comparator; objects never sorted.
+- **A2 fix:** one total order, `value_utils::compare_for_sort`, used by the
+  `find` sort, the `find` top-k heap and the aggregation `$sort` (full and
+  top-k): missing < null < numbers < strings < bools < objects < arrays, the
+  order `find` already had; objects compare field by field.
+- **A1 root cause:** `$match` built its Document with `Document::from_value`,
+  which requires an int/string `_id`: after `$group` with an object, null or
+  float `_id` it failed with a deserialization error. A document without
+  `_id` got a fake `_id: 0`, so `{_id: 0}` matched it.
+- **A1 fix:** the matcher gets the document's fields as they are.
+
+Regression tests: `tests/aggregation_sort_match_tests.rs`.
+
 ### Fixed — Batch flush is all or nothing (mcp-server v1.0.568)
 
 Follow-up of the 2026-10-08 Batch-mode audit (item B).

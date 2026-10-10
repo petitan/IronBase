@@ -460,6 +460,33 @@ pub fn compare_values_with_none(a: Option<&Value>, b: Option<&Value>) -> Orderin
     }
 }
 
+/// Total order for sorting one field: missing < present; same-type values
+/// by `compare_values`; objects field by field (name, then value, then the
+/// shorter object first); arrays equal to each other; other mixed types by
+/// `type_priority`. Shared by the `find` sort, the `find` top-k heap and the
+/// aggregation `$sort` so all of them order the same field identically — and
+/// a total order, which `sort_by` requires (an inconsistent comparator can
+/// panic, audit 2026-10-07 A2).
+pub fn compare_for_sort(a: Option<&Value>, b: Option<&Value>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(Value::Object(x)), Some(Value::Object(y))) => x
+            .iter()
+            .zip(y.iter())
+            .map(|((ka, va), (kb, vb))| {
+                ka.cmp(kb)
+                    .then_with(|| compare_for_sort(Some(va), Some(vb)))
+            })
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| x.len().cmp(&y.len())),
+        (Some(av), Some(bv)) => {
+            compare_values(av, bv).unwrap_or_else(|| type_priority(av).cmp(&type_priority(bv)))
+        }
+    }
+}
+
 /// Type-ordering rank for mixed-type sorting.
 ///
 /// When two values have incompatible types (`compare_values` returns `None`),

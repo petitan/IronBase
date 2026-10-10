@@ -2,10 +2,11 @@
 // $match stage implementation
 
 use crate::aggregation::types::MatchStage;
-use crate::document::Document;
+use crate::document::{Document, DocumentId};
 use crate::error::Result;
 use crate::query::Query;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Dynamic threshold for parallel processing based on available CPU cores.
 /// Returns `usize::MAX` on single-core (rayon overhead > benefit).
@@ -32,19 +33,16 @@ impl MatchStage {
     ///
     /// Used for streaming execution where we filter documents one at a time.
     pub(crate) fn matches(&self, doc: &Value) -> Result<bool> {
-        // Add _id if not present (for aggregation intermediate results)
-        let doc_with_id = if doc.get("_id").is_none() {
-            let mut doc_obj = doc.clone();
-            if let Value::Object(ref mut map) = doc_obj {
-                map.insert("_id".to_string(), Value::from(0)); // Temporary _id
-            }
-            doc_obj
-        } else {
-            doc.clone()
+        // An intermediate result's `_id` can be any value ($group: object,
+        // null, float) or absent ($project). The matcher reads the fields, so
+        // build the Document from them as they are; `Document::from_value`
+        // would require an int/string `_id` (audit 2026-10-07 A1)
+        let Value::Object(obj) = doc else {
+            return Ok(false);
         };
-
-        // Convert Value directly to Document (no JSON roundtrip)
-        let document = Document::from_value(&doc_with_id)?;
+        let fields: HashMap<String, Value> =
+            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let document = Document::new(DocumentId::Int(0), fields);
 
         self.query.matches(&document)
     }

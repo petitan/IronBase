@@ -2,10 +2,7 @@
 // Find query options: projection, sort, limit, skip
 
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{
-    compare_values as compare_values_core, delete_nested_value, get_nested_value, set_nested_value,
-    type_priority,
-};
+use crate::value_utils::{delete_nested_value, get_nested_value, set_nested_value};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -468,25 +465,9 @@ pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) -> Result<()> {
     Ok(())
 }
 
-/// Compare two JSON values for sorting
-/// BUG #2 FIX: Now uses compare_values_core which handles large integers correctly
+/// Compare two JSON values for sorting (shared total order)
 fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    match (a, b) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less, // null < any value
-        (Some(_), None) => Ordering::Greater,
-
-        // BUG #2 FIX: Use the core compare_values which doesn't lose precision
-        // for large integers (> 2^53)
-        (Some(a_val), Some(b_val)) => {
-            compare_values_core(a_val, b_val).unwrap_or_else(|| {
-                // Type priority fallback for incompatible types
-                type_priority(a_val).cmp(&type_priority(b_val))
-            })
-        }
-    }
+    crate::value_utils::compare_for_sort(a, b)
 }
 
 /// Apply limit and skip to documents
