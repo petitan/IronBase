@@ -95,6 +95,39 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
 
+    /// T2: while an index is built from a scan, writers record the documents
+    /// they change; the build skips those and re-adding an entry is a no-op.
+    #[test]
+    fn index_build_skips_documents_writers_touched() {
+        let mut tree = BPlusTree::new("u_idx".to_string(), "u".to_string(), true, false);
+        tree.begin_build();
+
+        // A writer updated doc 1 (old key 10 -> new key 11) before the scan
+        // reached it: the scan's older version is skipped
+        tree.delete(&IndexKey::Int(10), &DocumentId::Int(1))
+            .unwrap();
+        tree.insert(IndexKey::Int(11), DocumentId::Int(1)).unwrap();
+        tree.build_insert(IndexKey::Int(10), DocumentId::Int(1))
+            .unwrap();
+        assert_eq!(tree.search(&IndexKey::Int(10)), None);
+        assert_eq!(tree.search(&IndexKey::Int(11)), Some(DocumentId::Int(1)));
+
+        // The scan added doc 2, then the writer's own index update for the
+        // same insert arrives: no duplicate and no unique error
+        tree.build_insert(IndexKey::Int(20), DocumentId::Int(2))
+            .unwrap();
+        tree.insert(IndexKey::Int(20), DocumentId::Int(2)).unwrap();
+        assert_eq!(tree.size(), 2);
+
+        // A real duplicate is still an error
+        assert!(tree
+            .build_insert(IndexKey::Int(20), DocumentId::Int(3))
+            .is_err());
+
+        tree.end_build();
+        assert!(tree.insert(IndexKey::Int(20), DocumentId::Int(2)).is_err());
+    }
+
     #[test]
     fn test_index_key_ordering() {
         assert!(IndexKey::Null < IndexKey::Bool(false));
