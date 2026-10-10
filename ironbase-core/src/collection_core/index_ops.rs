@@ -481,6 +481,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut indexes = self.indexes.write();
         indexes.create_compound_index(index_name.clone(), fields.clone(), unique, sparse)?;
+        // Writers maintain the index while the scan below fills it (T2)
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.begin_build();
+        }
         drop(indexes); // Release index lock before batch scanning
 
         // Insert entries in batches to avoid full materialization (memory-safe).
@@ -491,84 +495,91 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut multikey_seen = false;
         let fields_clone = fields.clone();
         let collection_name = self.name.clone();
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
-            let mut indexes = self.indexes.write();
-            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
-                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
-            })?;
-            for (doc_id, doc) in batch_docs {
-                if !multikey_seen
-                    && fields_clone
-                        .iter()
-                        .any(|field| path_crosses_array(&doc, field))
-                {
-                    multikey_seen = true;
-                }
-                // Replicate extract_keys logic inline to avoid holding index lock
-                let mut field_values: Vec<Vec<IndexKey>> = Vec::with_capacity(fields_clone.len());
-                let mut missing_field = false;
-                let mut all_fields_exist = true;
-                for field in &fields_clone {
-                    let values = get_all_nested_values(&doc, field);
-                    if values.is_empty() {
-                        // Check if field actually exists (empty array vs truly missing)
-                        // Empty arrays should be indexed (field exists), missing fields should not
-                        let field_exists = get_nested_value(&doc, field).is_some();
-                        if !field_exists {
-                            missing_field = true;
-                            all_fields_exist = false;
-                        }
-                        field_values.push(vec![IndexKey::Null]);
-                    } else {
-                        field_values.push(values.into_iter().map(IndexKey::from).collect());
+        let scan =
+            self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+                let mut indexes = self.indexes.write();
+                let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                    IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+                })?;
+                for (doc_id, doc) in batch_docs {
+                    if !multikey_seen
+                        && fields_clone
+                            .iter()
+                            .any(|field| path_crosses_array(&doc, field))
+                    {
+                        multikey_seen = true;
                     }
-                }
-                if sparse && missing_field {
-                    total_scanned += 1;
-                    continue;
-                }
-
-                let mut combinations: Vec<Vec<IndexKey>> = vec![Vec::new()];
-                for values in field_values {
-                    let mut next = Vec::new();
-                    for prefix in &combinations {
-                        for value in &values {
-                            let mut key = prefix.clone();
-                            key.push(value.clone());
-                            next.push(key);
+                    // Replicate extract_keys logic inline to avoid holding index lock
+                    let mut field_values: Vec<Vec<IndexKey>> =
+                        Vec::with_capacity(fields_clone.len());
+                    let mut missing_field = false;
+                    let mut all_fields_exist = true;
+                    for field in &fields_clone {
+                        let values = get_all_nested_values(&doc, field);
+                        if values.is_empty() {
+                            // Check if field actually exists (empty array vs truly missing)
+                            // Empty arrays should be indexed (field exists), missing fields should not
+                            let field_exists = get_nested_value(&doc, field).is_some();
+                            if !field_exists {
+                                missing_field = true;
+                                all_fields_exist = false;
+                            }
+                            field_values.push(vec![IndexKey::Null]);
+                        } else {
+                            field_values.push(values.into_iter().map(IndexKey::from).collect());
                         }
                     }
-                    combinations = next;
-                }
-
-                let mut seen = std::collections::HashSet::new();
-                for keys in combinations {
-                    let index_key = IndexKey::Compound(keys);
-                    if !seen.insert(index_key.clone()) {
+                    if sparse && missing_field {
+                        total_scanned += 1;
                         continue;
                     }
-                    let is_null = IndexManager::is_key_all_null(&index_key);
-                    // For sparse index with all fields existing (even empty arrays), always index
-                    let should_index =
-                        (sparse && all_fields_exist) || !is_null || (unique && !sparse);
-                    if should_index {
-                        index.insert(index_key, doc_id.clone())?;
-                        indexed_entries += 1;
+
+                    let mut combinations: Vec<Vec<IndexKey>> = vec![Vec::new()];
+                    for values in field_values {
+                        let mut next = Vec::new();
+                        for prefix in &combinations {
+                            for value in &values {
+                                let mut key = prefix.clone();
+                                key.push(value.clone());
+                                next.push(key);
+                            }
+                        }
+                        combinations = next;
                     }
+
+                    let mut seen = std::collections::HashSet::new();
+                    for keys in combinations {
+                        let index_key = IndexKey::Compound(keys);
+                        if !seen.insert(index_key.clone()) {
+                            continue;
+                        }
+                        let is_null = IndexManager::is_key_all_null(&index_key);
+                        // For sparse index with all fields existing (even empty arrays), always index
+                        let should_index =
+                            (sparse && all_fields_exist) || !is_null || (unique && !sparse);
+                        if should_index {
+                            index.build_insert(index_key, doc_id.clone())?;
+                            indexed_entries += 1;
+                        }
+                    }
+                    total_scanned += 1;
                 }
-                total_scanned += 1;
-            }
-            // Log progress every PROGRESS_LOG_INTERVAL documents
-            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
-                tracing::info!(
-                    collection = %collection_name,
-                    scanned = total_scanned,
-                    indexed = indexed_entries,
-                    "Compound index build progress: scanning documents"
-                );
-            }
-            Ok(())
-        })?;
+                // Log progress every PROGRESS_LOG_INTERVAL documents
+                if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                    tracing::info!(
+                        collection = %collection_name,
+                        scanned = total_scanned,
+                        indexed = indexed_entries,
+                        "Compound index build progress: scanning documents"
+                    );
+                }
+                Ok(())
+            });
+        if let Err(e) = scan {
+            // A failed build (e.g. a real unique violation) leaves no index
+            let _ = self.indexes.write().drop_index(&index_name);
+            return Err(e);
+        }
 
         tracing::info!(
             collection = %self.name,
@@ -579,6 +590,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.end_build();
+        }
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             if multikey_seen {
                 index.metadata.multikey = true;
@@ -633,6 +647,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut indexes = self.indexes.write();
         indexes.create_btree_index(index_name.clone(), field.clone(), unique, sparse)?;
+        // Writers maintain the index while the scan below fills it (T2)
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.begin_build();
+        }
 
         // Release index lock before batch scanning
         drop(indexes);
@@ -645,62 +663,68 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut multikey_seen = false;
         let field_clone = field.clone();
         let collection_name = self.name.clone();
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
-            let mut indexes = self.indexes.write();
-            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
-                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
-            })?;
-            for (doc_id, doc) in batch_docs {
-                if !multikey_seen && path_crosses_array(&doc, &field_clone) {
-                    multikey_seen = true;
-                }
-                let values = get_all_nested_values(&doc, &field_clone);
-                if values.is_empty() {
-                    // Check if field actually exists (empty array vs truly missing)
-                    // Sparse index: skip only if field is truly missing, not for empty arrays
-                    let field_exists = get_nested_value(&doc, &field_clone).is_some();
-                    if sparse && !field_exists {
-                        total_scanned += 1;
-                        continue;
+        let scan =
+            self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+                let mut indexes = self.indexes.write();
+                let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                    IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+                })?;
+                for (doc_id, doc) in batch_docs {
+                    if !multikey_seen && path_crosses_array(&doc, &field_clone) {
+                        multikey_seen = true;
                     }
-                    let index_key = IndexKey::Null;
-                    // For sparse index with existing field (empty array), always index
-                    // For non-sparse: index null only if unique (to enforce uniqueness)
-                    let should_index = (sparse && field_exists)
-                        || !IndexManager::is_key_all_null(&index_key)
-                        || (unique && !sparse);
-                    if should_index {
-                        index.insert(index_key, doc_id.clone())?;
-                        indexed_entries += 1;
-                    }
-                } else {
-                    let mut seen = std::collections::HashSet::new();
-                    for value in values {
-                        let index_key = IndexKey::from(value);
-                        if !seen.insert(index_key.clone()) {
+                    let values = get_all_nested_values(&doc, &field_clone);
+                    if values.is_empty() {
+                        // Check if field actually exists (empty array vs truly missing)
+                        // Sparse index: skip only if field is truly missing, not for empty arrays
+                        let field_exists = get_nested_value(&doc, &field_clone).is_some();
+                        if sparse && !field_exists {
+                            total_scanned += 1;
                             continue;
                         }
-                        let should_index =
-                            !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
+                        let index_key = IndexKey::Null;
+                        // For sparse index with existing field (empty array), always index
+                        // For non-sparse: index null only if unique (to enforce uniqueness)
+                        let should_index = (sparse && field_exists)
+                            || !IndexManager::is_key_all_null(&index_key)
+                            || (unique && !sparse);
                         if should_index {
-                            index.insert(index_key, doc_id.clone())?;
+                            index.build_insert(index_key, doc_id.clone())?;
                             indexed_entries += 1;
                         }
+                    } else {
+                        let mut seen = std::collections::HashSet::new();
+                        for value in values {
+                            let index_key = IndexKey::from(value);
+                            if !seen.insert(index_key.clone()) {
+                                continue;
+                            }
+                            let should_index =
+                                !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
+                            if should_index {
+                                index.build_insert(index_key, doc_id.clone())?;
+                                indexed_entries += 1;
+                            }
+                        }
                     }
+                    total_scanned += 1;
                 }
-                total_scanned += 1;
-            }
-            // Log progress every PROGRESS_LOG_INTERVAL documents
-            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
-                tracing::info!(
-                    collection = %collection_name,
-                    scanned = total_scanned,
-                    indexed = indexed_entries,
-                    "Index build progress: scanning documents"
-                );
-            }
-            Ok(())
-        })?;
+                // Log progress every PROGRESS_LOG_INTERVAL documents
+                if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                    tracing::info!(
+                        collection = %collection_name,
+                        scanned = total_scanned,
+                        indexed = indexed_entries,
+                        "Index build progress: scanning documents"
+                    );
+                }
+                Ok(())
+            });
+        if let Err(e) = scan {
+            // A failed build (e.g. a real unique violation) leaves no index
+            let _ = self.indexes.write().drop_index(&index_name);
+            return Err(e);
+        }
 
         tracing::info!(
             collection = %self.name,
@@ -711,6 +735,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.end_build();
+        }
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             if multikey_seen {
                 index.metadata.multikey = true;
@@ -770,6 +797,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut indexes = self.indexes.write();
         indexes.create_btree_index_ci(index_name.clone(), field.clone(), unique)?;
+        // Writers maintain the index while the scan below fills it (T2)
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.begin_build();
+        }
 
         // Release index lock before batch scanning
         drop(indexes);
@@ -783,50 +814,56 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let field_clone = field.clone();
         let collection_name = self.name.clone();
 
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
-            let mut indexes = self.indexes.write();
-            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
-                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
-            })?;
-            for (doc_id, doc) in batch_docs {
-                if !multikey_seen && path_crosses_array(&doc, &field_clone) {
-                    multikey_seen = true;
-                }
-                let values = get_all_nested_values(&doc, &field_clone);
-                if values.is_empty() {
-                    // CI index is always sparse - skip missing values
-                    total_scanned += 1;
-                    continue;
-                } else {
-                    let mut seen = std::collections::HashSet::new();
-                    for value in values {
-                        // Lowercase string values for case-insensitive matching
-                        let index_key = match value {
-                            Value::String(s) => IndexKey::String(s.to_lowercase()),
-                            other => IndexKey::from(other),
-                        };
-                        if !seen.insert(index_key.clone()) {
-                            continue;
-                        }
-                        // Skip nulls - CI indexes are implicitly sparse
-                        if !IndexManager::is_key_all_null(&index_key) {
-                            index.insert(index_key, doc_id.clone())?;
-                            indexed_entries += 1;
+        let scan =
+            self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+                let mut indexes = self.indexes.write();
+                let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                    IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+                })?;
+                for (doc_id, doc) in batch_docs {
+                    if !multikey_seen && path_crosses_array(&doc, &field_clone) {
+                        multikey_seen = true;
+                    }
+                    let values = get_all_nested_values(&doc, &field_clone);
+                    if values.is_empty() {
+                        // CI index is always sparse - skip missing values
+                        total_scanned += 1;
+                        continue;
+                    } else {
+                        let mut seen = std::collections::HashSet::new();
+                        for value in values {
+                            // Lowercase string values for case-insensitive matching
+                            let index_key = match value {
+                                Value::String(s) => IndexKey::String(s.to_lowercase()),
+                                other => IndexKey::from(other),
+                            };
+                            if !seen.insert(index_key.clone()) {
+                                continue;
+                            }
+                            // Skip nulls - CI indexes are implicitly sparse
+                            if !IndexManager::is_key_all_null(&index_key) {
+                                index.build_insert(index_key, doc_id.clone())?;
+                                indexed_entries += 1;
+                            }
                         }
                     }
+                    total_scanned += 1;
                 }
-                total_scanned += 1;
-            }
-            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
-                tracing::info!(
-                    collection = %collection_name,
-                    scanned = total_scanned,
-                    indexed = indexed_entries,
-                    "CI index build progress: scanning documents"
-                );
-            }
-            Ok(())
-        })?;
+                if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                    tracing::info!(
+                        collection = %collection_name,
+                        scanned = total_scanned,
+                        indexed = indexed_entries,
+                        "CI index build progress: scanning documents"
+                    );
+                }
+                Ok(())
+            });
+        if let Err(e) = scan {
+            // A failed build (e.g. a real unique violation) leaves no index
+            let _ = self.indexes.write().drop_index(&index_name);
+            return Err(e);
+        }
 
         tracing::info!(
             collection = %self.name,
@@ -837,6 +874,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.end_build();
+        }
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             if multikey_seen {
                 index.metadata.multikey = true;
