@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `rename_collection` / `drop_collection` concurrent with writers (mcp-server v1.0.573)
+
+Audit 2026-10-07 T3.
+
+- **Root cause:** `rename_collection` (and both drops) took the persist gate
+  but not the collection's write lock. A writer that had looked up the
+  collection before the rename kept writing to the old `IndexManager`, which
+  the rename then discarded, so the new name's index (reloaded from the
+  flushed files) missed the change; the writer's WAL entry, written after the
+  rename cleared the WAL, named the old collection, and a crash recovery
+  resurrected it. Reproduced: an indexed document not found through the
+  renamed collection's index, and `["old", "new"]` after a crash.
+- **Fix:** rename and drop take the collection's write lock before the
+  persist gate (the order writers use), so they wait for the in-flight writer
+  and later writers get `CollectionNotFound`. The rename also moves the
+  collection's upsert lock to the new name.
+
+Regression test: `database::wal_replay_tests::rename_collection_concurrent_with_updates`.
+
 ### Fixed — explicit transactions after a crash: index replay and reopen (mcp-server v1.0.571)
 
 Audit 2026-10-07 T1, plus a reopen failure found while fixing it.
