@@ -28,6 +28,30 @@ Regression tests: `tests/index_build_concurrency_tests.rs` (a unique and a
 non-unique build under concurrent update/delete/insert; on master the first
 failed with `Duplicate key`, the second left ~20 phantom entries),
 `index::tests::index_build_skips_documents_writers_touched`.
+### Fixed — explicit transactions after a crash: index replay and reopen (mcp-server v1.0.571)
+
+Audit 2026-10-07 T1, plus a reopen failure found while fixing it.
+
+- **T1 root cause:** an explicit transaction got its tx_id at
+  `begin_transaction`, but its operations reach the WAL only at commit.
+  Auto-commits and a checkpoint in between could flush an index watermark
+  above that id; crash recovery replays only tx ids above the watermark, so it
+  skipped the transaction (reproduced: the transaction's vector was missing
+  from the HNSW index after a crash).
+- **T1 fix:** `commit_transaction` logs the transaction under an id taken at
+  commit, while it holds the write lock exclusively (no auto-commit running),
+  so the id is above every committed one. The caller's tx_id handle is
+  unchanged.
+- **Reopen failure (found while fixing T1, present on master):** a
+  transaction committed after the last checkpoint, then a crash: `open`
+  failed with `Duplicate key: ... (unique index)`. It applied the WAL's
+  recovered index changes with a plain `btree.insert`, and the loaded `_id`
+  index file already held the entry. The insert is now idempotent
+  (`delete` + `insert`, as `recovery::apply_op_to_btree` does).
+
+Regression tests (`database::wal_replay_tests`):
+`explicit_tx_begun_before_checkpoint_is_replayed_*` (fulltext, fuzzy, btree,
+vector), `explicit_tx_after_checkpoint_survives_crash`.
 
 ### Fixed — multi-key `$sort` keeps its key order (mcp-server v1.0.570)
 
