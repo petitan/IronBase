@@ -5270,7 +5270,7 @@ mod batch_mode_tests {
         let mut docs = db.collection("c").unwrap().find(&json!({})).unwrap();
         for doc in &mut docs {
             if let Some(map) = doc.as_object_mut() {
-                map.remove("_collection");
+                map.shift_remove("_collection");
             }
         }
         docs.sort_by_key(|d| d["_id"].to_string());

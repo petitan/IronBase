@@ -311,7 +311,7 @@ fn apply_unset(doc: &mut Map<String, Value>, path: &str) {
     let parts: Vec<&str> = path.split('.').collect();
 
     if parts.len() == 1 {
-        doc.remove(path);
+        doc.shift_remove(path);
     } else {
         let first = parts[0];
         let rest = parts[1..].join(".");

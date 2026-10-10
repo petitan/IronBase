@@ -288,7 +288,7 @@ pub fn delete_nested_value(doc: &mut Value, path: &str) -> bool {
     // Fast path: no dots means simple field deletion
     if !path.contains('.') {
         if let Value::Object(ref mut map) = doc {
-            return map.remove(path).is_some();
+            return map.shift_remove(path).is_some();
         }
         return false;
     }
@@ -324,7 +324,7 @@ pub fn delete_nested_value(doc: &mut Value, path: &str) -> bool {
     // Delete the final key/index
     let last_key = parts.last().unwrap();
     match current {
-        Value::Object(ref mut map) => map.remove(*last_key).is_some(),
+        Value::Object(ref mut map) => map.shift_remove(*last_key).is_some(),
         Value::Array(ref mut arr) => {
             if let Ok(index) = last_key.parse::<usize>() {
                 if index < arr.len() {
