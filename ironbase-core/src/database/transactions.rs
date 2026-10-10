@@ -35,6 +35,17 @@ impl DatabaseCore<StorageEngine> {
             })?
         };
 
+        // Log the transaction under an id taken now, not at begin_transaction
+        // (audit 2026-10-07 T1). Its operations reach the WAL only at commit;
+        // with the begin-time id, auto-commits and a checkpoint in between
+        // could flush an index watermark above it, and crash recovery
+        // (which replays only tx ids above the watermark) skipped the
+        // transaction. A transaction with operations holds the write lock
+        // exclusively here, so no auto-commit is running and this id is above
+        // every committed one. `tx_id` stays the caller's handle (write lock).
+        transaction.id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
+        let wal_tx_id = transaction.id;
+
         // Commit through storage engine
         let mut result = {
             let mut storage = self.storage.write();
@@ -58,7 +69,7 @@ impl DatabaseCore<StorageEngine> {
         // Advance watermark on successful commit (for WAL-replay index recovery)
         if result.is_ok() {
             self.max_committed_tx_id
-                .fetch_max(tx_id, std::sync::atomic::Ordering::SeqCst);
+                .fetch_max(wal_tx_id, std::sync::atomic::Ordering::SeqCst);
         }
 
         // Always release write lock (even on error to prevent deadlock)
