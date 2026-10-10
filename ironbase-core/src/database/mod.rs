@@ -679,6 +679,11 @@ impl DatabaseCore<StorageEngine> {
                     if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
                         match change.operation {
                             crate::transaction::IndexOperation::Insert => {
+                                // Idempotent like `recovery::apply_op_to_btree`:
+                                // the loaded index file may already hold this
+                                // entry, and a plain insert into a unique index
+                                // (`_id`) then failed the whole open
+                                btree_index.delete(&change.key, &change.doc_id)?;
                                 btree_index.insert(change.key.clone(), change.doc_id)?;
                             }
                             crate::transaction::IndexOperation::Delete => {
@@ -1862,6 +1867,200 @@ mod wal_replay_tests {
         assert_eq!(
             db.count_documents("docs", &serde_json::json!({})).unwrap(),
             15
+        );
+    }
+
+    /// Audit 2026-10-07 T1: an explicit transaction begun before other writes
+    /// and committed after a checkpoint must still reach the indexes after a
+    /// crash. With its begin-time tx_id it was below the flushed watermark and
+    /// the replay skipped it (the vector test below failed; the fulltext file
+    /// does not load on a dirty reopen today, so this one is rebuilt).
+    #[test]
+    fn explicit_tx_begun_before_checkpoint_is_replayed_after_crash() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("tx_watermark.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+
+            let tx_id = db.begin_transaction();
+            for i in 0..3 {
+                db.insert_one("docs", doc(&format!("a{}", i), "alpha document"))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            db.insert_one_tx("docs", doc("t", "gamma document"), tx_id)
+                .unwrap();
+            db.commit_transaction(tx_id).unwrap();
+
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        assert_eq!(
+            db.count_documents("docs", &serde_json::json!({})).unwrap(),
+            4
+        );
+        let gamma = coll
+            .fulltext_search("content", "gamma", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            gamma.len(),
+            1,
+            "transaction's document missing from the fulltext index"
+        );
+    }
+
+    /// T1 with a fuzzy index. (Today its file does not load on a dirty
+    /// reopen and the index is rebuilt from the documents; this guards the
+    /// result whichever path recovery takes.)
+    #[test]
+    fn explicit_tx_begun_before_checkpoint_is_replayed_into_fuzzy() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("tx_watermark_fz.mlite");
+        let name = |n: &str| {
+            let mut d = HashMap::new();
+            d.insert("name".to_string(), serde_json::json!(n));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            db.collection("names")
+                .unwrap()
+                .create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+            let tx_id = db.begin_transaction();
+            for n in &["Alice", "Bob", "Charles"] {
+                db.insert_one("names", name(n)).unwrap();
+            }
+            db.checkpoint().unwrap();
+            db.insert_one_tx("names", name("Zebulon"), tx_id).unwrap();
+            db.commit_transaction(tx_id).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let found = db
+            .collection("names")
+            .unwrap()
+            .find(&serde_json::json!({"name": {"$fuzzy": "Zebulon"}}))
+            .unwrap();
+        assert_eq!(
+            found.len(),
+            1,
+            "transaction's document missing from the fuzzy index"
+        );
+    }
+
+    /// T1 with a B+ tree index: its replay runs on every dirty reopen.
+    #[test]
+    fn explicit_tx_begun_before_checkpoint_is_replayed_into_btree() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("tx_watermark_bt.mlite");
+        let tagged = |t: &str| {
+            let mut d = HashMap::new();
+            d.insert("tag".to_string(), serde_json::json!(t));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            db.collection("c")
+                .unwrap()
+                .create_index("tag".to_string(), false, false)
+                .unwrap();
+            let tx_id = db.begin_transaction();
+            for t in &["a", "b", "c"] {
+                db.insert_one("c", tagged(t)).unwrap();
+            }
+            db.checkpoint().unwrap();
+            db.insert_one_tx("c", tagged("z"), tx_id).unwrap();
+            db.commit_transaction(tx_id).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(coll.find(&serde_json::json!({})).unwrap().len(), 4);
+        let found = coll.find(&serde_json::json!({"tag": "z"})).unwrap();
+        assert_eq!(
+            found.len(),
+            1,
+            "transaction's document missing from the B+ tree index"
+        );
+    }
+
+    /// T1 with a vector index.
+    #[test]
+    fn explicit_tx_begun_before_checkpoint_is_replayed_into_vector() {
+        use crate::vector::{DistanceMetric, VectorIndexConfig};
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("tx_watermark_vec.mlite");
+        let emb = |id: &str, v: [f32; 2]| {
+            let mut d = HashMap::new();
+            d.insert("n".to_string(), serde_json::json!(id));
+            d.insert("emb".to_string(), serde_json::json!(v));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let mut cfg = VectorIndexConfig::new(2);
+            cfg.field = "emb".to_string();
+            cfg.metric = DistanceMetric::Cosine;
+            db.collection("v")
+                .unwrap()
+                .create_vector_index("emb", cfg)
+                .unwrap();
+            let tx_id = db.begin_transaction();
+            db.insert_one("v", emb("a", [0.0, 1.0])).unwrap();
+            db.insert_one("v", emb("b", [-1.0, 0.0])).unwrap();
+            db.checkpoint().unwrap();
+            db.insert_one_tx("v", emb("t", [1.0, 0.0]), tx_id).unwrap();
+            db.commit_transaction(tx_id).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let results = db
+            .collection("v")
+            .unwrap()
+            .vector_search("emb", &[1.0, 0.0], 3)
+            .unwrap();
+        let ids: Vec<_> = results.iter().map(|(d, _)| d["n"].clone()).collect();
+        assert!(
+            ids.contains(&serde_json::json!("t")),
+            "transaction's vector missing: {ids:?}"
+        );
+    }
+
+    /// A transaction committed after the last checkpoint, then a crash: the
+    /// reopen must succeed and keep the document (its WAL index changes are
+    /// replayed into an `_id` index whose file may already hold the key).
+    #[test]
+    fn explicit_tx_after_checkpoint_survives_crash() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("tx_after_cp.mlite");
+        let tagged = |t: &str| {
+            let mut d = HashMap::new();
+            d.insert("tag".to_string(), serde_json::json!(t));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            db.insert_one("c", tagged("a")).unwrap();
+            db.checkpoint().unwrap();
+            let tx_id = db.begin_transaction();
+            db.insert_one_tx("c", tagged("z"), tx_id).unwrap();
+            db.commit_transaction(tx_id).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("c").unwrap();
+        assert_eq!(
+            coll.find(&serde_json::json!({"tag": "z"})).unwrap().len(),
+            1
         );
     }
 
