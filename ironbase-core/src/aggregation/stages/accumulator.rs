@@ -10,7 +10,9 @@ use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::helpers::{parse_field_reference, parse_value_expression};
 use crate::aggregation::types::{Accumulator, AccumulatorState, SumExpression, ValueExpression};
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{canonical_json_string, compare_values, get_nested_value, substr_string};
+use crate::value_utils::{
+    canonical_json_string, compare_for_sort, get_nested_value, substr_string,
+};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -54,27 +56,36 @@ fn expr_debug_name(expr: &ValueExpression) -> String {
 
 fn compute_extremum_expr(docs: &[Value], expr: &ValueExpression, is_min: bool) -> Result<Value> {
     let mut result: Option<Value> = None;
-
     for doc in docs {
         if let Some(value) = evaluate_value_expr(doc, expr) {
-            match &result {
-                None => result = Some(value),
-                Some(current) => {
-                    if compare_values(&value, current)
-                        == Some(if is_min {
-                            std::cmp::Ordering::Less
-                        } else {
-                            std::cmp::Ordering::Greater
-                        })
-                    {
-                        result = Some(value);
-                    }
-                }
-            }
+            fold_extremum(&mut result, value, is_min);
         }
     }
-
     Ok(result.unwrap_or(Value::Null))
+}
+
+/// Fold one value into a `$min`/`$max`. Null is ignored like a missing value
+/// (MongoDB), and mixed types follow the `$sort` order (`compare_for_sort`),
+/// so the result no longer sticks on a leading null or depends on the
+/// document order (audit 2026-10-07 A8).
+fn fold_extremum(current: &mut Option<Value>, value: Value, is_min: bool) {
+    if value.is_null() {
+        return;
+    }
+    let replace = match current {
+        None => true,
+        Some(c) => {
+            let order = compare_for_sort(Some(&value), Some(c));
+            if is_min {
+                order.is_lt()
+            } else {
+                order.is_gt()
+            }
+        }
+    };
+    if replace {
+        *current = Some(value);
+    }
 }
 
 impl Accumulator {
@@ -315,29 +326,13 @@ impl AccumulatorState {
 
             (AccumulatorState::Min { value: min_val }, Accumulator::Min(expr)) => {
                 if let Some(doc_val) = evaluate_value_expr(doc, expr) {
-                    match min_val {
-                        None => *min_val = Some(doc_val.clone()),
-                        Some(current) => {
-                            if compare_values(&doc_val, current) == Some(std::cmp::Ordering::Less) {
-                                *min_val = Some(doc_val.clone());
-                            }
-                        }
-                    }
+                    fold_extremum(min_val, doc_val, true);
                 }
             }
 
             (AccumulatorState::Max { value: max_val }, Accumulator::Max(expr)) => {
                 if let Some(doc_val) = evaluate_value_expr(doc, expr) {
-                    match max_val {
-                        None => *max_val = Some(doc_val.clone()),
-                        Some(current) => {
-                            if compare_values(&doc_val, current)
-                                == Some(std::cmp::Ordering::Greater)
-                            {
-                                *max_val = Some(doc_val.clone());
-                            }
-                        }
-                    }
+                    fold_extremum(max_val, doc_val, false);
                 }
             }
 
@@ -485,29 +480,13 @@ impl AccumulatorState {
 
             (AccumulatorState::Min { value: min_val }, Accumulator::Min(expr)) => {
                 if let Some(doc_val) = evaluate_value_expr(doc, expr) {
-                    match min_val {
-                        None => *min_val = Some(doc_val.clone()),
-                        Some(current) => {
-                            if compare_values(&doc_val, current) == Some(std::cmp::Ordering::Less) {
-                                *min_val = Some(doc_val.clone());
-                            }
-                        }
-                    }
+                    fold_extremum(min_val, doc_val, true);
                 }
             }
 
             (AccumulatorState::Max { value: max_val }, Accumulator::Max(expr)) => {
                 if let Some(doc_val) = evaluate_value_expr(doc, expr) {
-                    match max_val {
-                        None => *max_val = Some(doc_val.clone()),
-                        Some(current) => {
-                            if compare_values(&doc_val, current)
-                                == Some(std::cmp::Ordering::Greater)
-                            {
-                                *max_val = Some(doc_val.clone());
-                            }
-                        }
-                    }
+                    fold_extremum(max_val, doc_val, false);
                 }
             }
 

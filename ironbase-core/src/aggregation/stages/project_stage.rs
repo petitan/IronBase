@@ -495,10 +495,13 @@ impl ProjectStage {
                 for (field, action) in &self.fields {
                     match action {
                         ProjectField::Include => {
-                            if let Some(value) = get_nested_value(doc, field) {
-                                // MongoDB behavior: dot-notation creates nested structure
-                                // e.g., {"user.name": 1} → {user: {name: ...}}
-                                set_nested_value(&mut result_value, field, value.clone());
+                            // MongoDB behavior: dot-notation creates nested structure
+                            // e.g., {"user.name": 1} → {user: {name: ...}}, and
+                            // through an array keeps each element's field
+                            // (audit 2026-10-07 A9)
+                            let parts: Vec<&str> = field.split('.').collect();
+                            if let Some(projected) = include_path(doc, &parts) {
+                                merge_projected(&mut result_value, projected);
                             }
                         }
                         ProjectField::Rename(source) => {
@@ -518,19 +521,23 @@ impl ProjectStage {
 
                 return Ok(result_value);
             } else {
-                for (field, value) in obj {
-                    if let Some(action) = self.fields.get(field) {
-                        match action {
-                            ProjectField::Exclude => {}
-                            ProjectField::Include => {
-                                result.insert(field.clone(), value.clone());
-                            }
-                            ProjectField::Rename(_) | ProjectField::Expression(_) => {}
+                // Exclusion mode: the document minus the excluded paths,
+                // dot paths included (also inside arrays, audit 2026-10-07
+                // A9); renamed/computed fields are set below
+                let mut kept = obj.clone();
+                for (field, action) in &self.fields {
+                    match action {
+                        ProjectField::Exclude => {
+                            let parts: Vec<&str> = field.split('.').collect();
+                            exclude_path(&mut kept, &parts);
                         }
-                    } else {
-                        result.insert(field.clone(), value.clone());
+                        ProjectField::Rename(_) | ProjectField::Expression(_) => {
+                            kept.shift_remove(field);
+                        }
+                        ProjectField::Include => {}
                     }
                 }
+                result = kept;
 
                 for (target_field, action) in &self.fields {
                     match action {
@@ -753,6 +760,87 @@ impl ProjectStage {
             Value::Null => String::new(),
             _ => String::new(),
         }
+    }
+}
+
+/// The part of `value` under the dot path `parts`, keeping the structure
+/// above it. Through an array every element contributes: objects their part
+/// (an empty object when they lack the field), scalars nothing — MongoDB's
+/// inclusion projection.
+fn include_path(value: &Value, parts: &[&str]) -> Option<Value> {
+    let Some((first, rest)) = parts.split_first() else {
+        return Some(value.clone());
+    };
+    match value {
+        Value::Object(map) => {
+            let child = include_path(map.get(*first)?, rest)?;
+            let mut out = serde_json::Map::new();
+            out.insert((*first).to_string(), child);
+            Some(Value::Object(out))
+        }
+        Value::Array(arr) => Some(Value::Array(
+            arr.iter()
+                .filter_map(|elem| match elem {
+                    Value::Object(_) => Some(
+                        include_path(elem, parts)
+                            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+                    ),
+                    Value::Array(_) => include_path(elem, parts),
+                    _ => None,
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
+/// Merge one included path into the projection built so far: objects key by
+/// key, arrays element by element (both come from the same source array).
+fn merge_projected(dst: &mut Value, src: Value) {
+    match (dst, src) {
+        (Value::Object(d), Value::Object(s)) => {
+            for (k, v) in s {
+                match d.get_mut(&k) {
+                    Some(existing) => merge_projected(existing, v),
+                    None => {
+                        d.insert(k, v);
+                    }
+                }
+            }
+        }
+        (Value::Array(d), Value::Array(s)) => {
+            for (de, se) in d.iter_mut().zip(s) {
+                merge_projected(de, se);
+            }
+        }
+        (d, s) => *d = s,
+    }
+}
+
+/// Remove the dot path `parts` from `map`, inside every element of an array
+/// on the way (MongoDB's exclusion projection). Keeps the key order.
+fn exclude_path(map: &mut serde_json::Map<String, Value>, parts: &[&str]) {
+    let Some((first, rest)) = parts.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        map.shift_remove(*first);
+        return;
+    }
+    if let Some(child) = map.get_mut(*first) {
+        exclude_from_value(child, rest);
+    }
+}
+
+fn exclude_from_value(value: &mut Value, parts: &[&str]) {
+    match value {
+        Value::Object(map) => exclude_path(map, parts),
+        Value::Array(arr) => {
+            for elem in arr {
+                exclude_from_value(elem, parts);
+            }
+        }
+        _ => {}
     }
 }
 

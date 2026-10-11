@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — aggregation `$skip`/`$limit`, `$group` count, `$min`/`$max`, `$project` dot paths (mcp-server v1.0.579)
+
+Audit 2026-10-07 A5–A9.
+
+- **A5 — `$skip`/`$limit` beyond the document limit:** the early `$limit`
+  was capped at `doc_limit - skip`, so a pipeline needing more documents than
+  the limit silently returned a shorter (or, with a large `$skip`, empty)
+  result. Needing more documents than the limit is now an error, like any
+  other pipeline. Two unit tests that asserted the truncated result were
+  updated.
+- **A6 — `$skip`, `$match`/`$project`, `$limit`:** early-limit detection
+  treated `$match` as transparent and set skip + limit as the context's
+  document limit, so the pipeline failed with a bogus limit error as soon as
+  `$match` filtered a document. The streamable prefix (`$skip`, `$limit`,
+  `$match`, `$project`) is now applied per document in pipeline order,
+  stopping at a used-up `$limit`, on both execution paths
+  (`materialize_streamable_prefix`).
+- **A7 — `$group` behind `$sort`/`$unwind`:** the `$group` counted its input
+  documents again although they were counted when loaded, halving the
+  document limit (and holding unwound documents to it). It now only checks
+  the deadline.
+- **A8 — `$min`/`$max`:** a leading null stuck (null vs. anything was
+  incomparable) and mixed types depended on document order. Null is now
+  ignored like a missing value and mixed types follow the `$sort` order
+  (`compare_for_sort`), in all three implementations (one `fold_extremum`).
+- **A9 — `$project` dot paths:** an exclusion like `{"a.b": 0}` was ignored
+  and an inclusion through an array (`{"items.x": 1}`) dropped the field.
+  Both now follow MongoDB, inside arrays element by element.
+- **Tests:** `tests/aggregation_limit_skip_tests.rs` (both execution paths),
+  `tests/aggregation_minmax_project_tests.rs`.
+
 ### Fixed — fuzzy/fulltext/vector index build racing concurrent writers (mcp-server v1.0.578)
 
 Found while fixing audit 2026-10-07 T2 (which covered only the B+ tree).

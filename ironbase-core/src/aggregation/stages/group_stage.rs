@@ -420,11 +420,11 @@ impl GroupStage {
 
             // FIX (2026-01-25): Check deadline on EVERY document, not just new groups.
             // Without this, aggregations on 129K+ docs with few unique groups would never
-            // check the timeout, causing apparent hangs. The increment_docs() call:
-            // 1. Increments docs_processed counter
-            // 2. Calls check_doc_limit() which calls check_deadline()
-            // 3. Skips doc limit check in streaming_to_group mode (but deadline still checked)
-            ctx.increment_docs()?;
+            // check the timeout, causing apparent hangs. The documents are NOT counted
+            // here: they were counted once where they were loaded, and behind a
+            // $sort/$unwind counting them again halved the document limit or held
+            // unwound documents to it (audit 2026-10-07 A7).
+            ctx.check_deadline()?;
 
             let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
 
