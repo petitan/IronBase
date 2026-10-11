@@ -40,12 +40,12 @@ pub struct UpdateManyPrepared {
     pub matched: u64,
     /// Number of documents actually modified
     pub modified: u64,
-    /// WAL entries: (doc_id, old_doc, new_doc)
-    pub wal_entries: Vec<(DocumentId, Value, Value)>,
-    /// Index updates: (original_doc, updated_doc)
-    pub(crate) index_updates: Vec<(Document, Document)>,
-    /// Storage writes: (doc_id, tombstone_value, updated_json_string)
-    pub(crate) storage_writes: Vec<(DocumentId, Value, String)>,
+    /// The modified documents: (doc_id, old_doc, new_doc). The only copies
+    /// held until the persist phase, shared with the WAL operations (`Arc`);
+    /// the index `Document`s, the tombstone and the stored JSON are derived
+    /// from them when persisted (audit 2026-10-07 M2: the former separate
+    /// index, storage and WAL copies held ~13x the modified data).
+    pub wal_entries: Vec<(DocumentId, Arc<Value>, Arc<Value>)>,
 }
 
 /// Prepared data for delete_many operation.
@@ -828,107 +828,15 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         query_json: &Value,
         update_json: &Value,
     ) -> Result<(u64, u64, Vec<(DocumentId, Value, Value)>)> {
-        self.check_not_closed()?;
-        // 🚀 MAJOR OPTIMIZATION: Use index-based query to get matching doc IDs
-        // This uses indexes when available (34ms vs 1.8s for 10K matching docs!)
-        let doc_ids = self.collect_doc_ids(query_json)?;
-
-        let mut matched = 0u64;
-        let mut modified = 0u64;
-
-        // 🚀 OPTIMIZATION: Collect all updates for batch index processing
-        let mut index_updates: Vec<(Document, Document)> = Vec::new(); // (original, updated)
-        let mut storage_writes: Vec<(DocumentId, Value, String)> = Vec::new(); // (id, tombstone, updated_json)
-
-        // BUG #2 FIX: Track actual modified documents for WAL
-        let mut modified_docs: Vec<(DocumentId, Value, Value)> = Vec::new();
-
-        // 🔒 FIX #16: Use BatchConstraintValidator for unified duplicate detection
-        // This prevents update_many from bypassing unique constraints when updating
-        // multiple documents to the same value in a single batch operation.
-        let mut batch_validator = {
-            let indexes = self.indexes.read();
-            BatchConstraintValidator::new(&indexes, &self.name)
-        };
-
-        // ⚠️ OOM PREVENTION: Streaming document loading instead of bulk load
-        // Previously: batch_read_documents_by_ids() loaded ALL matching docs (OOM on 78K emails!)
-        // Now: load one document at a time - O(1) memory per iteration
-        for doc_id in doc_ids {
-            // Stream-load document one at a time
-            let doc = match self.read_document_by_id(&doc_id)? {
-                Some(d) => d,
-                None => continue, // Document was deleted or not found
-            };
-
-            // Skip tombstones (deleted documents)
-            if is_tombstone(&doc) {
-                continue;
-            }
-
-            matched += 1;
-
-            // PERF: Direct Value→Document (no serialization roundtrip)
-            let mut document = Document::from_value(&doc)?;
-
-            // Save original document for index removal and WAL
-            let original_document = document.clone();
-            let old_doc_value = doc.clone();
-
-            // Apply update operators
-            let was_modified =
-                super::update_operators::apply_update_operators(&mut document, update_json)?;
-
-            if was_modified {
-                // NOTE: _collection is NOT added here - it's WAL-only metadata
-                // Storage documents should NOT contain _collection
-
-                // 🔒 FIX #16: Check for duplicates WITHIN the current batch
-                // Uses unified BatchConstraintValidator for consistent duplicate detection.
-                let doc_value = serde_json::to_value(&document)
-                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-                batch_validator.check_and_track(&doc_value)?;
-
-                // 🔒 CHECK UNIQUE CONSTRAINTS against existing index
-                self.check_index_constraints(&document, Some(&document.id))?;
-
-                self.validate_document(&document)?;
-
-                // Mark old document as tombstone
-                let mut tombstone = doc.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                }
-
-                let updated_json = document.to_json()?;
-
-                // BUG #2 FIX: Collect modified document for WAL
-                let new_doc_value: Value = serde_json::from_str(&updated_json)?;
-                modified_docs.push((doc_id.clone(), old_doc_value, new_doc_value));
-
-                // 🚀 Collect for batch processing
-                index_updates.push((original_document, document));
-                storage_writes.push((doc_id, tombstone, updated_json));
-
-                modified += 1;
-            }
-        }
-
-        // 🚀 BATCH INDEX UPDATE: Single lock acquisition for all index operations
-        if !index_updates.is_empty() {
-            self.batch_update_indexes(&index_updates)?;
-        }
-
-        // 🚀 BATCH STORAGE WRITE: Single lock acquisition for all storage operations
-        self.batch_write_updates(storage_writes)?;
-
-        // Invalidate query cache if any document was modified
-        if modified > 0 {
-            self.query_cache.invalidate_collection(&self.name);
-        }
-
-        Ok((matched, modified, modified_docs))
+        // Same work as the WAL path, without the WAL in between
+        let prepared = self.update_many_prepare(query_json, update_json)?;
+        let (matched, modified) = self.update_many_persist_ref(&prepared)?;
+        let docs = prepared
+            .wal_entries
+            .into_iter()
+            .map(|(id, old, new)| (id, Arc::unwrap_or_clone(old), Arc::unwrap_or_clone(new)))
+            .collect();
+        Ok((matched, modified, docs))
     }
 
     /// Delete one document (raw, no WAL) - use DatabaseCore::delete_one for durability
@@ -1080,9 +988,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         let mut modified = 0u64;
 
         // Collect all updates for batch processing (NO WRITES YET!)
-        let mut index_updates: Vec<(Document, Document)> = Vec::new();
-        let mut storage_writes: Vec<(DocumentId, Value, String)> = Vec::new();
-        let mut wal_entries: Vec<(DocumentId, Value, Value)> = Vec::new();
+        let mut wal_entries: Vec<(DocumentId, Arc<Value>, Arc<Value>)> = Vec::new();
 
         // Use BatchConstraintValidator for unified duplicate detection
         let mut batch_validator = {
@@ -1108,8 +1014,6 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // PERF: Direct Value→Document (no serialization roundtrip)
             let mut document = Document::from_value(&doc)?;
-            let original_document = document.clone();
-            let old_doc_value = doc.clone();
 
             // Apply update operators
             let was_modified =
@@ -1128,22 +1032,11 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 self.check_index_constraints(&document, Some(&document.id))?;
                 self.validate_document(&document)?;
 
-                // Prepare tombstone
-                let mut tombstone = doc.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                }
+                // The stored form of the new document (as written by persist)
+                let new_doc_value: Value = serde_json::from_str(&document.to_json()?)?;
 
-                let updated_json = document.to_json()?;
-                let new_doc_value: Value = serde_json::from_str(&updated_json)?;
-
-                // Collect for WAL (used by database.rs)
-                wal_entries.push((doc_id.clone(), old_doc_value, new_doc_value));
-
-                // Collect for persist phase (index updates + storage writes)
-                index_updates.push((original_document, document));
-                storage_writes.push((doc_id, tombstone, updated_json));
+                // Keep only old + new; everything else is derived in persist
+                wal_entries.push((doc_id, Arc::new(doc), Arc::new(new_doc_value)));
 
                 modified += 1;
             }
@@ -1153,8 +1046,6 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             matched,
             modified,
             wal_entries,
-            index_updates,
-            storage_writes,
         })
     }
 
@@ -1169,20 +1060,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// NOTE: For batch operations, index-first is safer for partial storage failure.
     /// Phantom index entries are gracefully handled (fetch fails, skip).
     fn update_many_persist(&self, prepared: UpdateManyPrepared) -> Result<(u64, u64)> {
-        // BATCH INDEX UPDATE FIRST (safer for partial storage failure)
-        if !prepared.index_updates.is_empty() {
-            self.batch_update_indexes(&prepared.index_updates)?;
-        }
-
-        // BATCH STORAGE WRITE
-        self.batch_write_updates(prepared.storage_writes)?;
-
-        // Invalidate query cache if any document was modified
-        if prepared.modified > 0 {
-            self.query_cache.invalidate_collection(&self.name);
-        }
-
-        Ok((prepared.matched, prepared.modified))
+        self.update_many_persist_ref(&prepared)
     }
 
     /// PREPARE phase for delete_many: identify deletions in memory, NO storage writes.

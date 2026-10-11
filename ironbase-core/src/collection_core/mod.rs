@@ -1554,22 +1554,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
     }
 
-    /// Batch write tombstones and updated documents to storage
-    ///
-    /// Acquires storage lock once and writes all updates atomically.
-    /// Each update consists of: (doc_id, tombstone, updated_json)
-    fn batch_write_updates(&self, writes: Vec<(DocumentId, Value, String)>) -> Result<()> {
-        if writes.is_empty() {
-            return Ok(());
+    /// Persist prepared `update_many` changes: indexes first (safer for a
+    /// partial storage failure: phantom index entries are skipped on fetch),
+    /// then each document's tombstone and new version. Index `Document`s are
+    /// built per chunk and the tombstone/JSON per document, so only the
+    /// prepared old/new values stay in memory (audit 2026-10-07 M2).
+    pub(crate) fn update_many_persist_ref(
+        &self,
+        prepared: &raw_operations::UpdateManyPrepared,
+    ) -> Result<(u64, u64)> {
+        const INDEX_CHUNK: usize = 256;
+        for chunk in prepared.wal_entries.chunks(INDEX_CHUNK) {
+            let index_updates = chunk
+                .iter()
+                .map(|(_, old, new)| Ok((Document::from_value(old)?, Document::from_value(new)?)))
+                .collect::<Result<Vec<(Document, Document)>>>()?;
+            self.batch_update_indexes(&index_updates)?;
         }
 
-        let mut storage = self.storage.write();
-        for (doc_id, tombstone, updated_json) in writes {
-            let tombstone_json = serde_json::to_string(&tombstone)?;
-            storage.write_data(tombstone_json.as_bytes())?;
-            storage.write_document_raw(&self.name, &doc_id, updated_json.as_bytes())?;
+        if !prepared.wal_entries.is_empty() {
+            let mut storage = self.storage.write();
+            for (doc_id, old, new) in &prepared.wal_entries {
+                let mut tombstone = (**old).clone();
+                if let Value::Object(ref mut map) = tombstone {
+                    map.insert("_tombstone".to_string(), Value::Bool(true));
+                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                }
+                storage.write_data(serde_json::to_string(&tombstone)?.as_bytes())?;
+                storage.write_document_raw(
+                    &self.name,
+                    doc_id,
+                    serde_json::to_string(&**new)?.as_bytes(),
+                )?;
+            }
         }
-        Ok(())
+
+        if prepared.modified > 0 {
+            self.query_cache.invalidate_collection(&self.name);
+        }
+        Ok((prepared.matched, prepared.modified))
     }
 
     // ========== PRIVATE HELPER METHODS ==========
