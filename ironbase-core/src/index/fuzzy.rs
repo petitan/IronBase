@@ -4,6 +4,7 @@ use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -115,6 +116,12 @@ pub struct FuzzyIndex {
     lazy_mode: bool,
     entries_offset: u64,
     entries_size: u64,
+    /// While `create_fuzzy_index` builds this index from a document scan (not
+    /// persisted): the ids of the documents writers changed in it meanwhile.
+    /// Their entries already reflect the current document, so the build skips
+    /// them instead of adding the (possibly older) version it scanned. Twin of
+    /// `BPlusTree::build_touched` (audit 2026-10-07 T2).
+    build_touched: Option<HashSet<DocumentId>>,
 }
 
 impl FuzzyIndex {
@@ -135,6 +142,7 @@ impl FuzzyIndex {
             lazy_mode: false,
             entries_offset: 0,
             entries_size: 0,
+            build_touched: None,
         }
     }
 
@@ -161,6 +169,7 @@ impl FuzzyIndex {
             lazy_mode: false,
             entries_offset: 0,
             entries_size: 0,
+            build_touched: None,
         }
     }
 
@@ -208,6 +217,11 @@ impl FuzzyIndex {
     /// Insert a value into the fuzzy index
     pub fn insert(&mut self, value: &str, doc_id: DocumentId) {
         let _ = self.ensure_entries_loaded();
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(doc_id.clone());
+            // The build may already have added this document from its scan
+            self.entries.retain(|(_, _, id)| id != &doc_id);
+        }
         let lower = value.to_lowercase();
         self.entries.push((lower, value.to_string(), doc_id));
         self.metadata.num_entries = self.entries.len();
@@ -216,6 +230,7 @@ impl FuzzyIndex {
     /// Remove a document from the fuzzy index
     pub fn remove(&mut self, doc_id: &DocumentId) {
         let _ = self.ensure_entries_loaded();
+        self.record_build_touch(doc_id);
         self.entries.retain(|(_, _, id)| id != doc_id);
         self.metadata.num_entries = self.entries.len();
     }
@@ -223,9 +238,44 @@ impl FuzzyIndex {
     /// Remove a specific value-document pair
     pub fn remove_value(&mut self, value: &str, doc_id: &DocumentId) {
         let _ = self.ensure_entries_loaded();
+        self.record_build_touch(doc_id);
         let lower = value.to_lowercase();
         self.entries
             .retain(|(l, _, id)| !(l == &lower && id == doc_id));
+        self.metadata.num_entries = self.entries.len();
+    }
+
+    /// Start building this index from a document scan while writers keep
+    /// maintaining it: from now on `insert`/`remove` record their documents.
+    pub(crate) fn begin_build(&mut self) {
+        self.build_touched = Some(HashSet::new());
+    }
+
+    /// The build is over: writers stop recording.
+    pub(crate) fn end_build(&mut self) {
+        self.build_touched = None;
+    }
+
+    fn record_build_touch(&mut self, doc_id: &DocumentId) {
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(doc_id.clone());
+        }
+    }
+
+    /// Add a value from the build's document scan. Skipped when a writer
+    /// changed the document since the build began (the index already holds
+    /// its current entry).
+    pub(crate) fn build_insert(&mut self, value: &str, doc_id: DocumentId) {
+        let _ = self.ensure_entries_loaded();
+        if self
+            .build_touched
+            .as_ref()
+            .is_some_and(|touched| touched.contains(&doc_id))
+        {
+            return;
+        }
+        let lower = value.to_lowercase();
+        self.entries.push((lower, value.to_string(), doc_id));
         self.metadata.num_entries = self.entries.len();
     }
 
@@ -558,6 +608,7 @@ impl FuzzyIndex {
             lazy_mode,
             entries_offset,
             entries_size,
+            build_touched: None,
         })
     }
 

@@ -64,6 +64,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 threshold,
                 storage_path,
             )?;
+            // Writers maintain the index while the scan below fills it (T2)
+            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
+                index.begin_build();
+            }
         }
 
         // Step 2 & 3: Scan documents IN BATCHES and populate index
@@ -74,23 +78,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let index_name_clone = index_name.clone();
         let indexes_ref = self.indexes.clone();
 
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
-            let mut indexes = indexes_ref.write();
-            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name_clone) {
-                for (doc_id, doc) in &batch_docs {
-                    if let Some(value) = get_nested_value(doc, &field_clone) {
-                        if let Some(s) = value.as_str() {
-                            index.insert(s, doc_id.clone());
+        let scan =
+            self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+                let mut indexes = indexes_ref.write();
+                if let Some(index) = indexes.get_fuzzy_index_mut(&index_name_clone) {
+                    for (doc_id, doc) in &batch_docs {
+                        if let Some(value) = get_nested_value(doc, &field_clone) {
+                            if let Some(s) = value.as_str() {
+                                index.build_insert(s, doc_id.clone());
+                            }
                         }
                     }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            });
+        if let Err(e) = scan {
+            // A failed build leaves no half-populated index behind
+            let _ = self.indexes.write().drop_index(&index_name);
+            return Err(e);
+        }
 
         // Mark index as ready after population is complete
         {
             let mut indexes = self.indexes.write();
+            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
+                index.end_build();
+            }
             if let Err(e) = indexes.set_index_ready(&index_name) {
                 tracing::warn!(error = %e, "Failed to mark fuzzy index as ready");
             }
@@ -444,6 +457,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 accent_folding,
                 storage_path.clone(),
             )?;
+            // Writers maintain the index while the scan below fills it (T2)
+            if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
+                index.begin_build();
+            }
         }
 
         // Helper closure for cleanup on failure
@@ -476,11 +493,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 let pdid_field = index.parent_doc_id_field().to_string();
                                 let parent_doc_id = get_nested_value(doc, &pdid_field)
                                     .and_then(|v| v.as_str().map(|x| x.to_string()));
-                                let insert_result = if let Some(ref pdid) = parent_doc_id {
-                                    index.insert_with_parent_doc_id(doc_id, s, pdid)
-                                } else {
-                                    index.insert(doc_id, s)
-                                };
+                                let insert_result =
+                                    index.build_insert(doc_id, s, parent_doc_id.as_deref());
                                 if let Err(e) = insert_result {
                                     log_error!(
                                         "Failed to index doc {:?} in fulltext index '{}': {:?}",
@@ -503,6 +517,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Step 4: Mark index as ready and flush to disk
         let metadata = {
             let mut indexes = self.indexes.write();
+            if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
+                index.end_build();
+            }
             // Mark index as ready BEFORE persisting
             if let Err(e) = indexes.set_index_ready(&index_name) {
                 tracing::warn!(error = %e, "Failed to mark fulltext index as ready");

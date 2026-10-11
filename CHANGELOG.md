@@ -38,6 +38,27 @@ Audit 2026-10-07 A5–A9.
 - **Tests:** `tests/aggregation_limit_skip_tests.rs` (both execution paths),
   `tests/aggregation_minmax_project_tests.rs`.
 
+### Fixed — fuzzy/fulltext/vector index build racing concurrent writers (mcp-server v1.0.578)
+
+Found while fixing audit 2026-10-07 T2 (which covered only the B+ tree).
+
+- **Symptom:** `create_fuzzy_index` / `create_fulltext_index` while other
+  threads update or delete documents left phantom (deleted) and stale
+  (pre-update) entries and, for fuzzy, duplicates (1515 entries for 1500
+  live documents). `create_vector_index` lost every write made during the
+  build (1333 nodes for 2925 live documents).
+- **Root cause:** the builders scan the documents in batches without a lock
+  and add each scanned version afterwards; a writer that changed the document
+  in between had already updated the index, so the scan re-added the old
+  version. The vector index was built off to the side and registered only
+  at the end, so writers never saw it during the build.
+- **Fix:** the T2 mechanism for all three: `FuzzyIndex`, `FulltextIndex`
+  and `HnswIndex` get an in-memory (not persisted) `build_touched` set;
+  during a build the writers' insert/remove record their documents and the
+  build's `build_insert` skips them. The vector index is now registered
+  before the scan (writers maintain it) and is dropped if the build fails.
+- **Test:** `tests/search_index_build_concurrency_tests.rs`.
+
 ### Fixed — `insert_one_tx` keeps a supplied `_id` (mcp-server v1.0.577)
 
 Found while fixing audit 2026-10-07 T1.
