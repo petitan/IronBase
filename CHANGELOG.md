@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `create_index` concurrent with writers (mcp-server v1.0.572)
+
+Audit 2026-10-07 T2.
+
+- **Root cause:** `create_index` (also `create_compound_index`,
+  `create_ci_index`) registered the empty index, then filled it from a
+  batched document scan without holding a lock. Writers already maintained the
+  new index meanwhile, so the scan raced with them: an insert added by both
+  failed the build with a spurious `Duplicate key` (and the half-built index
+  stayed registered); a scan that read a document before an update or delete
+  re-added the old key afterwards, leaving stale or phantom entries.
+- **Fix:** while an index is built, `BPlusTree` records the documents writers
+  change in it (`build_touched`, in memory only). The scan skips those
+  documents (the index already holds their current keys), and re-adding an
+  existing entry is a no-op instead of a duplicate. A build that fails on a
+  real unique violation drops the index.
+
+Regression tests: `tests/index_build_concurrency_tests.rs` (a unique and a
+non-unique build under concurrent update/delete/insert; on master the first
+failed with `Duplicate key`, the second left ~20 phantom entries),
+`index::tests::index_build_skips_documents_writers_touched`.
 ### Fixed — explicit transactions after a crash: index replay and reopen (mcp-server v1.0.571)
 
 Audit 2026-10-07 T1, plus a reopen failure found while fixing it.

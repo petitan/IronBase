@@ -71,6 +71,7 @@ use crate::error::{IronBaseError, Result};
 use crate::log_warn;
 use crate::value_utils::get_all_nested_values;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -204,6 +205,12 @@ pub struct BPlusTree {
     lazy_mode: bool,
     /// Persisted file size in bytes (for threshold comparison)
     persisted_size: u64,
+    /// While `create_index` builds this index from a document scan (not
+    /// persisted): the ids of the documents writers changed in it meanwhile.
+    /// Their entries already reflect the current document, so the build skips
+    /// them instead of adding the (possibly older) version it scanned (audit
+    /// 2026-10-07 T2).
+    build_touched: Option<HashSet<DocumentId>>,
 }
 
 /// Index statistics for selectivity estimation
@@ -658,6 +665,7 @@ impl BPlusTree {
             source_path: None,
             lazy_mode: false,
             persisted_size: 0,
+            build_touched: None,
         }
     }
 
@@ -698,6 +706,7 @@ impl BPlusTree {
             source_path: None,
             lazy_mode: false,
             persisted_size: 0,
+            build_touched: None,
         }
     }
 
@@ -753,6 +762,7 @@ impl BPlusTree {
             source_path: None,
             lazy_mode: false,
             persisted_size: 0,
+            build_touched: None,
         }
     }
 
@@ -940,6 +950,15 @@ impl BPlusTree {
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
         // Ensure tree is fully loaded for traversal
         self.ensure_fully_loaded()?;
+
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(doc_id.clone());
+            // The build may already have added this entry from its scan:
+            // re-adding it is a no-op, not a duplicate (or a unique error)
+            if Self::delete_from_node(&mut self.root, &key, &doc_id) {
+                self.metadata.num_keys -= 1;
+            }
+        }
 
         // Check unique constraint
         if self.metadata.unique && self.search(&key).is_some() {
@@ -1228,11 +1247,51 @@ impl BPlusTree {
         self.metadata.tree_height = 1;
     }
 
+    /// Start building this index from a document scan while writers keep
+    /// maintaining it: from now on `insert`/`delete` record their documents.
+    pub(crate) fn begin_build(&mut self) {
+        self.build_touched = Some(HashSet::new());
+    }
+
+    /// The build is over: writers stop recording.
+    pub(crate) fn end_build(&mut self) {
+        self.build_touched = None;
+    }
+
+    /// Add an entry from the build's document scan. Skipped when a writer
+    /// changed the document since the build began (the index already holds
+    /// its current entries); idempotent otherwise. Unique violations are
+    /// still errors.
+    pub(crate) fn build_insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
+        self.ensure_fully_loaded()?;
+        if self
+            .build_touched
+            .as_ref()
+            .is_some_and(|touched| touched.contains(&doc_id))
+        {
+            return Ok(());
+        }
+        if Self::delete_from_node(&mut self.root, &key, &doc_id) {
+            self.metadata.num_keys -= 1;
+        }
+        if self.metadata.unique && self.search(&key).is_some() {
+            return Err(IronBaseError::IndexError(format!(
+                "Duplicate key: {:?} (unique index)",
+                key
+            )));
+        }
+        self.insert_unchecked(key, doc_id)
+    }
+
     /// Delete key-document pair from index
     /// Supports multi-level B+ trees by recursively finding the leaf
     pub fn delete(&mut self, key: &IndexKey, doc_id: &DocumentId) -> Result<()> {
         // Ensure tree is fully loaded for traversal
         self.ensure_fully_loaded()?;
+
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(doc_id.clone());
+        }
 
         let deleted = Self::delete_from_node(&mut self.root, key, doc_id);
         if deleted {
@@ -2971,6 +3030,7 @@ impl BPlusTree {
             source_path: None,
             lazy_mode: false,
             persisted_size: 0,
+            build_touched: None,
         };
         // Sync num_keys with actual tree content
         // (metadata from CollectionData may be stale if not synced on every insert/delete)
@@ -3066,6 +3126,7 @@ impl BPlusTree {
                 source_path: Some(path),
                 lazy_mode: true,
                 persisted_size: file_size,
+                build_touched: None,
             })
         } else {
             // EAGER LOADING: Load all nodes immediately
@@ -3078,6 +3139,7 @@ impl BPlusTree {
                 source_path: None,
                 lazy_mode: false,
                 persisted_size: file_size,
+                build_touched: None,
             };
 
             // Sync num_keys with actual tree content
