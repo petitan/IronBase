@@ -1254,8 +1254,9 @@ mod tests {
     #[test]
     fn test_bugfix_large_limit_respects_doc_limit() {
         // BUG: $limit: 1_000_000 bypassed doc_limit protection
-        // FIX: effective_limit = min(user_limit, doc_limit)
-        // NEW BEHAVIOR: Early exit at doc_limit, returns doc_limit docs (safe from OOM)
+        // FIX: the document limit applies whatever the $limit; needing more
+        // documents is an error, not a silently truncated result (audit
+        // 2026-10-07 A5 — this test used to expect the first 100 documents)
         let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
 
         let pipeline = Pipeline::from_json(&json!([{"$limit": 1_000_000}])).unwrap();
@@ -1265,12 +1266,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = pipeline
+        let err = pipeline
             .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
-            .unwrap();
-
-        // Should return exactly doc_limit docs (early exit protects from OOM)
-        assert_eq!(result.len(), 100);
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeded document limit"), "{err}");
     }
 
     #[test]
@@ -1397,8 +1396,9 @@ mod tests {
 
     #[test]
     fn test_bugfix_skip_limit_respects_doc_limit() {
-        // Verify $skip + $limit combination also respects doc_limit
-        // NEW BEHAVIOR: Early exit at (doc_limit - skip) docs after skipping
+        // Verify $skip + $limit combination also respects doc_limit: the
+        // skipped documents count, and needing more than the limit is an
+        // error (audit 2026-10-07 A5 — this test used to expect 50 documents)
         let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
 
         let pipeline = Pipeline::from_json(&json!([
@@ -1412,16 +1412,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = pipeline
+        let err = pipeline
             .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
-            .unwrap();
-
-        // Should return (doc_limit - skip) = 50 docs
-        // Processes 50 skipped + 50 returned = 100 total (within limit)
-        assert_eq!(result.len(), 50);
-        // Verify we got the correct docs (after skip)
-        assert_eq!(result[0]["i"], 50);
-        assert_eq!(result[49]["i"], 99);
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeded document limit"), "{err}");
     }
 
     #[test]

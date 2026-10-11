@@ -132,7 +132,7 @@ impl AggregationLimitContext {
     }
 
     /// Check if the deadline has been exceeded
-    fn check_deadline(&self) -> Result<()> {
+    pub(crate) fn check_deadline(&self) -> Result<()> {
         if let Some(deadline) = self.inner.borrow().deadline {
             if Instant::now() >= deadline {
                 return Err(IronBaseError::AggregationError(

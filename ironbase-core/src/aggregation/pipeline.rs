@@ -244,69 +244,14 @@ impl Pipeline {
                 };
                 (result, 1) // consumed 1 stage ($count)
             } else {
-                // No $group - check for early $limit/$skip optimization
-                // OOM FIX (2026-01): Apply $limit during streaming, not after materialization
-                let early_limit = Self::detect_early_limit(remaining_stages.iter().copied());
-
-                // CRITICAL: User's $limit MUST NOT bypass doc_limit protection!
-                // If user specifies $limit: 1_000_000 but doc_limit is 10K, use 10K.
-                let effective_limit = match early_limit {
-                    Some((skip, user_limit, stages)) => {
-                        // The effective limit includes skip count + materialized docs
-                        // e.g., $skip: 100, $limit: 50 → we need 150 docs total from source
-                        let total_needed = skip.saturating_add(user_limit);
-                        let safe_limit = total_needed.min(doc_limit);
-                        Some((
-                            skip,
-                            user_limit.min(safe_limit.saturating_sub(skip)),
-                            stages,
-                        ))
-                    }
-                    None => None,
-                };
-
-                let mut results = Vec::new();
-                let mut skipped = 0;
-                let mut total_processed = 0usize;
-                let mut iter = counted_iter;
-
-                loop {
-                    if let Some((_, limit, _)) = effective_limit {
-                        if results.len() >= limit {
-                            break;
-                        }
-                    }
-
-                    let doc_result = match iter.next() {
-                        Some(dr) => dr,
-                        None => break,
-                    };
-
-                    let doc = doc_result?;
-                    total_processed += 1;
-
-                    // Always check doc_limit, regardless of early limit
-                    if total_processed > doc_limit {
-                        return Err(IronBaseError::AggregationError(format!(
-                            "Aggregation exceeded document limit: {} documents processed. \
-                             Add a $match stage to filter documents. Limit: {}",
-                            total_processed, doc_limit
-                        )));
-                    }
-
-                    if let Some((skip, _, _)) = effective_limit {
-                        if skipped < skip {
-                            skipped += 1;
-                            continue;
-                        }
-                    }
-
-                    ctx.charge_bytes(estimate_json_size(&doc))?;
-                    results.push(doc);
-                }
-
-                let consumed = effective_limit.map(|(_, _, c)| c).unwrap_or(0);
-                (results, consumed)
+                // No $group: materialize through the streamable prefix
+                // ($skip/$limit/$match/$project), stopping at a used-up $limit
+                materialize_streamable_prefix(
+                    counted_iter,
+                    remaining_stages.iter().copied(),
+                    doc_limit,
+                    &ctx,
+                )?
             };
 
         // Phase 3: Execute remaining stages on materialized results
@@ -388,15 +333,6 @@ impl Pipeline {
             return collect_charged(iter, ctx);
         }
 
-        // Detect early $limit/$skip BEFORE streaming to set context limit
-        // This ensures doc_limit is respected even with large $limit values
-        let remaining_check_stages = &self.stages[..];
-        if let Some((skip, limit, _)) = Self::detect_early_limit_from_start(remaining_check_stages)
-        {
-            // Set effective limit in context (capped at doc_limit)
-            ctx.set_early_limit(skip.saturating_add(limit));
-        }
-
         // Phase 1: Chain streamable stages ($match, $project) as iterators
         // These use with_counting internally if no $match is first
         let (streaming_iter, consumed) = chain_streamable_stages(docs, &self.stages, ctx.clone());
@@ -442,74 +378,14 @@ impl Pipeline {
                 };
                 (result, 1)
             } else {
-                // No $group - check for early $limit/$skip
-                let early_limit = Self::detect_early_limit(remaining_stages.iter());
-
-                if let Some((skip, limit, stages_to_skip)) = early_limit {
-                    // Apply $skip/$limit during materialization
-                    // The context already has the effective limit set
-                    let effective = ctx.effective_limit();
-                    let mut results = Vec::new();
-                    let mut skipped = 0;
-                    let mut processed = 0;
-                    let mut iter = streaming_iter;
-
-                    loop {
-                        let allowed = limit.min(effective.saturating_sub(skip));
-                        if results.len() >= allowed {
-                            break;
-                        }
-
-                        let doc_result = match iter.next() {
-                            Some(dr) => dr,
-                            None => break,
-                        };
-
-                        let doc = doc_result?;
-                        processed += 1;
-
-                        if processed > effective {
-                            return Err(IronBaseError::AggregationError(format!(
-                                "Aggregation exceeded document limit: {} documents (limit: {})",
-                                processed, effective
-                            )));
-                        }
-
-                        if skipped < skip {
-                            skipped += 1;
-                            continue;
-                        }
-
-                        ctx.charge_bytes(estimate_json_size(&doc))?;
-                        results.push(doc);
-                    }
-
-                    (results, stages_to_skip)
-                } else {
-                    // No early limit - materialize with limit checking
-                    // CRITICAL FIX (2026-01): Don't blindly collect() - check limits!
-                    let effective = ctx.effective_limit();
-                    let mut results = Vec::new();
-                    let mut processed = 0;
-
-                    for doc_result in streaming_iter {
-                        let doc = doc_result?;
-                        processed += 1;
-
-                        if processed > effective {
-                            return Err(IronBaseError::AggregationError(format!(
-                                "Aggregation exceeded document limit: {} documents (limit: {}). \
-                                 Add a $match stage to filter documents.",
-                                processed, effective
-                            )));
-                        }
-
-                        ctx.charge_bytes(estimate_json_size(&doc))?;
-                        results.push(doc);
-                    }
-
-                    (results, 0)
-                }
+                // No $group: materialize through the streamable prefix
+                // ($skip/$limit/$match/$project), stopping at a used-up $limit
+                materialize_streamable_prefix(
+                    streaming_iter,
+                    remaining_stages,
+                    ctx.effective_limit(),
+                    ctx,
+                )?
             };
 
         // Phase 3: Execute remaining stages with context
@@ -531,51 +407,6 @@ impl Pipeline {
         }
 
         Ok(docs)
-    }
-
-    /// Detect early limit from start of pipeline (before streaming extraction)
-    ///
-    /// Scans through streamable stages ($match, $project, $skip, $limit) to find
-    /// if a $limit appears early enough that we can use it to stop iteration.
-    ///
-    /// CRITICAL FIX (2026-01): $match and $project are "transparent" for limit detection!
-    /// Pipeline like [$match, $project, $limit: 5] should return Some((0, 5, 1))
-    /// because $match/$project don't change document count.
-    ///
-    /// Materializing stages ($group, $sort, $unwind) DO block limit detection because
-    /// they need all documents to produce correct results.
-    fn detect_early_limit_from_start(stages: &[Stage]) -> Option<(usize, usize, usize)> {
-        let mut skip = 0;
-        let mut limit = None;
-        let mut limit_skip_stages = 0; // Only count $skip/$limit stages consumed
-
-        for stage in stages {
-            match stage {
-                Stage::Skip(s) => {
-                    skip += s.skip;
-                    limit_skip_stages += 1;
-                }
-                Stage::Limit(l) => {
-                    limit = Some(l.limit);
-                    limit_skip_stages += 1;
-                    break; // Found $limit - stop here
-                }
-                // $match/$project are STREAMABLE - they don't block limit detection
-                // because they don't change document count (match filters, project transforms)
-                Stage::Match(_) | Stage::Project(_) => {
-                    // Continue searching for $limit after streamable stages
-                    continue;
-                }
-                // MATERIALIZING stages block limit detection
-                // $group/$count/$sort/$unwind need ALL documents first
-                Stage::Group(_) | Stage::Count(_) | Stage::Sort(_) | Stage::Unwind(_) => {
-                    break; // Stop searching - limit after these can't be applied early
-                }
-            }
-        }
-
-        // Return if we found a $limit (skip/limit counts are valid even if 0)
-        limit.map(|l| (skip, l, limit_skip_stages))
     }
 
     /// Apply consecutive streamable stages ($match, $project) inline on the iterator
@@ -658,41 +489,6 @@ impl Pipeline {
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
-
-    /// Detect if remaining stages start with $skip/$limit that can be applied early
-    /// during materialization to prevent loading all documents.
-    ///
-    /// Returns (skip_count, limit_count, stages_to_remove) if early limit is applicable.
-    /// The stages_to_remove is how many leading $skip/$limit stages were consumed.
-    ///
-    /// Example: [$skip: 10, $limit: 5] → (10, 5, 2)
-    /// Example: [$limit: 5] → (0, 5, 1)
-    /// Example: [$sort, $limit: 5] → None (can't apply early, $sort needs all docs)
-    fn detect_early_limit<'a, I>(stages: I) -> Option<(usize, usize, usize)>
-    where
-        I: Iterator<Item = &'a Stage>,
-    {
-        let mut skip = 0;
-        let mut limit = None;
-        let mut stages_consumed = 0;
-
-        for stage in stages {
-            match stage {
-                Stage::Skip(s) => {
-                    skip += s.skip;
-                    stages_consumed += 1;
-                }
-                Stage::Limit(l) => {
-                    limit = Some(l.limit);
-                    stages_consumed += 1;
-                    break; // $limit terminates early detection
-                }
-                _ => break, // Non-streamable stage encountered, stop
-            }
-        }
-
-        limit.map(|l| (skip, l, stages_consumed))
-    }
 }
 
 impl Stage {
@@ -745,4 +541,87 @@ where
         results.push(doc);
     }
     Ok(results)
+}
+
+/// One stage of the streamable prefix materialized by
+/// [`materialize_streamable_prefix`], with its remaining skip/limit count.
+enum PrefixStep<'s> {
+    Skip(usize),
+    Limit(usize),
+    Match(&'s MatchStage),
+    Project(&'s ProjectStage),
+}
+
+/// Materialize the documents after the leading run of `$skip`, `$limit`,
+/// `$match` and `$project` stages, applying them per document in pipeline
+/// order and stopping once a `$limit` is used up. Returns the documents and
+/// the number of stages applied.
+///
+/// Every pulled document counts against `doc_limit`: needing more is an
+/// error, never a silently shorter result (audit 2026-10-07 A5). `$match` and
+/// `$project` between `$skip` and `$limit` are applied in place, so they do
+/// not turn skip + limit into a document limit (A6).
+fn materialize_streamable_prefix<'s, I, S>(
+    mut docs: I,
+    stages: S,
+    doc_limit: usize,
+    ctx: &AggregationLimitContext,
+) -> Result<(Vec<Value>, usize)>
+where
+    I: Iterator<Item = Result<Value>>,
+    S: IntoIterator<Item = &'s Stage>,
+{
+    let mut steps = Vec::new();
+    for stage in stages {
+        steps.push(match stage {
+            Stage::Skip(s) => PrefixStep::Skip(s.skip),
+            Stage::Limit(l) => PrefixStep::Limit(l.limit),
+            Stage::Match(m) => PrefixStep::Match(m),
+            Stage::Project(p) => PrefixStep::Project(p),
+            _ => break,
+        });
+    }
+
+    let mut results = Vec::new();
+    let mut processed = 0usize;
+    'docs: loop {
+        // A used-up $limit lets no further document through
+        if steps.iter().any(|s| matches!(s, PrefixStep::Limit(0))) {
+            break;
+        }
+        let Some(doc_result) = docs.next() else {
+            break;
+        };
+        let mut doc = doc_result?;
+        processed += 1;
+        if processed > doc_limit {
+            return Err(IronBaseError::AggregationError(format!(
+                "Aggregation exceeded document limit: {} documents processed. \
+                 Add a $match stage to filter documents. Limit: {}",
+                processed, doc_limit
+            )));
+        }
+
+        for step in steps.iter_mut() {
+            match step {
+                PrefixStep::Skip(n) if *n > 0 => {
+                    *n -= 1;
+                    continue 'docs;
+                }
+                PrefixStep::Skip(_) => {}
+                PrefixStep::Limit(n) => *n -= 1,
+                PrefixStep::Match(m) => {
+                    if !m.matches(&doc)? {
+                        continue 'docs;
+                    }
+                }
+                PrefixStep::Project(p) => doc = p.project_one(&doc)?,
+            }
+        }
+
+        ctx.charge_bytes(estimate_json_size(&doc))?;
+        results.push(doc);
+    }
+
+    Ok((results, steps.len()))
 }
