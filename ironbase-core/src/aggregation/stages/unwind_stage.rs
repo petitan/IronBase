@@ -4,6 +4,7 @@
 use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::types::UnwindStage;
 use crate::error::{IronBaseError, Result};
+use crate::find_options::estimate_json_size;
 use crate::value_utils::{get_nested_value, set_nested_value};
 use serde_json::Value;
 
@@ -217,6 +218,8 @@ impl UnwindStage {
                     // OLD (BAD): push → increment → fail = memory already allocated
                     // NEW (GOOD): check → try_reserve → push = fail fast before alloc
                     ctx.check_unwind_would_exceed(arr_len)?;
+                    // Each output is a full copy of the document (M3)
+                    ctx.charge_bytes(estimate_json_size(&doc).saturating_mul(arr_len))?;
 
                     // try_reserve for this batch (after limit check passes)
                     results.try_reserve(arr_len).map_err(|_| {

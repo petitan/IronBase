@@ -55,6 +55,10 @@ struct ContextInner {
     // $unwind output counter
     unwind_outputs: usize,
 
+    // Estimated bytes of documents held in memory (materialized results,
+    // $unwind copies), checked against max_memory_mb (audit 2026-10-07 M3)
+    bytes_materialized: usize,
+
     // Per-group counters: HashMap<group_hash, (push_count, addtoset_count)>
     group_counters: HashMap<u64, (usize, usize)>,
 
@@ -90,6 +94,7 @@ impl AggregationLimitContext {
                 index_entries_scanned: 0,
                 groups_created: 0,
                 unwind_outputs: 0,
+                bytes_materialized: 0,
                 group_counters: HashMap::new(),
                 total_push_elements: 0,
                 total_addtoset_elements: 0,
@@ -440,6 +445,32 @@ impl AggregationLimitContext {
     /// Get current $unwind output count
     pub fn unwind_outputs(&self) -> usize {
         self.inner.borrow().unwind_outputs
+    }
+
+    // ========== Memory budget ==========
+
+    /// Charge `bytes` of documents the pipeline holds in memory against
+    /// `max_memory_mb`. The document limits bound counts only; a few large
+    /// documents could exceed any memory budget (audit 2026-10-07 M3).
+    pub fn charge_bytes(&self, bytes: usize) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.bytes_materialized = inner.bytes_materialized.saturating_add(bytes);
+        let budget = inner.limits.max_memory_mb.saturating_mul(1024 * 1024);
+        if inner.bytes_materialized > budget {
+            return Err(IronBaseError::AggregationError(format!(
+                "Aggregation exceeded memory limit: ~{} MB of documents held in memory \
+                 (limit: {} MB, set via AggregationLimits.max_memory_mb). \
+                 Add a $match, $project or $limit stage to reduce them.",
+                inner.bytes_materialized / (1024 * 1024),
+                inner.limits.max_memory_mb
+            )));
+        }
+        Ok(())
+    }
+
+    /// Estimated bytes of documents charged so far
+    pub fn bytes_materialized(&self) -> usize {
+        self.inner.borrow().bytes_materialized
     }
 
     // ========== Index entry counting (for index-based paths) ==========

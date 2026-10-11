@@ -19,6 +19,7 @@ use crate::aggregation::types::{
     SkipStage, SortStage, Stage, UnwindStage,
 };
 use crate::error::{IronBaseError, Result};
+use crate::find_options::estimate_json_size;
 use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -137,6 +138,10 @@ impl Pipeline {
     where
         I: Iterator<Item = Result<Value>>,
     {
+        // Memory budget (max_memory_mb) for the documents this path holds;
+        // also the context of the stages after materialization (M3)
+        let ctx = AggregationLimitContext::new(limits);
+
         if self.stages.is_empty() {
             // OOM FIX (2026-01): Apply document limit even for empty pipeline
             // Previously collected ALL documents without limit!
@@ -165,6 +170,7 @@ impl Pipeline {
                         doc_limit
                     )));
                 }
+                ctx.charge_bytes(estimate_json_size(&doc))?;
                 results.push(doc);
             }
             return Ok(results);
@@ -295,6 +301,7 @@ impl Pipeline {
                         }
                     }
 
+                    ctx.charge_bytes(estimate_json_size(&doc))?;
                     results.push(doc);
                 }
 
@@ -318,7 +325,6 @@ impl Pipeline {
         // preventing OOM when: [$unwind: "$a", $unwind: "$b"] each produce near-limit output.
         // Before: Each $unwind had independent 1M limit → 2 stages could produce 2M docs
         // After: All $unwind stages share 1M cumulative limit
-        let ctx = AggregationLimitContext::new(limits);
 
         let mut docs = materialized;
         for (i, stage) in remaining_stages.iter().enumerate() {
@@ -379,7 +385,7 @@ impl Pipeline {
         if self.stages.is_empty() {
             // Empty pipeline - just collect with limit checking
             let iter = with_counting(docs, ctx.clone());
-            return iter.collect();
+            return collect_charged(iter, ctx);
         }
 
         // Detect early $limit/$skip BEFORE streaming to set context limit
@@ -400,7 +406,7 @@ impl Pipeline {
 
         if remaining_stages.is_empty() {
             // All stages were streamable - collect results
-            return streaming_iter.collect();
+            return collect_charged(streaming_iter, ctx);
         }
 
         // Phase 2: Handle $group stage specially (streaming accumulators)
@@ -474,6 +480,7 @@ impl Pipeline {
                             continue;
                         }
 
+                        ctx.charge_bytes(estimate_json_size(&doc))?;
                         results.push(doc);
                     }
 
@@ -497,6 +504,7 @@ impl Pipeline {
                             )));
                         }
 
+                        ctx.charge_bytes(estimate_json_size(&doc))?;
                         results.push(doc);
                     }
 
@@ -722,4 +730,19 @@ impl Stage {
 
     // NOTE: Stage::execute() removed — it was dead code that bypassed OOM limits
     // for $group/$unwind. Use execute_with_context() for proper limit tracking.
+}
+
+/// Collect a pipeline's output, charging every document against the
+/// context's memory budget (`max_memory_mb`).
+fn collect_charged<I>(iter: I, ctx: &AggregationLimitContext) -> Result<Vec<Value>>
+where
+    I: Iterator<Item = Result<Value>>,
+{
+    let mut results = Vec::new();
+    for doc in iter {
+        let doc = doc?;
+        ctx.charge_bytes(estimate_json_size(&doc))?;
+        results.push(doc);
+    }
+    Ok(results)
 }
