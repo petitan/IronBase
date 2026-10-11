@@ -28,6 +28,41 @@ Found while fixing audit 2026-10-07 T2 (which covered only the B+ tree).
   before the scan (writers maintain it) and is dropped if the build fails.
 - **Test:** `tests/search_index_build_concurrency_tests.rs`.
 
+### Fixed — `insert_one_tx` keeps a supplied `_id` (mcp-server v1.0.577)
+
+Found while fixing audit 2026-10-07 T1.
+
+- **Root cause:** `CollectionCore::insert_one_tx` always assigned the next
+  auto id and overwrote the caller's `_id` (`insert_one` keeps it). Inside a
+  transaction a document could not be inserted under a chosen `_id`.
+- **Fix:** one `assign_document_id` for every insert path (`insert_one_raw`,
+  `insert_one_prepare`, `insert_one_tx`; the first two were duplicates): the
+  supplied `_id` is parsed and kept, `last_id` stays above numeric ids, an auto
+  id is written into the document. The transaction path also rejects an `_id`
+  that is live, or already inserted earlier in the same transaction.
+
+Regression test: `tests/transaction_custom_id_tests.rs`.
+### Fixed — aggregation `max_memory_mb` is enforced (mcp-server v1.0.576)
+
+Audit 2026-10-07 M3.
+
+- **Root cause:** `AggregationLimits::max_memory_mb` was defined and scaled
+  by RAM tier but never checked; only document counts were. A few large
+  documents (or a `$unwind` that copies each document per array element)
+  could exceed any memory budget. Reproduced: ~4 MB of documents through
+  `$project` / `$sort` / `$unwind` under a 1 MB budget succeeded.
+- **Fix:** `AggregationLimitContext::charge_bytes` charges the estimated size
+  (`find_options::estimate_json_size`, as the `find` byte limit uses) of every
+  document an aggregation materializes — its result list in both execution
+  paths (`execute_with_context`, `execute_streaming_with_limits`) and each
+  `$unwind` copy — and fails with "Aggregation exceeded memory limit" past
+  `max_memory_mb`. A streaming `$group` holds no documents and is not charged.
+- Behaviour change: an aggregation that materializes more than its tier's
+  `max_memory_mb` (64 MB to 4 GB by RAM, `aggregate_auto`) now errors
+  instead of growing.
+
+Regression tests: `tests/aggregation_memory_limit_tests.rs`.
+
 ### Fixed — `update_many` memory: old + new only (mcp-server v1.0.575)
 
 Audit 2026-10-07 M2.
