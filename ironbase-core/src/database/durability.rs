@@ -1043,8 +1043,9 @@ impl DatabaseCore<StorageEngine> {
                         auto_tx.add_operation(Operation::Update {
                             collection: collection_name.to_string(),
                             doc_id: doc_id.clone(),
-                            old_doc: std::sync::Arc::new(old_doc.clone()),
-                            new_doc: std::sync::Arc::new(new_doc.clone()),
+                            // Shared with the prepared changes, not copied (M2)
+                            old_doc: std::sync::Arc::clone(old_doc),
+                            new_doc: std::sync::Arc::clone(new_doc),
                         })?;
                     }
 

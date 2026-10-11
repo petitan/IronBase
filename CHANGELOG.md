@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `update_many` memory: old + new only (mcp-server v1.0.575)
+
+Audit 2026-10-07 M2.
+
+- **Root cause:** `update_many_prepare` kept, for every modified document
+  until the persist phase, the old and new `Document`, the old and new
+  `Value`, a tombstone (a full copy of the old document) and the new JSON
+  string; the WAL path then deep-copied old and new again into `Arc`s.
+  Measured: 6.2 MB of modified documents -> 79.5 MB peak growth (12.8x).
+- **Fix:** the prepared changes hold only `(doc_id, Arc<old>, Arc<new>)`,
+  shared with the WAL operations (`Arc::clone`). Persist builds the index
+  `Document`s per 256-document chunk and each tombstone / JSON line per
+  document. `update_many_raw_with_docs` (the non-WAL path, a duplicate of the
+  same logic) now runs prepare + persist. Measured: 21.2 MB (3.4x), the floor
+  being old + new for the atomic WAL commit.
+
+Regression test: `tests/update_many_memory_tests.rs` (counting allocator).
 ### Fixed — fulltext and fuzzy index files reload after a crash (mcp-server v1.0.574)
 
 Found while fixing audit 2026-10-07 T1 (also an audit side note).
