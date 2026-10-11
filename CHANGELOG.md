@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — aggregation `max_memory_mb` is enforced (mcp-server v1.0.576)
+
+Audit 2026-10-07 M3.
+
+- **Root cause:** `AggregationLimits::max_memory_mb` was defined and scaled
+  by RAM tier but never checked; only document counts were. A few large
+  documents (or a `$unwind` that copies each document per array element)
+  could exceed any memory budget. Reproduced: ~4 MB of documents through
+  `$project` / `$sort` / `$unwind` under a 1 MB budget succeeded.
+- **Fix:** `AggregationLimitContext::charge_bytes` charges the estimated size
+  (`find_options::estimate_json_size`, as the `find` byte limit uses) of every
+  document an aggregation materializes — its result list in both execution
+  paths (`execute_with_context`, `execute_streaming_with_limits`) and each
+  `$unwind` copy — and fails with "Aggregation exceeded memory limit" past
+  `max_memory_mb`. A streaming `$group` holds no documents and is not charged.
+- Behaviour change: an aggregation that materializes more than its tier's
+  `max_memory_mb` (64 MB to 4 GB by RAM, `aggregate_auto`) now errors
+  instead of growing.
+
+Regression tests: `tests/aggregation_memory_limit_tests.rs`.
+
 ### Fixed — `update_many` memory: old + new only (mcp-server v1.0.575)
 
 Audit 2026-10-07 M2.
