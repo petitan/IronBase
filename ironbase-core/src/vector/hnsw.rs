@@ -211,6 +211,13 @@ pub struct HnswIndex {
     /// machine without any format migration (P0-2).
     #[serde(skip)]
     effective_max_vectors: Option<usize>,
+    /// While `create_vector_index` builds this index from a document scan
+    /// (runtime-only): the node ids writers changed in it meanwhile. Their
+    /// nodes already reflect the current document, so the build skips them
+    /// instead of adding the (possibly older) vector it scanned. Twin of
+    /// `BPlusTree::build_touched` (audit 2026-10-07 T2).
+    #[serde(skip)]
+    build_touched: Option<HashSet<String>>,
 }
 
 impl HnswIndex {
@@ -231,6 +238,7 @@ impl HnswIndex {
             // effective_ceiling() (also covers the bincode deserialize paths,
             // where serde(skip) defaults this to None).
             effective_max_vectors: None,
+            build_touched: None,
         }
     }
 
@@ -368,6 +376,38 @@ impl HnswIndex {
     /// If `id` already exists, the prior entry is removed first (idempotent)
     /// so WAL-replay based recovery can re-apply ops without error.
     pub fn insert(&mut self, id: &str, vector: &[f32]) -> Result<()> {
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(id.to_string());
+        }
+        self.insert_node(id, vector)
+    }
+
+    /// Start building this index from a document scan while writers keep
+    /// maintaining it: from now on `insert`/`remove` record their node ids.
+    pub(crate) fn begin_build(&mut self) {
+        self.build_touched = Some(HashSet::new());
+    }
+
+    /// The build is over: writers stop recording.
+    pub(crate) fn end_build(&mut self) {
+        self.build_touched = None;
+    }
+
+    /// Add a vector from the build's document scan. Skipped when a writer
+    /// changed the document since the build began (the index already holds
+    /// its current node); idempotent otherwise.
+    pub(crate) fn build_insert(&mut self, id: &str, vector: &[f32]) -> Result<()> {
+        if self
+            .build_touched
+            .as_ref()
+            .is_some_and(|touched| touched.contains(id))
+        {
+            return Ok(());
+        }
+        self.insert_node(id, vector)
+    }
+
+    fn insert_node(&mut self, id: &str, vector: &[f32]) -> Result<()> {
         if vector.len() != self.config.dim {
             return Err(IronBaseError::IndexError(format!(
                 "Vector dimension mismatch: expected {}, got {}",
@@ -646,6 +686,9 @@ impl HnswIndex {
     /// Note: This marks the node as deleted but doesn't fully update
     /// the graph structure. Call rebuild() after many deletions.
     pub fn remove(&mut self, id: &str) -> bool {
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(id.to_string());
+        }
         if let Some(&idx) = self.id_to_index.get(id) {
             // Lazy removal: drop from the lookup; the node and its edges stay in
             // the graph as an orphan (search_layer traverses through but never
@@ -719,7 +762,7 @@ impl HnswIndex {
         self.id_to_index.clear();
 
         for (_idx, id, vector) in items {
-            self.insert(&id, &vector)?;
+            self.insert_node(&id, &vector)?;
         }
 
         self.dirty = true;
