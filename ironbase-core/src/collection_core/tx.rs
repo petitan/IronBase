@@ -71,19 +71,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<DocumentId> {
         use crate::transaction::Operation;
 
-        // Generate document ID
-        let mut storage = self.storage.write();
-        let meta = storage
-            .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-
-        let doc_id = DocumentId::new_auto(meta.last_id);
-        meta.last_id += 1;
-        drop(storage); // Release lock early
-
-        // Create document with _id and _collection
+        // The supplied _id, or the next auto id (same rule as insert_one)
         let mut doc_with_id = doc.clone();
-        doc_with_id.insert("_id".to_string(), serde_json::json!(doc_id.clone()));
+        let doc_id = {
+            let mut storage = self.storage.write();
+            let meta = storage
+                .get_collection_meta_mut(&self.name)
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+            let doc_id = super::assign_document_id(meta, &mut doc_with_id)?;
+            self.ensure_id_not_live(&storage, &doc_id)?;
+            doc_id
+        }; // Release lock early
+        self.ensure_id_not_in_tx(tx, &doc_id)?;
+
+        // Add _collection (WAL metadata)
         doc_with_id.insert("_collection".to_string(), Value::String(self.name.clone()));
 
         let doc_for_validation = Document::new(doc_id.clone(), doc_with_id.clone());

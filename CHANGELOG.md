@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `insert_one_tx` keeps a supplied `_id` (mcp-server v1.0.577)
+
+Found while fixing audit 2026-10-07 T1.
+
+- **Root cause:** `CollectionCore::insert_one_tx` always assigned the next
+  auto id and overwrote the caller's `_id` (`insert_one` keeps it). Inside a
+  transaction a document could not be inserted under a chosen `_id`.
+- **Fix:** one `assign_document_id` for every insert path (`insert_one_raw`,
+  `insert_one_prepare`, `insert_one_tx`; the first two were duplicates): the
+  supplied `_id` is parsed and kept, `last_id` stays above numeric ids, an auto
+  id is written into the document. The transaction path also rejects an `_id`
+  that is live, or already inserted earlier in the same transaction.
+
+Regression test: `tests/transaction_custom_id_tests.rs`.
 ### Fixed — aggregation `max_memory_mb` is enforced (mcp-server v1.0.576)
 
 Audit 2026-10-07 M3.

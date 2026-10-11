@@ -295,6 +295,32 @@ pub struct CollectionCore<S: Storage + RawStorage> {
     pending_writes: Option<Arc<dyn PendingWrites<S>>>,
 }
 
+/// The `_id` of a document being inserted: the caller's, parsed and kept,
+/// or the next auto id, written into `fields`. Keeps `meta.last_id` above
+/// every non-negative integer `_id` so auto ids never collide. Shared by all
+/// insert paths (`insert_one_tx` used to ignore a supplied `_id`).
+pub(crate) fn assign_document_id(
+    meta: &mut crate::storage::CollectionMeta,
+    fields: &mut HashMap<String, Value>,
+) -> Result<DocumentId> {
+    if let Some(existing_id) = fields.get("_id") {
+        let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
+            .map_err(|e| IronBaseError::Serialization(format!("Invalid _id format: {}", e)))?;
+        if let DocumentId::Int(num) = parsed_id {
+            if num >= 0 && num as u64 > meta.last_id {
+                meta.last_id = num as u64;
+            }
+        }
+        Ok(parsed_id)
+    } else {
+        let new_id = DocumentId::new_auto(meta.last_id);
+        meta.last_id += 1;
+        // Add _id to fields for query matching
+        fields.insert("_id".to_string(), serde_json::to_value(&new_id)?);
+        Ok(new_id)
+    }
+}
+
 impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== CONSTRUCTOR ==========
 
@@ -2197,6 +2223,27 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Cross-check a transaction's own inserts: a second insert of the same
+    /// `_id` in one transaction would otherwise write both on commit.
+    pub(crate) fn ensure_id_not_in_tx(
+        &self,
+        tx: &crate::transaction::Transaction,
+        doc_id: &DocumentId,
+    ) -> Result<()> {
+        use crate::transaction::Operation;
+        let duplicate = tx.operations().iter().any(|op| {
+            matches!(op, Operation::Insert { collection, doc_id: id, .. }
+                if collection == &self.name && id == doc_id)
+        });
+        if duplicate {
+            return Err(IronBaseError::IndexError(format!(
+                "Duplicate key: {:?} (unique index)",
+                doc_id
+            )));
+        }
         Ok(())
     }
 

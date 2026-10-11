@@ -427,32 +427,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             .get_collection_meta_mut(&self.name)
             .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
-        // Check if _id already exists in fields
-        let doc_id = if let Some(existing_id) = fields.get("_id") {
-            // Use existing _id from fields
-            let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
-                .map_err(|e| IronBaseError::Serialization(format!("Invalid _id format: {}", e)))?;
-
-            // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
-            if let DocumentId::Int(num) = parsed_id {
-                if num >= 0 {
-                    let numeric = num as u64;
-                    if numeric > meta.last_id {
-                        meta.last_id = numeric;
-                    }
-                }
-            }
-
-            parsed_id
-        } else {
-            // Auto-generate new _id
-            let new_id = DocumentId::new_auto(meta.last_id);
-            meta.last_id += 1;
-
-            // Add _id to fields for query matching
-            fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
-            new_id
-        };
+        let doc_id = super::assign_document_id(meta, &mut fields)?;
 
         // NOTE: _collection is NOT added here - it's WAL-only metadata
         // Storage documents should NOT contain _collection
@@ -1200,33 +1175,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 .get_collection_meta_mut(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
-            let id = if let Some(existing_id) = fields.get("_id") {
-                // Use existing _id from fields
-                let parsed_id: DocumentId =
-                    serde_json::from_value(existing_id.clone()).map_err(|e| {
-                        IronBaseError::Serialization(format!("Invalid _id format: {}", e))
-                    })?;
-
-                // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
-                if let DocumentId::Int(num) = parsed_id {
-                    if num >= 0 {
-                        let numeric = num as u64;
-                        if numeric > meta.last_id {
-                            meta.last_id = numeric;
-                        }
-                    }
-                }
-
-                parsed_id
-            } else {
-                // Auto-generate new _id
-                let new_id = DocumentId::new_auto(meta.last_id);
-                meta.last_id += 1;
-
-                // Add _id to fields for query matching
-                fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
-                new_id
-            };
+            let id = super::assign_document_id(meta, &mut fields)?;
 
             self.ensure_id_not_live(&storage, &id)?;
             id
