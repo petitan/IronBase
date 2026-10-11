@@ -142,10 +142,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             field: field.to_string(),
             ..config
         };
-        let mut hnsw = HnswIndex::new(config_with_field.clone());
+        // Register the index BEFORE the scan so writers maintain it while the
+        // scan below fills it; built off to the side, every write made during
+        // the build was lost from it (T2)
+        {
+            let mut hnsw = HnswIndex::new(config_with_field.clone());
+            hnsw.begin_build();
+            self.indexes
+                .write()
+                .add_loaded_vector_index(index_name.clone(), hnsw);
+        }
 
-        // Scan documents and build the index
-        use crate::limits::INDEX_BUILD_BATCH_SIZE;
+        // Scan documents and build the index. Small batches: each one holds
+        // the IndexManager write lock for its HNSW inserts.
+        use crate::limits::FULLTEXT_INDEX_BUILD_BATCH_SIZE as INDEX_BUILD_BATCH_SIZE;
         const PROGRESS_LOG_INTERVAL: usize = 1000;
         let mut indexed_count: usize = 0;
         let mut total_scanned: usize = 0;
@@ -156,7 +166,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // After this, only the total count is reported at the end.
         const MAX_DIM_ERROR_LOG: u64 = 5;
 
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+        let scan = self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = self.indexes.write();
+            let hnsw = indexes.get_vector_index_mut(&index_name).ok_or_else(|| {
+                IronBaseError::IndexError(format!("Vector index '{}' not found", index_name))
+            })?;
             for (doc_id, doc) in batch_docs {
                 let id_str = doc_id_to_string(&doc_id);
                 // Get the vector field value
@@ -187,7 +201,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             // rather than failing the whole build. P0-2's ceiling
                             // makes a genuine hit reachable only at true RAM
                             // exhaustion.
-                            if let Err(e) = hnsw.insert(&id_str, &vector) {
+                            if let Err(e) = hnsw.build_insert(&id_str, &vector) {
                                 tracing::warn!(
                                     doc_id = %id_str,
                                     error = %e,
@@ -212,7 +226,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
             Ok(())
-        })?;
+        });
+        if let Err(e) = scan {
+            // A failed build leaves no half-populated index behind
+            let _ = self.indexes.write().drop_vector_index(&index_name);
+            return Err(e);
+        }
+
+        // Writers keep maintaining the registered index from here on; the
+        // cache file below is a snapshot, later changes are flushed by the
+        // checkpoint (the IndexManager marked the index dirty).
+        let (bytes, vector_count) = {
+            let mut indexes = self.indexes.write();
+            let hnsw = indexes.get_vector_index_mut(&index_name).ok_or_else(|| {
+                IronBaseError::IndexError(format!("Vector index '{}' not found", index_name))
+            })?;
+            hnsw.end_build();
+            let bytes = hnsw.to_bytes();
+            hnsw.mark_clean();
+            (bytes, hnsw.len())
+        };
+        // Until its metadata is persisted, a failure leaves no index behind
+        let drop_registered = |e: IronBaseError| {
+            let _ = self.indexes.write().drop_vector_index(&index_name);
+            e
+        };
+        let bytes = bytes.map_err(drop_registered)?;
 
         tracing::info!(
             collection = %self.name,
@@ -232,26 +271,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Save HNSW cache file if we have a file-based storage
         if !db_file_path.is_empty() {
             let cache_path = Self::build_hnsw_cache_path(&db_file_path, &cache_file_name);
-            let bytes = hnsw.to_bytes()?;
-            std::fs::write(&cache_path, &bytes).map_err(|e| {
-                IronBaseError::Io(std::io::Error::other(format!(
-                    "Failed to write HNSW cache file: {}",
-                    e
-                )))
-            })?;
+            std::fs::write(&cache_path, &bytes)
+                .map_err(|e| {
+                    IronBaseError::Io(std::io::Error::other(format!(
+                        "Failed to write HNSW cache file: {}",
+                        e
+                    )))
+                })
+                .map_err(drop_registered)?;
             tracing::info!(
                 cache_path = %cache_path.display(),
                 size_bytes = bytes.len(),
                 "HNSW cache file saved"
             );
-        }
-
-        hnsw.mark_clean();
-
-        // Store the HNSW index in IndexManager for unified index management
-        {
-            let mut indexes = self.indexes.write();
-            indexes.add_loaded_vector_index(index_name.clone(), hnsw);
         }
 
         // Create metadata
@@ -260,7 +292,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             field: field.to_string(),
             config: config_with_field,
             cache_file: cache_file_name,
-            vector_count: indexed_count,
+            vector_count,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 
@@ -276,7 +308,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         tracing::info!(
             collection = %self.name,
             index_name = %index_name,
-            vector_count = indexed_count,
+            vector_count = vector_count,
             "Vector index creation complete"
         );
 

@@ -839,6 +839,12 @@ pub struct FulltextIndex {
     /// True while index is being built - search operations should return empty results
     /// to prevent using partially populated indexes
     pub building: bool,
+    /// While `create_fulltext_index` builds this index from a document scan
+    /// (not persisted): the ids of the documents writers changed in it
+    /// meanwhile. Their postings already reflect the current document, so the
+    /// build skips them instead of adding the (possibly older) version it
+    /// scanned. Twin of `BPlusTree::build_touched` (audit 2026-10-07 T2).
+    build_touched: Option<HashSet<DocumentId>>,
 
     // === BM25 Document Length Normalization ===
     /// Per-document token count for BM25 length normalization (dl)
@@ -1533,6 +1539,7 @@ impl FulltextIndex {
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
+            build_touched: None,
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
@@ -1564,6 +1571,7 @@ impl FulltextIndex {
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
+            build_touched: None,
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
@@ -1936,6 +1944,7 @@ impl FulltextIndex {
 
     /// Insert a document's field value into the index
     pub fn insert(&mut self, doc_id: &DocumentId, text: &str) -> Result<()> {
+        self.record_build_touch(doc_id);
         self.insert_impl(doc_id, text, None)
     }
 
@@ -1948,7 +1957,44 @@ impl FulltextIndex {
         text: &str,
         parent_doc_id: &str,
     ) -> Result<()> {
+        self.record_build_touch(doc_id);
         self.insert_impl(doc_id, text, Some(parent_doc_id))
+    }
+
+    /// Start building this index from a document scan while writers keep
+    /// maintaining it: from now on `insert`/`remove` record their documents.
+    pub(crate) fn begin_build(&mut self) {
+        self.build_touched = Some(HashSet::new());
+    }
+
+    /// The build is over: writers stop recording.
+    pub(crate) fn end_build(&mut self) {
+        self.build_touched = None;
+    }
+
+    fn record_build_touch(&mut self, doc_id: &DocumentId) {
+        if let Some(touched) = self.build_touched.as_mut() {
+            touched.insert(doc_id.clone());
+        }
+    }
+
+    /// Add a document from the build's document scan. Skipped when a writer
+    /// changed the document since the build began (the index already holds
+    /// its current postings); idempotent otherwise.
+    pub(crate) fn build_insert(
+        &mut self,
+        doc_id: &DocumentId,
+        text: &str,
+        parent_doc_id: Option<&str>,
+    ) -> Result<()> {
+        if self
+            .build_touched
+            .as_ref()
+            .is_some_and(|touched| touched.contains(doc_id))
+        {
+            return Ok(());
+        }
+        self.insert_impl(doc_id, text, parent_doc_id)
     }
 
     fn insert_impl(
@@ -2025,6 +2071,7 @@ impl FulltextIndex {
     /// Note: This marks the document as removed but doesn't reclaim disk space.
     /// Disk space is reclaimed during compaction/rebuild.
     pub fn remove(&mut self, doc_id: &DocumentId) -> Result<()> {
+        self.record_build_touch(doc_id);
         // Enforce hard cap on deleted_doc_ids before mutating state.
         // In lazy mode we track every deletion to filter search results; if the
         // tracking set is full, refuse further removes so the heap can't grow
@@ -3324,6 +3371,7 @@ impl FulltextIndex {
                 deleted_doc_ids: HashSet::new(),
                 building: false,
                 frozen_inverted: None,
+                build_touched: None,
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
@@ -3413,6 +3461,7 @@ impl FulltextIndex {
                 deleted_doc_ids: HashSet::new(),
                 building: false,
                 frozen_inverted: None,
+                build_touched: None,
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
