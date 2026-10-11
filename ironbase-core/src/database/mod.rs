@@ -2064,6 +2064,117 @@ mod wal_replay_tests {
         );
     }
 
+    /// A fuzzy index created at runtime had no storage path, so a checkpoint
+    /// never wrote its .fzidx and every reopen after a crash rebuilt it from
+    /// the documents. Now the file exists after the checkpoint, and the dirty
+    /// reopen loads it and replays the post-checkpoint insert.
+    #[test]
+    fn fuzzy_index_file_written_at_checkpoint_and_replayed() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fz_file.mlite");
+        let name = |n: &str| {
+            let mut d = HashMap::new();
+            d.insert("name".to_string(), serde_json::json!(n));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let index_name = db
+                .collection("names")
+                .unwrap()
+                .create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+            db.insert_one("names", name("Alice")).unwrap();
+            db.checkpoint().unwrap();
+            let fzidx = crate::collection_core::build_fuzzy_index_file_path(
+                db_path.to_str().unwrap(),
+                &index_name,
+            )
+            .unwrap();
+            assert!(
+                fzidx.exists(),
+                "checkpoint did not write {}",
+                fzidx.display()
+            );
+            db.insert_one("names", name("Zebulon")).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("names").unwrap();
+        for n in ["Alice", "Zebulon"] {
+            let found = coll
+                .find(&serde_json::json!({"name": {"$fuzzy": n}}))
+                .unwrap();
+            assert_eq!(found.len(), 1, "{n} missing after the dirty reopen");
+        }
+    }
+
+    /// Audit 2026-10-07 T3: rename_collection while another thread updates
+    /// the collection. The renamed collection's index must match its
+    /// documents, and after a crash no update may resurrect the old name.
+    #[test]
+    fn rename_collection_concurrent_with_updates() {
+        use std::sync::atomic::AtomicBool;
+        for round in 0..5 {
+            let tmp = TempDir::new().unwrap();
+            let db_path = tmp.path().join(format!("rename_race_{round}.mlite"));
+            {
+                let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+                for i in 0..300 {
+                    let mut d = HashMap::new();
+                    d.insert("_id".to_string(), serde_json::json!(i));
+                    d.insert("v".to_string(), serde_json::json!(i));
+                    db.insert_one("old", d).unwrap();
+                }
+                db.collection("old")
+                    .unwrap()
+                    .create_index("v".to_string(), false, false)
+                    .unwrap();
+                let done = AtomicBool::new(false);
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        let mut k: i64 = 0;
+                        while !done.load(Ordering::SeqCst) {
+                            let _ = db.update_one(
+                                "old",
+                                &serde_json::json!({"_id": k % 300}),
+                                &serde_json::json!({"$set": {"v": 1000 + k}}),
+                            );
+                            k += 1;
+                        }
+                    });
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    db.rename_collection("old", "new").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    done.store(true, Ordering::SeqCst);
+                });
+                let coll = db.collection("new").unwrap();
+                for d in coll.find(&serde_json::json!({})).unwrap() {
+                    let hits = coll
+                        .find(&serde_json::json!({"v": d["v"].clone()}))
+                        .unwrap();
+                    assert!(
+                        hits.iter().any(|h| h["_id"] == d["_id"]),
+                        "round {round}: {} not found through the index",
+                        d["_id"]
+                    );
+                }
+                db.simulate_crash_for_test();
+            }
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let names = db.list_collections();
+            assert!(
+                !names.iter().any(|n| n == "old"),
+                "round {round}: old name resurrected after crash: {names:?}"
+            );
+            assert_eq!(
+                db.count_documents("new", &serde_json::json!({})).unwrap(),
+                300
+            );
+        }
+    }
+
     #[test]
     fn fuzzy_wal_replay_recovery_preserves_all_docs() {
         use crate::index::fuzzy::FuzzyAlgorithm;

@@ -24,6 +24,43 @@ Audit 2026-10-07 M2.
   being old + new for the atomic WAL commit.
 
 Regression test: `tests/update_many_memory_tests.rs` (counting allocator).
+### Fixed — fulltext and fuzzy index files reload after a crash (mcp-server v1.0.574)
+
+Found while fixing audit 2026-10-07 T1 (also an audit side note).
+
+- **Fulltext root cause:** after a flush, inserts append document tokens past
+  the `.ftidx` metadata (their offsets stay in memory until the next flush).
+  After a crash those bytes remain, and the loader read the metadata with
+  `serde_json::from_reader`, which rejects anything after the JSON value
+  ("trailing characters"). Every dirty reopen therefore rebuilt the fulltext
+  index from all documents, and the watermark-based WAL replay never ran.
+- **Fulltext fix:** the metadata is read as one JSON value, ignoring the
+  unreferenced tail (WAL replay adds those documents again).
+- **Fuzzy root cause:** `CollectionCore::create_fuzzy_index` created the
+  index without a storage path, so a checkpoint never wrote its `.fzidx`
+  (only a later reopen gave it a path). Every reopen after a crash rebuilt it.
+- **Fuzzy fix:** created with a `.fzidx` path, like `create_fulltext_index`.
+
+Regression tests: `fulltext::tests::test_load_after_unflushed_appends`,
+`database::wal_replay_tests::fuzzy_index_file_written_at_checkpoint_and_replayed`.
+### Fixed — `rename_collection` / `drop_collection` concurrent with writers (mcp-server v1.0.573)
+
+Audit 2026-10-07 T3.
+
+- **Root cause:** `rename_collection` (and both drops) took the persist gate
+  but not the collection's write lock. A writer that had looked up the
+  collection before the rename kept writing to the old `IndexManager`, which
+  the rename then discarded, so the new name's index (reloaded from the
+  flushed files) missed the change; the writer's WAL entry, written after the
+  rename cleared the WAL, named the old collection, and a crash recovery
+  resurrected it. Reproduced: an indexed document not found through the
+  renamed collection's index, and `["old", "new"]` after a crash.
+- **Fix:** rename and drop take the collection's write lock before the
+  persist gate (the order writers use), so they wait for the in-flight writer
+  and later writers get `CollectionNotFound`. The rename also moves the
+  collection's upsert lock to the new name.
+
+Regression test: `database::wal_replay_tests::rename_collection_concurrent_with_updates`.
 
 ### Fixed — `create_index` concurrent with writers (mcp-server v1.0.572)
 
