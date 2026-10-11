@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — fulltext and fuzzy index files reload after a crash (mcp-server v1.0.574)
+
+Found while fixing audit 2026-10-07 T1 (also an audit side note).
+
+- **Fulltext root cause:** after a flush, inserts append document tokens past
+  the `.ftidx` metadata (their offsets stay in memory until the next flush).
+  After a crash those bytes remain, and the loader read the metadata with
+  `serde_json::from_reader`, which rejects anything after the JSON value
+  ("trailing characters"). Every dirty reopen therefore rebuilt the fulltext
+  index from all documents, and the watermark-based WAL replay never ran.
+- **Fulltext fix:** the metadata is read as one JSON value, ignoring the
+  unreferenced tail (WAL replay adds those documents again).
+- **Fuzzy root cause:** `CollectionCore::create_fuzzy_index` created the
+  index without a storage path, so a checkpoint never wrote its `.fzidx`
+  (only a later reopen gave it a path). Every reopen after a crash rebuilt it.
+- **Fuzzy fix:** created with a `.fzidx` path, like `create_fulltext_index`.
+
+Regression tests: `fulltext::tests::test_load_after_unflushed_appends`,
+`database::wal_replay_tests::fuzzy_index_file_written_at_checkpoint_and_replayed`.
+
 ### Fixed — `create_index` concurrent with writers (mcp-server v1.0.572)
 
 Audit 2026-10-07 T2.

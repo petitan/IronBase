@@ -2064,6 +2064,52 @@ mod wal_replay_tests {
         );
     }
 
+    /// A fuzzy index created at runtime had no storage path, so a checkpoint
+    /// never wrote its .fzidx and every reopen after a crash rebuilt it from
+    /// the documents. Now the file exists after the checkpoint, and the dirty
+    /// reopen loads it and replays the post-checkpoint insert.
+    #[test]
+    fn fuzzy_index_file_written_at_checkpoint_and_replayed() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fz_file.mlite");
+        let name = |n: &str| {
+            let mut d = HashMap::new();
+            d.insert("name".to_string(), serde_json::json!(n));
+            d
+        };
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let index_name = db
+                .collection("names")
+                .unwrap()
+                .create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+            db.insert_one("names", name("Alice")).unwrap();
+            db.checkpoint().unwrap();
+            let fzidx = crate::collection_core::build_fuzzy_index_file_path(
+                db_path.to_str().unwrap(),
+                &index_name,
+            )
+            .unwrap();
+            assert!(
+                fzidx.exists(),
+                "checkpoint did not write {}",
+                fzidx.display()
+            );
+            db.insert_one("names", name("Zebulon")).unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("names").unwrap();
+        for n in ["Alice", "Zebulon"] {
+            let found = coll
+                .find(&serde_json::json!({"name": {"$fuzzy": n}}))
+                .unwrap();
+            assert_eq!(found.len(), 1, "{n} missing after the dirty reopen");
+        }
+    }
+
     #[test]
     fn fuzzy_wal_replay_recovery_preserves_all_docs() {
         use crate::index::fuzzy::FuzzyAlgorithm;

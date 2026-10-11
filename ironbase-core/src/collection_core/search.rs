@@ -17,7 +17,7 @@ use crate::query::Query;
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 
-use super::index_persistence::build_fulltext_index_file_path;
+use super::index_persistence::{build_fulltext_index_file_path, build_fuzzy_index_file_path};
 use super::topk::topk_select_with_skip;
 use super::CollectionCore;
 
@@ -46,10 +46,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.check_not_closed()?;
         let index_name = format!("{}_{}_fuzzy", self.name, field);
 
+        // Disk storage like create_fulltext_index: without a path the
+        // checkpoint never wrote a .fzidx, so every reopen after a crash
+        // rebuilt the index from the documents
+        let storage_path = {
+            let storage = self.storage.read();
+            build_fuzzy_index_file_path(storage.get_file_path(), &index_name)
+        };
+
         // Step 1: Create the fuzzy index in IndexManager
         {
             let mut indexes = self.indexes.write();
-            indexes.create_fuzzy_index(index_name.clone(), field.clone(), algorithm, threshold)?;
+            indexes.create_fuzzy_index_with_storage(
+                index_name.clone(),
+                field.clone(),
+                algorithm,
+                threshold,
+                storage_path,
+            )?;
         }
 
         // Step 2 & 3: Scan documents IN BATCHES and populate index

@@ -758,6 +758,17 @@ struct FulltextIndexMetadataForSave {
 //   FulltextIndexMetadataForSave - name, field, options
 
 const FTIDX_MAGIC: &[u8; 8] = b"IRONFTX\0";
+
+/// Read the metadata section of a `.ftidx`: one JSON value, stopping at its
+/// end. After a flush, inserts append document tokens past the metadata (their
+/// offsets live in memory until the next flush); after a crash those bytes
+/// remain, and `serde_json::from_reader` rejected them as trailing characters,
+/// so every dirty reopen rebuilt the index from the documents. The tail is
+/// unreferenced: WAL replay adds those documents again.
+fn read_metadata_ignoring_tail<R: Read>(reader: R) -> Result<FulltextIndexMetadataForSave> {
+    let mut de = serde_json::Deserializer::from_reader(reader);
+    Ok(FulltextIndexMetadataForSave::deserialize(&mut de)?)
+}
 const FTIDX_VERSION_V1: u32 = 1;
 const FTIDX_VERSION_V2: u32 = 2; // Lazy loading support
 const FTIDX_VERSION_V3: u32 = 3; // TF embedded in inverted index entries
@@ -3295,7 +3306,7 @@ impl FulltextIndex {
             // Read metadata
             file.seek(SeekFrom::Start(metadata_offset))?;
             let metadata_reader = BufReader::new(&file);
-            let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
+            let metadata = read_metadata_ignoring_tail(metadata_reader)?;
 
             let mut index = FulltextIndex {
                 name: metadata.name,
@@ -3378,7 +3389,7 @@ impl FulltextIndex {
             // Read metadata
             file.seek(SeekFrom::Start(metadata_offset))?;
             let metadata_reader = BufReader::new(&file);
-            let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
+            let metadata = read_metadata_ignoring_tail(metadata_reader)?;
 
             // FIX #25: Set write_offset to END of file (after metadata), NOT offsets_offset!
             // Previously, write_offset was set to offsets_offset, which caused flush()
@@ -4358,6 +4369,43 @@ mod tests {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].doc_id, DocumentId::Int(2));
         }
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    /// Inserts after a flush append document tokens past the metadata; when
+    /// the process dies before the next flush those bytes stay. Loading must
+    /// still succeed (it failed with "trailing characters", so every dirty
+    /// reopen rebuilt the index from the documents).
+    #[test]
+    fn test_load_after_unflushed_appends() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp_path = std::env::temp_dir().join("fts_test_unflushed_tail.ftidx");
+        let _ = std::fs::remove_file(&temp_path);
+        let flushed_len;
+        {
+            let mut index =
+                FulltextIndex::new_with_storage("test_idx", "content", options, temp_path.clone())
+                    .unwrap();
+            index
+                .insert(&DocumentId::Int(1), "The original document")
+                .unwrap();
+            index.save_to_file().unwrap();
+            flushed_len = std::fs::metadata(&temp_path).unwrap().len();
+            index
+                .insert(&DocumentId::Int(2), "A later document never flushed")
+                .unwrap();
+            // Dropped without a flush, like a crash
+        }
+        assert!(
+            std::fs::metadata(&temp_path).unwrap().len() > flushed_len,
+            "the unflushed insert should have appended to the file"
+        );
+
+        let loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+        let results = loaded.search("original", 10, 0, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].doc_id, DocumentId::Int(1));
 
         let _ = std::fs::remove_file(&temp_path);
     }
