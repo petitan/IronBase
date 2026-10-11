@@ -1532,6 +1532,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // Wait for this collection's in-flight writer and keep new ones out
+        // until the drop is done (audit 2026-10-07 T3). Writers take this lock
+        // before the persist gate, so the order is the same
+        let collection_write_lock = self.get_collection_write_lock(name);
+        let _collection_guard = collection_write_lock.lock();
+
         // storage.drop_collection clears the whole WAL: persist every
         // collection's dirty indexes first, with writers held off (audit
         // 2026-10-06 #28)
@@ -1570,6 +1576,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         if old_name == new_name {
             return Ok(());
         }
+
+        // Wait for the collection's in-flight writer and keep new ones out
+        // until the rename is done (audit 2026-10-07 T3): a writer that got the
+        // collection before the rename kept writing to the old IndexManager
+        // (the new name's index then missed its change) and logged the old
+        // name in the WAL. Writers take this lock before the persist gate, so
+        // the order is the same; after the rename they get CollectionNotFound
+        let collection_write_lock = self.get_collection_write_lock(old_name);
+        let _collection_guard = collection_write_lock.lock();
 
         // The storage rename clears the whole WAL, and the old IndexManager is
         // dropped and its files reloaded under the new name: persist every
@@ -1637,6 +1652,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         }
         {
             let mut locks = self.collection_write_locks.write();
+            if let Some(arc) = locks.remove(old_name) {
+                locks.insert(new_name.to_string(), arc);
+            }
+        }
+        {
+            let mut locks = self.collection_upsert_locks.write();
             if let Some(arc) = locks.remove(old_name) {
                 locks.insert(new_name.to_string(), arc);
             }
@@ -1758,6 +1779,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // Wait for this collection's in-flight writer and keep new ones out
+        // until the drop is done (audit 2026-10-07 T3). Writers take this lock
+        // before the persist gate, so the order is the same
+        let collection_write_lock = self.get_collection_write_lock(name);
+        let _collection_guard = collection_write_lock.lock();
+
         // storage.drop_collection clears the whole WAL: persist every
         // collection's dirty indexes first, with writers held off (audit
         // 2026-10-06 #28)
