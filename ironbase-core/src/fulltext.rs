@@ -649,6 +649,57 @@ pub fn tokenize(text: &str, options: &FtsOptions) -> Vec<String> {
         .collect()
 }
 
+/// Like [`tokenize`], but the tokens keep the text's letter case: stop words
+/// and stemming work on the lowercased word, and each character of the stem
+/// that matches the lowercased word takes back the original character's case
+/// ("Developers" → "Develop"). For the case-sensitive `$text` match; the
+/// fulltext index keeps using [`tokenize`].
+pub fn tokenize_case_sensitive(text: &str, options: &FtsOptions) -> Vec<String> {
+    let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
+    let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
+
+    let processed = if options.accent_folding {
+        fold_accents(text)
+    } else {
+        text.to_string()
+    };
+
+    processed
+        .split_whitespace()
+        .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|s| !s.is_empty())
+        .filter(|s| s.chars().count() >= options.min_word_length)
+        .filter_map(|word| {
+            let chars: Vec<char> = word.chars().collect();
+            // One lowercase char per original char, so positions line up
+            let lower: Vec<char> = chars
+                .iter()
+                .map(|c| c.to_lowercase().next().unwrap_or(*c))
+                .collect();
+            let lower_word: String = lower.iter().collect();
+            if stop_words.contains(lower_word.as_str()) {
+                return None;
+            }
+            let stem = stemmer
+                .as_ref()
+                .map(|st| st.stem(&lower_word).to_string())
+                .unwrap_or(lower_word);
+            Some(
+                stem.chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if lower.get(i) == Some(&c) {
+                            chars[i]
+                        } else {
+                            c
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 /// Tokenize a search query: like [`tokenize`], with repeated tokens removed
 /// (first occurrence kept). Each query term is scored and reported once, so a
 /// query repeating one word thousands of times does not multiply posting-list

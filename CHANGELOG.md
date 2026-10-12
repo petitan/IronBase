@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `$text` `$caseSensitive: true` compares letter case (mcp-server v1.0.582)
+
+Found while fixing audit 2026-10-07 O6.
+
+- **Symptom:** `{"$text": {"$search": "Rust", "$caseSensitive": true}}`
+  matched "likes rust".
+- **Root cause:** `text_matches` passed `!case_sensitive` as the
+  tokenizer's `accent_folding`, and `fulltext::tokenize` always lowercases,
+  so the flag only turned accent folding off.
+- **Fix:** with `$caseSensitive: true` the `$text` match tokenizes with the
+  new `fulltext::tokenize_case_sensitive`: stop words and stemming work on
+  the lowercased word, and the stem takes back the word's letter case
+  ("Developers" → "Develop"). Accent folding stays off for it, as before;
+  the default (case-insensitive) match and the fulltext index are unchanged.
+- **Test:** `test_text_operator_case_sensitive` (`query/operators/mod.rs`).
+
 ### Fixed — extended form of `$text` / `$startsWith` / `$endsWith` / `$contains` (mcp-server v1.0.581)
 
 Audit 2026-10-07 O6.

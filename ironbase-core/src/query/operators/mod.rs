@@ -2051,6 +2051,34 @@ mod tests {
     }
 
     #[test]
+    fn test_text_operator_case_sensitive() {
+        let op = TextOperator;
+        // $caseSensitive: true compares case (it used to only turn off
+        // accent folding: tokens were always lowercased)
+        let filter = json!({"$search": "Rust", "$caseSensitive": true});
+        assert!(op
+            .matches(Some(&json!("Rust developer")), &filter, None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("likes rust")), &filter, None)
+            .unwrap());
+        // ... also with stemming: the stem keeps the word's case
+        let filter =
+            json!({"$search": "Developers", "$language": "english", "$caseSensitive": true});
+        assert!(op
+            .matches(Some(&json!("Developer tools")), &filter, None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("developer tools")), &filter, None)
+            .unwrap());
+        // the default stays case-insensitive and accent-folding
+        let filter = json!({"$search": "Rust Kiraly"});
+        assert!(op
+            .matches(Some(&json!("rust király")), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
     fn test_text_operator_array_support() {
         let op = TextOperator;
         // Any array element matching should return true
