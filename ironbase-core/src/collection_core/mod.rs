@@ -1101,46 +1101,54 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Cancellation flag reference for cooperative timeout
         let cancel_flag = &ctx.cancel_flag;
 
-        // 🚀 PERF FIX: Acquire storage read lock ONCE for all documents
-        // Previously: N lock acquisitions + N HashMap lookups for N documents
-        // Now: 1 lock acquisition + 1 HashMap lookup for N documents
-        let storage = self.storage.read();
-        let meta = storage
-            .get_collection_meta(&self.name)
-            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-
+        // The storage lock is held per chunk while its bytes are read, not for
+        // the whole load: a long find used to stall every writer for its
+        // duration (audit 2026-10-07 T5). Each chunk looks its offsets up in
+        // the current catalog, since a compaction between chunks moves
+        // documents; parsing and the rest run without the lock.
+        const LOAD_LOCK_CHUNK: usize = 1000;
         let mut loaded = 0;
-        for doc_id in doc_ids {
-            // Check for cancellation/timeout every 100 documents
-            if loaded % 100 == 0 {
-                if let Some(ref flag) = cancel_flag {
-                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        drop(storage); // Release lock before returning error
-                        return Err(IronBaseError::Cancelled(format!(
-                            "Query cancelled after loading {} documents. \
-                            The operation was aborted due to client disconnection.",
-                            loaded
-                        )));
+        for chunk in doc_ids.chunks(LOAD_LOCK_CHUNK) {
+            let raw_docs: Vec<Vec<u8>> = {
+                let storage = self.storage.read();
+                let meta = storage
+                    .get_collection_meta(&self.name)
+                    .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+                let mut raw = Vec::with_capacity(chunk.len());
+                for doc_id in chunk {
+                    if let Some(&offset) = meta.document_catalog.get(doc_id) {
+                        raw.push(storage.read_data_at(offset)?);
                     }
                 }
-                if let Some(dl) = ctx.deadline {
-                    if std::time::Instant::now() >= dl {
-                        drop(storage); // Release lock before returning error
-                        return Err(IronBaseError::Timeout(format!(
-                            "Query timed out after loading {} documents. \
-                            The operation exceeded the configured deadline.",
-                            loaded
-                        )));
-                    }
-                }
-            }
+                raw
+            };
 
-            // Inline document loading (no per-doc lock/meta lookup!)
-            let doc_opt = if let Some(&offset) = meta.document_catalog.get(&doc_id) {
-                let doc_bytes = storage.read_data_at(offset)?;
+            for doc_bytes in raw_docs {
+                // Check for cancellation/timeout every 100 documents
+                if loaded % 100 == 0 {
+                    if let Some(ref flag) = cancel_flag {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(IronBaseError::Cancelled(format!(
+                                "Query cancelled after loading {} documents. \
+                                The operation was aborted due to client disconnection.",
+                                loaded
+                            )));
+                        }
+                    }
+                    if let Some(dl) = ctx.deadline {
+                        if std::time::Instant::now() >= dl {
+                            return Err(IronBaseError::Timeout(format!(
+                                "Query timed out after loading {} documents. \
+                                The operation exceeded the configured deadline.",
+                                loaded
+                            )));
+                        }
+                    }
+                }
+
                 let doc: Value = serde_json::from_slice(&doc_bytes)?;
                 // Check tombstone
-                if doc
+                let doc_opt = if doc
                     .get("_tombstone")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
@@ -1148,34 +1156,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     None
                 } else {
                     Some(doc)
-                }
-            } else {
-                None
-            };
-
-            if let Some(doc) = doc_opt {
-                // Apply early projection if safe (reduces memory, enables accurate size check)
-                let doc = if early_project {
-                    ctx.apply_early_projection(doc)?
-                } else {
-                    doc
                 };
 
-                if let Some(ref mut heap) = topk_heap {
-                    // Top-K path: the heap retains only k = skip + limit docs, so
-                    // memory stays bounded no matter how many match. The response-
-                    // size guard is applied to the final ≤limit result after the
-                    // scan (Phase 4); the heap's own size is checked here.
-                    heap.push(doc);
-                    check_topk_bytes(heap, topk_byte_limit)?;
-                } else {
-                    // Track response size if limit is set
-                    // NOTE: With early projection, this checks the PROJECTED size (accurate)
-                    // Without early projection, this checks the FULL document size
-                    if let Some(max_bytes) = max_response_bytes {
-                        let doc_size = crate::find_options::estimate_json_size(&doc);
-                        if total_response_bytes.saturating_add(doc_size) > max_bytes {
-                            return Err(IronBaseError::InvalidQuery(format!(
+                if let Some(doc) = doc_opt {
+                    // Apply early projection if safe (reduces memory, enables accurate size check)
+                    let doc = if early_project {
+                        ctx.apply_early_projection(doc)?
+                    } else {
+                        doc
+                    };
+
+                    if let Some(ref mut heap) = topk_heap {
+                        // Top-K path: the heap retains only k = skip + limit docs, so
+                        // memory stays bounded no matter how many match. The response-
+                        // size guard is applied to the final ≤limit result after the
+                        // scan (Phase 4); the heap's own size is checked here.
+                        heap.push(doc);
+                        check_topk_bytes(heap, topk_byte_limit)?;
+                    } else {
+                        // Track response size if limit is set
+                        // NOTE: With early projection, this checks the PROJECTED size (accurate)
+                        // Without early projection, this checks the FULL document size
+                        if let Some(max_bytes) = max_response_bytes {
+                            let doc_size = crate::find_options::estimate_json_size(&doc);
+                            if total_response_bytes.saturating_add(doc_size) > max_bytes {
+                                return Err(IronBaseError::InvalidQuery(format!(
                                 "Response size limit exceeded: loaded {} documents ({} bytes), \
                                 next document would exceed {} byte limit. \
                                 Solutions: 1) Add 'limit' to reduce results, \
@@ -1183,22 +1188,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 3) Use find_streaming() for large results.",
                                 loaded, total_response_bytes, max_bytes
                             )));
+                            }
+                            total_response_bytes += doc_size;
                         }
-                        total_response_bytes += doc_size;
-                    }
 
-                    docs.push(doc);
-                }
-                loaded += 1;
-                // Progress logging every 10,000 documents
-                if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
-                    log_debug!(
-                        "find on '{}': loaded {}/{} documents ({} bytes)",
-                        self.name,
-                        loaded,
-                        doc_count,
-                        total_response_bytes
-                    );
+                        docs.push(doc);
+                    }
+                    loaded += 1;
+                    // Progress logging every 10,000 documents
+                    if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
+                        log_debug!(
+                            "find on '{}': loaded {}/{} documents ({} bytes)",
+                            self.name,
+                            loaded,
+                            doc_count,
+                            total_response_bytes
+                        );
+                    }
                 }
             }
         }
