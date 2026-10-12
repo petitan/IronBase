@@ -182,6 +182,26 @@ impl Query {
                             continue;
                         }
 
+                        // SPECIAL CASE: the extended form of the text operators
+                        // takes option keys ($search, $value, $caseSensitive...),
+                        // not query operators: check them against the options the
+                        // operator reads instead of recursing (audit 2026-10-07 O6)
+                        if let Some(allowed) = text_operator_options(key) {
+                            if let Some(opts) = value.as_object() {
+                                if let Some(unknown) =
+                                    opts.keys().find(|k| !allowed.contains(&k.as_str()))
+                                {
+                                    return Err(crate::IronBaseError::InvalidQuery(format!(
+                                        "Unknown option {} for {} (allowed: {})",
+                                        unknown,
+                                        key,
+                                        allowed.join(", ")
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
+
                         // Not a wildcard - validate it's a known operator
                         if !operators::OPERATOR_REGISTRY.contains_key(key.as_str()) {
                             return Err(crate::IronBaseError::InvalidQuery(format!(
@@ -281,6 +301,16 @@ impl Query {
 impl Default for Query {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The option keys of a text operator's extended form, as its parser in
+/// `operators/text_search.rs` reads them; `None` for any other operator.
+fn text_operator_options(op: &str) -> Option<&'static [&'static str]> {
+    match op {
+        "$text" => Some(&["$search", "$language", "$caseSensitive"]),
+        "$startsWith" | "$endsWith" | "$contains" => Some(&["$value", "$caseSensitive"]),
+        _ => None,
     }
 }
 
