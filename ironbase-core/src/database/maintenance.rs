@@ -129,8 +129,8 @@ impl DatabaseCore<StorageEngine> {
 
         // Rebuild HNSW indexes to remove orphan nodes before flush
         {
-            let index_managers = self.index_managers.read();
-            for (collection_name, index_manager) in index_managers.iter() {
+            let _flush = self.index_flush_lock.lock();
+            for (collection_name, index_manager) in self.index_managers_snapshot() {
                 let mut mgr = index_manager.write();
                 let rebuilt = mgr.rebuild_all_vector_indexes()?;
                 if rebuilt > 0 {
@@ -195,8 +195,8 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<crate::storage::CompactionStats> {
         // Pre-Phase: HNSW rebuild + index flush (does NOT hold storage lock)
         {
-            let index_managers = self.index_managers.read();
-            for (collection_name, index_manager) in index_managers.iter() {
+            let _flush = self.index_flush_lock.lock();
+            for (collection_name, index_manager) in self.index_managers_snapshot() {
                 let mut mgr = index_manager.write();
                 // A forced (explicit operator) compact fully reconstructs every
                 // graph; the automatic bloat-triggered compact only rebuilds
@@ -526,7 +526,8 @@ impl DatabaseCore<StorageEngine> {
             storage.get_file_path().to_string()
         };
 
-        let index_managers = self.index_managers.read();
+        let _flush = self.index_flush_lock.lock();
+        let index_managers = self.index_managers_snapshot();
 
         // Parallel across collections: each collection has its own
         // Arc<RwLock<IndexManager>>, so they can flush concurrently.
@@ -824,8 +825,8 @@ impl DatabaseCore<StorageEngine> {
 
         let watermark = self.watermark_tx_id();
         let mut total_flushed = 0usize;
-        let index_managers = self.index_managers.read();
-        for (collection_name, index_manager) in index_managers.iter() {
+        let _flush = self.index_flush_lock.lock();
+        for (collection_name, index_manager) in self.index_managers_snapshot() {
             let dirty_bt = {
                 let mgr = index_manager.read();
                 mgr.dirty_btree_index_names()
@@ -950,6 +951,25 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.flush()
     }
 
+    /// The collections' index managers, cloned out of `index_managers` under a
+    /// brief read lock. The flush passes iterate this instead of holding the
+    /// map's read lock for the whole flush, which stalled every map reader
+    /// behind a waiting collection create/drop (audit 2026-10-07 T4). Callers
+    /// hold `index_flush_lock`, so a collection dropped meanwhile does not get
+    /// its index files written back.
+    pub(crate) fn index_managers_snapshot(
+        &self,
+    ) -> Vec<(
+        String,
+        std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
+    )> {
+        self.index_managers
+            .read()
+            .iter()
+            .map(|(name, mgr)| (name.clone(), std::sync::Arc::clone(mgr)))
+            .collect()
+    }
+
     /// Flush every dirty index (B+ tree, fulltext, fuzzy, vector) of every
     /// collection. Tries all of them and returns the first error.
     ///
@@ -960,7 +980,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let db_path = self.storage.read().get_file_path().to_string();
         let watermark = self.watermark_tx_id();
         let mut first_error = None;
-        for index_manager in self.index_managers.read().values() {
+        let _flush = self.index_flush_lock.lock();
+        for (_, index_manager) in self.index_managers_snapshot() {
             let mut manager = index_manager.write();
             let mut results = vec![
                 manager.flush_fulltext_indexes(watermark),
@@ -992,21 +1013,28 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
 /// Holds `DatabaseCore::is_compacting` for the duration of one compaction and
 /// clears it on drop, so the flag is released on error and panic too.
-struct CompactionGuard<'a>(&'a std::sync::atomic::AtomicBool);
+pub(crate) struct CompactionGuard<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl<'a> CompactionGuard<'a> {
     fn acquire(flag: &'a std::sync::atomic::AtomicBool) -> Result<Self> {
+        Self::acquire_for(flag, "Compaction already in progress")
+    }
+
+    /// Hold the flag for an operation that must not run alongside a
+    /// compaction (dropping or renaming a collection): it fails with
+    /// `message` while one runs, and a compaction started meanwhile fails
+    /// with "Compaction already in progress" (audit 2026-10-07 T6).
+    pub(crate) fn acquire_for(
+        flag: &'a std::sync::atomic::AtomicBool,
+        message: &str,
+    ) -> Result<Self> {
         flag.compare_exchange(
             false,
             true,
             std::sync::atomic::Ordering::SeqCst,
             std::sync::atomic::Ordering::SeqCst,
         )
-        .map_err(|_| {
-            crate::error::IronBaseError::OperationNotAllowed(
-                "Compaction already in progress".to_string(),
-            )
-        })?;
+        .map_err(|_| crate::error::IronBaseError::OperationNotAllowed(message.to_string()))?;
         Ok(CompactionGuard(flag))
     }
 }
@@ -1335,5 +1363,83 @@ mod compact_metadata_catchup_tests {
             });
             assert_eq!(incomplete, 0, "scan returned incomplete results");
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_hold_tests {
+    //! Audit 2026-10-07 T4 / T6. Crate-internal: the T4 test holds a
+    //! collection's `IndexManager` lock (only reachable via `index_managers`)
+    //! to make an index flush slow.
+
+    use crate::error::IronBaseError;
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    /// T4: an index flush stuck on one collection must not keep a collection
+    /// create (a writer of the `index_managers` map) waiting, and with it
+    /// every reader of the map.
+    #[test]
+    fn slow_index_flush_does_not_block_collection_create() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        db.collection("a").unwrap();
+        let mgr_a = std::sync::Arc::clone(db.index_managers.read().get("a").unwrap());
+
+        let held = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            // stands in for a long flush of collection "a": holds its
+            // IndexManager for a second, then lets go
+            s.spawn(|| {
+                let _guard = mgr_a.write();
+                held.wait();
+                std::thread::sleep(Duration::from_secs(1));
+            });
+            held.wait();
+            let flusher = s.spawn(|| db.flush_all_index_managers().unwrap());
+            std::thread::sleep(Duration::from_millis(100));
+
+            let t = Instant::now();
+            db.collection("b").unwrap();
+            let create = t.elapsed();
+
+            flusher.join().unwrap();
+            assert!(
+                create < Duration::from_millis(300),
+                "collection create waited {create:?} for an index flush"
+            );
+        });
+    }
+
+    /// T6: dropping or renaming a collection fails while a compaction runs,
+    /// instead of waiting for it.
+    #[test]
+    fn drop_and_rename_fail_during_compaction() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        db.collection("a").unwrap();
+        db.collection("b").unwrap();
+
+        db.is_compacting.store(true, Ordering::SeqCst);
+        for result in [
+            db.drop_collection("a"),
+            db.force_drop_collection("a"),
+            db.rename_collection("a", "c"),
+        ] {
+            match result {
+                Err(IronBaseError::OperationNotAllowed(msg)) => {
+                    assert!(msg.contains("compaction"), "{msg}")
+                }
+                other => panic!("expected OperationNotAllowed, got {other:?}"),
+            }
+        }
+        // the failed attempts left the compaction's flag alone
+        assert!(db.is_compacting.load(Ordering::SeqCst));
+
+        db.is_compacting.store(false, Ordering::SeqCst);
+        db.rename_collection("a", "c").unwrap();
+        db.drop_collection("b").unwrap();
+        // and released it again
+        assert!(!db.is_compacting.load(Ordering::SeqCst));
     }
 }

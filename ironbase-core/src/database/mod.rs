@@ -415,6 +415,14 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Each collection shares its IndexManager across all CollectionCore instances
     pub(crate) index_managers: Arc<RwLock<HashMap<String, Arc<RwLock<IndexManager>>>>>,
 
+    /// Serializes the index-flush passes (checkpoint, compaction, WAL-clearing
+    /// flushes) with dropping and renaming a collection's index files. The
+    /// flush passes work on a snapshot of `index_managers` instead of holding
+    /// its read lock, so a collection create/drop no longer stalls every
+    /// reader behind a long flush (audit 2026-10-07 T4); this lock keeps a
+    /// flush from writing a dropped collection's index files back.
+    pub(crate) index_flush_lock: Mutex<()>,
+
     // Shared SchemaManagers per collection (fixes stale schema problem)
     // Each collection shares its CompiledSchema across all CollectionCore instances
     pub(crate) schema_managers: Arc<RwLock<HashMap<String, Arc<RwLock<Option<CompiledSchema>>>>>>,
@@ -627,6 +635,7 @@ impl DatabaseCore<StorageEngine> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            index_flush_lock: Mutex::new(()),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             pending_writes: None,
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
@@ -791,6 +800,7 @@ impl DatabaseCore<MemoryStorage> {
             batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            index_flush_lock: Mutex::new(()),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             pending_writes: None,
             schema_managers: Arc::new(RwLock::new(HashMap::new())),

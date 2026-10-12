@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — index flushes and compaction no longer freeze collection create/drop and the MCP server (mcp-server v1.0.584)
+
+Audit 2026-10-07 T4, T6.
+
+- **T4 — symptom:** a collection create waited 900 ms for an index flush
+  stuck on another collection, and every reader of the collection map
+  waited behind it.
+- **T4 — root cause:** the index-flush passes (checkpoint, compaction,
+  the WAL-clearing `flush_all_index_managers`) held the `index_managers`
+  map's read lock for the whole flush; a waiting map writer (collection
+  create/drop) blocks new readers.
+- **T4 — fix:** the passes work on a snapshot of the map
+  (`index_managers_snapshot`). A new internal `index_flush_lock` serializes
+  them with dropping and renaming a collection's index files, which the map
+  lock used to do implicitly, so a flush never writes a dropped
+  collection's files back.
+- **T6 — symptom:** in the MCP server a drop/rename during a compaction
+  froze the whole server until the compaction ended.
+- **T6 — root cause:** the adapter took `db.write()` for drop, force-drop
+  and rename while the non-blocking compaction holds `db.read()` for its
+  whole run; the pending writer blocked every other request.
+- **T6 — fix:** the adapter takes `db.read()` for them (the core
+  synchronizes them itself), and the core fails a drop/rename while a
+  compaction runs (`OperationNotAllowed`), by holding the compaction flag
+  for its duration; a compaction started during a drop/rename fails with
+  "Compaction already in progress".
+- **Behaviour change:** dropping or renaming a collection during a
+  compaction is an error instead of a wait.
+- **Tests:** `database::maintenance::lock_hold_tests`.
+
 ### Fixed — `$text` `$caseSensitive: true` compares letter case (mcp-server v1.0.582)
 
 Found while fixing audit 2026-10-07 O6.
