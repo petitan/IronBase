@@ -255,6 +255,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             None => None,
         };
         let mut total_response_bytes: usize = 0;
+        // The top-k heap holds skip + limit documents, so a deep skip can keep
+        // far more than the final page: its byte total is checked during the
+        // scan against the explicit cap, or the RAM-derived one (audit
+        // 2026-10-07 M6; the page itself is checked again after the scan).
+        let topk_byte_limit = topk_heap.as_ref().map(|_| {
+            ctx.max_response_bytes
+                .unwrap_or_else(crate::find_options::calculate_safe_response_limit)
+        });
 
         for (i, doc_id) in doc_ids.into_iter().enumerate() {
             // Check for cancellation/timeout every 100 documents
@@ -280,8 +288,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 if let Some(ref mut heap) = topk_heap {
                     // Top-K path: heap keeps only k docs; the response-size guard is
-                    // applied to the final ≤limit result after the scan.
+                    // applied to the final ≤limit result after the scan; the
+                    // heap's own size is checked here.
                     heap.push(doc);
+                    super::check_topk_bytes(heap, topk_byte_limit)?;
                 } else {
                     // Track response size for OOM protection
                     if let Some(max_bytes) = max_response_bytes {

@@ -207,6 +207,8 @@ where
 /// `apply_sort` + truncate (which kept the first k in scan order on ties).
 struct HeapItem {
     doc: Value,
+    /// `estimate_json_size(doc)`, kept for the heap's byte total.
+    size: usize,
     /// Monotonic scan index; lower = scanned earlier. Tiebreaker for equal keys.
     seq: u64,
     sort: Arc<[(String, i32)]>,
@@ -252,6 +254,8 @@ pub struct TopKHeap {
     skip: usize,
     next_seq: u64,
     sort_spec: Arc<[(String, i32)]>,
+    /// Estimated JSON size of the retained documents.
+    bytes: usize,
 }
 
 impl TopKHeap {
@@ -272,7 +276,15 @@ impl TopKHeap {
             skip,
             next_seq: 0,
             sort_spec,
+            bytes: 0,
         }
+    }
+
+    /// Estimated JSON size (`estimate_json_size`) of the documents the heap
+    /// holds now. A deep skip keeps skip + limit documents, so callers check
+    /// this against their byte limit during the scan (audit 2026-10-07 M6).
+    pub fn retained_bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Offer one document. O(log k). Documents that cannot enter the top-k are
@@ -282,6 +294,7 @@ impl TopKHeap {
             return;
         }
         let item = HeapItem {
+            size: crate::find_options::estimate_json_size(&doc),
             doc,
             seq: self.next_seq,
             sort: Arc::clone(&self.sort_spec),
@@ -290,12 +303,16 @@ impl TopKHeap {
         // avoids any overflow panic/wrap if it somehow did.
         self.next_seq = self.next_seq.saturating_add(1);
         if self.heap.len() < self.k {
+            self.bytes = self.bytes.saturating_add(item.size);
             self.heap.push(item);
         } else if let Some(top) = self.heap.peek() {
             // Keep `item` only if it ranks before the current worst-of-the-best.
             // A tie never displaces an earlier doc: a later scan seq ranks larger.
             if item.cmp(top) == Ordering::Less {
-                self.heap.pop();
+                if let Some(evicted) = self.heap.pop() {
+                    self.bytes = self.bytes.saturating_sub(evicted.size);
+                }
+                self.bytes = self.bytes.saturating_add(item.size);
                 self.heap.push(item);
             }
         }

@@ -321,6 +321,26 @@ pub(crate) fn assign_document_id(
     }
 }
 
+/// Fail once the `find` top-k heap holds more than `limit` bytes. A deep
+/// skip keeps skip + limit documents there, so the byte limit has to apply
+/// during the scan, not only to the final page (audit 2026-10-07 M6).
+pub(crate) fn check_topk_bytes(heap: &TopKHeap, limit: Option<usize>) -> Result<()> {
+    match limit {
+        Some(max_bytes) if heap.retained_bytes() > max_bytes => {
+            Err(IronBaseError::InvalidQuery(format!(
+                "Response size limit exceeded: the sort holds skip + limit documents \
+                ({} bytes), more than the {} byte limit. \
+                Solutions: 1) Reduce 'skip' (page by a range on the sort field), \
+                2) Add an index on the sort field, \
+                3) Use 'projection' to exclude large fields.",
+                heap.retained_bytes(),
+                max_bytes
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== CONSTRUCTOR ==========
 
@@ -1064,6 +1084,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             None => None,
         };
         let mut total_response_bytes: usize = 0;
+        // The top-k heap holds skip + limit documents, so a deep skip can keep
+        // far more than the final page: its byte total is checked during the
+        // scan against the explicit cap, or the RAM-derived one (audit
+        // 2026-10-07 M6; the page itself is checked again after the scan).
+        let topk_byte_limit = topk_heap.as_ref().map(|_| {
+            ctx.max_response_bytes
+                .unwrap_or_else(crate::find_options::calculate_safe_response_limit)
+        });
 
         // Early projection optimization:
         // Apply projection immediately after loading if safe (no sort on excluded fields)
@@ -1137,8 +1165,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Top-K path: the heap retains only k = skip + limit docs, so
                     // memory stays bounded no matter how many match. The response-
                     // size guard is applied to the final ≤limit result after the
-                    // scan (Phase 4), not per scanned doc.
+                    // scan (Phase 4); the heap's own size is checked here.
                     heap.push(doc);
+                    check_topk_bytes(heap, topk_byte_limit)?;
                 } else {
                     // Track response size if limit is set
                     // NOTE: With early projection, this checks the PROJECTED size (accurate)
