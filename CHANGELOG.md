@@ -23,6 +23,23 @@ Found while fixing audit 2026-10-07 O6.
   the default (case-insensitive) match and the fulltext index are unchanged.
 - **Test:** `test_text_operator_case_sensitive` (`query/operators/mod.rs`).
 
+### Fixed — extended form of `$text` / `$startsWith` / `$endsWith` / `$contains` (mcp-server v1.0.581)
+
+Audit 2026-10-07 O6.
+
+- **Symptom:** the documented extended forms, e.g.
+  `{"name": {"$startsWith": {"$value": "Al", "$caseSensitive": true}}}` or
+  `{"bio": {"$text": {"$search": "...", "$language": "english"}}}`, failed
+  with `Unknown query operator: $value` (`$search`) in every query path.
+- **Root cause:** `Query::validate_query_operators` recursed into the
+  operator's value and took the option keys for query operators.
+- **Fix:** for these four operators the validator checks the option keys
+  against the ones the operator reads (`$search`, `$language`,
+  `$caseSensitive` for `$text`; `$value`, `$caseSensitive` for the others)
+  instead of recursing; an unknown option is still an error.
+- **Test:** `tests/text_operator_extended_form_tests.rs` (find, count,
+  delete_many).
+
 ### Fixed — `find` deep-skip sort and `distinct` memory are bounded (mcp-server v1.0.580)
 
 Audit 2026-10-07 M6, M7.
