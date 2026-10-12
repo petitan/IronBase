@@ -700,7 +700,12 @@ impl IronBaseAdapter {
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<()> {
-        let db = self.db.write();
+        // A read guard: DatabaseCore synchronizes the drop itself, and a
+        // write guard waited for a running compaction (which holds a read
+        // guard throughout) while blocking every other request behind it;
+        // the core now fails the drop during a compaction instead (audit
+        // 2026-10-07 T6)
+        let db = self.db.read();
         db.drop_collection(name)?;
         // Remove from in-memory stats
         self.collection_stats.remove(name);
@@ -710,7 +715,8 @@ impl IronBaseAdapter {
     /// Rename a collection (metadata + index files; no document copy).
     pub fn rename_collection(&self, old_name: &str, new_name: &str) -> Result<()> {
         {
-            let db = self.db.write();
+            // A read guard, as in drop_collection (audit 2026-10-07 T6)
+            let db = self.db.read();
             db.rename_collection(old_name, new_name)?;
         }
         // Move the cached document count from the old name to the new one.
@@ -2022,7 +2028,8 @@ impl IronBaseAdapter {
 
     /// Force drop a collection, ignoring protected flag
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
-        let db = self.db.write();
+        // A read guard, as in drop_collection (audit 2026-10-07 T6)
+        let db = self.db.read();
         db.force_drop_collection(name)?;
         // Remove from in-memory stats
         self.collection_stats.remove(name);

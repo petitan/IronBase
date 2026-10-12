@@ -1535,6 +1535,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
         // before the persist gate, so the order is the same
+        // Not while a compaction runs: it fails instead of waiting (audit
+        // 2026-10-07 T6)
+        let _no_compaction = super::maintenance::CompactionGuard::acquire_for(
+            &self.is_compacting,
+            "Cannot drop a collection while a compaction is running",
+        )?;
         let collection_write_lock = self.get_collection_write_lock(name);
         let _collection_guard = collection_write_lock.lock();
 
@@ -1544,11 +1550,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let _persist_gate = self.persist_gate.write();
         self.flush_all_index_managers()?;
 
+        // No index flush may write this collection's files from here on
+        // (the flush passes work on a snapshot, audit 2026-10-07 T4)
+        let flush_guard = self.index_flush_lock.lock();
+
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
         // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
+        drop(flush_guard);
         self.schema_managers.write().remove(name);
         self.query_cache.invalidate_collection(name);
         self.collection_write_locks.write().remove(name);
@@ -1583,6 +1594,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // (the new name's index then missed its change) and logged the old
         // name in the WAL. Writers take this lock before the persist gate, so
         // the order is the same; after the rename they get CollectionNotFound
+        // Not while a compaction runs: it fails instead of waiting (audit
+        // 2026-10-07 T6)
+        let _no_compaction = super::maintenance::CompactionGuard::acquire_for(
+            &self.is_compacting,
+            "Cannot rename a collection while a compaction is running",
+        )?;
         let collection_write_lock = self.get_collection_write_lock(old_name);
         let _collection_guard = collection_write_lock.lock();
 
@@ -1592,6 +1609,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // current (audit 2026-10-06 #28, #29)
         let _persist_gate = self.persist_gate.write();
         self.flush_all_index_managers()?;
+
+        // No index flush may write the old name's files from here until its
+        // IndexManager is gone (the flush passes work on a snapshot, audit
+        // 2026-10-07 T4)
+        let flush_guard = self.index_flush_lock.lock();
 
         // Validate existence + protection, and capture the db file path. The
         // new-name conflict is also enforced by the storage layer.
@@ -1642,6 +1664,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // 3) Drop the stale in-memory IndexManager (forces a fresh reload from
         //    the renamed files + catalog), and move the schema + write lock.
         self.index_managers.write().remove(old_name);
+        drop(flush_guard);
         self.query_cache.invalidate_collection(old_name);
         self.query_cache.invalidate_collection(new_name);
         {
@@ -1782,6 +1805,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
         // before the persist gate, so the order is the same
+        // Not while a compaction runs: it fails instead of waiting (audit
+        // 2026-10-07 T6)
+        let _no_compaction = super::maintenance::CompactionGuard::acquire_for(
+            &self.is_compacting,
+            "Cannot drop a collection while a compaction is running",
+        )?;
         let collection_write_lock = self.get_collection_write_lock(name);
         let _collection_guard = collection_write_lock.lock();
 
@@ -1791,11 +1820,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let _persist_gate = self.persist_gate.write();
         self.flush_all_index_managers()?;
 
+        // No index flush may write this collection's files from here on
+        // (the flush passes work on a snapshot, audit 2026-10-07 T4)
+        let flush_guard = self.index_flush_lock.lock();
+
         // Collect and delete index files BEFORE removing the IndexManager
         self.cleanup_index_files_for_collection(name);
 
         // Remove shared IndexManager, SchemaManager, and collection write/upsert locks
         self.index_managers.write().remove(name);
+        drop(flush_guard);
         self.schema_managers.write().remove(name);
         self.query_cache.invalidate_collection(name);
         self.collection_write_locks.write().remove(name);
