@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `find` deep-skip sort and `distinct` memory are bounded (mcp-server v1.0.580)
+
+Audit 2026-10-07 M6, M7.
+
+- **M6 — `find` with sort + limit and a deep `skip`:** the top-k heap holds
+  skip + limit full documents, but the byte limit was applied only to the
+  final ≤limit page, so a deep skip grew without bound (and with no explicit
+  cap there was no check at all). `TopKHeap` now tracks the estimated size of
+  the documents it holds (`retained_bytes`), and both find paths
+  (`find_with_options`, `find_with_hint_ext`) check it during the scan
+  against the explicit `max_response_bytes`, or the RAM-derived
+  `calculate_safe_response_limit()` (`check_topk_bytes`).
+- **M7 — `distinct`:** collected every distinct value without a byte limit,
+  on both the scan and the index path. Both now fail past the RAM-derived
+  limit (`estimate_json_size`, as the `find` response limit).
+- **Behaviour change:** a sort with a deep `skip` whose working set exceeds
+  the limit, and a `distinct` whose values exceed it, now fail with
+  "Response size limit exceeded" instead of growing memory.
+- **Tests:** `tests/find_topk_distinct_memory_tests.rs` (both find paths),
+  `collection_core/distinct.rs` unit tests (scan and index path).
+
 ### Fixed — aggregation `$skip`/`$limit`, `$group` count, `$min`/`$max`, `$project` dot paths (mcp-server v1.0.579)
 
 Audit 2026-10-07 A5–A9.

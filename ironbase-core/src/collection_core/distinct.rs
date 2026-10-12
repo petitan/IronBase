@@ -65,6 +65,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<Value>> {
+        self.distinct_with_byte_limit(
+            field,
+            query_json,
+            ctx,
+            crate::find_options::calculate_safe_response_limit(),
+        )
+    }
+
+    /// `distinct_with_ctx` with the byte limit of the collected values given:
+    /// past `max_bytes` (`estimate_json_size`, as the `find` response limit)
+    /// it fails instead of growing without bound (audit 2026-10-07 M7).
+    fn distinct_with_byte_limit(
+        &self,
+        field: &str,
+        query_json: &Value,
+        ctx: Option<&ExecutionContext>,
+        max_bytes: usize,
+    ) -> Result<Vec<Value>> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
@@ -93,7 +111,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // INDEX-BASED OPTIMIZATION: use index to get distinct values without loading documents
         if query_json == &serde_json::json!({}) {
-            if let Some(distinct_values) = self.try_index_based_distinct(field)? {
+            if let Some(distinct_values) = self.try_index_based_distinct(field, max_bytes)? {
                 log_debug!(
                     "distinct: used index for field '{}', found {} unique values",
                     field,
@@ -124,6 +142,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Collect distinct values with cancellation checks
         let mut seen_hashes: HashSet<u64> = HashSet::new();
         let mut distinct_values = Vec::new();
+        let mut total_bytes: usize = 0;
 
         let estimated_unique = doc_ids.len().min(MAX_ESTIMATED_UNIQUE);
         distinct_values.try_reserve(estimated_unique).map_err(|e| {
@@ -147,6 +166,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let value_hash = crate::value_utils::value_hash(field_value);
 
                     if seen_hashes.insert(value_hash) {
+                        total_bytes = total_bytes
+                            .saturating_add(crate::find_options::estimate_json_size(field_value));
+                        if total_bytes > max_bytes {
+                            return Err(distinct_limit_error(distinct_values.len(), max_bytes));
+                        }
                         // Dynamic memory check every N new distinct values
                         if distinct_values.len() % MEMORY_CHECK_INTERVAL == 0
                             && !distinct_values.is_empty()
@@ -175,7 +199,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// Returns Some(values) if an index was found and used, None otherwise.
     /// This is O(index_entries) which is much faster than loading all documents.
-    fn try_index_based_distinct(&self, field: &str) -> Result<Option<Vec<Value>>> {
+    fn try_index_based_distinct(
+        &self,
+        field: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<Value>>> {
         // The index has no null / missing / object values and holds arrays
         // element by element: it gives the scan's answer only if it holds
         // every document once under a scalar key (audit 2026-10-07 Q13)
@@ -200,17 +228,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Uses for_each_entry to avoid materializing the entire index.
                     let mut seen: HashSet<IndexKey> = HashSet::new();
                     let mut distinct_values = Vec::new();
+                    let mut total_bytes: usize = 0;
+                    let mut over_limit = false;
 
                     btree.for_each_entry(&mut |key, _doc_id| {
                         // Skip Null keys (documents without this field)
-                        if matches!(key, IndexKey::Null) {
+                        if over_limit || matches!(key, IndexKey::Null) {
                             return;
                         }
                         if seen.insert(key.clone()) {
-                            distinct_values.push(key.to_value());
+                            let value = key.to_value();
+                            total_bytes = total_bytes
+                                .saturating_add(crate::find_options::estimate_json_size(&value));
+                            if total_bytes > max_bytes {
+                                over_limit = true;
+                                return;
+                            }
+                            distinct_values.push(value);
                         }
                     });
 
+                    if over_limit {
+                        return Err(distinct_limit_error(distinct_values.len(), max_bytes));
+                    }
                     return Ok(Some(distinct_values));
                 }
             }
@@ -218,5 +258,66 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // No suitable index found
         Ok(None)
+    }
+}
+
+fn distinct_limit_error(collected: usize, max_bytes: usize) -> IronBaseError {
+    IronBaseError::InvalidQuery(format!(
+        "Response size limit exceeded: distinct collected {} values, \
+        the next one would exceed the {} byte limit. \
+        Solutions: 1) Add a query filter, 2) Use an aggregation with $group and $limit.",
+        collected, max_bytes
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    /// 100 documents with distinct ~1 KB `s` values.
+    fn create_test_db() -> DatabaseCore<MemoryStorage> {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        for n in 0..100 {
+            let s = format!("{:04}{}", n, "y".repeat(1_000));
+            let fields: HashMap<String, Value> =
+                HashMap::from([("s".to_string(), json!(s)), ("n".to_string(), json!(n))]);
+            db.insert_one("c", fields).unwrap();
+        }
+        db
+    }
+
+    /// M7: the scan path fails past the byte limit (~100 KB of values here).
+    #[test]
+    fn distinct_scan_respects_byte_limit() {
+        let db = create_test_db();
+        let coll = db.collection("c").unwrap();
+        let query = json!({"n": {"$gte": 0}});
+        let err = coll
+            .distinct_with_byte_limit("s", &query, None, 50_000)
+            .unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        let all = coll
+            .distinct_with_byte_limit("s", &query, None, 1_000_000)
+            .unwrap();
+        assert_eq!(all.len(), 100);
+    }
+
+    /// M7: the index path has the same limit.
+    #[test]
+    fn distinct_index_respects_byte_limit() {
+        let db = create_test_db();
+        let coll = db.collection("c").unwrap();
+        coll.create_index("s".to_string(), false, false).unwrap();
+        let err = coll
+            .distinct_with_byte_limit("s", &json!({}), None, 50_000)
+            .unwrap_err();
+        assert!(err.to_string().contains("byte limit"), "{err}");
+        let all = coll
+            .distinct_with_byte_limit("s", &json!({}), None, 1_000_000)
+            .unwrap();
+        assert_eq!(all.len(), 100);
     }
 }
