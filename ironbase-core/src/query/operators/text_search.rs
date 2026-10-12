@@ -344,7 +344,7 @@ fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f
 // TEXT SEARCH OPERATOR ($text)
 // ============================================================================
 
-use crate::fulltext::{tokenize, FtsLanguage, FtsOptions};
+use crate::fulltext::{tokenize, tokenize_case_sensitive, FtsLanguage, FtsOptions};
 use std::collections::HashSet;
 
 /// $text operator: Matches strings using tokenization and optional stemming
@@ -371,7 +371,8 @@ use std::collections::HashSet;
 /// # Matching Logic
 ///
 /// ALL query tokens must be present in the document field tokens (AND logic).
-/// Tokenization includes: lowercase, accent folding, stop word removal, optional stemming.
+/// Tokenization includes: lowercase (unless `$caseSensitive`), accent folding
+/// (off with `$caseSensitive`), stop word removal, optional stemming.
 ///
 /// # Complexity: CC = 5
 pub struct TextOperator;
@@ -453,8 +454,15 @@ fn text_matches(
     case_sensitive: bool,
 ) -> Result<bool> {
     let options = FtsOptions::with_settings(language, 2, !case_sensitive);
-    let doc_tokens: HashSet<String> = tokenize(doc_text, &options).into_iter().collect();
-    let query_tokens = tokenize(search_text, &options);
+    // `$caseSensitive: true` keeps the letter case of the tokens: `tokenize`
+    // always lowercases, so the flag used to only turn off accent folding
+    let tokenize_fn = if case_sensitive {
+        tokenize_case_sensitive
+    } else {
+        tokenize
+    };
+    let doc_tokens: HashSet<String> = tokenize_fn(doc_text, &options).into_iter().collect();
+    let query_tokens = tokenize_fn(search_text, &options);
 
     if query_tokens.is_empty() {
         return Ok(false);
