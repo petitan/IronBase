@@ -428,33 +428,41 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         const CHUNK_SIZE: usize = 1000;
 
         let parsed_query = Query::from_json(query_json)?;
-        let storage = self.storage.read();
 
-        // Get catalog entries (small: only IDs + offsets, ~32 bytes each)
-        let catalog_entries: Vec<(DocumentId, u64)> = {
+        // Snapshot the IDs only (small: ~32 bytes each). The storage lock is
+        // held per chunk, not for the whole scan, so writers are not stalled
+        // for its duration (audit 2026-10-07 T5); each chunk looks its
+        // offsets up in the current catalog, since a compaction between
+        // chunks moves documents.
+        let doc_ids: Vec<DocumentId> = {
+            let storage = self.storage.read();
             let meta = storage
                 .get_collection_meta(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-            meta.document_catalog
-                .iter()
-                .map(|(id, &offset)| (id.clone(), offset))
-                .collect()
+            meta.document_catalog.keys().cloned().collect()
         };
 
         let mut total_count = 0u64;
 
         // Process in chunks to limit memory usage
-        for (chunks_processed, chunk) in catalog_entries.chunks(CHUNK_SIZE).enumerate() {
+        for (chunks_processed, chunk) in doc_ids.chunks(CHUNK_SIZE).enumerate() {
             // Check for cancellation at the start of each chunk
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(chunks_processed)?;
             }
 
-            // Phase 1: Read chunk bytes (sequential, holds lock)
-            let raw_docs: Vec<Vec<u8>> = chunk
-                .iter()
-                .filter_map(|(_, offset)| storage.read_data_at(*offset).ok())
-                .collect();
+            // Phase 1: Read chunk bytes (sequential, under a brief lock)
+            let raw_docs: Vec<Vec<u8>> = {
+                let storage = self.storage.read();
+                let meta = storage
+                    .get_collection_meta(&self.name)
+                    .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+                chunk
+                    .iter()
+                    .filter_map(|id| meta.document_catalog.get(id))
+                    .filter_map(|&offset| storage.read_data_at(offset).ok())
+                    .collect()
+            };
 
             // Phase 2: Parallel parse + match (CPU bound)
             //

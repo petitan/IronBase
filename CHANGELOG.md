@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — unindexed `count` and `find` no longer stall writers for the whole scan (mcp-server v1.0.583)
+
+Audit 2026-10-07 T5.
+
+- **Symptom:** a concurrent insert waited for an unindexed `count`
+  (233 ms of a 238 ms scan) or for the document load of a sorted `find`
+  (354 ms) to finish.
+- **Root cause:** `count_with_scan` and the `find_with_options` document
+  load held `storage.read()` for the whole scan, including JSON parsing and
+  query matching, so every writer waiting for `storage.write()` stalled.
+- **Fix:** both hold the lock per chunk of 1000 documents, only while the
+  chunk's bytes are read; each chunk looks its offsets up in the current
+  catalog (a compaction between chunks moves documents), as
+  `scan_documents_in_batches` already does. Parsing and matching run
+  without the lock.
+- **Test:** `tests/scan_lock_release_tests.rs`.
+
 ### Fixed — `$text` `$caseSensitive: true` compares letter case (mcp-server v1.0.582)
 
 Found while fixing audit 2026-10-07 O6.
