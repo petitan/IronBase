@@ -5,7 +5,7 @@ use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::types::UnwindStage;
 use crate::error::{IronBaseError, Result};
 use crate::find_options::estimate_json_size;
-use crate::value_utils::{get_nested_value, set_nested_value};
+use crate::value_utils::{delete_nested_value, get_nested_value, set_nested_value};
 use serde_json::Value;
 
 impl UnwindStage {
@@ -56,6 +56,31 @@ impl UnwindStage {
         Err(IronBaseError::AggregationError(
             "$unwind must be a string or object".to_string(),
         ))
+    }
+
+    /// The document `preserveNullAndEmptyArrays` outputs for a null, missing
+    /// or empty-array path, as MongoDB does: an empty array's field is
+    /// removed, null stays null, a missing field stays missing, and
+    /// `includeArrayIndex` is null. It used to set the field to null for an
+    /// empty array or missing field and leave the index out (audit
+    /// 2026-10-07 A13).
+    fn preserved_doc(&self, mut doc: Value, empty_array: bool) -> Value {
+        if empty_array {
+            delete_nested_value(&mut doc, &self.path);
+        }
+        if let Some(ref index_field) = self.include_array_index {
+            set_nested_value(&mut doc, index_field, Value::Null);
+        }
+        doc
+    }
+
+    /// A non-array value unwinds to itself; its `includeArrayIndex` is null
+    /// as in MongoDB (it used to be 0, audit 2026-10-07 A13).
+    fn scalar_doc(&self, mut doc: Value) -> Value {
+        if let Some(ref index_field) = self.include_array_index {
+            set_nested_value(&mut doc, index_field, Value::Null);
+        }
+        doc
     }
 
     /// Default max output documents for $unwind to prevent OOM
@@ -135,9 +160,7 @@ impl UnwindStage {
                                 output_count, max_output
                             )));
                         }
-                        let mut new_doc = doc.clone();
-                        set_nested_value(&mut new_doc, &self.path, Value::Null);
-                        results.push(new_doc);
+                        results.push(self.preserved_doc(doc, true));
                     }
                 }
                 None => {
@@ -149,9 +172,7 @@ impl UnwindStage {
                                 output_count, max_output
                             )));
                         }
-                        let mut new_doc = doc.clone();
-                        set_nested_value(&mut new_doc, &self.path, Value::Null);
-                        results.push(new_doc);
+                        results.push(self.preserved_doc(doc, false));
                     }
                 }
                 Some(Value::Null) => {
@@ -163,7 +184,7 @@ impl UnwindStage {
                                 output_count, max_output
                             )));
                         }
-                        results.push(doc);
+                        results.push(self.preserved_doc(doc, false));
                     }
                 }
                 Some(_) => {
@@ -174,17 +195,7 @@ impl UnwindStage {
                             output_count, max_output
                         )));
                     }
-                    if let Some(ref index_field) = self.include_array_index {
-                        let mut new_doc = doc.clone();
-                        set_nested_value(
-                            &mut new_doc,
-                            index_field,
-                            Value::Number(serde_json::Number::from(0)),
-                        );
-                        results.push(new_doc);
-                    } else {
-                        results.push(doc);
-                    }
+                    results.push(self.scalar_doc(doc));
                 }
             }
         }
@@ -252,39 +263,25 @@ impl UnwindStage {
                     // Empty array
                     if self.preserve_null_and_empty_arrays {
                         ctx.increment_unwind(1)?;
-                        let mut new_doc = doc.clone();
-                        set_nested_value(&mut new_doc, &self.path, Value::Null);
-                        results.push(new_doc);
+                        results.push(self.preserved_doc(doc, true));
                     }
                 }
                 None => {
                     if self.preserve_null_and_empty_arrays {
                         ctx.increment_unwind(1)?;
-                        let mut new_doc = doc.clone();
-                        set_nested_value(&mut new_doc, &self.path, Value::Null);
-                        results.push(new_doc);
+                        results.push(self.preserved_doc(doc, false));
                     }
                 }
                 Some(Value::Null) => {
                     if self.preserve_null_and_empty_arrays {
                         ctx.increment_unwind(1)?;
-                        results.push(doc);
+                        results.push(self.preserved_doc(doc, false));
                     }
                 }
                 Some(_) => {
                     // Non-array value - treat as single element
                     ctx.increment_unwind(1)?;
-                    if let Some(ref index_field) = self.include_array_index {
-                        let mut new_doc = doc.clone();
-                        set_nested_value(
-                            &mut new_doc,
-                            index_field,
-                            Value::Number(serde_json::Number::from(0)),
-                        );
-                        results.push(new_doc);
-                    } else {
-                        results.push(doc);
-                    }
+                    results.push(self.scalar_doc(doc));
                 }
             }
         }
