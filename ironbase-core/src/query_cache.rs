@@ -2,7 +2,7 @@
 // Query result caching with LRU eviction policy
 
 use crate::document::DocumentId;
-use crate::limits::QUERY_CACHE_MAX_RESULT_IDS;
+use crate::limits::{QUERY_CACHE_MAX_BYTES, QUERY_CACHE_MAX_RESULT_IDS};
 use lru::LruCache;
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -10,6 +10,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Hash of a query (collection + query JSON)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +53,23 @@ pub struct QueryCache {
     /// once per write, not once per query.
     facts: RwLock<HashMap<(String, String), (u64, bool)>>,
     capacity: usize,
+    /// Estimated bytes of the cached id lists, changed only under the `cache`
+    /// write lock. Bounded by `QUERY_CACHE_MAX_BYTES` (audit 2026-10-07 M9).
+    bytes: AtomicUsize,
+}
+
+/// Estimated heap + inline bytes of a cached id list.
+fn doc_ids_bytes(doc_ids: &[DocumentId]) -> usize {
+    doc_ids
+        .iter()
+        .map(|id| {
+            std::mem::size_of::<DocumentId>()
+                + match id {
+                    DocumentId::Int(_) => 0,
+                    DocumentId::String(s) | DocumentId::ObjectId(s) => s.len(),
+                }
+        })
+        .sum()
 }
 
 impl QueryCache {
@@ -68,6 +86,7 @@ impl QueryCache {
             generations: RwLock::new(HashMap::new()),
             facts: RwLock::new(HashMap::new()),
             capacity,
+            bytes: AtomicUsize::new(0),
         }
     }
 
@@ -138,23 +157,38 @@ impl QueryCache {
         if doc_ids.len() > QUERY_CACHE_MAX_RESULT_IDS {
             return;
         }
+        let size = doc_ids_bytes(&doc_ids);
+        if size > QUERY_CACHE_MAX_BYTES {
+            return;
+        }
         // BUG #3 fix: Acquire both locks upfront to avoid TOCTOU race condition
         // Lock ordering: always cache first, then collection_index (prevents deadlock)
         let mut cache = self.cache.write();
         let mut coll_index = self.collection_index.write();
 
-        // Handle LRU eviction: if at capacity and inserting new key, clean up reverse index
-        if cache.len() >= self.capacity && !cache.contains(&query_hash) {
-            if let Some((evicted_hash, _)) = cache.peek_lru() {
-                let evicted_hash = *evicted_hash;
-                // Remove from all collection indexes atomically
-                for hashes in coll_index.values_mut() {
-                    hashes.remove(&evicted_hash);
-                }
+        // A re-insert replaces the old entry: account for it first
+        if let Some(old) = cache.pop(&query_hash) {
+            self.bytes.fetch_sub(doc_ids_bytes(&old), Ordering::Relaxed);
+        }
+
+        // LRU eviction until both the entry and the byte budget fit; clean
+        // up the reverse index for every evicted entry
+        while cache.len() >= self.capacity
+            || self.bytes.load(Ordering::Relaxed) + size > QUERY_CACHE_MAX_BYTES
+        {
+            let Some((evicted_hash, evicted)) = cache.pop_lru() else {
+                break;
+            };
+            self.bytes
+                .fetch_sub(doc_ids_bytes(&evicted), Ordering::Relaxed);
+            // Remove from all collection indexes atomically
+            for hashes in coll_index.values_mut() {
+                hashes.remove(&evicted_hash);
             }
         }
 
         cache.put(query_hash, doc_ids);
+        self.bytes.fetch_add(size, Ordering::Relaxed);
 
         // Update reverse index
         coll_index
@@ -181,7 +215,9 @@ impl QueryCache {
         // Get and remove query hashes for this collection
         if let Some(hashes) = coll_index.remove(collection) {
             for hash in hashes {
-                cache.pop(&hash);
+                if let Some(old) = cache.pop(&hash) {
+                    self.bytes.fetch_sub(doc_ids_bytes(&old), Ordering::Relaxed);
+                }
             }
         }
 
@@ -200,6 +236,7 @@ impl QueryCache {
         CacheStats {
             capacity: self.capacity,
             size: cache.len(),
+            bytes: self.bytes.load(Ordering::Relaxed),
         }
     }
 }
@@ -215,6 +252,8 @@ impl Default for QueryCache {
 pub struct CacheStats {
     pub capacity: usize,
     pub size: usize,
+    /// Estimated bytes of the cached results (at most `QUERY_CACHE_MAX_BYTES`)
+    pub bytes: usize,
 }
 
 #[cfg(test)]
@@ -352,5 +391,40 @@ mod tests {
             cache.get(&hash_posts).is_some(),
             "Posts cache should remain"
         );
+    }
+
+    #[test]
+    fn test_cache_tracks_bytes() {
+        let cache = QueryCache::new(100);
+        let hash = QueryHash::new("users", &json!({"a": 1}));
+        let ids = vec![DocumentId::String("x".repeat(100))];
+        let size = doc_ids_bytes(&ids);
+        cache.insert("users", hash, ids.clone());
+        assert_eq!(cache.stats().bytes, size);
+        // A re-insert of the same query replaces, not adds
+        cache.insert("users", hash, ids);
+        assert_eq!(cache.stats().bytes, size);
+        cache.invalidate_collection("users");
+        assert_eq!(cache.stats().bytes, 0);
+    }
+
+    #[test]
+    fn test_cache_evicts_to_byte_budget() {
+        let cache = QueryCache::new(100);
+        // Each entry is just over a third of the budget: three never fit
+        let len = QUERY_CACHE_MAX_BYTES / 3 / 1000;
+        for q in 0..3 {
+            let ids: Vec<DocumentId> = (0..1000)
+                .map(|i| DocumentId::String(format!("{i:0len$}")))
+                .collect();
+            cache.insert("users", QueryHash::new("users", &json!({ "q": q })), ids);
+        }
+        let stats = cache.stats();
+        assert!(stats.bytes <= QUERY_CACHE_MAX_BYTES);
+        assert_eq!(stats.size, 2);
+        // The least recently inserted one went
+        assert!(cache
+            .get(&QueryHash::new("users", &json!({"q": 0})))
+            .is_none());
     }
 }

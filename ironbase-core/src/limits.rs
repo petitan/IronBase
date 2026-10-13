@@ -107,6 +107,13 @@ pub const QUERY_CACHE_CAPACITY: usize = 1000;
 /// RAM lehetne, és nagy eredménynél a dokumentumok betöltése dominál.
 pub const QUERY_CACHE_MAX_RESULT_IDS: usize = 10_000;
 
+/// Query cache: a cache-ben tartott eredmények becsült összmérete (bájt)
+///
+/// Az entry- és ID-korlát együtt még 1000 × 10 000 ID-t enged, ami hosszú
+/// string `_id`-knél GB-os nagyságrend (audit 2026-10-07 M9). A keret
+/// túllépésekor LRU eviction történik.
+pub const QUERY_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// Regex pattern cache kapacitás
 ///
 /// Maximum ennyi lefordított regex mintát tárol.
