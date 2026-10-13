@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — aggregation numbers (1 vs 1.0, integer arithmetic, `$sum` overflow) and `$unwind` options (mcp-server v1.0.586)
+
+Audit 2026-10-07 A10–A13.
+
+- **A10:** `1` and `1.0` were two `$group` keys, two `$addToSet` elements
+  and two `distinct` values: `value_hash` / `canonical_json_string` spelled
+  numbers with `to_string`. An integral float within ±2^53 is now spelled as
+  its integer (`canonical_number_string`).
+- **A11:** `$project` arithmetic ran in f64: integers above 2^53 lost
+  precision and `3 + 4` gave `7.0`. `$add`/`$subtract`/`$multiply`/`$mod`/
+  `$abs`/`$ceil`/`$floor` keep integers as checked i64 (an overflow or a
+  float operand goes to f64); `$divide` stays a double, as in MongoDB.
+  **Behaviour change:** integer arithmetic now returns integers; six unit
+  tests that asserted the float result were updated.
+- **A12:** `$sum` saturated silently at i64::MAX on overflow; it now
+  promotes the sum to a double, as MongoDB does (`add_to_sum`).
+- **A13:** `$unwind` with `preserveNullAndEmptyArrays` set the field to
+  null for an empty array or a missing field and left `includeArrayIndex`
+  out, and a scalar got index 0. Now (MongoDB): an empty array's field is
+  removed, a missing field stays missing, null stays null, and the index is
+  null for all of them and for a scalar. Both execution paths share
+  `preserved_doc` / `scalar_doc`.
+- **Test:** `tests/aggregation_numeric_unwind_tests.rs`.
+
 ### Fixed — index flushes and compaction no longer freeze collection create/drop and the MCP server (mcp-server v1.0.584)
 
 Audit 2026-10-07 T4, T6.
