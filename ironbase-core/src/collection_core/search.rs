@@ -306,11 +306,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             None
         };
 
-        // Determine candidate limit - if we have a filter, request more candidates
+        // Determine candidate limit: the skipped matches are candidates too.
+        // With a filter, request more candidates
+        let page_end = effective_skip.saturating_add(effective_limit);
         let candidate_limit = if parsed_filter.is_some() {
-            effective_limit.saturating_mul(10).max(100)
+            page_end.saturating_mul(10).max(100)
         } else {
-            effective_limit
+            page_end
         };
 
         // Perform fuzzy search with cancellation support
@@ -352,8 +354,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
-            // Handle skip (manual skip when filter was used)
-            if parsed_filter.is_some() && skipped < effective_skip {
+            // Skip the matches (after the filter) before the page
+            if skipped < effective_skip {
                 skipped += 1;
                 continue;
             }
@@ -391,15 +393,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // Early exit when limit reached
             if results.len() >= effective_limit {
                 break;
-            }
-        }
-
-        // If no filter was used, handle skip manually (for efficiency, skip was not applied in search)
-        if parsed_filter.is_none() && effective_skip > 0 {
-            if effective_skip < results.len() {
-                results = results.into_iter().skip(effective_skip).collect();
-            } else {
-                results.clear();
             }
         }
 

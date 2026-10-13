@@ -715,3 +715,41 @@ fn test_fuzzy_index_persistence_with_drop() {
         index_name
     );
 }
+
+/// `skip` pages through the matches with and without a filter: the second
+/// page of a fuzzy search without a filter used to be empty, because the
+/// search stopped at `limit` candidates before skipping.
+#[test]
+fn test_fuzzy_search_skip_pages() {
+    use ironbase_core::FuzzySearchOptions;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db = DatabaseCore::open(temp_dir.path().join("test.mlite")).unwrap();
+    for i in 0..20 {
+        insert_user!(db, format!("Johnson{i:02}"), "j@example.com", i);
+    }
+    let collection = db.collection("users").unwrap();
+    collection
+        .create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.5)
+        .unwrap();
+
+    let page = |skip: usize, filter: Option<serde_json::Value>| -> Vec<String> {
+        let mut options = FuzzySearchOptions::new().with_limit(5).with_skip(skip);
+        if let Some(f) = filter {
+            options = options.with_filter(f);
+        }
+        collection
+            .fuzzy_search_ext("name", "Johnson", options)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.matched_value)
+            .collect()
+    };
+
+    for filter in [None, Some(json!({"age": {"$gte": 0}}))] {
+        let all: Vec<String> = (0..4).flat_map(|p| page(p * 5, filter.clone())).collect();
+        assert_eq!(all.len(), 20, "filter {filter:?}: {all:?}");
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), 20, "pages overlap, filter {filter:?}");
+    }
+}
