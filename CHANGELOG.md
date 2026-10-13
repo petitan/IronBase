@@ -31,6 +31,26 @@ Audit 2026-10-07 A10–A13.
   `preserved_doc` / `scalar_doc`.
 - **Test:** `tests/aggregation_numeric_unwind_tests.rs`.
 
+### Fixed — `$expr` `$eq`/`$ne` across types, objects and missing fields; `$type` on array elements (mcp-server v1.0.585)
+
+Audit 2026-10-07 O8, O9.
+
+- **O8 — symptom:** `{"$expr": {"$ne": ["$a", "$b"]}}` was false for
+  `a: 1, b: "1"`, and `$eq` was false for two equal objects or two missing
+  fields.
+- **O8 — root cause:** `$eq`/`$ne` went through the ordering comparison
+  (`compare_values`), which gives no answer across types, for objects or
+  for a missing field; no answer made every comparison false.
+- **O8 — fix:** `$eq`/`$ne` use `values_equal` (numbers by value, objects
+  and arrays deeply); a missing field equals only another missing field.
+  `$gt`/`$gte`/`$lt`/`$lte` are unchanged (false for a missing field or
+  mixed types, as `test_expr_missing_field` documents).
+- **O9 — symptom/root cause:** `{"t": {"$type": "string"}}` did not match
+  `t: ["x", 1]`: `$type` looked only at the value itself.
+- **O9 — fix:** an array field also matches when one of its (non-array)
+  elements has the type, as in MongoDB; `"array"` still matches the array.
+- **Test:** `tests/expr_type_operator_tests.rs`.
+
 ### Fixed — index flushes and compaction no longer freeze collection create/drop and the MCP server (mcp-server v1.0.584)
 
 Audit 2026-10-07 T4, T6.
