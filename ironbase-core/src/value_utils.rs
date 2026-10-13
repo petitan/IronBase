@@ -574,8 +574,9 @@ fn hash_value_into<H: std::hash::Hasher>(hasher: &mut H, value: &Value) {
         }
         Value::Number(n) => {
             2u8.hash(hasher);
-            // Use string for deterministic float hashing
-            n.to_string().hash(hasher);
+            // Use string for deterministic float hashing; equal numbers
+            // (1 and 1.0) hash the same (audit 2026-10-07 A10)
+            canonical_number_string(n).hash(hasher);
         }
         Value::String(s) => {
             3u8.hash(hasher);
@@ -647,9 +648,27 @@ pub fn canonical_json_string(value: &Value) -> String {
                 .join(",");
             format!("[{}]", inner)
         }
+        Value::Number(n) => canonical_number_string(n),
         // Primitives: use standard serialization
         _ => value.to_string(),
     }
+}
+
+/// One spelling per numeric value for hashing and deduplication: a float
+/// with an integral value in the exactly representable range (|x| ≤ 2^53)
+/// is written as that integer, so `1` and `1.0` — equal for `values_equal` —
+/// are one `$group` key, one `$addToSet` element and one `distinct` value
+/// (audit 2026-10-07 A10).
+fn canonical_number_string(n: &serde_json::Number) -> String {
+    const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+    if !n.is_i64() && !n.is_u64() {
+        if let Some(f) = n.as_f64() {
+            if f.fract() == 0.0 && f.abs() <= EXACT {
+                return (f as i64).to_string();
+            }
+        }
+    }
+    n.to_string()
 }
 
 #[cfg(test)]
