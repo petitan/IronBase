@@ -1544,6 +1544,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let collection_write_lock = self.get_collection_write_lock(name);
         let _collection_guard = collection_write_lock.lock();
 
+        // Persist the Batch-buffered inserts now: a later flush would write
+        // them back under the dropped/old name (audit 2026-10-07 T7). Before
+        // the persist gate, which the flush takes shared
+        self.flush_pending_writes()?;
+
         // storage.drop_collection clears the whole WAL: persist every
         // collection's dirty indexes first, with writers held off (audit
         // 2026-10-06 #28)
@@ -1602,6 +1607,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         )?;
         let collection_write_lock = self.get_collection_write_lock(old_name);
         let _collection_guard = collection_write_lock.lock();
+
+        // Persist the Batch-buffered inserts now: a later flush would write
+        // them back under the dropped/old name (audit 2026-10-07 T7). Before
+        // the persist gate, which the flush takes shared
+        self.flush_pending_writes()?;
 
         // The storage rename clears the whole WAL, and the old IndexManager is
         // dropped and its files reloaded under the new name: persist every
@@ -1813,6 +1823,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         )?;
         let collection_write_lock = self.get_collection_write_lock(name);
         let _collection_guard = collection_write_lock.lock();
+
+        // Persist the Batch-buffered inserts now: a later flush would write
+        // them back under the dropped/old name (audit 2026-10-07 T7). Before
+        // the persist gate, which the flush takes shared
+        self.flush_pending_writes()?;
 
         // storage.drop_collection clears the whole WAL: persist every
         // collection's dirty indexes first, with writers held off (audit
