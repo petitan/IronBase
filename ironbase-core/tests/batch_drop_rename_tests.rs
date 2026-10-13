@@ -14,8 +14,11 @@ fn doc(n: i64) -> HashMap<String, Value> {
 }
 
 fn open(path: &std::path::Path) -> DatabaseCore<StorageEngine> {
-    DatabaseCore::<StorageEngine>::open_with_durability(path, DurabilityMode::Batch { batch_size: 1000 })
-        .unwrap()
+    DatabaseCore::<StorageEngine>::open_with_durability(
+        path,
+        DurabilityMode::Batch { batch_size: 1000 },
+    )
+    .unwrap()
 }
 
 /// A drop takes the collection's buffered inserts with it.
@@ -52,6 +55,10 @@ fn rename_keeps_buffered_inserts_under_the_new_name() {
     db.insert_one("a", doc(2)).unwrap(); // buffered
     db.rename_collection("a", "b").unwrap();
     db.flush().unwrap();
-    assert!(!db.list_collections().contains(&"a".to_string()), "{:?}", db.list_collections());
+    assert!(
+        !db.list_collections().contains(&"a".to_string()),
+        "{:?}",
+        db.list_collections()
+    );
     assert_eq!(db.find("b", &json!({})).unwrap().len(), 2);
 }
