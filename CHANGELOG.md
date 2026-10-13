@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the query result cache is bounded in bytes (mcp-server v1.0.589)
+
+Audit 2026-10-07 M9.
+
+- **Symptom:** four different queries over 10 000 documents with 4 KB string
+  `_id`s kept ~164 MB in the query cache; with its 1000 entries the cache
+  could grow to tens of GB.
+- **Root cause:** the cache was bounded only in entries (1000) and in ids per
+  entry (10 000), not in bytes, so the id length multiplied straight through.
+- **Fix:** the cache tracks the estimated bytes of its id lists and evicts
+  LRU entries to stay within `QUERY_CACHE_MAX_BYTES` (64 MB); a larger result
+  is not cached. `CacheStats` reports `bytes`.
+- **Not changed:** `find_streaming` on a collection without a usable index
+  still takes a snapshot of the collection catalog (O(n) ids, guarded by
+  `try_reserve`), at most the size of the catalog already in memory.
+- **Test:** `tests/shared_query_cache_tests.rs` (`cache_is_bounded_in_bytes`),
+  `query_cache` unit tests.
+
 ### Fixed — dropped or renamed collections no longer come back from Batch-buffered inserts (mcp-server v1.0.588)
 
 Audit 2026-10-07 T7 (follow-up).

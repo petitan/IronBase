@@ -150,3 +150,27 @@ fn large_results_are_not_cached() {
     assert_eq!(coll.find(&json!({"_id": {"$lt": 5}})).unwrap().len(), 5);
     assert_eq!(coll.query_cache.stats().size, 1);
 }
+
+/// The cache is bounded in bytes, not only in entries (audit 2026-10-07 M9):
+/// long string `_id`s made 1000 entries × 10 000 ids reach gigabytes.
+#[test]
+fn cache_is_bounded_in_bytes() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let long = "x".repeat(4096);
+    let docs: Vec<_> = (0..10_000)
+        .map(|i| fields(json!({"_id": format!("{i:05}{long}"), "a": i})))
+        .collect();
+    db.insert_many("c", docs).unwrap();
+    let coll = db.collection("c").unwrap();
+    // Four results of ~41 MB each (10 000 ids of 4 KB)
+    for bound in 0..4 {
+        let q = json!({"a": {"$gte": -1 - bound}});
+        assert_eq!(coll.find(&q).unwrap().len(), 10_000);
+    }
+    let stats = coll.query_cache.stats();
+    assert!(
+        stats.size <= 1,
+        "cache kept {} results of ~41 MB each",
+        stats.size
+    );
+}
