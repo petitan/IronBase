@@ -21,6 +21,26 @@ Found while fixing the `distinct` hash collision (audit 2026-10-07 side note).
   the hash (they only bound memory).
 - **Test:** `group_stage` unit test
   `test_group_key_hash_collision_keeps_groups_apart` (forced collision).
+### Fixed — fuzzy search `skip` without a filter; `distinct` hash collisions (mcp-server v1.0.590)
+
+Audit 2026-10-07 side notes.
+
+- **Fuzzy skip — symptom:** `fuzzy_search_ext` with `skip` and no filter
+  returned an empty or short page: 20 matches paged by 5 gave 5 in total.
+- **Fuzzy skip — root cause:** without a filter only `limit` candidates were
+  requested from the index, and `skip` was cut from those afterwards.
+- **Fuzzy skip — fix:** the index is asked for `skip + limit` candidates
+  (×10, at least 100, with a filter) and `skip` is applied in one place,
+  after the filter, for both cases.
+- **Distinct — root cause:** the scan path deduplicated on the 64-bit value
+  hash alone, so a value whose hash collided with an earlier one was lost.
+- **Distinct — fix:** the hash picks a bucket and the values in it are
+  compared with `values_equal` (also `1` = `1.0`, as before).
+- **Not changed:** `$group` still keys groups on the value hash alone
+  (`group_stage.rs`); reported separately.
+- **Test:** `tests/fuzzy_integration_tests.rs`
+  (`test_fuzzy_search_skip_pages`), `distinct` unit test
+  `hash_collision_keeps_both_values` (forced collision).
 
 ### Fixed — the query result cache is bounded in bytes (mcp-server v1.0.589)
 
