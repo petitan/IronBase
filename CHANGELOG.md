@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — dropped or renamed collections no longer come back from Batch-buffered inserts (mcp-server v1.0.588)
+
+Audit 2026-10-07 T7 (follow-up).
+
+- **Symptom:** in `DurabilityMode::Batch`, `insert_one("c", ..)` then
+  `drop_collection("c")` and `flush()` brought `c` back (also after reopen);
+  after `rename_collection("a", "b")` the buffered insert recreated `a`, and
+  `b` missed it.
+- **Root cause:** drop, force-drop and rename never flushed the Batch
+  buffer, so the next flush persisted the buffered inserts under the dropped
+  or old name.
+- **Fix:** drop, force-drop and rename flush the buffered inserts
+  (`flush_pending_writes`) after taking the collection write lock and before
+  the persist gate (the flush takes the gate shared).
+- **Test:** `tests/batch_drop_rename_tests.rs`.
 ### Fixed — indexed and unindexed queries agree beyond 2^53 and for large u64 (mcp-server v1.0.587)
 
 Audit 2026-10-07 Q15.
