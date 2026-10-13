@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — indexed and unindexed queries agree beyond 2^53 and for large u64 (mcp-server v1.0.587)
+
+Audit 2026-10-07 Q15.
+
+- **Symptom:** `{"v": 9007199254740993}` (2^53 + 1) matched
+  `v: 9007199254740992.0` by scan but not by index; with an index on `v`,
+  `{"v": {"$lt": u64::MAX}}` missed `u64::MAX - 1` and `count({"v": u64::MAX})`
+  counted it too.
+- **Root cause (scan):** `compare_values` compared an integer with a float by
+  turning both into f64, which is inexact above 2^53.
+- **Root cause (index):** a u64 above i64::MAX becomes a lossy `Float` index
+  key, so `u64::MAX` and `u64::MAX - 1` share one key; the planner used the
+  index for such query values (and for implicit equality skipped the
+  `is_indexable_value` check entirely).
+- **Fix:** `compare_values` orders an integer against a float exactly
+  (`cmp_int_float`). The planner uses an index only for numbers within
+  ±2^53, where both key buckets are exact (`is_indexable_value`, now also
+  applied to implicit equality and to range bounds); other numbers take the
+  exact scan path. The index key format is unchanged.
+- **Test:** `tests/index_numeric_edge_tests.rs` (find and count, index vs
+  scan).
+
 ### Fixed — `$expr` `$eq`/`$ne` across types, objects and missing fields; `$type` on array elements (mcp-server v1.0.585)
 
 Audit 2026-10-07 O8, O9.
