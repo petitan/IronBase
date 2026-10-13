@@ -576,38 +576,41 @@ impl ProjectStage {
                 }
             }
             ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
+            // Integer operands stay integers (checked; an overflow or a float
+            // operand goes to f64), as in MongoDB: every operation used to run
+            // in f64, losing precision above 2^53 and turning 3 + 4 into 7.0
+            // (audit 2026-10-07 A11)
             ProjectExpression::Add(operands) => {
-                let mut result = 0.0;
+                let mut result = Num::Int(0);
                 for op in operands {
-                    if let Some(val) = Self::evaluate_operand(op, doc) {
-                        result += val;
-                    } else {
-                        return Value::Null;
+                    match Self::evaluate_num(op, doc) {
+                        Some(val) => result = result.combine(val, i64::checked_add, |a, b| a + b),
+                        None => return Value::Null,
                     }
                 }
-                Value::from(result)
+                result.into_value()
             }
             ProjectExpression::Multiply(operands) => {
-                let mut result = 1.0;
+                let mut result = Num::Int(1);
                 for op in operands {
-                    if let Some(val) = Self::evaluate_operand(op, doc) {
-                        result *= val;
-                    } else {
-                        return Value::Null;
+                    match Self::evaluate_num(op, doc) {
+                        Some(val) => result = result.combine(val, i64::checked_mul, |a, b| a * b),
+                        None => return Value::Null,
                     }
                 }
-                Value::from(result)
+                result.into_value()
             }
             ProjectExpression::Subtract(left, right) => {
                 match (
-                    Self::evaluate_operand(left, doc),
-                    Self::evaluate_operand(right, doc),
+                    Self::evaluate_num(left, doc),
+                    Self::evaluate_num(right, doc),
                 ) {
-                    (Some(l), Some(r)) => Value::from(l - r),
+                    (Some(l), Some(r)) => l.combine(r, i64::checked_sub, |a, b| a - b).into_value(),
                     _ => Value::Null,
                 }
             }
             ProjectExpression::Divide(left, right) => {
+                // Division always gives a double (MongoDB)
                 match (
                     Self::evaluate_operand(left, doc),
                     Self::evaluate_operand(right, doc),
@@ -619,23 +622,34 @@ impl ProjectStage {
             }
             ProjectExpression::Mod(left, right) => {
                 match (
-                    Self::evaluate_operand(left, doc),
-                    Self::evaluate_operand(right, doc),
+                    Self::evaluate_num(left, doc),
+                    Self::evaluate_num(right, doc),
                 ) {
-                    (Some(l), Some(r)) if r != 0.0 => Value::from(l % r),
+                    (Some(l), Some(r)) if r.as_f64() != 0.0 => {
+                        l.combine(r, i64::checked_rem, |a, b| a % b).into_value()
+                    }
                     (Some(_), Some(_)) => Value::Null, // Mod by zero
                     _ => Value::Null,
                 }
             }
-            ProjectExpression::Abs(operand) => Self::evaluate_operand(operand, doc)
-                .map(|v| Value::from(v.abs()))
-                .unwrap_or(Value::Null),
-            ProjectExpression::Ceil(operand) => Self::evaluate_operand(operand, doc)
-                .map(|v| Value::from(v.ceil()))
-                .unwrap_or(Value::Null),
-            ProjectExpression::Floor(operand) => Self::evaluate_operand(operand, doc)
-                .map(|v| Value::from(v.floor()))
-                .unwrap_or(Value::Null),
+            ProjectExpression::Abs(operand) => match Self::evaluate_num(operand, doc) {
+                Some(Num::Int(i)) => i
+                    .checked_abs()
+                    .map(Value::from)
+                    .unwrap_or_else(|| Value::from((i as f64).abs())),
+                Some(Num::Float(f)) => Value::from(f.abs()),
+                None => Value::Null,
+            },
+            ProjectExpression::Ceil(operand) => match Self::evaluate_num(operand, doc) {
+                Some(Num::Int(i)) => Value::from(i),
+                Some(Num::Float(f)) => Value::from(f.ceil()),
+                None => Value::Null,
+            },
+            ProjectExpression::Floor(operand) => match Self::evaluate_num(operand, doc) {
+                Some(Num::Int(i)) => Value::from(i),
+                Some(Num::Float(f)) => Value::from(f.floor()),
+                None => Value::Null,
+            },
             ProjectExpression::Round(operand, precision) => Self::evaluate_operand(operand, doc)
                 .map(|v| {
                     let p = precision.unwrap_or(0);
@@ -652,6 +666,20 @@ impl ProjectStage {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             StringOperand::Literal(value) => Some(value.clone()),
+        }
+    }
+
+    /// Evaluate an arithmetic operand keeping integers as integers. A literal
+    /// is stored as f64; an integral one within ±2^53 is exact as an i64.
+    fn evaluate_num(op: &ArithmeticOperand, doc: &Value) -> Option<Num> {
+        match op {
+            ArithmeticOperand::Field(field) => {
+                get_nested_value(doc, field).and_then(Num::from_value)
+            }
+            ArithmeticOperand::Literal(n) => Some(Num::from_f64(*n)),
+            ArithmeticOperand::Expression(expr) => {
+                Num::from_value(&Self::evaluate_expression(expr, doc))
+            }
         }
     }
 
@@ -844,6 +872,65 @@ fn exclude_from_value(value: &mut Value, parts: &[&str]) {
     }
 }
 
+/// A number in `$project` arithmetic: integers stay exact i64 until an
+/// operation overflows or meets a float (audit 2026-10-07 A11).
+#[derive(Debug, Clone, Copy)]
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+impl Num {
+    fn from_value(value: &Value) -> Option<Num> {
+        match value {
+            Value::Number(n) => match n.as_i64() {
+                Some(i) => Some(Num::Int(i)),
+                None => n.as_f64().map(Num::Float),
+            },
+            _ => None,
+        }
+    }
+
+    fn from_f64(f: f64) -> Num {
+        const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+        if f.fract() == 0.0 && f.abs() <= EXACT {
+            Num::Int(f as i64)
+        } else {
+            Num::Float(f)
+        }
+    }
+
+    fn as_f64(self) -> f64 {
+        match self {
+            Num::Int(i) => i as f64,
+            Num::Float(f) => f,
+        }
+    }
+
+    /// `int_op` for two integers (falling back to `float_op` when it
+    /// overflows), `float_op` otherwise.
+    fn combine(
+        self,
+        other: Num,
+        int_op: fn(i64, i64) -> Option<i64>,
+        float_op: fn(f64, f64) -> f64,
+    ) -> Num {
+        if let (Num::Int(a), Num::Int(b)) = (self, other) {
+            if let Some(v) = int_op(a, b) {
+                return Num::Int(v);
+            }
+        }
+        Num::Float(float_op(self.as_f64(), other.as_f64()))
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Num::Int(i) => Value::from(i),
+            Num::Float(f) => Value::from(f),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,7 +946,7 @@ mod tests {
         let doc = json!({"price": 10, "qty": 5});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["total"], json!(50.0));
+        assert_eq!(result[0]["total"], json!(50)); // integer arithmetic (A11)
     }
 
     #[test]
@@ -872,7 +959,7 @@ mod tests {
         let doc = json!({"a": 10, "b": 20, "c": 30});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["sum"], json!(60.0));
+        assert_eq!(result[0]["sum"], json!(60)); // integer arithmetic (A11)
     }
 
     #[test]
@@ -885,7 +972,7 @@ mod tests {
         let doc = json!({"total": 100, "discount": 15});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["diff"], json!(85.0));
+        assert_eq!(result[0]["diff"], json!(85)); // integer arithmetic (A11)
     }
 
     #[test]
@@ -925,7 +1012,7 @@ mod tests {
         let doc = json!({"price": 100, "tax": 10, "qty": 2});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["total"], json!(220.0)); // (100+10) * 2
+        assert_eq!(result[0]["total"], json!(220)); // (100+10) * 2, integer (A11)
     }
 
     #[test]
@@ -938,7 +1025,7 @@ mod tests {
         let doc = json!({"diff": -42});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["absVal"], json!(42.0));
+        assert_eq!(result[0]["absVal"], json!(42)); // integer (A11)
     }
 
     #[test]
@@ -979,7 +1066,7 @@ mod tests {
         let doc = json!({"value": 17});
         let result = stage.execute(vec![doc]).unwrap();
 
-        assert_eq!(result[0]["remainder"], json!(2.0));
+        assert_eq!(result[0]["remainder"], json!(2)); // integer (A11)
     }
 
     #[test]

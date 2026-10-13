@@ -22,6 +22,50 @@ Audit 2026-10-07 T7 (follow-up).
   (`flush_pending_writes`) after taking the collection write lock and before
   the persist gate (the flush takes the gate shared).
 - **Test:** `tests/batch_drop_rename_tests.rs`.
+### Fixed — indexed and unindexed queries agree beyond 2^53 and for large u64 (mcp-server v1.0.587)
+
+Audit 2026-10-07 Q15.
+
+- **Symptom:** `{"v": 9007199254740993}` (2^53 + 1) matched
+  `v: 9007199254740992.0` by scan but not by index; with an index on `v`,
+  `{"v": {"$lt": u64::MAX}}` missed `u64::MAX - 1` and `count({"v": u64::MAX})`
+  counted it too.
+- **Root cause (scan):** `compare_values` compared an integer with a float by
+  turning both into f64, which is inexact above 2^53.
+- **Root cause (index):** a u64 above i64::MAX becomes a lossy `Float` index
+  key, so `u64::MAX` and `u64::MAX - 1` share one key; the planner used the
+  index for such query values (and for implicit equality skipped the
+  `is_indexable_value` check entirely).
+- **Fix:** `compare_values` orders an integer against a float exactly
+  (`cmp_int_float`). The planner uses an index only for numbers within
+  ±2^53, where both key buckets are exact (`is_indexable_value`, now also
+  applied to implicit equality and to range bounds); other numbers take the
+  exact scan path. The index key format is unchanged.
+- **Test:** `tests/index_numeric_edge_tests.rs` (find and count, index vs
+  scan).
+### Fixed — aggregation numbers (1 vs 1.0, integer arithmetic, `$sum` overflow) and `$unwind` options (mcp-server v1.0.586)
+
+Audit 2026-10-07 A10–A13.
+
+- **A10:** `1` and `1.0` were two `$group` keys, two `$addToSet` elements
+  and two `distinct` values: `value_hash` / `canonical_json_string` spelled
+  numbers with `to_string`. An integral float within ±2^53 is now spelled as
+  its integer (`canonical_number_string`).
+- **A11:** `$project` arithmetic ran in f64: integers above 2^53 lost
+  precision and `3 + 4` gave `7.0`. `$add`/`$subtract`/`$multiply`/`$mod`/
+  `$abs`/`$ceil`/`$floor` keep integers as checked i64 (an overflow or a
+  float operand goes to f64); `$divide` stays a double, as in MongoDB.
+  **Behaviour change:** integer arithmetic now returns integers; six unit
+  tests that asserted the float result were updated.
+- **A12:** `$sum` saturated silently at i64::MAX on overflow; it now
+  promotes the sum to a double, as MongoDB does (`add_to_sum`).
+- **A13:** `$unwind` with `preserveNullAndEmptyArrays` set the field to
+  null for an empty array or a missing field and left `includeArrayIndex`
+  out, and a scalar got index 0. Now (MongoDB): an empty array's field is
+  removed, a missing field stays missing, null stays null, and the index is
+  null for all of them and for a scalar. Both execution paths share
+  `preserved_doc` / `scalar_doc`.
+- **Test:** `tests/aggregation_numeric_unwind_tests.rs`.
 
 ### Fixed — `$expr` `$eq`/`$ne` across types, objects and missing fields; `$type` on array elements (mcp-server v1.0.585)
 

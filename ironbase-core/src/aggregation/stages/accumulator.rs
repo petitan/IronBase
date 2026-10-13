@@ -88,6 +88,20 @@ fn fold_extremum(current: &mut Option<Value>, value: Value, is_min: bool) {
     }
 }
 
+/// Add an integer to a `$sum`. On i64 overflow the value goes to the
+/// float part instead, as MongoDB promotes the sum to a double; the
+/// integer part used to saturate silently at i64::MAX (audit 2026-10-07
+/// A12).
+fn add_to_sum(int_sum: &mut i64, float_sum: &mut f64, has_float: &mut bool, n: i64) {
+    match int_sum.checked_add(n) {
+        Some(total) => *int_sum = total,
+        None => {
+            *float_sum += n as f64;
+            *has_float = true;
+        }
+    }
+}
+
 impl Accumulator {
     pub(crate) fn from_json(spec: &Value) -> Result<Self> {
         if let Value::Object(obj) = spec {
@@ -147,9 +161,10 @@ impl Accumulator {
     pub(crate) fn compute(&self, docs: &[Value]) -> Result<Value> {
         match self {
             Accumulator::Sum(expr) => match expr {
-                SumExpression::Constant(n) => {
-                    Ok(Value::from((*n).saturating_mul(docs.len() as i64)))
-                }
+                SumExpression::Constant(n) => Ok(match n.checked_mul(docs.len() as i64) {
+                    Some(total) => Value::from(total),
+                    None => Value::from(*n as f64 * docs.len() as f64),
+                }),
                 SumExpression::Field(field) => {
                     let mut sum_int: i64 = 0;
                     let mut sum_float: f64 = 0.0;
@@ -158,7 +173,7 @@ impl Accumulator {
                     for doc in docs {
                         if let Some(value) = get_nested_value(doc, field) {
                             if let Some(n) = value.as_i64() {
-                                sum_int = sum_int.saturating_add(n);
+                                add_to_sum(&mut sum_int, &mut sum_float, &mut has_float, n);
                             } else if let Some(f) = value.as_f64() {
                                 sum_float += f;
                                 has_float = true;
@@ -297,13 +312,13 @@ impl AccumulatorState {
                 Accumulator::Sum(expr),
             ) => match expr {
                 SumExpression::Constant(n) => {
-                    *int_sum = int_sum.saturating_add(*n);
+                    add_to_sum(int_sum, float_sum, has_float, *n);
                     *is_count = true;
                 }
                 SumExpression::Field(field) => {
                     if let Some(value) = get_nested_value(doc, field) {
                         if let Some(n) = value.as_i64() {
-                            *int_sum = int_sum.saturating_add(n);
+                            add_to_sum(int_sum, float_sum, has_float, n);
                         } else if let Some(f) = value.as_f64() {
                             *float_sum += f;
                             *has_float = true;
@@ -451,13 +466,13 @@ impl AccumulatorState {
                 Accumulator::Sum(expr),
             ) => match expr {
                 SumExpression::Constant(n) => {
-                    *int_sum = int_sum.saturating_add(*n);
+                    add_to_sum(int_sum, float_sum, has_float, *n);
                     *is_count = true;
                 }
                 SumExpression::Field(field) => {
                     if let Some(value) = get_nested_value(doc, field) {
                         if let Some(n) = value.as_i64() {
-                            *int_sum = int_sum.saturating_add(n);
+                            add_to_sum(int_sum, float_sum, has_float, n);
                         } else if let Some(f) = value.as_f64() {
                             *float_sum += f;
                             *has_float = true;
