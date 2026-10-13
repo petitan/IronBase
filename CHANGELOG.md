@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `$group` keeps `_id`s with colliding hashes apart (mcp-server v1.0.591)
+
+Found while fixing the `distinct` hash collision (audit 2026-10-07 side note).
+
+- **Root cause:** every `$group` path (streaming, streaming with context, and
+  both index-based counts) keyed its groups on the 64-bit `value_hash` of
+  `_id` alone, so two different `_id`s whose hashes collided were merged into
+  one group with mixed accumulator values and one of the `_id`s.
+- **Fix:** the groups are keyed on `GroupKey` (hash + value): the hash picks
+  the bucket, keys are compared with `values_equal` (`1` and `1.0` still one
+  group). The context's per-group `$push`/`$addToSet` counters stay keyed by
+  the hash (they only bound memory).
+- **Test:** `group_stage` unit test
+  `test_group_key_hash_collision_keeps_groups_apart` (forced collision).
+
 ### Fixed — the query result cache is bounded in bytes (mcp-server v1.0.589)
 
 Audit 2026-10-07 M9.
