@@ -21,7 +21,7 @@
 //! **Practical impact:** Rare in practice. For strict consistency, wrap in a transaction
 //! (note: distinct inside transactions is not yet supported).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -140,7 +140,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         )?;
 
         // Collect distinct values with cancellation checks
-        let mut seen_hashes: HashSet<u64> = HashSet::new();
+        // hash → indexes into distinct_values with that hash
+        let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
         let mut distinct_values = Vec::new();
         let mut total_bytes: usize = 0;
 
@@ -165,7 +166,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 for field_value in document.get_all(field) {
                     let value_hash = crate::value_utils::value_hash(field_value);
 
-                    if seen_hashes.insert(value_hash) {
+                    if is_new_distinct(&mut seen, &distinct_values, value_hash, field_value) {
                         total_bytes = total_bytes
                             .saturating_add(crate::find_options::estimate_json_size(field_value));
                         if total_bytes > max_bytes {
@@ -186,6 +187,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     ))
                                 })?;
                         }
+                        seen.entry(value_hash)
+                            .or_default()
+                            .push(distinct_values.len());
                         distinct_values.push(field_value.clone());
                     }
                 }
@@ -270,6 +274,22 @@ fn distinct_limit_error(collected: usize, max_bytes: usize) -> IronBaseError {
     ))
 }
 
+/// True if `value` is not among the distinct values already collected. The
+/// hash only picks the bucket: values are compared exactly, so two different
+/// values with the same 64-bit hash both stay (audit 2026-10-07 side note).
+fn is_new_distinct(
+    seen: &mut HashMap<u64, Vec<usize>>,
+    distinct_values: &[Value],
+    value_hash: u64,
+    value: &Value,
+) -> bool {
+    seen.get(&value_hash).is_none_or(|indexes| {
+        !indexes
+            .iter()
+            .any(|&i| crate::value_utils::values_equal(&distinct_values[i], value))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::storage::MemoryStorage;
@@ -319,5 +339,22 @@ mod tests {
             .distinct_with_byte_limit("s", &json!({}), None, 1_000_000)
             .unwrap();
         assert_eq!(all.len(), 100);
+    }
+
+    /// Two different values with the same hash are both distinct; equal
+    /// values (also 1 and 1.0) are not.
+    #[test]
+    fn hash_collision_keeps_both_values() {
+        use super::is_new_distinct;
+        let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut values: Vec<Value> = Vec::new();
+        // Force one hash for every value, as a 64-bit collision would
+        for v in [json!("a"), json!("b"), json!("a"), json!(1), json!(1.0)] {
+            if is_new_distinct(&mut seen, &values, 7, &v) {
+                seen.entry(7).or_default().push(values.len());
+                values.push(v);
+            }
+        }
+        assert_eq!(values, vec![json!("a"), json!("b"), json!(1)]);
     }
 }
