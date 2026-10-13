@@ -103,56 +103,71 @@ impl OperatorMatcher for TypeOperator {
                     ));
                 };
 
-                let matches = match type_name {
-                    "double" => {
-                        // Double should match floating-point numbers only (not integers)
-                        // serde_json stores integers as PosInt/NegInt, floats as Float
-                        // is_i64()/is_u64() returns false for Float-stored numbers
-                        if let Value::Number(n) = val {
-                            !n.is_i64() && !n.is_u64()
-                        } else {
-                            false
+                // MongoDB: an array field also matches when one of its
+                // elements has the type (audit 2026-10-07 O9)
+                if value_has_type(val, type_name)? {
+                    return Ok(true);
+                }
+                if let Value::Array(items) = val {
+                    for item in items {
+                        if !item.is_array() && value_has_type(item, type_name)? {
+                            return Ok(true);
                         }
                     }
-                    "number" => val.is_number(), // Alias - matches all numeric types
-                    "string" => val.is_string(),
-                    "object" => val.is_object(),
-                    "array" => val.is_array(),
-                    "bool" | "boolean" => val.is_boolean(),
-                    "null" => val.is_null(),
-                    "int" => {
-                        // int32: must be integer AND fit in i32 range
-                        if let Value::Number(n) = val {
-                            if let Some(i) = n.as_i64() {
-                                i >= i32::MIN as i64 && i <= i32::MAX as i64
-                            } else if let Some(u) = n.as_u64() {
-                                u <= i32::MAX as u64
-                            } else {
-                                false // Float-stored number
-                            }
-                        } else {
-                            false
-                        }
-                    }
-                    "long" => {
-                        // int64: must be integer (stored as PosInt/NegInt, not Float)
-                        if let Value::Number(n) = val {
-                            n.is_i64()
-                                || (n.is_u64() && n.as_u64().is_some_and(|u| u <= i64::MAX as u64))
-                        } else {
-                            false
-                        }
-                    }
-                    _ => {
-                        return Err(IronBaseError::InvalidQuery(format!(
-                            "Unknown type name: {}",
-                            type_name
-                        )))
-                    }
-                };
-
-                Ok(matches)
+                }
+                Ok(false)
             }
         }
     }
+}
+
+/// Whether `val` itself has the `$type` named `type_name`.
+fn value_has_type(val: &Value, type_name: &str) -> Result<bool> {
+    let matches = match type_name {
+        "double" => {
+            // Double should match floating-point numbers only (not integers)
+            // serde_json stores integers as PosInt/NegInt, floats as Float
+            // is_i64()/is_u64() returns false for Float-stored numbers
+            if let Value::Number(n) = val {
+                !n.is_i64() && !n.is_u64()
+            } else {
+                false
+            }
+        }
+        "number" => val.is_number(), // Alias - matches all numeric types
+        "string" => val.is_string(),
+        "object" => val.is_object(),
+        "array" => val.is_array(),
+        "bool" | "boolean" => val.is_boolean(),
+        "null" => val.is_null(),
+        "int" => {
+            // int32: must be integer AND fit in i32 range
+            if let Value::Number(n) = val {
+                if let Some(i) = n.as_i64() {
+                    i >= i32::MIN as i64 && i <= i32::MAX as i64
+                } else if let Some(u) = n.as_u64() {
+                    u <= i32::MAX as u64
+                } else {
+                    false // Float-stored number
+                }
+            } else {
+                false
+            }
+        }
+        "long" => {
+            // int64: must be integer (stored as PosInt/NegInt, not Float)
+            if let Value::Number(n) = val {
+                n.is_i64() || (n.is_u64() && n.as_u64().is_some_and(|u| u <= i64::MAX as u64))
+            } else {
+                false
+            }
+        }
+        _ => {
+            return Err(IronBaseError::InvalidQuery(format!(
+                "Unknown type name: {}",
+                type_name
+            )))
+        }
+    };
+    Ok(matches)
 }

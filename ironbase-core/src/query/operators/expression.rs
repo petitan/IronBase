@@ -3,7 +3,7 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::compare_values;
+use crate::value_utils::{compare_values, values_equal};
 use serde_json::Value;
 
 use super::traits::OperatorMatcher;
@@ -315,12 +315,8 @@ fn evaluate_expr(expr: &Value, document: &Document, depth: usize) -> Result<bool
 
     match op.as_str() {
         // Comparison operators
-        "$eq" => evaluate_comparison_expr(args, document, depth, |ord| {
-            ord == std::cmp::Ordering::Equal
-        }),
-        "$ne" => evaluate_comparison_expr(args, document, depth, |ord| {
-            ord != std::cmp::Ordering::Equal
-        }),
+        "$eq" => evaluate_equality_expr(args, document, depth),
+        "$ne" => evaluate_equality_expr(args, document, depth).map(|eq| !eq),
         "$gt" => evaluate_comparison_expr(args, document, depth, |ord| {
             ord == std::cmp::Ordering::Greater
         }),
@@ -412,6 +408,29 @@ where
         // If either field is missing, comparison returns false
         _ => Ok(false),
     }
+}
+
+/// `$eq` / `$ne` in `$expr`: `values_equal` (numbers by value, objects and
+/// arrays deeply), and a missing field equals only another missing field.
+/// They went through the ordering comparison, which gives no answer across
+/// types, for objects or for a missing field, so `$eq` and `$ne` were both
+/// false there (audit 2026-10-07 O8). `$gt`/`$lt`/... keep that behaviour.
+fn evaluate_equality_expr(args: &Value, document: &Document, depth: usize) -> Result<bool> {
+    let arr = args.as_array().ok_or_else(|| {
+        IronBaseError::InvalidQuery("Comparison in $expr requires an array".to_string())
+    })?;
+    if arr.len() != 2 {
+        return Err(IronBaseError::InvalidQuery(
+            "Comparison in $expr requires exactly 2 arguments".to_string(),
+        ));
+    }
+    let left = resolve_expr_value(&arr[0], document, depth + 1)?;
+    let right = resolve_expr_value(&arr[1], document, depth + 1)?;
+    Ok(match (left, right) {
+        (Some(l), Some(r)) => values_equal(&l, &r),
+        (None, None) => true,
+        _ => false,
+    })
 }
 
 impl OperatorMatcher for ExprOperator {
