@@ -756,8 +756,23 @@ impl QueryPlanner {
     /// must be skipped so the collection-scan path performs proper deep equality.
     /// Originally fixed for equality only (audit #27 finding A, b9209f7d); the
     /// `$in` path (`collect_in_candidates`) needs the same guard.
+    ///
+    /// A number is indexable only within ±2^53, where the Int and Float key
+    /// buckets hold it exactly: a u64 above i64::MAX becomes a lossy Float
+    /// key (u64::MAX and u64::MAX - 1 share one), so an index range around
+    /// such a value missed or added documents the exact scan does not
+    /// (audit 2026-10-07 Q15). Those queries take the scan path.
     fn is_indexable_value(v: &Value) -> bool {
-        !matches!(v, Value::Object(_) | Value::Array(_))
+        const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+        match v {
+            Value::Object(_) | Value::Array(_) => false,
+            Value::Number(n) => match (n.as_i64(), n.as_f64()) {
+                (Some(i), _) => i.unsigned_abs() <= EXACT as u64,
+                (None, Some(f)) if n.is_f64() => f.abs() <= EXACT,
+                _ => false, // u64 above i64::MAX
+            },
+            _ => true,
+        }
     }
 
     /// Analyze a query with compound-index-aware field matching (v2)
@@ -1074,9 +1089,12 @@ impl QueryPlanner {
                 } else if matches!(value, Value::Array(_)) {
                     // Array value — not indexable as a single key.
                     None
-                } else {
-                    // Scalar value (Null/Bool/Number/String) — usable.
+                } else if Self::is_indexable_value(value) {
+                    // Scalar value (Null/Bool/Number/String) — usable, a
+                    // number only within ±2^53 (audit 2026-10-07 Q15).
                     Some(value)
+                } else {
+                    None
                 };
 
                 let eq_val = match equality_value {
@@ -1138,6 +1156,15 @@ impl QueryPlanner {
                         let (index_name, is_compound) =
                             Self::find_index_for_field(field, index_fields)?;
                         if is_compound {
+                            continue;
+                        }
+                        // A bound the keys cannot hold exactly takes the scan
+                        // path (audit 2026-10-07 Q15)
+                        if ["$gt", "$gte", "$lt", "$lte"]
+                            .iter()
+                            .filter_map(|op| cond_map.get(*op))
+                            .any(|v| !Self::is_indexable_value(v))
+                        {
                             continue;
                         }
 

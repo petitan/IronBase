@@ -393,11 +393,24 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
                 return Some(u.cmp(&(i as u64)));
             }
 
-            // Case 4: Fall back to f64 only for actual floating-point numbers
-            // (or if the above integer checks all failed)
-            let f1 = n1.as_f64()?;
-            let f2 = n2.as_f64()?;
-            f1.partial_cmp(&f2)
+            // Case 4: an integer against a float compares exactly; turning
+            // the integer into an f64 made 2^53 + 1 equal 2^53 (audit
+            // 2026-10-07 Q15)
+            let as_int = |n: &serde_json::Number| {
+                n.as_i64()
+                    .map(i128::from)
+                    .or_else(|| n.as_u64().map(i128::from))
+            };
+            match (as_int(n1), as_int(n2)) {
+                (Some(i), None) => cmp_int_float(i, n2.as_f64()?),
+                (None, Some(i)) => cmp_int_float(i, n1.as_f64()?).map(Ordering::reverse),
+                _ => {
+                    // Both floats
+                    let f1 = n1.as_f64()?;
+                    let f2 = n2.as_f64()?;
+                    f1.partial_cmp(&f2)
+                }
+            }
         }
         (Value::String(s1), Value::String(s2)) => Some(s1.cmp(s2)),
         (Value::Bool(b1), Value::Bool(b2)) => Some(b1.cmp(b2)),
@@ -408,6 +421,28 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Null, Value::Null) => Some(Ordering::Equal),
         _ => None,
     }
+}
+
+/// Exact order of integer `i` against float `f` (None for NaN): an integral
+/// float is an exact integer, so compare `i` with `floor(f)` and break a tie
+/// by the fraction.
+fn cmp_int_float(i: i128, f: f64) -> Option<Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    // Beyond every i64/u64: the float decides
+    const LIMIT: f64 = 1.0e38;
+    if f >= LIMIT {
+        return Some(Ordering::Less);
+    }
+    if f <= -LIMIT {
+        return Some(Ordering::Greater);
+    }
+    let floor = f.floor();
+    Some(match i.cmp(&(floor as i128)) {
+        Ordering::Equal if f > floor => Ordering::Less,
+        o => o,
+    })
 }
 
 /// MongoDB value equality: numbers compare by value (`1 == 1.0`), arrays
