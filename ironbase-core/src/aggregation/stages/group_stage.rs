@@ -21,14 +21,44 @@ use crate::aggregation::types::{
 };
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
-use crate::value_utils::{get_nested_value, substr_string, value_hash};
+use crate::value_utils::{get_nested_value, substr_string, value_hash, values_equal};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
-/// Group entry: stores the original key value and accumulator states
-/// Using u64 hash as HashMap key avoids expensive JSON serialization
+/// Group key: the `_id` value with its precomputed `value_hash`. The hash
+/// only picks the bucket (no JSON serialization per document); keys are
+/// compared with `values_equal`, so two different `_id`s whose 64-bit hashes
+/// collide stay separate groups (audit 2026-10-07 side note).
+struct GroupKey {
+    hash: u64,
+    value: Value,
+}
+
+impl GroupKey {
+    fn new(hash: u64, value: Value) -> Self {
+        GroupKey { hash, value }
+    }
+}
+
+impl Hash for GroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        // values_equal implies equal hashes (value_hash hashes 1 and 1.0,
+        // and objects in any key order, alike)
+        self.hash == other.hash && values_equal(&self.value, &other.value)
+    }
+}
+
+impl Eq for GroupKey {}
+
+/// Group entry: the accumulator states of one group
 struct GroupEntry {
-    key_value: Value, // Original _id value for output
     states: HashMap<String, AccumulatorState>,
 }
 
@@ -260,8 +290,8 @@ impl GroupStage {
     where
         I: Iterator<Item = Result<Value>>,
     {
-        // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
-        let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
+        // GroupKey lookup: hashed once per document, no JSON serialization
+        let mut groups: HashMap<GroupKey, GroupEntry> = HashMap::new();
         let mut doc_count: usize = 0;
         let mut last_group_check: usize = 0;
 
@@ -282,10 +312,10 @@ impl GroupStage {
 
             let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
 
-            let is_new_group = !groups.contains_key(&group_hash);
+            let group_key = GroupKey::new(group_hash, group_value);
+            let is_new_group = !groups.contains_key(&group_key);
 
-            let entry = groups.entry(group_hash).or_insert_with(|| GroupEntry {
-                key_value: group_value,
+            let entry = groups.entry(group_key).or_insert_with(|| GroupEntry {
                 states: self
                     .accumulators
                     .iter()
@@ -365,9 +395,9 @@ impl GroupStage {
 
         // Finalize
         let mut results = Vec::new();
-        for (_hash, mut entry) in groups {
+        for (key, mut entry) in groups {
             let mut result = serde_json::Map::new();
-            result.insert("_id".to_string(), entry.key_value);
+            result.insert("_id".to_string(), key.value);
 
             for field in self.accumulators.keys() {
                 if let Some(state) = entry.states.remove(field) {
@@ -411,7 +441,7 @@ impl GroupStage {
     {
         use std::collections::hash_map::Entry;
 
-        let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
+        let mut groups: HashMap<GroupKey, GroupEntry> = HashMap::new();
 
         // Process documents ONE AT A TIME from the iterator
         // Each document is dropped after processing - NOT stored!
@@ -429,13 +459,14 @@ impl GroupStage {
             let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
 
             // Use Entry API to check and insert atomically
-            let entry = match groups.entry(group_hash) {
+            // The context's per-group counters stay keyed by the hash: they
+            // only bound memory, a collision just shares a counter
+            let entry = match groups.entry(GroupKey::new(group_hash, group_value)) {
                 Entry::Vacant(e) => {
                     // New group - register with context first (checks limit)
                     ctx.register_new_group(group_hash)?;
 
                     e.insert(GroupEntry {
-                        key_value: group_value,
                         states: self
                             .accumulators
                             .iter()
@@ -457,9 +488,9 @@ impl GroupStage {
 
         // Finalize: convert accumulated states to output values
         let mut results = Vec::new();
-        for (_hash, mut entry) in groups {
+        for (key, mut entry) in groups {
             let mut result = serde_json::Map::new();
-            result.insert("_id".to_string(), entry.key_value);
+            result.insert("_id".to_string(), key.value);
 
             for field in self.accumulators.keys() {
                 if let Some(state) = entry.states.remove(field) {
@@ -557,7 +588,7 @@ impl GroupStage {
         // Count entries per key directly from the index using streaming traversal.
         // O(1) memory — processes entries leaf-by-leaf without materializing them.
         // OOM FIX (2026-01): Apply max_group_count limit
-        let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+        let mut counts: HashMap<GroupKey, i64> = HashMap::new();
         let mut exceeded_limit = false;
 
         btree.for_each_entry(&mut |key, _doc_id| {
@@ -566,20 +597,20 @@ impl GroupStage {
             }
 
             let key_value = key.to_value();
-            let key_hash = value_hash(&key_value);
+            let group_key = GroupKey::new(value_hash(&key_value), key_value);
 
             // Check if this is a NEW group (not updating existing count)
-            if !counts.contains_key(&key_hash) {
+            if let Some(count) = counts.get_mut(&group_key) {
+                // Update existing group's count
+                *count += 1;
+            } else {
                 // Check group count limit BEFORE inserting new group
                 if counts.len() >= limits.max_group_count {
                     // Too many groups - fall back to streaming which has proper error handling
                     exceeded_limit = true;
                     return;
                 }
-                counts.insert(key_hash, (key_value, 1));
-            } else {
-                // Update existing group's count
-                counts.get_mut(&key_hash).unwrap().1 += 1;
+                counts.insert(group_key, 1);
             }
         });
 
@@ -591,9 +622,9 @@ impl GroupStage {
         // Each accumulator that was $sum: N gets value N * count
         let mut results = Vec::with_capacity(counts.len());
 
-        for (_hash, (key_value, count)) in counts {
+        for (key, count) in counts {
             let mut result = serde_json::Map::new();
-            result.insert("_id".to_string(), key_value);
+            result.insert("_id".to_string(), key.value);
 
             // For each accumulator, compute final value
             for (acc_name, acc) in &self.accumulators {
@@ -651,7 +682,7 @@ impl GroupStage {
         // Count entries per key directly from the index using streaming traversal.
         // O(1) memory — processes entries leaf-by-leaf without materializing them.
         // Uses context for both entry and group limit tracking
-        let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+        let mut counts: HashMap<GroupKey, i64> = HashMap::new();
         let mut exceeded_limit = false;
 
         btree.for_each_entry(&mut |key, _doc_id| {
@@ -671,7 +702,7 @@ impl GroupStage {
 
             // Use Entry API for clippy compliance
             use std::collections::hash_map::Entry;
-            match counts.entry(key_hash) {
+            match counts.entry(GroupKey::new(key_hash, key_value)) {
                 Entry::Vacant(e) => {
                     // Register new group via context
                     if ctx.register_new_group(key_hash).is_err() {
@@ -679,11 +710,11 @@ impl GroupStage {
                         exceeded_limit = true;
                         return;
                     }
-                    e.insert((key_value, 1));
+                    e.insert(1);
                 }
                 Entry::Occupied(mut e) => {
                     // Update existing group's count
-                    e.get_mut().1 += 1;
+                    *e.get_mut() += 1;
                 }
             }
         });
@@ -695,9 +726,9 @@ impl GroupStage {
         // Build result documents
         let mut results = Vec::with_capacity(counts.len());
 
-        for (_hash, (key_value, count)) in counts {
+        for (key, count) in counts {
             let mut result = serde_json::Map::new();
-            result.insert("_id".to_string(), key_value);
+            result.insert("_id".to_string(), key.value);
 
             // For each accumulator, compute final value
             for (acc_name, acc) in &self.accumulators {
@@ -1103,5 +1134,26 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].get("_id"), Some(&Value::Null));
         assert_eq!(results[0].get("count"), Some(&json!(2)));
+    }
+
+    /// Two different `_id`s with the same hash stay separate groups; equal
+    /// ones (also 1 and 1.0) share one.
+    #[test]
+    fn test_group_key_hash_collision_keeps_groups_apart() {
+        use super::GroupKey;
+        let mut groups: HashMap<GroupKey, i64> = HashMap::new();
+        // Force one hash for every key, as a 64-bit collision would
+        for v in [json!("a"), json!("b"), json!("a"), json!(1), json!(1.0)] {
+            *groups.entry(GroupKey::new(7, v)).or_insert(0) += 1;
+        }
+        let mut counts: Vec<(String, i64)> = groups
+            .into_iter()
+            .map(|(k, n)| (k.value.to_string(), n))
+            .collect();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![("\"a\"".into(), 2), ("\"b\"".into(), 1), ("1".into(), 2)]
+        );
     }
 }
