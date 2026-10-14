@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented — `find_streaming` without a usable index holds O(n) ids
+
+Audit 2026-10-07 M9 (remainder), closed as a known limitation: documents are
+streamed, but without a single-range index plan the matching ids come from a
+catalog snapshot (O(n), `try_reserve`-guarded). True streaming would need an
+ordered catalog (storage data-structure change). See
+`docs/DOCUMENTED-BUGS.md` → *Ismert korlátok* and the `find_streaming` rustdoc.
+
 ### Fixed — `$group` keeps `_id`s with colliding hashes apart (mcp-server v1.0.591)
 
 Found while fixing the `distinct` hash collision (audit 2026-10-07 side note).

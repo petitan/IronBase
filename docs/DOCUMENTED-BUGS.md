@@ -84,4 +84,10 @@ Részletes elemzések: `memory/critical-bugs.md`.
 | **Fuzzy `skip` szűrő nélkül; `distinct` hash-ütközés** | audit 2026-10-07 mellékes (v1.0.590) | Fuzzy: 20 találat 5-ös lapokkal összesen 5-öt ad (2. oldaltól üres); distinct: ütköző hash-ű érték kimarad | Fuzzy: szűrő nélkül csak `limit` jelöltet kért az indextől, a `skip` ebből vágott; distinct: csak a 64 bites hash alapján dedup-olt | Fuzzy: `skip + limit` jelölt, `skip` egy helyen a szűrő után; distinct: hash-vödör + `values_equal` |
 | **`$group` hash-ütközésnél összevon két csoportot** | a `distinct` hash-ütközés javítása közben (v1.0.591) | Két különböző `_id`, amelynek 64 bites hash-e egyezik, egy csoportba kerül: kevert összegek/darabszámok, az egyik `_id` eltűnik | Minden `$group` út (streaming, kontextusos, két index-alapú) csak a `value_hash`-t használta kulcsnak | `GroupKey` (hash + érték): a hash vödröt választ, egyenlőség `values_equal`-lal |
 
+**Ismert korlátok (szándékosan nem javítva):**
+
+| Korlát | Forrás | Viselkedés | Miért nem javítjuk | Ha mégis kell |
+|--------|--------|------------|--------------------|---------------|
+| **`find_streaming` index nélkül O(n) id-t tart** | audit 2026-10-07 M9 maradéka | Használható (egy tartományos) index nélkül a cursor a katalógus pillanatképéből gyűjti a találatok id-jait: a dokumentumok streamelődnek, az id-k nem (a lekérdezés alatt kb. a katalógus 2–3× mérete, `try_reserve` védi) | A katalógus `HashMap`: lock elengedése után nem folytatható pozícióból, ezért pillanatkép kell (T5: a scan alatt nem tartjuk a storage lockot). A valódi streaming rendezett (`BTreeMap`) katalógust igényelne → storage adatstruktúra-változás | Index a szűrt mezőre (egy tartományos plan → `IndexScan` cursor, O(batch) memória), vagy szűkebb szűrő |
+
 **Részletes bug elemzések:** Lásd `memory/critical-bugs.md` (Lazy Index, read_data boundary, Fulltext candidate limit, Fulltext flush dirty flag, Btree delete not dirty, Workaround-ok)

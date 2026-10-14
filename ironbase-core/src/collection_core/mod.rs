@@ -1307,6 +1307,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Returns a cursor that lazily loads documents, allowing memory-efficient
     /// iteration over large result sets.
     ///
+    /// # Memory
+    ///
+    /// Documents are loaded one batch at a time. The matching ids are not
+    /// streamed unless a single-range index plan applies: otherwise the ids
+    /// are collected up front from a snapshot of the collection catalog
+    /// (O(n) ids, `try_reserve`-guarded). Known limitation, see
+    /// `docs/DOCUMENTED-BUGS.md` (audit 2026-10-07 M9).
+    ///
     /// # Example
     /// ```rust,ignore
     /// // Process 1 million documents without loading all into memory
