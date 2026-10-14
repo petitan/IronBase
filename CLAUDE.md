@@ -121,6 +121,8 @@ Metadata at END → no race conditions, no truncation.
 
 **Védelmek:** ✅ `$match` nem kapcsolja ki limitet · ✅ `$push/$addToSet` per-group limit · ✅ `$unwind` kumulatív · ✅ `try_reserve()`
 
+**Ismert korlát:** `find_streaming` csak egy tartományos, nem multikey index-plan mellett streameli az id-kat; minden más úton (plan nélkül katalógus-pillanatkép, multi-range/logikai operátor, `MemoryStorage`, multikey `seen`) O(n) id-t tart. Szándékos — részletek: `docs/DOCUMENTED-BUGS.md` → *Ismert korlátok*.
+
 <details>
 <summary>Top-K Optimization</summary>
 

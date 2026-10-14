@@ -1307,6 +1307,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Returns a cursor that lazily loads documents, allowing memory-efficient
     /// iteration over large result sets.
     ///
+    /// # Memory
+    ///
+    /// Documents are loaded one batch at a time. The matching ids are
+    /// streamed (O(batch)) only for a file-backed collection with a single
+    /// contiguous-range plan on a non-multikey index and no top-level
+    /// `$and`/`$or`/`$nor`. Otherwise they are collected up front: from a
+    /// snapshot of the collection catalog when no index plan applies
+    /// (O(catalog), `try_reserve`-guarded; a narrower filter does not shrink
+    /// it), from the index for multi-range plans, by index or snapshot for
+    /// top-level logical operators, always for `MemoryStorage`; a multikey index cursor keeps a `seen` set
+    /// of the ids it returned. A file-backed collection with an empty catalog
+    /// uses a sequential file scan (O(1) ids). Known limitation, see
+    /// `docs/DOCUMENTED-BUGS.md` (audit 2026-10-07 M9).
+    ///
     /// # Example
     /// ```rust,ignore
     /// // Process 1 million documents without loading all into memory
@@ -1378,6 +1392,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// Same as `find_streaming()` but accepts optional cancellation parameters
     /// for timeout enforcement during document collection phase.
+    /// Same memory behaviour as `find_streaming()` (see its `# Memory`).
     ///
     /// # Arguments
     /// * `query_json` - Query filter
@@ -2506,22 +2521,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // OOM PROTECTION: Check memory BEFORE collecting catalog entries
             // This is the first major allocation - catches OOM early
+            // The reservation is filled, not dropped: a separate pre-check
+            // followed by an unchecked collect() could still abort.
             let catalog_size = meta.document_catalog.len();
-            let mut pre_check = Vec::<(DocumentId, u64)>::new();
-            pre_check.try_reserve(catalog_size).map_err(|e| {
+            let mut entries = Vec::<(DocumentId, u64)>::new();
+            entries.try_reserve(catalog_size).map_err(|e| {
                 IronBaseError::OutOfMemory(format!(
                     "Cannot allocate for {} catalog entries ({}). \
                     Collection too large for available memory.",
                     catalog_size, e
                 ))
             })?;
-            drop(pre_check);
-
-            let entries: Vec<(DocumentId, u64)> = meta
-                .document_catalog
-                .iter()
-                .map(|(id, &offset)| (id.clone(), offset))
-                .collect();
+            entries.extend(
+                meta.document_catalog
+                    .iter()
+                    .map(|(id, &offset)| (id.clone(), offset)),
+            );
             let len = entries.len();
             let live = storage.get_live_count(&self.name).unwrap_or(0);
             (entries, len, live, storage.layout_generation())

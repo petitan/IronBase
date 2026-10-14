@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented — when `find_streaming` holds O(n) ids; catalog snapshot allocation is fallible (mcp-server v1.0.592)
+
+Audit 2026-10-07 M9 (remainder), closed as a known limitation. Documents are
+loaded in batches, but ids are streamed only for a file-backed collection with
+a single contiguous-range, non-multikey index plan and no top-level logical
+operator. Otherwise the ids are collected up front: from a catalog snapshot
+without a plan (a narrower filter does not shrink it), from the index for
+multi-range plans, by index or snapshot for top-level logical operators,
+always for `MemoryStorage`, and a
+multikey index cursor keeps a `seen` set. Streaming only this collection's ids
+would need an ordered catalog; the existing file scan (`new_scan`, used when
+the catalog is empty) reads the whole data area. See `docs/DOCUMENTED-BUGS.md`
+→ *Ismert korlátok* and the `find_streaming` rustdoc.
+
+- **Fixed:** `scan_documents_with_early_termination` reserved the catalog
+  snapshot with `try_reserve`, dropped the reservation and then built the
+  snapshot with an unchecked `collect()`, so an allocation failure could still
+  abort. The reservation is now filled in place.
+
 ### Fixed — `$group` keeps `_id`s with colliding hashes apart (mcp-server v1.0.591)
 
 Found while fixing the `distinct` hash collision (audit 2026-10-07 side note).
