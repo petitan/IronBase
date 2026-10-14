@@ -246,6 +246,17 @@ mod sealed_raw {
 ///
 /// Use DatabaseCore methods for safe, durable operations.
 pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
+    /// Persist the collection metadata without clearing the WAL.
+    ///
+    /// For a metadata change (new index, schema, ...), not a checkpoint: the
+    /// WAL still holds committed operations other collections' unflushed
+    /// indexes are recovered from, so only a checkpoint (after the index
+    /// flush) may drop them (WAL/recovery audit 2026-10-14). No-op for
+    /// in-memory storage.
+    fn persist_metadata(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Write raw document bytes with explicit ID (tracked in catalog)
     ///
     /// # Arguments

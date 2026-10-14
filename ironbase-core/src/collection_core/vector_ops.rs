@@ -301,7 +301,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
                 meta.vector_indexes.push(metadata);
-                storage.flush()?;
+                storage.persist_metadata()?;
             }
         }
 
@@ -336,7 +336,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     .position(|idx| idx.name == index_name);
                 if let Some(pos) = idx_pos {
                     let idx_meta = meta.vector_indexes.remove(pos);
-                    storage.flush()?;
+                    storage.persist_metadata()?;
                     Some(idx_meta.cache_file)
                 } else {
                     return Err(IronBaseError::IndexError(format!(

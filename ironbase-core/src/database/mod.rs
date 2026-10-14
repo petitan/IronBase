@@ -665,46 +665,13 @@ impl DatabaseCore<StorageEngine> {
             }));
         }
 
-        // Apply recovered index changes to collections
-        // Group index changes by collection name
-        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> =
-            HashMap::new();
-
-        for change in recovered_index_changes {
-            // Group by collection name (now properly included in RecoveredIndexChange)
-            changes_by_collection
-                .entry(change.collection.clone())
-                .or_default()
-                .push(change);
-        }
-
-        // Apply changes to each collection's indexes
-        for (collection_name, changes) in changes_by_collection {
-            // Get collection (creates if doesn't exist)
-            if let Ok(collection) = db.collection(&collection_name) {
-                for change in changes {
-                    // Apply the index change to the collection's indexes
-                    let mut indexes = collection.indexes.write();
-                    if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
-                        match change.operation {
-                            crate::transaction::IndexOperation::Insert => {
-                                // Idempotent like `recovery::apply_op_to_btree`:
-                                // the loaded index file may already hold this
-                                // entry, and a plain insert into a unique index
-                                // (`_id`) then failed the whole open
-                                btree_index.delete(&change.key, &change.doc_id)?;
-                                btree_index.insert(change.key.clone(), change.doc_id)?;
-                            }
-                            crate::transaction::IndexOperation::Delete => {
-                                btree_index.delete(&change.key, &change.doc_id)?;
-                            }
-                        }
-                    }
-                    // Mark dirty so WAL-replayed changes are persisted at next checkpoint
-                    indexes.mark_btree_dirty(&change.index_name);
-                }
-            }
-        }
+        // The recovered `IndexChange` entries are not applied: the operations
+        // of the same transactions are replayed into the indexes below
+        // (`apply_op_to_btree`, idempotent, watermark-gated). Re-applying the
+        // index history on top of that state broke unique indexes (a key that
+        // moved to another document made the reopen fail) and derived keys
+        // wrongly for compound/multikey indexes (WAL/recovery audit 2026-10-14).
+        drop(recovered_index_changes);
 
         // Replay the indexes of every collection with recovered operations
         // now instead of on first access: the next checkpoint must find their

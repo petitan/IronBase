@@ -130,7 +130,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     collection_meta.fuzzy_indexes.push(metadata);
                 }
             }
-            storage.flush()?;
+            storage.persist_metadata()?;
         }
 
         Ok(index_name)
@@ -563,7 +563,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
             // CRITICAL FIX: Flush metadata to persist index metadata to disk
             // Without this, crash before next checkpoint would lose the index (bug found 2024-12-26)
-            storage.flush()?;
+            storage.persist_metadata()?;
         }
 
         Ok(index_name)

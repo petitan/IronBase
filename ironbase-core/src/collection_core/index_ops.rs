@@ -430,7 +430,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     });
 
                 meta.indexes.push(index_meta);
-                storage.flush()?;
+                storage.persist_metadata()?;
             }
         }
 
@@ -939,7 +939,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
             // Remove from fulltext indexes
             meta.fulltext_indexes.retain(|idx| idx.name != index_name);
-            storage.flush()?;
+            storage.persist_metadata()?;
         }
         // Both locks released here atomically
 
