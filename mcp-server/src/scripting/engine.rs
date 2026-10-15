@@ -55,17 +55,36 @@ type MemoryProbe = fn() -> Option<u64>;
 
 /// Process allocation from the allocator statistics (jemalloc on Unix,
 /// `GetProcessMemoryInfo` on Windows).
+/// A failed statistics read reports 0, which a running process never has.
 fn process_allocated_bytes() -> Option<u64> {
     let stats = crate::monitoring::get_memory_stats();
-    stats.available.then_some(stats.allocated_bytes)
+    (stats.available && stats.allocated_bytes > 0).then_some(stats.allocated_bytes)
 }
 
-/// Memory budget of one script run: half of the system memory available at
-/// its start. Per-value limits do not bound a script that keeps many values
-/// alive (M5 follow-up). `None` if the available memory is unknown.
+/// Memory budget of one script run: half of the memory available at its
+/// start, from the cgroup limit when the server runs in a container. Per-value
+/// limits do not bound a script that keeps many values alive (M5 follow-up).
+/// `None` if memory is not measurable here (total reported as 0); a genuine 0
+/// available gives a 0 budget.
 fn script_memory_budget() -> Option<u64> {
-    let available = crate::monitoring::get_system_memory().available_bytes;
-    (available > 0).then_some(available / 2)
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    if sys.total_memory() == 0 {
+        return None;
+    }
+    let mut available = sys.available_memory();
+    if let Some(cgroup) = sys.cgroup_limits() {
+        available = available.min(cgroup.free_memory);
+    }
+    Some(available / 2)
+}
+
+fn memory_budget_error(budget: Option<u64>) -> McpError {
+    McpError::script_error(format!(
+        "Script stopped: process memory grew past its budget ({} MB, half of \
+        the memory available at start). Keep fewer values alive or use pagination.",
+        budget.unwrap_or(0) / (1024 * 1024)
+    ))
 }
 
 /// Rhai script execution engine with IronBase bindings.
@@ -302,8 +321,19 @@ impl RhaiEngine {
             final_logs.push(warning);
         }
 
+        // A final check: growth after the last periodic probe must not slip
+        // through on a script that finishes before the next one
+        if let (Some(start), Some(budget)) = (memory_start, memory_budget) {
+            if probe().is_some_and(|now| now.saturating_sub(start) > budget) {
+                memory_exceeded.store(true, Ordering::Relaxed);
+            }
+        }
+
         match result {
             Ok(value) => {
+                if memory_exceeded.load(Ordering::Relaxed) {
+                    return Err(memory_budget_error(memory_budget));
+                }
                 // Check if cancelled during execution
                 if cancelled.load(Ordering::Relaxed) {
                     return Err(McpError::script_error("Script was cancelled".to_string()));
@@ -339,11 +369,7 @@ impl RhaiEngine {
                 // Set only by the progress callback: an error raised for
                 // another reason after the deadline is not relabeled
                 if memory_exceeded.load(Ordering::Relaxed) {
-                    return Err(McpError::script_error(format!(
-                        "Script stopped: process memory grew past its budget ({} MB, half of \
-                        the memory available at start). Keep fewer values alive or use pagination.",
-                        memory_budget.unwrap_or(0) / (1024 * 1024)
-                    )));
+                    return Err(memory_budget_error(memory_budget));
                 }
                 if timed_out.load(Ordering::Relaxed) {
                     return Err(McpError::script_error(format!(
@@ -657,6 +683,26 @@ mod tests {
             .run_with_limits("let x = 0; loop { x += 1; }", None, &limits)
             .unwrap_err()
             .to_string();
+        assert!(err.contains("memory"), "{err}");
+    }
+
+    /// M5 follow-up: growth past the budget after the last periodic probe is
+    /// caught by the final check of a script that finishes quickly.
+    #[test]
+    fn test_final_memory_check_rejects_result() {
+        static READS: AtomicU64 = AtomicU64::new(0);
+        fn jump_probe() -> Option<u64> {
+            // First read (start): 1; later reads: far past any budget
+            Some(if READS.fetch_add(1, Ordering::Relaxed) == 0 {
+                1
+            } else {
+                u64::MAX / 2
+            })
+        }
+        let (adapter, _temp) = create_test_adapter();
+        let mut engine = RhaiEngine::new(adapter, None);
+        engine.memory_probe = jump_probe;
+        let err = engine.run("1 + 2", None).unwrap_err().to_string();
         assert!(err.contains("memory"), "{err}");
     }
 

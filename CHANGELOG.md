@@ -21,8 +21,11 @@ MCP audit 2026-10-14 M5 follow-up (Sourcery review on #188).
   allocates; (b) every `MEMORY_CHECK_INTERVAL` (5 ms) the progress callback
   compares the process allocation (jemalloc / `GetProcessMemoryInfo`) with
   its value at the script start, and stops the script when the growth
-  passes half of the system memory available at start ("Script stopped:
-  process memory grew past its budget").
+  passes half of the memory available at start ("Script stopped: process
+  memory grew past its budget"). The available memory is taken from the
+  cgroup limit when lower (containers); a final check after evaluation
+  catches growth after the last periodic probe; a failed allocator read
+  (0 bytes) is treated as unmeasurable, not as a reading.
 
 ### Fixed — Rhai scripts: enforced timeout, capped operation limit, value size limits; HNSW cache path stays in the database directory (mcp-server v1.0.595)
 
