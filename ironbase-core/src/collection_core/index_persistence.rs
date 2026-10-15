@@ -8,7 +8,7 @@ use crate::fulltext::{FulltextIndex, FulltextIndexMetadata};
 use crate::index::fuzzy::{FuzzyIndex, FuzzyIndexMetadata};
 use crate::index::{BPlusTree, IndexMetadata};
 
-fn sanitize_component(name: &str) -> String {
+pub(crate) fn sanitize_component(name: &str) -> String {
     let sanitized: String = name
         .chars()
         .map(|c| {

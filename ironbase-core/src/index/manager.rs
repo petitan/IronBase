@@ -1195,11 +1195,52 @@ impl IndexManager {
         }
     }
 
+    /// HNSW cache file name of an index. The index name embeds the
+    /// collection name, which is not validated: `../x` put the cache file
+    /// outside the database directory (MCP audit 2026-10-14 M6).
+    ///
+    /// A name that is a plain path component keeps the `{index}.hnsw` form,
+    /// so existing caches (dotted field names included) stay valid. Any
+    /// other name is sanitized like the other index files and gets a
+    /// `_{hash:016x}` suffix; a kept name never ends in that suffix, so the
+    /// two forms cannot produce the same file.
+    pub(crate) fn vector_cache_file_name(index_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        if Self::is_plain_path_component(index_name) && !Self::has_hash_suffix(index_name) {
+            return format!("{}.hnsw", index_name);
+        }
+        let safe = crate::collection_core::sanitize_component(index_name);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        index_name.hash(&mut hasher);
+        format!("{}_{:016x}.hnsw", safe, hasher.finish())
+    }
+
+    /// True if `name` names a file in its directory on every platform: no
+    /// separator, drive or stream marker, control character, or `.`/`..`.
+    fn is_plain_path_component(name: &str) -> bool {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name
+                .chars()
+                .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+    }
+
+    /// True if `name` ends in `_` + 16 lowercase hex digits (the hashed form).
+    fn has_hash_suffix(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        bytes.len() >= 17
+            && bytes[bytes.len() - 17] == b'_'
+            && bytes[bytes.len() - 16..]
+                .iter()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    }
+
     /// Build the path for HNSW cache file
     pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
         let db_path_buf = PathBuf::from(db_path);
         let parent = db_path_buf.parent().unwrap_or(&db_path_buf);
-        parent.join(format!("{}.hnsw", index_name))
+        parent.join(Self::vector_cache_file_name(index_name))
     }
 
     /// Try to load vector index from .hnsw cache file
@@ -1970,5 +2011,26 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("Index already exists"));
+    }
+
+    /// M6: plain names (dotted field names too) keep their existing cache
+    /// file; unsafe names are hashed and cannot collide with a plain name.
+    #[test]
+    fn test_vector_cache_file_name() {
+        let name = IndexManager::vector_cache_file_name;
+        assert_eq!(name("docs_vec_embedding"), "docs_vec_embedding.hnsw");
+        assert_eq!(
+            name("docs_vec_meta.embedding"),
+            "docs_vec_meta.embedding.hnsw"
+        );
+
+        let unsafe_name = name("../out/pwn_vec_v");
+        assert!(!unsafe_name.contains('/'), "{unsafe_name}");
+        // A plain name spelling out the hashed form is hashed itself
+        let lookalike = unsafe_name.trim_end_matches(".hnsw");
+        assert_ne!(name(lookalike), unsafe_name);
+        for bad in ["..", ".", "a\\b", "c:d", "a\nb"] {
+            assert!(name(bad).len() > 22, "{bad} kept as is");
+        }
     }
 }

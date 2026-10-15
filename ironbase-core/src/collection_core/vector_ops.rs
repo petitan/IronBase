@@ -262,7 +262,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         // Get database file path for cache file
-        let cache_file_name = format!("{}.hnsw", index_name);
+        let cache_file_name = crate::index::IndexManager::vector_cache_file_name(&index_name);
         let db_file_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
@@ -840,11 +840,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(docs_with_scores)
     }
 
-    /// Build the path for HNSW cache file
+    /// Build the path for HNSW cache file. Only the file-name component of
+    /// the stored name is used, so metadata written before the fix cannot
+    /// point outside the database directory either.
     fn build_hnsw_cache_path(db_file_path: &str, cache_file_name: &str) -> PathBuf {
         let db_path = PathBuf::from(db_file_path);
         let parent = db_path.parent().unwrap_or(&db_path);
-        parent.join(cache_file_name)
+        let file_name = std::path::Path::new(cache_file_name)
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("index.hnsw"));
+        parent.join(file_name)
     }
 
     /// Extract f32 vector from JSON value

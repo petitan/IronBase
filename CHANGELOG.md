@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Rhai scripts: enforced timeout, capped operation limit, value size limits; HNSW cache path stays in the database directory (mcp-server v1.0.595)
+
+MCP audit 2026-10-14 M4–M6.
+
+- **M4 — symptom:** `script_exec` with `max_operations: 9e18` and `loop {}`
+  ran until the process was killed; `timeout_ms` had no effect.
+- **M4 — root cause:** the caller's `max_operations` was used uncapped, and
+  `timeout_ms` was never checked on the execution path; the MCP request's
+  cancel flag did not reach the Rhai progress callback.
+- **M4 — fix:** `max_operations` is capped at `MAX_OPERATIONS` (100× the
+  default); the progress callback stops the script at `timeout_ms` ("Script
+  execution timed out after N ms") and on the request's cancel flag.
+- **M5 — symptom:** a script doubling a string (`s += s` ~40 times) or an
+  array aborted the server process on allocation failure.
+- **M5 — root cause:** the Rhai engine had no string/array/map size limits;
+  `max_result_size` was checked only on the final result.
+- **M5 — fix:** `set_max_string_size(max_result_size)`, and
+  `MAX_SCRIPT_COLLECTION_SIZE` (1,000,000) for arrays and maps.
+- **M6 — symptom:** a vector index on collection `../out/pwn` wrote its HNSW
+  cache file outside the database directory.
+- **M6 — root cause:** the `.hnsw` file name was built from the unvalidated
+  index name (which embeds the collection name), in two places
+  (`vector_ops` and `IndexManager::build_vector_cache_path`).
+- **M6 — fix:** one shared `IndexManager::vector_cache_file_name()`: a name
+  that is a plain path component (dotted field names too) keeps
+  `{index}.hnsw`, so existing caches stay valid; any other name is sanitized
+  like the other index files, with a `_{hash}` suffix that a kept name can
+  never end in (no collision between the two forms). Only the file name
+  component is joined to the database directory.
+- **M4 follow-up:** a script stopped by the timeout or by the request's
+  cancel flag reports "timed out" / "cancelled" (the timeout label comes from
+  the progress callback, not from elapsed time), and `run_with_timeout`
+  carries the request's execution context to its worker thread.
 ### Security — MCP: `resources/read` authorized; ACL checks the tool's real target (mcp-server v1.0.594)
 
 MCP audit 2026-10-14 M1, M2.

@@ -19,9 +19,36 @@ use std::time::{Duration, Instant};
 use super::conversion::{dynamic_to_json, json_to_dynamic};
 use super::db_functions::register_db_functions;
 use super::error::{format_rhai_error, is_operation_limit_error};
-use super::limits::{estimate_json_size, LogCollector, ScriptLimits, DEFAULT_MAX_OPERATIONS};
+use super::limits::{
+    estimate_json_size, LogCollector, ScriptLimits, DEFAULT_MAX_OPERATIONS, MAX_OPERATIONS,
+    MAX_SCRIPT_COLLECTION_SIZE,
+};
 use super::types::ScriptResult;
 use super::utility_functions::register_utility_functions;
+
+/// The operation limit for a run: the caller's value (default if 0), capped
+/// at `MAX_OPERATIONS` (MCP audit 2026-10-14 M4).
+fn effective_max_operations(limits: &ScriptLimits) -> u64 {
+    if limits.max_operations > 0 {
+        limits.max_operations.min(MAX_OPERATIONS)
+    } else {
+        DEFAULT_MAX_OPERATIONS
+    }
+}
+
+/// Apply the resource limits to a Rhai engine; returns the operation limit.
+fn configure_limits(engine: &mut Engine, limits: &ScriptLimits) -> u64 {
+    // Operation limit (default if 0, capped to prevent DoS)
+    let max_ops = effective_max_operations(limits);
+    engine.set_max_operations(max_ops);
+
+    // Value size limits: a string or collection doubled a few times
+    // aborted the process on allocation failure (M5)
+    engine.set_max_string_size(limits.max_result_size);
+    engine.set_max_array_size(MAX_SCRIPT_COLLECTION_SIZE);
+    engine.set_max_map_size(MAX_SCRIPT_COLLECTION_SIZE);
+    max_ops
+}
 
 /// Rhai script execution engine with IronBase bindings.
 ///
@@ -168,19 +195,27 @@ impl RhaiEngine {
         cancelled: Arc<AtomicBool>,
     ) -> Result<ScriptResult> {
         let mut engine = Engine::new();
+        let max_ops = configure_limits(&mut engine, limits);
 
-        // Set operation limit (use default if 0 to prevent DoS)
-        let max_ops = if limits.max_operations > 0 {
-            limits.max_operations
-        } else {
-            DEFAULT_MAX_OPERATIONS
-        };
-        engine.set_max_operations(max_ops);
-
-        // Setup cancellation check via progress callback
+        // Stop on cancellation (own flag or the MCP request's), and at the
+        // timeout: `timeout_ms` was never enforced on this path (M4)
+        let started = Instant::now();
+        let time_limit = (limits.timeout_ms > 0).then(|| Duration::from_millis(limits.timeout_ms));
+        let request_cancel = crate::execution::current_cancel_flag();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timed_out_flag = timed_out.clone();
         let cancelled_check = cancelled.clone();
-        engine.on_progress(move |_ops| {
-            if cancelled_check.load(Ordering::Relaxed) {
+        let request_cancel_check = request_cancel.clone();
+        engine.on_progress(move |ops| {
+            if ops % 1024 == 0 && time_limit.is_some_and(|t| started.elapsed() >= t) {
+                timed_out_flag.store(true, Ordering::Relaxed);
+            }
+            if timed_out_flag.load(Ordering::Relaxed)
+                || cancelled_check.load(Ordering::Relaxed)
+                || request_cancel_check
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Relaxed))
+            {
                 // Signal termination
                 Some(rhai::Dynamic::UNIT)
             } else {
@@ -254,8 +289,20 @@ impl RhaiEngine {
             }
             Err(e) => {
                 // Check if it was a cancellation
-                if cancelled.load(Ordering::Relaxed) {
+                if cancelled.load(Ordering::Relaxed)
+                    || request_cancel
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                {
                     return Err(McpError::script_error("Script was cancelled".to_string()));
+                }
+                // Set only by the progress callback: an error raised for
+                // another reason after the deadline is not relabeled
+                if timed_out.load(Ordering::Relaxed) {
+                    return Err(McpError::script_error(format!(
+                        "Script execution timed out after {} ms",
+                        limits.timeout_ms
+                    )));
                 }
 
                 let err_str = format_rhai_error(&e);
@@ -310,8 +357,13 @@ impl RhaiEngine {
         let limits = limits.clone();
         let params = params.clone();
 
+        // The request's execution context (cancel flag) is thread-local:
+        // carry it to the worker thread
+        let exec_ctx = crate::execution::current_execution_context();
+
         // Spawn blocking task for Rhai execution
         let handle = tokio::task::spawn_blocking(move || {
+            let _exec_guard = exec_ctx.map(crate::execution::set_execution_context);
             let engine = RhaiEngine::new(adapter, embedding_manager);
             engine.run_with_cancellation(&code, params, &limits, cancelled_clone)
         });
@@ -494,5 +546,69 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("cancelled"));
+    }
+
+    /// M4: an infinite loop with a huge `max_operations` ends at the timeout
+    /// (it used to run until the process was killed).
+    #[test]
+    fn test_timeout_ends_infinite_loop() {
+        let (adapter, _temp) = create_test_adapter();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let engine = RhaiEngine::new(adapter, None);
+            let limits = ScriptLimits {
+                max_operations: u64::MAX,
+                timeout_ms: 200,
+                ..ScriptLimits::default()
+            };
+            let _ = tx.send(engine.run_with_limits("loop {}", None, &limits));
+        });
+        // Well below the 100M-operation cap: the callback stopped it
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("script did not stop at its timeout");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    /// M4: `max_operations` from the caller is capped on the engine.
+    #[test]
+    fn test_max_operations_is_capped() {
+        let limits = ScriptLimits {
+            max_operations: u64::MAX,
+            ..ScriptLimits::default()
+        };
+        let mut engine = Engine::new();
+        assert_eq!(configure_limits(&mut engine, &limits), MAX_OPERATIONS);
+        assert_eq!(engine.max_operations(), MAX_OPERATIONS);
+        assert_eq!(engine.max_string_size(), limits.max_result_size);
+        assert_eq!(engine.max_array_size(), MAX_SCRIPT_COLLECTION_SIZE);
+        assert_eq!(engine.max_map_size(), MAX_SCRIPT_COLLECTION_SIZE);
+    }
+
+    /// M4: a cancelled MCP request stops its script.
+    #[test]
+    fn test_request_cancel_stops_script() {
+        let (adapter, _temp) = create_test_adapter();
+        let flag = Arc::new(AtomicBool::new(true));
+        let _guard = crate::execution::set_execution_context(
+            crate::execution::ExecutionContext::new(None, Some(flag)),
+        );
+        let engine = RhaiEngine::new(adapter, None);
+        let err = engine.run("loop {}", None).unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "{err}");
+    }
+
+    /// M5: a string doubled past the size limit fails the script instead of
+    /// allocating without bound (40 doublings would need ~8 TB).
+    #[test]
+    fn test_string_size_is_limited() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter, None);
+        let result = engine.run(
+            r#"let s = "xxxxxxxx"; for i in 0..25 { s += s; } s.len()"#,
+            None,
+        );
+        assert!(result.is_err(), "256 MB string built: {result:?}");
     }
 }
