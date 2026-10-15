@@ -23,6 +23,16 @@ use std::sync::Arc;
 /// Each Rhai statement/expression counts as one operation.
 pub const DEFAULT_MAX_OPERATIONS: u64 = 1_000_000;
 
+/// Upper bound for a caller-supplied `max_operations` (100× the default).
+/// The caller's value was used as is, so `9e18` made a script effectively
+/// unbounded (MCP audit 2026-10-14 M4).
+pub const MAX_OPERATIONS: u64 = 100 * DEFAULT_MAX_OPERATIONS;
+
+/// Maximum number of elements in a script array or object map. Strings are
+/// bounded by `max_result_size`. Without these limits a few operations could
+/// double a value until the allocation aborted the process (M5).
+pub const MAX_SCRIPT_COLLECTION_SIZE: usize = 1_000_000;
+
 /// Default script execution timeout in milliseconds.
 ///
 /// Scripts running longer than this will be cancelled.

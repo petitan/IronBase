@@ -1195,11 +1195,28 @@ impl IndexManager {
         }
     }
 
+    /// HNSW cache file name of an index. The index name embeds the
+    /// collection name, which is not validated: `../x` put the cache file
+    /// outside the database directory (MCP audit 2026-10-14 M6). Unsafe
+    /// characters are replaced like for the other index files, with a hash of
+    /// the original name against collisions; plain names keep the
+    /// `{index}.hnsw` form of existing databases.
+    pub(crate) fn vector_cache_file_name(index_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let safe = crate::collection_core::sanitize_component(index_name);
+        if safe == index_name {
+            return format!("{}.hnsw", index_name);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        index_name.hash(&mut hasher);
+        format!("{}_{:016x}.hnsw", safe, hasher.finish())
+    }
+
     /// Build the path for HNSW cache file
     pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
         let db_path_buf = PathBuf::from(db_path);
         let parent = db_path_buf.parent().unwrap_or(&db_path_buf);
-        parent.join(format!("{}.hnsw", index_name))
+        parent.join(Self::vector_cache_file_name(index_name))
     }
 
     /// Try to load vector index from .hnsw cache file

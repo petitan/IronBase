@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Rhai scripts: enforced timeout, capped operation limit, value size limits; HNSW cache path stays in the database directory (mcp-server v1.0.595)
+
+MCP audit 2026-10-14 M4–M6.
+
+- **M4 — symptom:** `script_exec` with `max_operations: 9e18` and `loop {}`
+  ran until the process was killed; `timeout_ms` had no effect.
+- **M4 — root cause:** the caller's `max_operations` was used uncapped, and
+  `timeout_ms` was never checked on the execution path; the MCP request's
+  cancel flag did not reach the Rhai progress callback.
+- **M4 — fix:** `max_operations` is capped at `MAX_OPERATIONS` (100× the
+  default); the progress callback stops the script at `timeout_ms` ("Script
+  execution timed out after N ms") and on the request's cancel flag.
+- **M5 — symptom:** a script doubling a string (`s += s` ~40 times) or an
+  array aborted the server process on allocation failure.
+- **M5 — root cause:** the Rhai engine had no string/array/map size limits;
+  `max_result_size` was checked only on the final result.
+- **M5 — fix:** `set_max_string_size(max_result_size)`, and
+  `MAX_SCRIPT_COLLECTION_SIZE` (1,000,000) for arrays and maps.
+- **M6 — symptom:** a vector index on collection `../out/pwn` wrote its HNSW
+  cache file outside the database directory.
+- **M6 — root cause:** the `.hnsw` file name was built from the unvalidated
+  index name (which embeds the collection name), in two places
+  (`vector_ops` and `IndexManager::build_vector_cache_path`).
+- **M6 — fix:** one shared `IndexManager::vector_cache_file_name()`: plain
+  names keep `{index}.hnsw` (existing caches stay valid); others are
+  sanitized like the other index files, with a hash suffix. Only the file
+  name component is joined to the database directory.
+
 ### Fixed — crash recovery: metadata changes no longer clear the WAL; no index-history replay; metadata recovery keeps the WAL (mcp-server v1.0.593)
 
 WAL/recovery audit 2026-10-14 W1–W3. Reproduced by simulated crashes
