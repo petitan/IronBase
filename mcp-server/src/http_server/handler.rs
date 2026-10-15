@@ -269,6 +269,14 @@ pub(crate) fn handle_request(
                 }
             };
 
+            // Same API-key, localhost and ACL checks as the equivalent tool
+            // (MCP audit 2026-10-14 M1)
+            let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
+            let ctx = ServiceContext::new(caller, is_initialized, None);
+            if let Err(msg) = service.authorize_resource(&ctx, &params.uri) {
+                return Some(create_error_response(-32001, &msg, request.id.clone()));
+            }
+
             match read_resource(service.adapter(), &params.uri) {
                 Ok(content) => Some(create_success_response(content, request.id.clone())),
                 Err(e) => Some(create_error_response(-32602, &e, request.id.clone())),
