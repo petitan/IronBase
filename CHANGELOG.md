@@ -30,10 +30,16 @@ MCP audit 2026-10-14 M4–M6.
 - **M6 — root cause:** the `.hnsw` file name was built from the unvalidated
   index name (which embeds the collection name), in two places
   (`vector_ops` and `IndexManager::build_vector_cache_path`).
-- **M6 — fix:** one shared `IndexManager::vector_cache_file_name()`: plain
-  names keep `{index}.hnsw` (existing caches stay valid); others are
-  sanitized like the other index files, with a hash suffix. Only the file
-  name component is joined to the database directory.
+- **M6 — fix:** one shared `IndexManager::vector_cache_file_name()`: a name
+  that is a plain path component (dotted field names too) keeps
+  `{index}.hnsw`, so existing caches stay valid; any other name is sanitized
+  like the other index files, with a `_{hash}` suffix that a kept name can
+  never end in (no collision between the two forms). Only the file name
+  component is joined to the database directory.
+- **M4 follow-up:** a script stopped by the timeout or by the request's
+  cancel flag reports "timed out" / "cancelled" (the timeout label comes from
+  the progress callback, not from elapsed time), and `run_with_timeout`
+  carries the request's execution context to its worker thread.
 
 ### Fixed — crash recovery: metadata changes no longer clear the WAL; no index-history replay; metadata recovery keeps the WAL (mcp-server v1.0.593)
 

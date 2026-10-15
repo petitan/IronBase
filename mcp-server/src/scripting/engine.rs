@@ -36,6 +36,20 @@ fn effective_max_operations(limits: &ScriptLimits) -> u64 {
     }
 }
 
+/// Apply the resource limits to a Rhai engine; returns the operation limit.
+fn configure_limits(engine: &mut Engine, limits: &ScriptLimits) -> u64 {
+    // Operation limit (default if 0, capped to prevent DoS)
+    let max_ops = effective_max_operations(limits);
+    engine.set_max_operations(max_ops);
+
+    // Value size limits: a string or collection doubled a few times
+    // aborted the process on allocation failure (M5)
+    engine.set_max_string_size(limits.max_result_size);
+    engine.set_max_array_size(MAX_SCRIPT_COLLECTION_SIZE);
+    engine.set_max_map_size(MAX_SCRIPT_COLLECTION_SIZE);
+    max_ops
+}
+
 /// Rhai script execution engine with IronBase bindings.
 ///
 /// Executes Rhai scripts with database access and resource limits.
@@ -181,28 +195,24 @@ impl RhaiEngine {
         cancelled: Arc<AtomicBool>,
     ) -> Result<ScriptResult> {
         let mut engine = Engine::new();
-
-        // Set operation limit (default if 0, capped to prevent DoS)
-        let max_ops = effective_max_operations(limits);
-        engine.set_max_operations(max_ops);
-
-        // Value size limits: a string or collection doubled a few times
-        // aborted the process on allocation failure (M5)
-        engine.set_max_string_size(limits.max_result_size);
-        engine.set_max_array_size(MAX_SCRIPT_COLLECTION_SIZE);
-        engine.set_max_map_size(MAX_SCRIPT_COLLECTION_SIZE);
+        let max_ops = configure_limits(&mut engine, limits);
 
         // Stop on cancellation (own flag or the MCP request's), and at the
         // timeout: `timeout_ms` was never enforced on this path (M4)
         let started = Instant::now();
         let time_limit = (limits.timeout_ms > 0).then(|| Duration::from_millis(limits.timeout_ms));
         let request_cancel = crate::execution::current_cancel_flag();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timed_out_flag = timed_out.clone();
         let cancelled_check = cancelled.clone();
+        let request_cancel_check = request_cancel.clone();
         engine.on_progress(move |ops| {
-            let timed_out = ops % 1024 == 0 && time_limit.is_some_and(|t| started.elapsed() >= t);
-            if timed_out
+            if ops % 1024 == 0 && time_limit.is_some_and(|t| started.elapsed() >= t) {
+                timed_out_flag.store(true, Ordering::Relaxed);
+            }
+            if timed_out_flag.load(Ordering::Relaxed)
                 || cancelled_check.load(Ordering::Relaxed)
-                || request_cancel
+                || request_cancel_check
                     .as_ref()
                     .is_some_and(|f| f.load(Ordering::Relaxed))
             {
@@ -279,10 +289,16 @@ impl RhaiEngine {
             }
             Err(e) => {
                 // Check if it was a cancellation
-                if cancelled.load(Ordering::Relaxed) {
+                if cancelled.load(Ordering::Relaxed)
+                    || request_cancel
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                {
                     return Err(McpError::script_error("Script was cancelled".to_string()));
                 }
-                if time_limit.is_some_and(|t| started.elapsed() >= t) {
+                // Set only by the progress callback: an error raised for
+                // another reason after the deadline is not relabeled
+                if timed_out.load(Ordering::Relaxed) {
                     return Err(McpError::script_error(format!(
                         "Script execution timed out after {} ms",
                         limits.timeout_ms
@@ -341,8 +357,13 @@ impl RhaiEngine {
         let limits = limits.clone();
         let params = params.clone();
 
+        // The request's execution context (cancel flag) is thread-local:
+        // carry it to the worker thread
+        let exec_ctx = crate::execution::current_execution_context();
+
         // Spawn blocking task for Rhai execution
         let handle = tokio::task::spawn_blocking(move || {
+            let _exec_guard = exec_ctx.map(crate::execution::set_execution_context);
             let engine = RhaiEngine::new(adapter, embedding_manager);
             engine.run_with_cancellation(&code, params, &limits, cancelled_clone)
         });
@@ -542,21 +563,40 @@ mod tests {
             };
             let _ = tx.send(engine.run_with_limits("loop {}", None, &limits));
         });
+        // Well below the 100M-operation cap: the callback stopped it
         let result = rx
-            .recv_timeout(Duration::from_secs(30))
+            .recv_timeout(Duration::from_secs(5))
             .expect("script did not stop at its timeout");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("timed out"), "{err}");
     }
 
-    /// M4: `max_operations` from the caller is capped.
+    /// M4: `max_operations` from the caller is capped on the engine.
     #[test]
     fn test_max_operations_is_capped() {
         let limits = ScriptLimits {
             max_operations: u64::MAX,
             ..ScriptLimits::default()
         };
-        assert_eq!(effective_max_operations(&limits), MAX_OPERATIONS);
+        let mut engine = Engine::new();
+        assert_eq!(configure_limits(&mut engine, &limits), MAX_OPERATIONS);
+        assert_eq!(engine.max_operations(), MAX_OPERATIONS);
+        assert_eq!(engine.max_string_size(), limits.max_result_size);
+        assert_eq!(engine.max_array_size(), MAX_SCRIPT_COLLECTION_SIZE);
+        assert_eq!(engine.max_map_size(), MAX_SCRIPT_COLLECTION_SIZE);
+    }
+
+    /// M4: a cancelled MCP request stops its script.
+    #[test]
+    fn test_request_cancel_stops_script() {
+        let (adapter, _temp) = create_test_adapter();
+        let flag = Arc::new(AtomicBool::new(true));
+        let _guard = crate::execution::set_execution_context(
+            crate::execution::ExecutionContext::new(None, Some(flag)),
+        );
+        let engine = RhaiEngine::new(adapter, None);
+        let err = engine.run("loop {}", None).unwrap_err().to_string();
+        assert!(err.contains("cancelled"), "{err}");
     }
 
     /// M5: a string doubled past the size limit fails the script instead of
