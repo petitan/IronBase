@@ -802,7 +802,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 .get_collection_meta_mut(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
             meta.schema = schema;
-            storage.flush()?;
+            storage.persist_metadata()?;
         }
 
         let mut guard = self.schema.write();
@@ -835,7 +835,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .get_collection_meta_mut(&self.name)
             .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
         meta.auto_embedding_config = config;
-        storage.flush()?;
+        storage.persist_metadata()?;
         Ok(())
     }
 

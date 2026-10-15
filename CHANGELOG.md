@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — crash recovery: metadata changes no longer clear the WAL; no index-history replay; metadata recovery keeps the WAL (mcp-server v1.0.593)
+
+WAL/recovery audit 2026-10-14 W1–W3. Reproduced by simulated crashes
+(database files copied while open).
+
+- **W1 — symptom:** after a checkpoint, `insert_one("a", {k: 2})`, then the
+  first insert into a new collection `b` (or creating an index, fuzzy/fulltext
+  /vector index, schema or auto-embed config on any collection) and a crash:
+  `count({})` = 2 but `find({k: 2})` = 0.
+- **W1 — root cause:** these metadata changes persisted with
+  `StorageEngine::flush()`, which clears the whole WAL without flushing the
+  other collections' dirty indexes (the #28 fix covered only drop, rename and
+  flags). The dirty reopen then replayed an empty WAL and trusted the stale
+  index file. The same path cleared the WAL outside the persist gate, between
+  a Safe insert's WAL commit and its storage write.
+- **W1 — fix:** a metadata change persists with the new crate-internal
+  `persist_metadata()` (metadata written, WAL kept); only checkpoint/close
+  clear the WAL, after the index flush.
+- **W2 — symptom:** with a unique index, an explicit transaction moving a key
+  from one document to another (`x` on doc 1 → `y`, then `x` on doc 2) and a
+  crash made the database unopenable: `IndexError("Duplicate key")`.
+- **W2 — root cause:** the open re-applied the recovered `IndexChange`
+  entries (index history) on top of the index already recovered from the
+  operations, with errors propagated.
+- **W2 — fix:** the `IndexChange` entries are no longer applied; the
+  operation replay (`apply_op_to_btree`, idempotent, watermark-gated) covers
+  the same transactions.
+- **W3 — symptom:** 5 Safe inserts, a crash and a corrupted metadata length
+  field: after the metadata recovery from the WAL snapshot only 1 document was
+  left.
+- **W3 — root cause:** `recover_metadata_from_wal` restored the snapshot
+  (the state at the first write after the last flush) and then cleared the WAL.
+- **W3 — fix:** the WAL is kept; `recover_from_wal` replays the committed
+  transactions on top of the restored metadata.
+- **Test:** `tests/wal_recovery_audit_tests.rs`.
+
 ### Documented — when `find_streaming` holds O(n) ids; catalog snapshot allocation is fallible (mcp-server v1.0.592)
 
 Audit 2026-10-07 M9 (remainder), closed as a known limitation. Documents are

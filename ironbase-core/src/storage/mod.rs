@@ -856,9 +856,10 @@ impl StorageEngine {
 
         self.insert_empty_collection_meta(name);
 
-        // Mark metadata dirty and flush to persist new collection
+        // Persist the new collection; the WAL is kept (a create is not a
+        // checkpoint, other collections' indexes may still need it)
         self.mark_metadata_dirty()?;
-        self.flush()?;
+        self.persist_metadata()?;
 
         Ok(())
     }
@@ -1037,13 +1038,7 @@ impl StorageEngine {
     /// WAL is cleared unconditionally to prevent stale entries from
     /// causing unnecessary replay on next startup (e.g., after Drop).
     pub fn flush(&mut self) -> Result<()> {
-        if self.metadata_dirty {
-            self.ensure_metadata_snapshot()?;
-        }
-
-        // Flush metadata to disk (WAL snapshot already contains latest state)
-        self.flush_metadata()?;
-        self.metadata_snapshot_pending = false;
+        self.persist_metadata()?;
 
         // Clear WAL unconditionally after successful metadata flush
         // All operations are now persisted in the main file, WAL is redundant.
@@ -1051,6 +1046,21 @@ impl StorageEngine {
         self.wal.clear()?;
         self.wal_ops_since_clear = 0;
 
+        Ok(())
+    }
+
+    /// Write the metadata to disk and keep the WAL: for a metadata change
+    /// (collection created, index or schema added), not a checkpoint. The WAL
+    /// may still hold committed operations that other collections' unflushed
+    /// indexes are recovered from (WAL/recovery audit 2026-10-14).
+    pub(crate) fn persist_metadata(&mut self) -> Result<()> {
+        if self.metadata_dirty {
+            self.ensure_metadata_snapshot()?;
+        }
+
+        // Flush metadata to disk (WAL snapshot already contains latest state)
+        self.flush_metadata()?;
+        self.metadata_snapshot_pending = false;
         Ok(())
     }
 
@@ -1307,8 +1317,12 @@ impl StorageEngine {
             self.metadata_snapshot_pending = false;
             self.file.sync_all()?;
 
-            // Clear WAL after successful recovery
-            self.wal.clear()?;
+            // Keep the WAL: the snapshot is the state at the first write
+            // after the last flush, so the committed transactions logged
+            // after it are still needed. `recover_from_wal` replays them
+            // (idempotent full-image writes) on top of the restored
+            // metadata; clearing here lost them (WAL/recovery audit
+            // 2026-10-14).
 
             return Ok(true);
         }
@@ -2707,6 +2721,10 @@ impl Storage for StorageEngine {
 // ============================================================================
 
 impl RawStorage for StorageEngine {
+    fn persist_metadata(&mut self) -> Result<()> {
+        StorageEngine::persist_metadata(self)
+    }
+
     fn write_document_raw(
         &mut self,
         collection: &str,
