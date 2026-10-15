@@ -8,7 +8,7 @@
 //! This layer can be called from any transport (HTTP, stdio, WebSocket, gRPC).
 
 use crate::acl::{
-    get_collection_from_args, get_required_permission, get_system_collection_for_tool,
+    collections_from_args, get_required_permission, get_system_collection_for_tool,
     requires_localhost, tool_policy, AclManager, CallerContext, InterfaceType,
 };
 use crate::adapter::IronBaseAdapter;
@@ -311,20 +311,42 @@ impl IronBaseService {
         Ok(())
     }
 
+    /// Authorize an MCP `resources/read` like the equivalent tool call: API
+    /// key, localhost gate and ACL. The resource routes used to read the
+    /// database without any of these (MCP audit 2026-10-14 M1).
+    pub fn authorize_resource(&self, ctx: &ServiceContext, uri: &str) -> Result<(), String> {
+        let path = uri.strip_prefix("ironbase://").unwrap_or(uri);
+        let (tool, args) = match path.split_once('/') {
+            None if path == "stats" => ("db_stats", serde_json::json!({})),
+            Some(("collections", name)) => ("find_one", serde_json::json!({"collection": name})),
+            Some(("schemas", name)) => ("schema_get", serde_json::json!({"collection": name})),
+            Some(("indexes", name)) => ("index_list", serde_json::json!({"collection": name})),
+            // Unknown resource: read_resource rejects it
+            _ => return Ok(()),
+        };
+        let request = ToolRequest::new(tool, args);
+        self.check_api_key(ctx, tool)?;
+        self.check_localhost_requirement(ctx, tool)?;
+        self.check_acl(ctx, &request)
+    }
+
     /// Check ACL permissions for collection operations
     fn check_acl(&self, ctx: &ServiceContext, request: &ToolRequest) -> Result<(), String> {
-        // Determine collection to check:
-        // 1. From tool arguments (regular operations)
-        // 2. From tool name (system tools like acl_*, listener_*)
-        let collection_to_check = get_collection_from_args(&request.arguments)
-            .or_else(|| get_system_collection_for_tool(&request.name).map(String::from));
+        // A tool with an implicit `_system.*` scope (acl_*, script_*, admin_*,
+        // listener_*) is always checked on that scope: a `collection` argument
+        // the caller adds must not replace it. Any other tool is checked on
+        // every collection its arguments name (MCP audit 2026-10-14 M2).
+        let collections_to_check = match get_system_collection_for_tool(&request.name) {
+            Some(scope) => vec![scope.to_string()],
+            None => collections_from_args(&request.arguments),
+        };
 
-        if let Some(collection) = collection_to_check {
-            let required = get_required_permission(&request.name);
-            self.acl_manager
-                .check(&collection, &ctx.caller, required)
-                .map_err(|e| format!("Access denied: {}", e))?;
+        let required = get_required_permission(&request.name);
+        self.acl_manager
+            .check_all(&collections_to_check, &ctx.caller, required)
+            .map_err(|e| format!("Access denied: {}", e))?;
 
+        for collection in collections_to_check {
             // SECURITY FIX: Insert operations on non-existent collections are rejected.
             // Collections must be created explicitly via collection_create.
             // This prevents:
@@ -407,5 +429,112 @@ mod tests {
         assert!(!is_collection_creating_insert("collection_create"));
         assert!(!is_collection_creating_insert("transaction_update_one"));
         assert!(!is_collection_creating_insert("transaction_delete_one"));
+    }
+
+    /// A service over a fresh database, default ACL, no API key required.
+    fn test_service(dir: &std::path::Path) -> IronBaseService {
+        test_service_with_key(dir, false)
+    }
+
+    fn test_service_with_key(dir: &std::path::Path, require_api_key: bool) -> IronBaseService {
+        let adapter = Arc::new(IronBaseAdapter::new(dir.join("acl.mlite")).unwrap());
+        adapter
+            .insert_one("users", serde_json::json!({"name": "a"}))
+            .unwrap();
+        IronBaseService::new(
+            adapter.clone(),
+            AclManager::new(adapter),
+            ApiKeyCache::new(60, false),
+            ServerInfo {
+                protocol: "http".into(),
+                host: "localhost".into(),
+                port: 0,
+                require_api_key,
+            },
+            require_api_key,
+            LimitsManager::new(),
+            None,
+            None,
+        )
+    }
+
+    fn external() -> ServiceContext {
+        let addr: std::net::SocketAddr = "8.8.8.8:4000".parse().unwrap();
+        ServiceContext::new(CallerContext::new(Some(addr), None), true, None)
+    }
+
+    /// M2: a `collection` argument the caller adds does not replace a tool's
+    /// `_system.*` scope (script code ran with a readable decoy collection).
+    #[test]
+    fn test_decoy_collection_does_not_replace_system_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        for (tool, args) in [
+            (
+                "script_exec",
+                serde_json::json!({"collection": "users", "code": "1"}),
+            ),
+            ("acl_list", serde_json::json!({"collection": "users"})),
+        ] {
+            let result = service.execute_tool(&external(), &ToolRequest::new(tool, args));
+            assert!(
+                matches!(result, ToolResult::AccessDenied(_)),
+                "{tool} ran for an external caller with a decoy collection"
+            );
+        }
+        // Localhost keeps its access
+        let result = service.execute_tool(
+            &ServiceContext::localhost(),
+            &ToolRequest::new("script_exec", serde_json::json!({"code": "1"})),
+        );
+        assert!(result.is_success(), "localhost script_exec denied");
+    }
+
+    /// M2: every collection argument is checked, not only the first one.
+    #[test]
+    fn test_collections_from_args_lists_every_target() {
+        let args = serde_json::json!({
+            "collection": "mine",
+            "old_collection": "victim",
+            "new_collection": "renamed"
+        });
+        assert_eq!(
+            crate::acl::collections_from_args(&args),
+            vec!["mine", "victim", "renamed"]
+        );
+    }
+
+    /// M1: `resources/read` is authorized like the equivalent tool.
+    #[test]
+    fn test_resource_read_is_authorized() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        for uri in [
+            "ironbase://collections/_system.api_keys",
+            "ironbase://stats",
+        ] {
+            assert!(
+                service.authorize_resource(&external(), uri).is_err(),
+                "{uri} readable by an external caller"
+            );
+        }
+        // Default ACL: external callers may read normal collections
+        assert!(service
+            .authorize_resource(&external(), "ironbase://collections/users")
+            .is_ok());
+        assert!(service
+            .authorize_resource(&ServiceContext::localhost(), "ironbase://stats")
+            .is_ok());
+    }
+
+    /// M1: with `require_api_key`, a resource read without a key is denied.
+    #[test]
+    fn test_resource_read_requires_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service_with_key(dir.path(), true);
+        let err = service
+            .authorize_resource(&external(), "ironbase://collections/users")
+            .unwrap_err();
+        assert!(err.contains("API key required"), "{err}");
     }
 }
