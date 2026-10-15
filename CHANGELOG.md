@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — MCP: `resources/read` authorized; ACL checks the tool's real target (mcp-server v1.0.594)
+
+MCP audit 2026-10-14 M1, M2.
+
+- **M1 — symptom:** an HTTP client that only called `initialize` (no API key)
+  could `resources/read` `ironbase://collections/_system.api_keys` and get the
+  first API key in plaintext; also `_system.scripts` code, the first document
+  of any ACL-denied collection, and `ironbase://stats` (loopback-only as a tool).
+- **M1 — root cause:** the HTTP `resources/read` route called `read_resource`
+  directly, without the API-key, localhost and ACL checks of `execute_tool`.
+- **M1 — fix:** `IronBaseService::authorize_resource` maps the URI to the
+  equivalent tool (`db_stats`, `find_one`, `schema_get`, `index_list`) and
+  runs the same three checks before the read.
+- **M2 — symptom:** an external (read-only) caller ran `script_exec` /
+  `script_run` / `acl_list` by adding any readable `collection` argument;
+  `collection_rename` was checked on a decoy `collection` instead of
+  `old_collection`.
+- **M2 — root cause:** `check_acl` checked the first collection found in the
+  arguments and used the tool's `_system.*` scope only as a fallback.
+- **M2 — fix:** a tool with a `_system.*` scope is always checked on that scope;
+  any other tool on every collection its arguments name (`collection`,
+  `old_collection`, `new_collection`). The builtin rule already made
+  `_system.scripts` localhost-only; it now applies whatever the arguments are.
+- **Test:** `engine::tests` (`test_decoy_collection_does_not_replace_system_scope`,
+  `test_collections_from_args_lists_every_target`, `test_resource_read_is_authorized`).
+
 ### Fixed — crash recovery: metadata changes no longer clear the WAL; no index-history replay; metadata recovery keeps the WAL (mcp-server v1.0.593)
 
 WAL/recovery audit 2026-10-14 W1–W3. Reproduced by simulated crashes

@@ -588,6 +588,24 @@ impl AclManager {
         config.check(collection, caller, required)
     }
 
+    /// Check several collections against one ACL snapshot: a reload between
+    /// per-collection checks could otherwise authorize a multi-collection tool
+    /// (rename) under two different rule sets.
+    pub fn check_all(
+        &self,
+        collections: &[String],
+        caller: &CallerContext,
+        required: RequiredPermission,
+    ) -> Result<()> {
+        let config = self.config.read().map_err(|_| {
+            McpError::internal("ACL config lock poisoned - service restart required".to_string())
+        })?;
+        for collection in collections {
+            config.check(collection, caller, required)?;
+        }
+        Ok(())
+    }
+
     /// Reload ACL from database
     /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn reload(&self) -> Result<()> {
@@ -850,10 +868,19 @@ pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
 /// Falls back to `old_collection` so collection_rename is ACL-gated on the
 /// collection being renamed (you need admin rights on the source collection).
 pub fn get_collection_from_args(args: &Value) -> Option<String> {
-    args.get("collection")
-        .or_else(|| args.get("old_collection"))
-        .and_then(|v| v.as_str())
+    collections_from_args(args).into_iter().next()
+}
+
+/// Every collection a tool call names in its arguments (`collection`,
+/// `old_collection`, `new_collection`). Each must pass the ACL: checking only
+/// the first let a caller add an authorized decoy `collection` next to the
+/// collection the tool really acts on (MCP audit 2026-10-14 M2).
+pub fn collections_from_args(args: &Value) -> Vec<String> {
+    ["collection", "old_collection", "new_collection"]
+        .iter()
+        .filter_map(|k| args.get(*k).and_then(|v| v.as_str()))
         .map(|s| s.to_string())
+        .collect()
 }
 
 /// Get the implicit system collection for a tool (projection of [`tool_policy`]).
