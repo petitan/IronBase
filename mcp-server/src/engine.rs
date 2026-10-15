@@ -341,12 +341,12 @@ impl IronBaseService {
             None => collections_from_args(&request.arguments),
         };
 
-        for collection in collections_to_check {
-            let required = get_required_permission(&request.name);
-            self.acl_manager
-                .check(&collection, &ctx.caller, required)
-                .map_err(|e| format!("Access denied: {}", e))?;
+        let required = get_required_permission(&request.name);
+        self.acl_manager
+            .check_all(&collections_to_check, &ctx.caller, required)
+            .map_err(|e| format!("Access denied: {}", e))?;
 
+        for collection in collections_to_check {
             // SECURITY FIX: Insert operations on non-existent collections are rejected.
             // Collections must be created explicitly via collection_create.
             // This prevents:
@@ -433,6 +433,10 @@ mod tests {
 
     /// A service over a fresh database, default ACL, no API key required.
     fn test_service(dir: &std::path::Path) -> IronBaseService {
+        test_service_with_key(dir, false)
+    }
+
+    fn test_service_with_key(dir: &std::path::Path, require_api_key: bool) -> IronBaseService {
         let adapter = Arc::new(IronBaseAdapter::new(dir.join("acl.mlite")).unwrap());
         adapter
             .insert_one("users", serde_json::json!({"name": "a"}))
@@ -445,9 +449,9 @@ mod tests {
                 protocol: "http".into(),
                 host: "localhost".into(),
                 port: 0,
-                require_api_key: false,
+                require_api_key,
             },
-            false,
+            require_api_key,
             LimitsManager::new(),
             None,
             None,
@@ -521,5 +525,16 @@ mod tests {
         assert!(service
             .authorize_resource(&ServiceContext::localhost(), "ironbase://stats")
             .is_ok());
+    }
+
+    /// M1: with `require_api_key`, a resource read without a key is denied.
+    #[test]
+    fn test_resource_read_requires_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service_with_key(dir.path(), true);
+        let err = service
+            .authorize_resource(&external(), "ironbase://collections/users")
+            .unwrap_err();
+        assert!(err.contains("API key required"), "{err}");
     }
 }

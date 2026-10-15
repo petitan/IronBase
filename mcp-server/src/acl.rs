@@ -588,6 +588,24 @@ impl AclManager {
         config.check(collection, caller, required)
     }
 
+    /// Check several collections against one ACL snapshot: a reload between
+    /// per-collection checks could otherwise authorize a multi-collection tool
+    /// (rename) under two different rule sets.
+    pub fn check_all(
+        &self,
+        collections: &[String],
+        caller: &CallerContext,
+        required: RequiredPermission,
+    ) -> Result<()> {
+        let config = self.config.read().map_err(|_| {
+            McpError::internal("ACL config lock poisoned - service restart required".to_string())
+        })?;
+        for collection in collections {
+            config.check(collection, caller, required)?;
+        }
+        Ok(())
+    }
+
     /// Reload ACL from database
     /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn reload(&self) -> Result<()> {
