@@ -1517,20 +1517,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.list_collections()
     }
 
+    /// Fail if the collection is protected (`drop_collection` only).
+    fn check_not_protected(&self, name: &str) -> Result<()> {
+        let storage = self.storage.read();
+        if let Some(meta) = storage.get_collection_meta(name) {
+            if meta.flags.protected {
+                return Err(IronBaseError::OperationNotAllowed(format!(
+                    "Cannot drop protected collection '{}'",
+                    name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Drop collection (fails if protected)
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         // Check if collection is protected
-        {
-            let storage = self.storage.read();
-            if let Some(meta) = storage.get_collection_meta(name) {
-                if meta.flags.protected {
-                    return Err(IronBaseError::OperationNotAllowed(format!(
-                        "Cannot drop protected collection '{}'",
-                        name
-                    )));
-                }
-            }
-        }
+        self.check_not_protected(name)?;
 
         // Hold the write lock shared like an auto-commit write: wait for an
         // open explicit transaction to commit or roll back, and keep new ones
@@ -1562,6 +1566,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // collection's dirty indexes first, with writers held off (audit
         // 2026-10-06 #28)
         let _persist_gate = self.persist_gate.write();
+
+        // Check again: set_collection_flags may have protected the collection
+        // while the drop waited for a transaction. It takes the persist gate
+        // too, so the flags cannot change from here on
+        self.check_not_protected(name)?;
         self.flush_all_index_managers()?;
 
         // No index flush may write this collection's files from here on

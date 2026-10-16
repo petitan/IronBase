@@ -116,3 +116,39 @@ fn rename_waits_for_open_transaction() {
         2
     );
 }
+
+#[test]
+fn drop_rechecks_protection_after_waiting() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Arc::new(DatabaseCore::open(dir.path().join("w4p.mlite")).unwrap());
+    db.insert_one("users", doc(json!({"k": 0}))).unwrap();
+
+    let tx = db.begin_transaction();
+    db.insert_one_tx("users", doc(json!({"k": 1})), tx).unwrap();
+
+    let dropper = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || db.drop_collection("users"))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Protected while the drop waits for the transaction
+    let flags = ironbase_core::storage::CollectionFlags {
+        protected: true,
+        ..Default::default()
+    };
+    db.set_collection_flags("users", flags).unwrap();
+    db.commit_transaction(tx).unwrap();
+
+    assert!(matches!(
+        dropper.join().unwrap(),
+        Err(ironbase_core::error::IronBaseError::OperationNotAllowed(_))
+    ));
+    assert_eq!(
+        db.collection("users")
+            .unwrap()
+            .count_documents(&json!({}))
+            .unwrap(),
+        2
+    );
+}
