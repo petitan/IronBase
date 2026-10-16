@@ -1532,6 +1532,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the drop is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the drop run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the dropped collection came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
+
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
         // before the persist gate, so the order is the same
@@ -1592,6 +1601,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         if old_name == new_name {
             return Ok(());
         }
+
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the rename is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the rename run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the old name came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
 
         // Wait for the collection's in-flight writer and keep new ones out
         // until the rename is done (audit 2026-10-07 T3): a writer that got the
@@ -1812,6 +1830,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the drop is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the drop run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the dropped collection came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
+
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
         // before the persist gate, so the order is the same
