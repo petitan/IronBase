@@ -35,54 +35,56 @@ pub extern "C" fn ironbase_insert_one(
     document_json: *const c_char,
     out_id: *mut *mut c_char,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let doc_str = match c_str_to_string(document_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Document JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let doc: Value = match serde_json::from_str(&doc_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid JSON: {}", e));
-            return IronBaseErrorCode::SerializationError as i32;
-        }
-    };
-
-    // Convert JSON Value to HashMap
-    let doc_map = match json_to_hashmap(&doc) {
-        Some(m) => m,
-        None => {
-            set_last_error("Document must be a JSON object");
-            return IronBaseErrorCode::SerializationError as i32;
-        }
-    };
-
-    // Use database-level insert for proper durability
-    match coll.db.insert_one(&coll.name, doc_map) {
-        Ok(id) => {
-            if !out_id.is_null() {
-                let id_json = document_id_to_json(&id);
-                unsafe {
-                    *out_id = string_to_c_str(&id_json);
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            IronBaseErrorCode::Success as i32
+        };
+
+        let doc_str = match c_str_to_string(document_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Document JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let doc: Value = match serde_json::from_str(&doc_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid JSON: {}", e));
+                return IronBaseErrorCode::SerializationError as i32;
+            }
+        };
+
+        // Convert JSON Value to HashMap
+        let doc_map = match json_to_hashmap(&doc) {
+            Some(m) => m,
+            None => {
+                set_last_error("Document must be a JSON object");
+                return IronBaseErrorCode::SerializationError as i32;
+            }
+        };
+
+        // Use database-level insert for proper durability
+        match coll.db.insert_one(&coll.name, doc_map) {
+            Ok(id) => {
+                if !out_id.is_null() {
+                    let id_json = document_id_to_json(&id);
+                    unsafe {
+                        *out_id = string_to_c_str(&id_json);
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 /// Insert many documents
@@ -101,75 +103,79 @@ pub extern "C" fn ironbase_insert_many(
     documents_json: *const c_char,
     out_result: *mut *mut c_char,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let docs_str = match c_str_to_string(documents_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Documents JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let docs: Value = match serde_json::from_str(&docs_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid JSON: {}", e));
-            return IronBaseErrorCode::SerializationError as i32;
-        }
-    };
-
-    let docs_array = match docs.as_array() {
-        Some(arr) => arr,
-        None => {
-            set_last_error("Documents must be a JSON array");
-            return IronBaseErrorCode::SerializationError as i32;
-        }
-    };
-
-    let mut doc_maps = Vec::with_capacity(docs_array.len());
-    for doc in docs_array {
-        match json_to_hashmap(doc) {
-            Some(m) => doc_maps.push(m),
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
             None => {
-                set_last_error("Each document must be a JSON object");
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
+            }
+        };
+
+        let docs_str = match c_str_to_string(documents_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Documents JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let docs: Value = match serde_json::from_str(&docs_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid JSON: {}", e));
                 return IronBaseErrorCode::SerializationError as i32;
             }
-        }
-    }
+        };
 
-    match coll.db.insert_many(&coll.name, doc_maps) {
-        Ok(inserted_ids) => {
-            if !out_result.is_null() {
-                let ids: Vec<Value> = inserted_ids
-                    .iter()
-                    .map(|id| serde_json::from_str(&document_id_to_json(id)).unwrap_or(Value::Null))
-                    .collect();
+        let docs_array = match docs.as_array() {
+            Some(arr) => arr,
+            None => {
+                set_last_error("Documents must be a JSON array");
+                return IronBaseErrorCode::SerializationError as i32;
+            }
+        };
 
-                let result_json = serde_json::json!({
-                    "acknowledged": true,
-                    "inserted_count": inserted_ids.len(),
-                    "inserted_ids": ids
-                });
-
-                if let Ok(json) = serde_json::to_string(&result_json) {
-                    unsafe {
-                        *out_result = string_to_c_str(&json);
-                    }
+        let mut doc_maps = Vec::with_capacity(docs_array.len());
+        for doc in docs_array {
+            match json_to_hashmap(doc) {
+                Some(m) => doc_maps.push(m),
+                None => {
+                    set_last_error("Each document must be a JSON object");
+                    return IronBaseErrorCode::SerializationError as i32;
                 }
             }
-            IronBaseErrorCode::Success as i32
         }
-        Err(e) => set_error(&e) as i32,
-    }
+
+        match coll.db.insert_many(&coll.name, doc_maps) {
+            Ok(inserted_ids) => {
+                if !out_result.is_null() {
+                    let ids: Vec<Value> = inserted_ids
+                        .iter()
+                        .map(|id| {
+                            serde_json::from_str(&document_id_to_json(id)).unwrap_or(Value::Null)
+                        })
+                        .collect();
+
+                    let result_json = serde_json::json!({
+                        "acknowledged": true,
+                        "inserted_count": inserted_ids.len(),
+                        "inserted_ids": ids
+                    });
+
+                    if let Ok(json) = serde_json::to_string(&result_json) {
+                        unsafe {
+                            *out_result = string_to_c_str(&json);
+                        }
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
+        }
+    })
 }
 
 // ============== FIND ==============
@@ -185,48 +191,50 @@ pub extern "C" fn ironbase_insert_many(
 /// - Null on error
 #[no_mangle]
 pub extern "C" fn ironbase_find(handle: CollHandle, query_json: *const c_char) -> *mut c_char {
-    clear_last_error();
+    crate::error::ffi_guard(std::ptr::null_mut(), || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return ptr::null_mut();
-        }
-    };
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return ptr::null_mut();
+            }
+        };
 
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return ptr::null_mut();
-        }
-    };
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return ptr::null_mut();
+            }
+        };
 
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid JSON: {}", e));
-            return ptr::null_mut();
-        }
-    };
-
-    // Use collection find_with_options for default limit handling
-    let mut find_options = ironbase_core::find_options::FindOptions::new();
-    find_options.limit = Some(DEFAULT_FIND_LIMIT);
-    match coll.inner.find_with_options(&query, find_options) {
-        Ok(docs) => match serde_json::to_string(&docs) {
-            Ok(json) => string_to_c_str(&json),
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
             Err(e) => {
-                set_last_error(&format!("Failed to serialize results: {}", e));
+                set_last_error(&format!("Invalid JSON: {}", e));
+                return ptr::null_mut();
+            }
+        };
+
+        // Use collection find_with_options for default limit handling
+        let mut find_options = ironbase_core::find_options::FindOptions::new();
+        find_options.limit = Some(DEFAULT_FIND_LIMIT);
+        match coll.inner.find_with_options(&query, find_options) {
+            Ok(docs) => match serde_json::to_string(&docs) {
+                Ok(json) => string_to_c_str(&json),
+                Err(e) => {
+                    set_last_error(&format!("Failed to serialize results: {}", e));
+                    ptr::null_mut()
+                }
+            },
+            Err(e) => {
+                set_error(&e);
                 ptr::null_mut()
             }
-        },
-        Err(e) => {
-            set_error(&e);
-            ptr::null_mut()
         }
-    }
+    })
 }
 
 /// Find one document
@@ -240,47 +248,49 @@ pub extern "C" fn ironbase_find(handle: CollHandle, query_json: *const c_char) -
 /// - Null if not found or on error
 #[no_mangle]
 pub extern "C" fn ironbase_find_one(handle: CollHandle, query_json: *const c_char) -> *mut c_char {
-    clear_last_error();
+    crate::error::ffi_guard(std::ptr::null_mut(), || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return ptr::null_mut();
-        }
-    };
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return ptr::null_mut();
+            }
+        };
 
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return ptr::null_mut();
-        }
-    };
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return ptr::null_mut();
+            }
+        };
 
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid JSON: {}", e));
-            return ptr::null_mut();
-        }
-    };
-
-    // Use db.find_one for FFI consistency (same CollectionCore as write ops)
-    match coll.db.find_one(&coll.name, &query) {
-        Ok(Some(doc)) => match serde_json::to_string(&doc) {
-            Ok(json) => string_to_c_str(&json),
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
             Err(e) => {
-                set_last_error(&format!("Failed to serialize document: {}", e));
+                set_last_error(&format!("Invalid JSON: {}", e));
+                return ptr::null_mut();
+            }
+        };
+
+        // Use db.find_one for FFI consistency (same CollectionCore as write ops)
+        match coll.db.find_one(&coll.name, &query) {
+            Ok(Some(doc)) => match serde_json::to_string(&doc) {
+                Ok(json) => string_to_c_str(&json),
+                Err(e) => {
+                    set_last_error(&format!("Failed to serialize document: {}", e));
+                    ptr::null_mut()
+                }
+            },
+            Ok(None) => ptr::null_mut(),
+            Err(e) => {
+                set_error(&e);
                 ptr::null_mut()
             }
-        },
-        Ok(None) => ptr::null_mut(),
-        Err(e) => {
-            set_error(&e);
-            ptr::null_mut()
         }
-    }
+    })
 }
 
 /// Find documents with options (projection, sort, limit, skip)
@@ -300,126 +310,128 @@ pub extern "C" fn ironbase_find_with_options(
     query_json: *const c_char,
     options_json: *const c_char,
 ) -> *mut c_char {
-    clear_last_error();
+    crate::error::ffi_guard(std::ptr::null_mut(), || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return ptr::null_mut();
-        }
-    };
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return ptr::null_mut();
+            }
+        };
 
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return ptr::null_mut();
-        }
-    };
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return ptr::null_mut();
+            }
+        };
 
-    let options_str = match c_str_to_string(options_json) {
-        Some(s) => s,
-        None => "{}".to_string(),
-    };
+        let options_str = match c_str_to_string(options_json) {
+            Some(s) => s,
+            None => "{}".to_string(),
+        };
 
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return ptr::null_mut();
-        }
-    };
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return ptr::null_mut();
+            }
+        };
 
-    let options: Value = match serde_json::from_str(&options_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid options JSON: {}", e));
-            return ptr::null_mut();
-        }
-    };
+        let options: Value = match serde_json::from_str(&options_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid options JSON: {}", e));
+                return ptr::null_mut();
+            }
+        };
 
-    // Parse options
-    use ironbase_core::find_options::FindOptions;
-    let mut find_options = FindOptions::new();
+        // Parse options
+        use ironbase_core::find_options::FindOptions;
+        let mut find_options = FindOptions::new();
 
-    if let Some(proj) = options.get("projection").and_then(|v| v.as_object()) {
-        let mut projection_map = HashMap::new();
-        for (k, v) in proj {
-            let int_val = if let Some(n) = v.as_i64() {
-                if n != 0 && n != 1 {
-                    set_last_error(&format!(
-                        "Invalid projection value for '{}': expected 0 or 1, got {}",
-                        k, n
-                    ));
-                    return ptr::null_mut();
-                }
-                n as i32
-            } else if let Some(f) = v.as_f64() {
-                // Handle float 0.0/1.0 (consistent with Python, MCP, Rhai bindings)
-                if f == 0.0 {
-                    0
-                } else if f == 1.0 {
-                    1
+        if let Some(proj) = options.get("projection").and_then(|v| v.as_object()) {
+            let mut projection_map = HashMap::new();
+            for (k, v) in proj {
+                let int_val = if let Some(n) = v.as_i64() {
+                    if n != 0 && n != 1 {
+                        set_last_error(&format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, n
+                        ));
+                        return ptr::null_mut();
+                    }
+                    n as i32
+                } else if let Some(f) = v.as_f64() {
+                    // Handle float 0.0/1.0 (consistent with Python, MCP, Rhai bindings)
+                    if f == 0.0 {
+                        0
+                    } else if f == 1.0 {
+                        1
+                    } else {
+                        set_last_error(&format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, f
+                        ));
+                        return ptr::null_mut();
+                    }
                 } else {
                     set_last_error(&format!(
-                        "Invalid projection value for '{}': expected 0 or 1, got {}",
-                        k, f
+                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                        k, v
                     ));
                     return ptr::null_mut();
-                }
-            } else {
-                set_last_error(&format!(
-                    "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                    k, v
-                ));
-                return ptr::null_mut();
-            };
-            projection_map.insert(k.clone(), int_val);
+                };
+                projection_map.insert(k.clone(), int_val);
+            }
+            find_options.projection = Some(projection_map);
         }
-        find_options.projection = Some(projection_map);
-    }
 
-    if let Some(sort) = options.get("sort").and_then(|v| v.as_array()) {
-        let mut sort_vec = Vec::new();
-        for item in sort {
-            if let Some(arr) = item.as_array() {
-                if arr.len() == 2 {
-                    if let (Some(field), Some(dir)) = (arr[0].as_str(), arr[1].as_i64()) {
-                        sort_vec.push((field.to_string(), dir as i32));
+        if let Some(sort) = options.get("sort").and_then(|v| v.as_array()) {
+            let mut sort_vec = Vec::new();
+            for item in sort {
+                if let Some(arr) = item.as_array() {
+                    if arr.len() == 2 {
+                        if let (Some(field), Some(dir)) = (arr[0].as_str(), arr[1].as_i64()) {
+                            sort_vec.push((field.to_string(), dir as i32));
+                        }
                     }
                 }
             }
+            if !sort_vec.is_empty() {
+                find_options.sort = Some(sort_vec);
+            }
         }
-        if !sort_vec.is_empty() {
-            find_options.sort = Some(sort_vec);
-        }
-    }
 
-    let limit = options
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .or(Some(DEFAULT_FIND_LIMIT));
-    find_options.limit = limit;
-    find_options.skip = options
-        .get("skip")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+        let limit = options
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .or(Some(DEFAULT_FIND_LIMIT));
+        find_options.limit = limit;
+        find_options.skip = options
+            .get("skip")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
 
-    match coll.inner.find_with_options(&query, find_options) {
-        Ok(docs) => match serde_json::to_string(&docs) {
-            Ok(json) => string_to_c_str(&json),
+        match coll.inner.find_with_options(&query, find_options) {
+            Ok(docs) => match serde_json::to_string(&docs) {
+                Ok(json) => string_to_c_str(&json),
+                Err(e) => {
+                    set_last_error(&format!("Failed to serialize results: {}", e));
+                    ptr::null_mut()
+                }
+            },
             Err(e) => {
-                set_last_error(&format!("Failed to serialize results: {}", e));
+                set_error(&e);
                 ptr::null_mut()
             }
-        },
-        Err(e) => {
-            set_error(&e);
-            ptr::null_mut()
         }
-    }
+    })
 }
 
 // ============== UPDATE ==============
@@ -444,64 +456,66 @@ pub extern "C" fn ironbase_update_one(
     out_matched: *mut u64,
     out_modified: *mut u64,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let update_str = match c_str_to_string(update_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Update JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    let update: Value = match serde_json::from_str(&update_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid update JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    match coll.db.update_one(&coll.name, &query, &update) {
-        Ok((matched, modified)) => {
-            if !out_matched.is_null() {
-                unsafe {
-                    *out_matched = matched;
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            if !out_modified.is_null() {
-                unsafe {
-                    *out_modified = modified;
-                }
+        };
+
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
             }
-            IronBaseErrorCode::Success as i32
+        };
+
+        let update_str = match c_str_to_string(update_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Update JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        let update: Value = match serde_json::from_str(&update_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid update JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        match coll.db.update_one(&coll.name, &query, &update) {
+            Ok((matched, modified)) => {
+                if !out_matched.is_null() {
+                    unsafe {
+                        *out_matched = matched;
+                    }
+                }
+                if !out_modified.is_null() {
+                    unsafe {
+                        *out_modified = modified;
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 /// Update one document with upsert support
@@ -528,78 +542,80 @@ pub extern "C" fn ironbase_update_one_with_options(
     out_modified: *mut u64,
     out_upserted_id: *mut *mut c_char,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let update_str = match c_str_to_string(update_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Update JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    let update: Value = match serde_json::from_str(&update_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid update JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    let options = ironbase_core::UpdateOptions::new().with_upsert(upsert != 0);
-
-    match coll
-        .db
-        .update_one_with_options(&coll.name, &query, &update, options)
-    {
-        Ok(result) => {
-            if !out_matched.is_null() {
-                unsafe {
-                    *out_matched = result.matched_count;
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            if !out_modified.is_null() {
-                unsafe {
-                    *out_modified = result.modified_count;
-                }
+        };
+
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
             }
-            if !out_upserted_id.is_null() {
-                unsafe {
-                    if let Some(ref id) = result.upserted_id {
-                        *out_upserted_id = string_to_c_str(&document_id_to_json(id));
-                    } else {
-                        *out_upserted_id = ptr::null_mut();
+        };
+
+        let update_str = match c_str_to_string(update_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Update JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        let update: Value = match serde_json::from_str(&update_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid update JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        let options = ironbase_core::UpdateOptions::new().with_upsert(upsert != 0);
+
+        match coll
+            .db
+            .update_one_with_options(&coll.name, &query, &update, options)
+        {
+            Ok(result) => {
+                if !out_matched.is_null() {
+                    unsafe {
+                        *out_matched = result.matched_count;
                     }
                 }
+                if !out_modified.is_null() {
+                    unsafe {
+                        *out_modified = result.modified_count;
+                    }
+                }
+                if !out_upserted_id.is_null() {
+                    unsafe {
+                        if let Some(ref id) = result.upserted_id {
+                            *out_upserted_id = string_to_c_str(&document_id_to_json(id));
+                        } else {
+                            *out_upserted_id = ptr::null_mut();
+                        }
+                    }
+                }
+                IronBaseErrorCode::Success as i32
             }
-            IronBaseErrorCode::Success as i32
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 /// Update many documents
@@ -622,64 +638,66 @@ pub extern "C" fn ironbase_update_many(
     out_matched: *mut u64,
     out_modified: *mut u64,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let update_str = match c_str_to_string(update_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Update JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    let update: Value = match serde_json::from_str(&update_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid update JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    match coll.db.update_many(&coll.name, &query, &update) {
-        Ok((matched, modified)) => {
-            if !out_matched.is_null() {
-                unsafe {
-                    *out_matched = matched;
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            if !out_modified.is_null() {
-                unsafe {
-                    *out_modified = modified;
-                }
+        };
+
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
             }
-            IronBaseErrorCode::Success as i32
+        };
+
+        let update_str = match c_str_to_string(update_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Update JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        let update: Value = match serde_json::from_str(&update_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid update JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        match coll.db.update_many(&coll.name, &query, &update) {
+            Ok((matched, modified)) => {
+                if !out_matched.is_null() {
+                    unsafe {
+                        *out_matched = matched;
+                    }
+                }
+                if !out_modified.is_null() {
+                    unsafe {
+                        *out_modified = modified;
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 // ============== DELETE ==============
@@ -700,43 +718,45 @@ pub extern "C" fn ironbase_delete_one(
     query_json: *const c_char,
     out_deleted: *mut u64,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    match coll.db.delete_one(&coll.name, &query) {
-        Ok(count) => {
-            if !out_deleted.is_null() {
-                unsafe {
-                    *out_deleted = count;
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            IronBaseErrorCode::Success as i32
+        };
+
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        match coll.db.delete_one(&coll.name, &query) {
+            Ok(count) => {
+                if !out_deleted.is_null() {
+                    unsafe {
+                        *out_deleted = count;
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 /// Delete many documents
@@ -755,43 +775,45 @@ pub extern "C" fn ironbase_delete_many(
     query_json: *const c_char,
     out_deleted: *mut u64,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let coll = match validate_coll_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid collection handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let query_str = match c_str_to_string(query_json) {
-        Some(s) => s,
-        None => {
-            set_last_error("Query JSON is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    let query: Value = match serde_json::from_str(&query_str) {
-        Ok(v) => v,
-        Err(e) => {
-            set_last_error(&format!("Invalid query JSON: {}", e));
-            return IronBaseErrorCode::InvalidQuery as i32;
-        }
-    };
-
-    match coll.db.delete_many(&coll.name, &query) {
-        Ok(count) => {
-            if !out_deleted.is_null() {
-                unsafe {
-                    *out_deleted = count;
-                }
+        let coll = match validate_coll_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid collection handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
             }
-            IronBaseErrorCode::Success as i32
+        };
+
+        let query_str = match c_str_to_string(query_json) {
+            Some(s) => s,
+            None => {
+                set_last_error("Query JSON is null or invalid UTF-8");
+                return IronBaseErrorCode::NullPointer as i32;
+            }
+        };
+
+        let query: Value = match serde_json::from_str(&query_str) {
+            Ok(v) => v,
+            Err(e) => {
+                set_last_error(&format!("Invalid query JSON: {}", e));
+                return IronBaseErrorCode::InvalidQuery as i32;
+            }
+        };
+
+        match coll.db.delete_many(&coll.name, &query) {
+            Ok(count) => {
+                if !out_deleted.is_null() {
+                    unsafe {
+                        *out_deleted = count;
+                    }
+                }
+                IronBaseErrorCode::Success as i32
+            }
+            Err(e) => set_error(&e) as i32,
         }
-        Err(e) => set_error(&e) as i32,
-    }
+    })
 }
 
 // ============== HELPERS ==============
