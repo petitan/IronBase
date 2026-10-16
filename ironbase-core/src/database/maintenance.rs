@@ -319,6 +319,13 @@ impl DatabaseCore<StorageEngine> {
     /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn close(&self) -> Result<()> {
+        // A second close() must not checkpoint again: the file may belong to
+        // a reopened instance by now, and this handle's stale state would
+        // overwrite it (Python audit 2026-10-14 P1)
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
         // Batch mode: persist the acknowledged-but-buffered inserts while the
         // database is still open (the flush persists through collection
         // handles, which refuse a closed database)
@@ -352,8 +359,15 @@ impl DatabaseCore<StorageEngine> {
         }
 
         // Release the exclusive file lock so other processes can open the database
-        let storage = self.storage.read();
-        storage.release_lock()
+        self.storage.read().release_lock()?;
+
+        // Everything is persisted and the lock released: the storage's Drop
+        // must not write again. A closed handle can outlive a reopen of the
+        // same file (Python GC), and its stale metadata/header/WAL clear would
+        // overwrite the new instance's writes (Python audit 2026-10-14 P1).
+        // Marked only after the unlock, so a failed unlock is retried on Drop.
+        self.storage.write().mark_closed();
+        Ok(())
     }
 
     /// Flush metadata and clear WAL only (without index flush).

@@ -257,6 +257,11 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
         Ok(())
     }
 
+    /// Called by a completed `DatabaseCore::close`: the storage must not
+    /// write to the file any more, not even on Drop (Python audit 2026-10-14
+    /// P1). No-op for in-memory storage.
+    fn mark_closed(&mut self) {}
+
     /// Write raw document bytes with explicit ID (tracked in catalog)
     ///
     /// # Arguments

@@ -580,6 +580,11 @@ pub struct StorageEngine {
     was_clean_shutdown: bool,
     /// Set by `abandon_shutdown`: Drop only releases the file lock.
     shutdown_abandoned: bool,
+    /// Set by `mark_closed` after a completed `DatabaseCore::close`: Drop
+    /// does nothing. The file may already belong to a reopened instance, and
+    /// this handle's stale metadata, WAL clear and header must not reach it
+    /// (Python audit 2026-10-14 P1).
+    closed: bool,
 }
 
 impl StorageEngine {
@@ -758,6 +763,7 @@ impl StorageEngine {
             wal_ops_since_clear: 0,
             was_clean_shutdown: was_clean,
             shutdown_abandoned: false,
+            closed: false,
         };
 
         let migrated = Self::rebuild_document_order_if_needed(storage.collections_mut());
@@ -2500,6 +2506,10 @@ impl StorageEngine {
 // Automatic cleanup on drop
 impl Drop for StorageEngine {
     fn drop(&mut self) {
+        if self.closed {
+            // close() already persisted everything and released the lock
+            return;
+        }
         if self.shutdown_abandoned {
             // Index state could not be persisted: keep the WAL and the dirty
             // marker so the next open replays/rebuilds (audit 2026-10-06 #30).
@@ -2723,6 +2733,10 @@ impl Storage for StorageEngine {
 impl RawStorage for StorageEngine {
     fn persist_metadata(&mut self) -> Result<()> {
         StorageEngine::persist_metadata(self)
+    }
+
+    fn mark_closed(&mut self) {
+        self.closed = true;
     }
 
     fn write_document_raw(

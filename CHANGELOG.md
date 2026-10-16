@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a closed database handle dropped after a reopen no longer overwrites the file (mcp-server v1.0.597)
+
+Python audit 2026-10-14 P1.
+
+- **Symptom:** in Python, `db.close()` and then `IronBase(path)` again, with
+  the old object freed by the GC only later: the writes of the reopened
+  database were lost (its documents and new collections disappeared on the
+  next open).
+- **Root cause:** `DatabaseCore::close()` set `is_closed`, so the
+  `DatabaseCore` Drop skipped its flush, but the inner `StorageEngine` Drop
+  still ran in full: it wrote its stale in-memory metadata and header,
+  cleared the WAL and marked a clean shutdown, over the file the new
+  instance had written since.
+- **Fix:** a completed `close()` calls the crate-internal
+  `RawStorage::mark_closed()`; the `StorageEngine` Drop then does nothing
+  (everything was persisted and the lock released by `close()`; marked only
+  after a successful unlock). A second `close()` on the same handle is a
+  no-op: it used to checkpoint the stale state again over a reopened
+  instance. Affects every binding (Python, C#, Rust).
+
 ### Fixed — Rhai scripts: aggregate memory budget, smaller per-string limit (mcp-server v1.0.596)
 
 MCP audit 2026-10-14 M5 follow-up (Sourcery review on #188).
