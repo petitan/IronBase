@@ -551,4 +551,35 @@ mod tests {
         assert_eq!(completed, 1);
         assert!(thread_completed.load(Ordering::SeqCst));
     }
+
+    /// M3: a worker that reports progress (or completion) after the job was
+    /// cancelled must not resurrect it: the backfill wrote "Cancelled" as a
+    /// Running progress message and the job stayed active forever, holding
+    /// a MAX_CONCURRENT_JOBS slot and never cleaned up.
+    #[test]
+    fn test_cancelled_job_stays_cancelled() {
+        let manager = JobManager::new();
+        let (id, _) = manager.create_job(JobType::Custom {
+            name: "backfill".to_string(),
+        });
+        manager.update_progress(&id, 10, Some(100), "Embedding...");
+        assert_eq!(manager.active_job_count(), 1);
+
+        assert!(manager.cancel_job(&id));
+        // What the backfill worker does when it notices the cancel
+        manager.update_progress(&id, 10, Some(100), "Cancelled");
+        assert!(matches!(
+            manager.get_job_info(&id).unwrap().status,
+            JobStatus::Cancelled
+        ));
+        assert_eq!(manager.active_job_count(), 0, "cancelled job still active");
+
+        // Compaction completes its cancelled run: stays Cancelled
+        manager.complete_job(&id, serde_json::json!({"status": "cancelled"}));
+        manager.fail_job(&id, "late error".to_string());
+        assert!(matches!(
+            manager.get_job_info(&id).unwrap().status,
+            JobStatus::Cancelled
+        ));
+    }
 }

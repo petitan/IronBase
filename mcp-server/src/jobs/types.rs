@@ -131,7 +131,14 @@ impl Job {
     }
 
     /// Update progress
+    ///
+    /// No-op once the job is in a terminal state: a worker reporting after a
+    /// cancel turned the job back into Running for good (MCP audit
+    /// 2026-10-14 M3).
     pub fn update_progress(&mut self, processed: usize, total: Option<usize>, message: &str) {
+        if self.info.status.is_terminal() {
+            return;
+        }
         self.info.items_processed = processed;
         self.info.items_total = total;
 
@@ -147,14 +154,20 @@ impl Job {
         self.updated_at = Instant::now();
     }
 
-    /// Mark job as completed
+    /// Mark job as completed (no-op once terminal, e.g. cancelled)
     pub fn complete(&mut self, result: Value) {
+        if self.info.status.is_terminal() {
+            return;
+        }
         self.info.status = JobStatus::Completed { result };
         self.updated_at = Instant::now();
     }
 
-    /// Mark job as failed
+    /// Mark job as failed (no-op once terminal, e.g. cancelled)
     pub fn fail(&mut self, error: String) {
+        if self.info.status.is_terminal() {
+            return;
+        }
         self.info.status = JobStatus::Failed { error };
         self.updated_at = Instant::now();
     }
