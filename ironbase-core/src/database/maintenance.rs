@@ -349,6 +349,11 @@ impl DatabaseCore<StorageEngine> {
             // on next open (P1-7). Mirrors the tx_id watermark persistence above.
             storage.set_last_compact_size(self.last_compact_size.load(Ordering::Relaxed))?;
             storage.mark_clean_shutdown()?;
+            // Everything is persisted: the storage's Drop must not write
+            // again. A closed handle can outlive a reopen of the same file
+            // (Python GC), and its stale metadata/header/WAL clear would
+            // overwrite the new instance's writes (Python audit 2026-10-14 P1)
+            storage.mark_closed();
         }
 
         // Release the exclusive file lock so other processes can open the database
