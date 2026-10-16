@@ -124,23 +124,28 @@ impl Job {
         }
     }
 
-    /// Update job status
+    /// Update job status (no-op once terminal)
     pub fn set_status(&mut self, status: JobStatus) {
+        if self.info.status.is_terminal() {
+            return;
+        }
         self.info.status = status;
         self.updated_at = Instant::now();
     }
 
     /// Update progress
     ///
-    /// No-op once the job is in a terminal state: a worker reporting after a
-    /// cancel turned the job back into Running for good (MCP audit
-    /// 2026-10-14 M3).
+    /// Keeps a terminal status: a worker reporting after a cancel turned the
+    /// job back into Running for good (MCP audit 2026-10-14 M3). Only the
+    /// item counters are updated then.
     pub fn update_progress(&mut self, processed: usize, total: Option<usize>, message: &str) {
+        // The counters stay accurate (a batch finished after the cancel)
+        self.info.items_processed = processed;
+        self.info.items_total = total;
+        self.updated_at = Instant::now();
         if self.info.status.is_terminal() {
             return;
         }
-        self.info.items_processed = processed;
-        self.info.items_total = total;
 
         let progress = match total {
             Some(t) if t > 0 => (processed as f64 / t as f64) * 100.0,
@@ -172,8 +177,11 @@ impl Job {
         self.updated_at = Instant::now();
     }
 
-    /// Mark job as cancelled
+    /// Mark job as cancelled (no-op once terminal)
     pub fn cancel(&mut self) {
+        if self.info.status.is_terminal() {
+            return;
+        }
         self.cancelled = true;
         self.info.status = JobStatus::Cancelled;
         self.updated_at = Instant::now();

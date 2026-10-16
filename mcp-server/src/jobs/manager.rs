@@ -309,12 +309,16 @@ impl JobManager {
     }
 
     /// Check if job is cancelled
+    ///
+    /// A job missing from the manager (cleanup removed it after its cancel,
+    /// or it was removed) counts as cancelled: its worker must stop rather
+    /// than carry on unobserved (MCP audit 2026-10-14 M3).
     pub fn is_cancelled(&self, id: &str) -> bool {
         self.jobs
             .read()
             .get(id)
             .map(|j| j.read().is_cancelled())
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     /// Try to run cleanup if enough time has passed
@@ -573,6 +577,17 @@ mod tests {
             JobStatus::Cancelled
         ));
         assert_eq!(manager.active_job_count(), 0, "cancelled job still active");
+
+        // Counters still follow the worker's last report
+        manager.update_progress(&id, 42, Some(100), "Cancelled");
+        assert_eq!(manager.get_job_info(&id).unwrap().items_processed, 42);
+
+        // A removed job's worker must stop
+        let (gone, _) = manager.create_job(JobType::Custom {
+            name: "gone".to_string(),
+        });
+        manager.remove_job(&gone);
+        assert!(manager.is_cancelled(&gone));
 
         // Compaction completes its cancelled run: stays Cancelled
         manager.complete_job(&id, serde_json::json!({"status": "cancelled"}));

@@ -22,7 +22,11 @@ MCP audit 2026-10-14 M3.
   compaction progress callback and its final `complete_job` run after the
   cancel too, so the terminal `Cancelled` was replaced.
 - **Fix:** a terminal status (`completed`, `failed`, `cancelled`) is final:
-  `update_progress`, `complete` and `fail` are no-ops on it.
+  `set_status`, `cancel`, `complete` and `fail` are no-ops on it, and
+  `update_progress` only updates the item counters. `is_cancelled` reports a
+  job missing from the manager (cleaned up after its cancel) as cancelled,
+  so its worker stops; the backfill's per-document fallback checks the
+  cancel before each embedding call.
 
 ### Fixed — C#/FFI: a Rust panic returns an error instead of aborting the .NET process (mcp-server v1.0.598)
 

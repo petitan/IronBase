@@ -653,6 +653,11 @@ fn run_backfill_job(
                     );
 
                     for (doc, text) in docs_with_source.iter().zip(texts.iter()) {
+                        // One embedding call per document: stop on cancel
+                        // instead of finishing the batch (M3)
+                        if job_manager.is_cancelled(job_id) {
+                            break;
+                        }
                         if let Some(id) = doc.get("_id") {
                             match provider.embed(text) {
                                 Ok(embedding) => {
