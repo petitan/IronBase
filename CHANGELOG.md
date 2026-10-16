@@ -22,8 +22,10 @@ Python audit 2026-10-14 P1.
   instance had written since.
 - **Fix:** a completed `close()` calls the crate-internal
   `RawStorage::mark_closed()`; the `StorageEngine` Drop then does nothing
-  (everything was persisted and the lock released by `close()`). Affects
-  every binding (Python, C#, Rust).
+  (everything was persisted and the lock released by `close()`; marked only
+  after a successful unlock). A second `close()` on the same handle is a
+  no-op: it used to checkpoint the stale state again over a reopened
+  instance. Affects every binding (Python, C#, Rust).
 
 ### Fixed — Rhai scripts: aggregate memory budget, smaller per-string limit (mcp-server v1.0.596)
 

@@ -40,3 +40,30 @@ fn dropping_closed_handle_after_reopen_keeps_new_writes() {
     assert_eq!(c.find(&json!({"k": 2})).unwrap().len(), 1);
     assert!(db.list_collections().contains(&"d".to_string()));
 }
+
+#[test]
+fn second_close_after_reopen_keeps_new_writes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("p1b.mlite");
+
+    let old = DatabaseCore::open(&path).unwrap();
+    old.insert_one("c", doc(json!({"k": 1}))).unwrap();
+    old.close().unwrap();
+
+    let new = DatabaseCore::open(&path).unwrap();
+    new.insert_one("c", doc(json!({"k": 2}))).unwrap();
+    new.close().unwrap();
+    drop(new);
+
+    // Closing the old handle again must be a no-op
+    old.close().unwrap();
+    drop(old);
+
+    let db = DatabaseCore::open(&path).unwrap();
+    let c = db.collection("c").unwrap();
+    assert_eq!(
+        c.count_documents(&json!({})).unwrap(),
+        2,
+        "second close overwrote the reopened database"
+    );
+}
