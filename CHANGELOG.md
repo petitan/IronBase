@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — MCP jobs: a cancelled job stays cancelled instead of running forever (mcp-server v1.0.599)
+
+MCP audit 2026-10-14 M3.
+
+- **Symptom:** `embed_job_cancel` on a running backfill left the job in
+  `running` ("Cancelled" as its progress message) for good: it held one of
+  the `MAX_CONCURRENT_JOBS` slots, so new jobs were refused once enough
+  cancelled jobs piled up, and cleanup never removed it. A cancelled compact
+  job ended as `completed`.
+- **Root cause:** `Job::update_progress` (and `complete` / `fail`)
+  overwrote any status. The backfill worker reports
+  `update_progress(.., "Cancelled")` when it notices the cancel, and the
+  compaction progress callback and its final `complete_job` run after the
+  cancel too, so the terminal `Cancelled` was replaced.
+- **Fix:** a terminal status (`completed`, `failed`, `cancelled`) is final:
+  `set_status`, `cancel`, `complete` and `fail` are no-ops on it, and
+  `update_progress` only updates the item counters. `is_cancelled` reports a
+  job missing from the manager (cleaned up after its cancel) as cancelled,
+  so its worker stops; the backfill's per-document fallback checks the
+  cancel before each embedding call.
+
 ### Fixed — C#/FFI: a Rust panic returns an error instead of aborting the .NET process (mcp-server v1.0.598)
 
 C# audit 2026-10-14 C1.
