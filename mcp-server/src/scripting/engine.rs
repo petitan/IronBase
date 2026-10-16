@@ -12,7 +12,7 @@ use crate::error::{McpError, Result};
 use parking_lot::Mutex;
 use rhai::{Dynamic, Engine, Scope};
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use super::db_functions::register_db_functions;
 use super::error::{format_rhai_error, is_operation_limit_error};
 use super::limits::{
     estimate_json_size, LogCollector, ScriptLimits, DEFAULT_MAX_OPERATIONS, MAX_OPERATIONS,
-    MAX_SCRIPT_COLLECTION_SIZE,
+    MAX_SCRIPT_COLLECTION_SIZE, MAX_SCRIPT_STRING_SIZE, MEMORY_CHECK_INTERVAL,
 };
 use super::types::ScriptResult;
 use super::utility_functions::register_utility_functions;
@@ -44,10 +44,47 @@ fn configure_limits(engine: &mut Engine, limits: &ScriptLimits) -> u64 {
 
     // Value size limits: a string or collection doubled a few times
     // aborted the process on allocation failure (M5)
-    engine.set_max_string_size(limits.max_result_size);
+    engine.set_max_string_size(limits.max_result_size.min(MAX_SCRIPT_STRING_SIZE));
     engine.set_max_array_size(MAX_SCRIPT_COLLECTION_SIZE);
     engine.set_max_map_size(MAX_SCRIPT_COLLECTION_SIZE);
     max_ops
+}
+
+/// Reads the bytes the process has allocated; `None` if not measurable.
+type MemoryProbe = fn() -> Option<u64>;
+
+/// Process allocation from the allocator statistics (jemalloc on Unix,
+/// `GetProcessMemoryInfo` on Windows).
+/// A failed statistics read reports 0, which a running process never has.
+fn process_allocated_bytes() -> Option<u64> {
+    let stats = crate::monitoring::get_memory_stats();
+    (stats.available && stats.allocated_bytes > 0).then_some(stats.allocated_bytes)
+}
+
+/// Memory budget of one script run: half of the memory available at its
+/// start, from the cgroup limit when the server runs in a container. Per-value
+/// limits do not bound a script that keeps many values alive (M5 follow-up).
+/// `None` if memory is not measurable here (total reported as 0); a genuine 0
+/// available gives a 0 budget.
+fn script_memory_budget() -> Option<u64> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    if sys.total_memory() == 0 {
+        return None;
+    }
+    let mut available = sys.available_memory();
+    if let Some(cgroup) = sys.cgroup_limits() {
+        available = available.min(cgroup.free_memory);
+    }
+    Some(available / 2)
+}
+
+fn memory_budget_error(budget: Option<u64>) -> McpError {
+    McpError::script_error(format!(
+        "Script stopped: process memory grew past its budget ({} MB, half of \
+        the memory available at start). Keep fewer values alive or use pagination.",
+        budget.unwrap_or(0) / (1024 * 1024)
+    ))
 }
 
 /// Rhai script execution engine with IronBase bindings.
@@ -79,6 +116,7 @@ fn configure_limits(engine: &mut Engine, limits: &ScriptLimits) -> u64 {
 pub struct RhaiEngine {
     adapter: Arc<IronBaseAdapter>,
     embedding_manager: Option<Arc<EmbeddingManager>>,
+    memory_probe: MemoryProbe,
 }
 
 impl RhaiEngine {
@@ -95,6 +133,7 @@ impl RhaiEngine {
         Self {
             adapter,
             embedding_manager,
+            memory_probe: process_allocated_bytes,
         }
     }
 
@@ -206,11 +245,31 @@ impl RhaiEngine {
         let timed_out_flag = timed_out.clone();
         let cancelled_check = cancelled.clone();
         let request_cancel_check = request_cancel.clone();
+
+        // Stop when the process memory grew past the script's budget (M5
+        // follow-up), checked every MEMORY_CHECK_INTERVAL
+        let probe = self.memory_probe;
+        let memory_start = probe();
+        let memory_budget = memory_start.and(script_memory_budget());
+        let memory_exceeded = Arc::new(AtomicBool::new(false));
+        let memory_exceeded_flag = memory_exceeded.clone();
+        let last_memory_check_ms = Arc::new(AtomicU64::new(0));
         engine.on_progress(move |ops| {
             if ops % 1024 == 0 && time_limit.is_some_and(|t| started.elapsed() >= t) {
                 timed_out_flag.store(true, Ordering::Relaxed);
             }
+            if let (Some(start), Some(budget), 0) = (memory_start, memory_budget, ops % 16) {
+                let now_ms = started.elapsed().as_millis() as u64;
+                let interval_ms = MEMORY_CHECK_INTERVAL.as_millis() as u64;
+                if now_ms >= last_memory_check_ms.load(Ordering::Relaxed) + interval_ms {
+                    last_memory_check_ms.store(now_ms, Ordering::Relaxed);
+                    if probe().is_some_and(|now| now.saturating_sub(start) > budget) {
+                        memory_exceeded_flag.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
             if timed_out_flag.load(Ordering::Relaxed)
+                || memory_exceeded_flag.load(Ordering::Relaxed)
                 || cancelled_check.load(Ordering::Relaxed)
                 || request_cancel_check
                     .as_ref()
@@ -262,8 +321,19 @@ impl RhaiEngine {
             final_logs.push(warning);
         }
 
+        // A final check: growth after the last periodic probe must not slip
+        // through on a script that finishes before the next one
+        if let (Some(start), Some(budget)) = (memory_start, memory_budget) {
+            if probe().is_some_and(|now| now.saturating_sub(start) > budget) {
+                memory_exceeded.store(true, Ordering::Relaxed);
+            }
+        }
+
         match result {
             Ok(value) => {
+                if memory_exceeded.load(Ordering::Relaxed) {
+                    return Err(memory_budget_error(memory_budget));
+                }
                 // Check if cancelled during execution
                 if cancelled.load(Ordering::Relaxed) {
                     return Err(McpError::script_error("Script was cancelled".to_string()));
@@ -298,6 +368,9 @@ impl RhaiEngine {
                 }
                 // Set only by the progress callback: an error raised for
                 // another reason after the deadline is not relabeled
+                if memory_exceeded.load(Ordering::Relaxed) {
+                    return Err(memory_budget_error(memory_budget));
+                }
                 if timed_out.load(Ordering::Relaxed) {
                     return Err(McpError::script_error(format!(
                         "Script execution timed out after {} ms",
@@ -581,9 +654,69 @@ mod tests {
         let mut engine = Engine::new();
         assert_eq!(configure_limits(&mut engine, &limits), MAX_OPERATIONS);
         assert_eq!(engine.max_operations(), MAX_OPERATIONS);
-        assert_eq!(engine.max_string_size(), limits.max_result_size);
+        assert_eq!(
+            engine.max_string_size(),
+            limits.max_result_size.min(MAX_SCRIPT_STRING_SIZE)
+        );
         assert_eq!(engine.max_array_size(), MAX_SCRIPT_COLLECTION_SIZE);
         assert_eq!(engine.max_map_size(), MAX_SCRIPT_COLLECTION_SIZE);
+    }
+
+    /// M5 follow-up: a script keeping many allowed values alive is stopped
+    /// when the process memory grows past its budget. The probe is faked
+    /// (tests run without jemalloc): it reports 1 GB more on every read.
+    #[test]
+    fn test_memory_growth_stops_script() {
+        static READS: AtomicU64 = AtomicU64::new(0);
+        fn growing_probe() -> Option<u64> {
+            Some(READS.fetch_add(1, Ordering::Relaxed) * (1 << 30))
+        }
+        let (adapter, _temp) = create_test_adapter();
+        let mut engine = RhaiEngine::new(adapter, None);
+        engine.memory_probe = growing_probe;
+        let limits = ScriptLimits {
+            max_operations: MAX_OPERATIONS,
+            timeout_ms: 0,
+            ..ScriptLimits::default()
+        };
+        let err = engine
+            .run_with_limits("let x = 0; loop { x += 1; }", None, &limits)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("memory"), "{err}");
+    }
+
+    /// M5 follow-up: growth past the budget after the last periodic probe is
+    /// caught by the final check of a script that finishes quickly.
+    #[test]
+    fn test_final_memory_check_rejects_result() {
+        static READS: AtomicU64 = AtomicU64::new(0);
+        fn jump_probe() -> Option<u64> {
+            // First read (start): 1; later reads: far past any budget
+            Some(if READS.fetch_add(1, Ordering::Relaxed) == 0 {
+                1
+            } else {
+                u64::MAX / 2
+            })
+        }
+        let (adapter, _temp) = create_test_adapter();
+        let mut engine = RhaiEngine::new(adapter, None);
+        engine.memory_probe = jump_probe;
+        let err = engine.run("1 + 2", None).unwrap_err().to_string();
+        assert!(err.contains("memory"), "{err}");
+    }
+
+    /// M5 follow-up: one string is capped at MAX_SCRIPT_STRING_SIZE even
+    /// with a larger result limit.
+    #[test]
+    fn test_string_size_capped_below_result_limit() {
+        let limits = ScriptLimits {
+            max_result_size: 100 * 1024 * 1024,
+            ..ScriptLimits::default()
+        };
+        let mut engine = Engine::new();
+        configure_limits(&mut engine, &limits);
+        assert_eq!(engine.max_string_size(), MAX_SCRIPT_STRING_SIZE);
     }
 
     /// M4: a cancelled MCP request stops its script.

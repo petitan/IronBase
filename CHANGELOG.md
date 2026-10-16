@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Rhai scripts: aggregate memory budget, smaller per-string limit (mcp-server v1.0.596)
+
+MCP audit 2026-10-14 M5 follow-up (Sourcery review on #188).
+
+- **Symptom:** a script keeping many individually allowed values alive
+  (`let s = <100 MB string>; for i in 0..1000 { a.push(s + i) }`) allocated
+  ~100 GB in a few thousand operations and could abort the server process.
+- **Root cause:** Rhai limits each string, array and map, not the total live
+  data; one string could reach `max_result_size` (up to 100 MB).
+- **Fix:** (a) one script string is capped at `MAX_SCRIPT_STRING_SIZE`
+  (8 MB, or `max_result_size` if lower), bounding what one operation
+  allocates; (b) every `MEMORY_CHECK_INTERVAL` (5 ms) the progress callback
+  compares the process allocation (jemalloc / `GetProcessMemoryInfo`) with
+  its value at the script start, and stops the script when the growth
+  passes half of the memory available at start ("Script stopped: process
+  memory grew past its budget"). The available memory is taken from the
+  cgroup limit when lower (containers); a final check after evaluation
+  catches growth after the last periodic probe; a failed allocator read
+  (0 bytes) is treated as unmeasurable, not as a reading.
+
 ### Fixed — Rhai scripts: enforced timeout, capped operation limit, value size limits; HNSW cache path stays in the database directory (mcp-server v1.0.595)
 
 MCP audit 2026-10-14 M4–M6.
