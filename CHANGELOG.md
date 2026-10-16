@@ -21,6 +21,11 @@ C# audit 2026-10-14 C1.
   (panic): …") and returns the function's error value (`Unknown` (-99),
   null, 0 or nothing); C# raises `IronBaseException` from it. A test fails
   if a new export is added without the guard.
+- **Also:** C# `Builders<T>.Filter.And()` with no filters now builds `{}`
+  (match all) instead of `{"$and": []}`, which the engine rejects as an
+  invalid query since v1.0.506; `EdgeCaseTests.Filter_EmptyAndFilter` failed
+  on it (the .NET CI job only runs when `IronBase.NET/` or
+  `bindings/csharp/` changes).
 
 ### Fixed — a closed database handle dropped after a reopen no longer overwrites the file (mcp-server v1.0.597)
 
