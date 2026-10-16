@@ -178,6 +178,28 @@ pub(crate) fn set_error(err: &IronBaseError) -> IronBaseErrorCode {
     IronBaseErrorCode::from(err)
 }
 
+/// Run an FFI function body, turning a Rust panic into an error result.
+///
+/// A panic unwinding out of an `extern "C"` function aborts the process, so
+/// a panic anywhere below the FFI layer killed the whole .NET application
+/// (C# audit 2026-10-14 C1). The panic is caught here instead: the last
+/// error message is set and `on_panic` (the function's error value) is
+/// returned, which the C# side maps to an `IronBaseException`.
+pub(crate) fn ffi_guard<T>(on_panic: T, f: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            set_last_error(&format!("Internal error (panic): {}", msg));
+            on_panic
+        }
+    }
+}
+
 /// Clear the last error message
 pub(crate) fn clear_last_error() {
     LAST_ERROR.with(|e| {
@@ -196,9 +218,11 @@ pub(crate) fn clear_last_error() {
 /// The pointer is only valid until the next FFI call on the same thread.
 #[no_mangle]
 pub extern "C" fn ironbase_get_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| match e.borrow().as_ref() {
-        Some(cstr) => cstr.as_ptr(),
-        None => std::ptr::null(),
+    crate::error::ffi_guard(std::ptr::null(), || {
+        LAST_ERROR.with(|e| match e.borrow().as_ref() {
+            Some(cstr) => cstr.as_ptr(),
+            None => std::ptr::null(),
+        })
     })
 }
 
@@ -208,7 +232,9 @@ pub extern "C" fn ironbase_get_last_error() -> *const c_char {
 /// for errors after the sequence.
 #[no_mangle]
 pub extern "C" fn ironbase_clear_error() {
-    clear_last_error();
+    crate::error::ffi_guard((), || {
+        clear_last_error();
+    })
 }
 
 /// Check if an error occurred
@@ -216,7 +242,9 @@ pub extern "C" fn ironbase_clear_error() {
 /// Returns 1 if there is an error message, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn ironbase_has_error() -> i32 {
-    LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+    })
 }
 
 /// Helper to convert C string to Rust string
@@ -234,5 +262,55 @@ pub(crate) fn string_to_c_str(s: &str) -> *mut c_char {
     match CString::new(s) {
         Ok(cstr) => cstr.into_raw(),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stands for any FFI function whose body panics below the FFI layer.
+    extern "C" fn panicking_ffi_fn() -> i32 {
+        ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+            clear_last_error();
+            panic!("boom in core");
+        })
+    }
+
+    /// C1: a panic inside an FFI function returns an error code with the
+    /// message instead of aborting the process (without the guard this test
+    /// process aborts: a panic cannot unwind out of `extern "C"`).
+    #[test]
+    fn test_panic_becomes_error_code() {
+        assert_eq!(panicking_ffi_fn(), IronBaseErrorCode::Unknown as i32);
+        let msg = unsafe { CStr::from_ptr(ironbase_get_last_error()) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(msg.contains("boom in core"), "{msg}");
+    }
+
+    /// C1: every exported FFI function runs its body inside `ffi_guard`, so
+    /// a new export cannot reintroduce the abort.
+    #[test]
+    fn test_every_ffi_export_is_guarded() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut unguarded = Vec::new();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (i, _) in text.match_indices("pub extern \"C\" fn ") {
+                let body_start = text[i..].find('{').unwrap() + i;
+                let head = &text[body_start..(body_start + 80).min(text.len())];
+                if !head.contains("ffi_guard(") {
+                    let name = text[i..].split('(').next().unwrap().to_string();
+                    unguarded.push(format!("{}: {}", path.display(), name));
+                }
+            }
+        }
+        assert!(
+            unguarded.is_empty(),
+            "FFI exports without ffi_guard: {unguarded:#?}"
+        );
     }
 }

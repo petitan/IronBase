@@ -30,12 +30,14 @@ use std::os::raw::c_char;
 /// ```
 #[no_mangle]
 pub extern "C" fn ironbase_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        unsafe {
-            // Reconstruct the CString to properly free it
-            let _ = CString::from_raw(ptr);
+    crate::error::ffi_guard((), || {
+        if !ptr.is_null() {
+            unsafe {
+                // Reconstruct the CString to properly free it
+                let _ = CString::from_raw(ptr);
+            }
         }
-    }
+    })
 }
 
 /// Get the version of the IronBase FFI library
@@ -44,6 +46,8 @@ pub extern "C" fn ironbase_free_string(ptr: *mut c_char) {
 /// - Version string (caller must free with `ironbase_free_string()`)
 #[no_mangle]
 pub extern "C" fn ironbase_version() -> *mut c_char {
-    let version = env!("CARGO_PKG_VERSION");
-    crate::error::string_to_c_str(version)
+    crate::error::ffi_guard(std::ptr::null_mut(), || {
+        let version = env!("CARGO_PKG_VERSION");
+        crate::error::string_to_c_str(version)
+    })
 }

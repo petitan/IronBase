@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — C#/FFI: a Rust panic returns an error instead of aborting the .NET process (mcp-server v1.0.598)
+
+C# audit 2026-10-14 C1.
+
+- **Symptom:** any panic below the FFI layer (core bug, unexpected input)
+  killed the whole .NET application ("panic in a function that cannot
+  unwind", exit 134); no exception reached C#.
+- **Root cause:** none of the 64 `extern "C"` functions caught panics, and a
+  panic unwinding out of an `extern "C"` function aborts the process.
+- **Fix:** every exported function runs its body inside the new
+  `ffi_guard`, which catches the panic, sets the last error ("Internal error
+  (panic): …") and returns the function's error value (`Unknown` (-99),
+  null, 0 or nothing); C# raises `IronBaseException` from it. A test fails
+  if a new export is added without the guard.
+- **Also:** C# `Builders<T>.Filter.And()` with no filters now builds `{}`
+  (match all) instead of `{"$and": []}`, which the engine rejects as an
+  invalid query since v1.0.506; `EdgeCaseTests.Filter_EmptyAndFilter` failed
+  on it (the .NET CI job only runs when `IronBase.NET/` or
+  `bindings/csharp/` changes).
+
 ### Fixed — a closed database handle dropped after a reopen no longer overwrites the file (mcp-server v1.0.597)
 
 Python audit 2026-10-14 P1.

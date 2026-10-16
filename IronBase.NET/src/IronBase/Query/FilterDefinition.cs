@@ -142,6 +142,12 @@ namespace IronBase
         /// </summary>
         public FilterDefinition<T> And(params FilterDefinition<T>[] filters)
         {
+            // No conditions: match everything (like the MongoDB C# driver).
+            // The engine rejects an empty "$and" array as invalid.
+            if (filters.Length == 0)
+            {
+                return new FilterDefinition<T>("{}");
+            }
             var filtersJson = string.Join(",", Array.ConvertAll(filters, f => f.ToJson()));
             return new FilterDefinition<T>($"{{\"$and\": [{filtersJson}]}}");
         }

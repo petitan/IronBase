@@ -41,47 +41,49 @@ pub extern "C" fn ironbase_set_collection_schema(
     collection_name: *const c_char,
     schema_json: *const c_char,
 ) -> i32 {
-    clear_last_error();
+    crate::error::ffi_guard(IronBaseErrorCode::Unknown as i32, || {
+        clear_last_error();
 
-    let db = match validate_db_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid database handle");
-            return IronBaseErrorCode::InvalidHandle as i32;
-        }
-    };
-
-    let coll_name = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => {
-            set_last_error("Collection name is null or invalid UTF-8");
-            return IronBaseErrorCode::NullPointer as i32;
-        }
-    };
-
-    // Parse schema JSON (null means clear schema)
-    let schema = if schema_json.is_null() {
-        None
-    } else {
-        match c_str_to_string(schema_json) {
-            Some(s) => match serde_json::from_str(&s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    set_last_error(&format!("Invalid schema JSON: {}", e));
-                    return IronBaseErrorCode::SerializationError as i32;
-                }
-            },
+        let db = match validate_db_handle(handle) {
+            Some(h) => h,
             None => {
-                set_last_error("Schema JSON is invalid UTF-8");
+                set_last_error("Invalid database handle");
+                return IronBaseErrorCode::InvalidHandle as i32;
+            }
+        };
+
+        let coll_name = match c_str_to_string(collection_name) {
+            Some(s) => s,
+            None => {
+                set_last_error("Collection name is null or invalid UTF-8");
                 return IronBaseErrorCode::NullPointer as i32;
             }
-        }
-    };
+        };
 
-    match db.inner.set_collection_schema(&coll_name, schema) {
-        Ok(_) => IronBaseErrorCode::Success as i32,
-        Err(e) => set_error(&e) as i32,
-    }
+        // Parse schema JSON (null means clear schema)
+        let schema = if schema_json.is_null() {
+            None
+        } else {
+            match c_str_to_string(schema_json) {
+                Some(s) => match serde_json::from_str(&s) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        set_last_error(&format!("Invalid schema JSON: {}", e));
+                        return IronBaseErrorCode::SerializationError as i32;
+                    }
+                },
+                None => {
+                    set_last_error("Schema JSON is invalid UTF-8");
+                    return IronBaseErrorCode::NullPointer as i32;
+                }
+            }
+        };
+
+        match db.inner.set_collection_schema(&coll_name, schema) {
+            Ok(_) => IronBaseErrorCode::Success as i32,
+            Err(e) => set_error(&e) as i32,
+        }
+    })
 }
 
 /// Get JSON schema for a collection
@@ -108,55 +110,57 @@ pub extern "C" fn ironbase_get_collection_schema(
     handle: DbHandle,
     collection_name: *const c_char,
 ) -> *mut c_char {
-    clear_last_error();
+    crate::error::ffi_guard(std::ptr::null_mut(), || {
+        clear_last_error();
 
-    let db = match validate_db_handle(handle) {
-        Some(h) => h,
-        None => {
-            set_last_error("Invalid database handle");
-            return std::ptr::null_mut();
-        }
-    };
+        let db = match validate_db_handle(handle) {
+            Some(h) => h,
+            None => {
+                set_last_error("Invalid database handle");
+                return std::ptr::null_mut();
+            }
+        };
 
-    let coll_name = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => {
-            set_last_error("Collection name is null or invalid UTF-8");
-            return std::ptr::null_mut();
-        }
-    };
+        let coll_name = match c_str_to_string(collection_name) {
+            Some(s) => s,
+            None => {
+                set_last_error("Collection name is null or invalid UTF-8");
+                return std::ptr::null_mut();
+            }
+        };
 
-    // Get collection
-    let collection = match db.inner.collection(&coll_name) {
-        Ok(c) => c,
-        Err(e) => {
-            set_last_error(&format!("Failed to get collection: {}", e));
-            return std::ptr::null_mut();
-        }
-    };
+        // Get collection
+        let collection = match db.inner.collection(&coll_name) {
+            Ok(c) => c,
+            Err(e) => {
+                set_last_error(&format!("Failed to get collection: {}", e));
+                return std::ptr::null_mut();
+            }
+        };
 
-    // Get schema
-    match collection.get_schema() {
-        Ok(Some(schema)) => {
-            // Convert schema to JSON string
-            match serde_json::to_string(&schema) {
-                Ok(json_str) => match std::ffi::CString::new(json_str) {
-                    Ok(c_str) => c_str.into_raw(),
+        // Get schema
+        match collection.get_schema() {
+            Ok(Some(schema)) => {
+                // Convert schema to JSON string
+                match serde_json::to_string(&schema) {
+                    Ok(json_str) => match std::ffi::CString::new(json_str) {
+                        Ok(c_str) => c_str.into_raw(),
+                        Err(e) => {
+                            set_last_error(&format!("Failed to create C string: {}", e));
+                            std::ptr::null_mut()
+                        }
+                    },
                     Err(e) => {
-                        set_last_error(&format!("Failed to create C string: {}", e));
+                        set_last_error(&format!("Failed to serialize schema: {}", e));
                         std::ptr::null_mut()
                     }
-                },
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize schema: {}", e));
-                    std::ptr::null_mut()
                 }
             }
+            Ok(None) => std::ptr::null_mut(), // No schema set - return NULL (not an error)
+            Err(e) => {
+                set_last_error(&format!("Failed to get schema: {}", e));
+                std::ptr::null_mut()
+            }
         }
-        Ok(None) => std::ptr::null_mut(), // No schema set - return NULL (not an error)
-        Err(e) => {
-            set_last_error(&format!("Failed to get schema: {}", e));
-            std::ptr::null_mut()
-        }
-    }
+    })
 }
