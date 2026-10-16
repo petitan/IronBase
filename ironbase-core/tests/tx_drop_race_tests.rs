@@ -64,7 +64,7 @@ fn drop_waits_for_open_transaction() {
         crash_copy(dir.path(), crashed.path());
     }
 
-    let db = DatabaseCore::open(&crashed.path().join("w4.mlite")).unwrap();
+    let db = DatabaseCore::open(crashed.path().join("w4.mlite")).unwrap();
     assert!(
         !db.list_collections().contains(&"users".to_string()),
         "dropped collection came back after recovery"
@@ -103,7 +103,7 @@ fn rename_waits_for_open_transaction() {
         crash_copy(dir.path(), crashed.path());
     }
 
-    let db = DatabaseCore::open(&crashed.path().join("w4r.mlite")).unwrap();
+    let db = DatabaseCore::open(crashed.path().join("w4r.mlite")).unwrap();
     assert!(
         !db.list_collections().contains(&"users".to_string()),
         "renamed collection came back under its old name after recovery"
