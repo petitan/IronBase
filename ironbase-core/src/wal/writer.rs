@@ -98,8 +98,12 @@ impl WriteAheadLog {
     /// This method uses the new streaming approach but returns the same
     /// format as the old method for backwards compatibility.
     ///
-    /// OOM PROTECTION: Aborts if WAL contains more than MAX_WAL_ENTRIES entries.
-    /// This should never happen in normal operation (WAL cleared every flush/checkpoint).
+    /// OOM PROTECTION: aborts when the entries held exceed
+    /// [`recovery_memory_budget`](Self::recovery_memory_budget), a share of
+    /// the available RAM. An entry-count cap (1 000 000) refused WALs that
+    /// fit in memory many times over, and the database could not be opened
+    /// without deleting committed transactions (WAL/recovery audit
+    /// 2026-10-14 W5).
     pub fn recover(&mut self) -> Result<Vec<Vec<WALEntry>>> {
         use std::collections::HashMap;
         use std::io::BufReader;
@@ -112,19 +116,22 @@ impl WriteAheadLog {
         // Group entries by transaction ID
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
         let mut committed = Vec::new();
-        let mut entry_count: usize = 0;
+        let budget = Self::recovery_memory_budget();
+        // Bytes of the entries still held (`txs` + `committed`)
+        let mut held: u64 = 0;
+        let group_bytes = |group: &[WALEntry]| group.iter().map(Self::held_bytes).sum::<u64>();
 
         for entry_result in iter {
             let entry = entry_result?;
-            entry_count += 1;
+            held += Self::held_bytes(&entry);
 
-            // OOM protection: abort if WAL is abnormally large
-            if entry_count > Self::MAX_WAL_ENTRIES {
+            // OOM protection: abort if the entries no longer fit in memory
+            if held > budget {
                 return Err(crate::error::IronBaseError::OutOfMemory(format!(
-                    "WAL recovery aborted: too many entries (>{}) - \
-                     WAL file may be corrupted or was not cleared. \
-                     Consider deleting the .wal file (backup .mlite first)",
-                    Self::MAX_WAL_ENTRIES
+                    "WAL recovery aborted: the WAL needs more than {} MB of memory \
+                     to replay (budget: a quarter of the available RAM). Open the \
+                     database on a machine with more free memory",
+                    budget / (1024 * 1024)
                 )));
             }
 
@@ -138,7 +145,9 @@ impl WriteAheadLog {
                 // A BEGIN starts a new transaction: drop a torn group left
                 // under the same id, so it cannot merge into this one
                 // (audit 2026-10-06 #34).
-                txs.remove(&tx_id);
+                if let Some(torn) = txs.remove(&tx_id) {
+                    held -= group_bytes(&torn);
+                }
             }
             txs.entry(tx_id).or_default().push(entry);
             match entry_type {
@@ -154,12 +163,13 @@ impl WriteAheadLog {
                     // be replayed.
                     // The ABORT itself was just pushed: a group holding only
                     // it means no open transaction had this id.
-                    let open_group = txs.remove(&tx_id).is_some_and(|group| group.len() > 1);
-                    if !open_group {
+                    let group = txs.remove(&tx_id).unwrap_or_default();
+                    held -= group_bytes(&group);
+                    if group.len() <= 1 {
                         if let Some(pos) = committed.iter().rposition(|tx: &Vec<WALEntry>| {
                             tx.first().map(|e| e.transaction_id) == Some(tx_id)
                         }) {
-                            committed.remove(pos);
+                            held -= group_bytes(&committed.remove(pos));
                         }
                     }
                 }
@@ -243,13 +253,30 @@ impl WriteAheadLog {
         Ok(kept)
     }
 
-    /// Maximum WAL entries for recovery/checkpoint (OOM protection)
+    /// Maximum WAL entries for `checkpoint` (OOM protection)
     ///
     /// If WAL has more entries than this, something is very wrong
     /// (WAL clear should run on every flush/checkpoint).
     /// With checkpoint every 120s and ~5K ops/sec Safe mode,
     /// worst case is ~600K entries between checkpoints.
     const MAX_WAL_ENTRIES: usize = 1_000_000;
+
+    /// Recovery budget when the available RAM cannot be detected (Windows)
+    const RECOVERY_FALLBACK_BUDGET: u64 = 1024 * 1024 * 1024;
+
+    /// Memory one entry held by `recover` takes.
+    fn held_bytes(entry: &WALEntry) -> u64 {
+        (std::mem::size_of::<WALEntry>() + entry.data.len()) as u64
+    }
+
+    /// Bytes of WAL entries `recover` may hold: a quarter of the available
+    /// RAM (the replay also parses every operation and keeps it for index
+    /// replay, roughly doubling it), 1 GB when the RAM is unknown.
+    fn recovery_memory_budget() -> u64 {
+        crate::aggregation::memory_info::get_available_memory_bytes()
+            .map(|bytes| bytes / 4)
+            .unwrap_or(Self::RECOVERY_FALLBACK_BUDGET)
+    }
 
     /// Checkpoint: remove committed transactions from WAL
     ///

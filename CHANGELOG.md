@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: a long WAL or one ending in garbage no longer stops the database from opening (mcp-server v1.0.601)
+
+WAL/recovery audit 2026-10-14 W5, W6.
+
+- **Symptom (W5):** a WAL with more than 1 000 000 entries failed the open
+  with `OutOfMemory("WAL recovery aborted: too many entries ...")`, however
+  little memory it needed; the only way in was deleting the WAL and its
+  committed transactions.
+- **Symptom (W6):** a WAL ending in an invalid record failed the open with
+  `WALCorruption`. A crash leaves such a tail when the file grew but its
+  blocks hold zeros, or when only part of a record reached the disk (bad
+  checksum); only a tail cut short was tolerated.
+- **Root cause:** `WriteAheadLog::recover` capped the entry count instead
+  of the memory it holds. `WALEntryIterator` returned `WALCorruption` for
+  any invalid record (unknown type, oversized length, bad checksum) without
+  telling a torn tail from damage inside the log.
+- **Fix:** `recover` aborts only when the entries held exceed a quarter of
+  the available RAM (1 GB when it cannot be detected). An invalid record
+  with no valid record after it ends the log, logged with the discarded
+  byte count; recovery rewrites the WAL, which drops it. An invalid record
+  followed by a valid one is still `WALCorruption`, so committed
+  transactions after damage are never skipped silently.
+
 ### Fixed — WAL: a drop or rename during an open transaction no longer brings the collection back (mcp-server v1.0.600)
 
 WAL/recovery audit 2026-10-14 W4.
