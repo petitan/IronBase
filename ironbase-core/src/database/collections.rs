@@ -1517,20 +1517,33 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.list_collections()
     }
 
+    /// Fail if the collection is protected (`drop_collection` only).
+    fn check_not_protected(&self, name: &str) -> Result<()> {
+        let storage = self.storage.read();
+        if let Some(meta) = storage.get_collection_meta(name) {
+            if meta.flags.protected {
+                return Err(IronBaseError::OperationNotAllowed(format!(
+                    "Cannot drop protected collection '{}'",
+                    name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Drop collection (fails if protected)
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         // Check if collection is protected
-        {
-            let storage = self.storage.read();
-            if let Some(meta) = storage.get_collection_meta(name) {
-                if meta.flags.protected {
-                    return Err(IronBaseError::OperationNotAllowed(format!(
-                        "Cannot drop protected collection '{}'",
-                        name
-                    )));
-                }
-            }
-        }
+        self.check_not_protected(name)?;
+
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the drop is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the drop run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the dropped collection came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
 
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
@@ -1553,6 +1566,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // collection's dirty indexes first, with writers held off (audit
         // 2026-10-06 #28)
         let _persist_gate = self.persist_gate.write();
+
+        // Check again: set_collection_flags may have protected the collection
+        // while the drop waited for a transaction. It takes the persist gate
+        // too, so the flags cannot change from here on
+        self.check_not_protected(name)?;
         self.flush_all_index_managers()?;
 
         // No index flush may write this collection's files from here on
@@ -1592,6 +1610,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         if old_name == new_name {
             return Ok(());
         }
+
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the rename is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the rename run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the old name came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
 
         // Wait for the collection's in-flight writer and keep new ones out
         // until the rename is done (audit 2026-10-07 T3): a writer that got the
@@ -1812,6 +1839,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // Hold the write lock shared like an auto-commit write: wait for an
+        // open explicit transaction to commit or roll back, and keep new ones
+        // out until the drop is done (WAL audit 2026-10-14 W4). Otherwise a
+        // transaction could buffer writes to this collection, the drop run,
+        // and the commit log them to the WAL but fail while applying them:
+        // recovery then replayed them and the dropped collection came back. Taken before
+        // the collection lock and the persist gate, like every writer
+        let _auto_write = self.enter_auto_write()?;
+
         // Wait for this collection's in-flight writer and keep new ones out
         // until the drop is done (audit 2026-10-07 T3). Writers take this lock
         // before the persist gate, so the order is the same

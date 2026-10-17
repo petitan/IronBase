@@ -1862,6 +1862,21 @@ impl StorageEngine {
 
         let already_applied = transaction.operations_applied();
 
+        // Every collection must still exist before anything reaches the WAL:
+        // a commit that logged COMMIT and then failed in apply_operations()
+        // was half applied, and recovery replayed it in full, recreating a
+        // dropped collection (WAL audit 2026-10-14 W4)
+        for operation in transaction.operations() {
+            let collection = match operation {
+                Operation::Insert { collection, .. }
+                | Operation::Update { collection, .. }
+                | Operation::Delete { collection, .. } => collection,
+            };
+            if !self.collections.contains_key(collection) {
+                return Err(IronBaseError::CollectionNotFound(collection.clone()));
+            }
+        }
+
         // Step 1: Write BEGIN marker to WAL
         let begin_entry = WALEntry::new(transaction.id, WALEntryType::Begin, vec![]);
         self.wal.append(&begin_entry)?;
@@ -3847,5 +3862,59 @@ mod tests {
         assert_eq!(recovered.data_end_offset, 12345);
         assert!(recovered.collections.contains_key("test_collection"));
         assert_eq!(recovered.collections["test_collection"].document_count, 42);
+    }
+
+    /// A commit whose collection was dropped fails before anything reaches the
+    /// WAL (WAL audit 2026-10-14 W4): logged and then half applied, recovery
+    /// replayed it and recreated the dropped collection.
+    #[test]
+    fn commit_to_dropped_collection_writes_nothing() {
+        use crate::transaction::{Operation, Transaction};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("w4_storage.mlite");
+
+        {
+            let mut storage = StorageEngine::open(&db_path).unwrap();
+            storage.create_collection("a").unwrap();
+            storage.create_collection("b").unwrap();
+
+            let mut tx = Transaction::new(1);
+            for name in ["a", "b"] {
+                tx.add_operation(Operation::Insert {
+                    collection: name.to_string(),
+                    doc_id: crate::document::DocumentId::Int(1),
+                    doc: std::sync::Arc::new(serde_json::json!({"v": 1})),
+                })
+                .unwrap();
+            }
+            storage.drop_collection("b").unwrap();
+
+            assert!(matches!(
+                storage.commit_transaction(&mut tx),
+                Err(IronBaseError::CollectionNotFound(name)) if name == "b"
+            ));
+            assert!(
+                tx.is_active(),
+                "a failed commit leaves the transaction open"
+            );
+            assert_eq!(
+                storage
+                    .get_collection_meta("a")
+                    .unwrap()
+                    .document_catalog
+                    .len(),
+                0
+            );
+
+            // Simulate a crash: free the lock, then skip Drop (no flush)
+            storage.release_lock().unwrap();
+            std::mem::forget(storage);
+        }
+
+        // Recovery replays the WAL
+        let db = crate::DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!db.list_collections().contains(&"b".to_string()));
+        assert_eq!(db.count_documents("a", &serde_json::json!({})).unwrap(), 0);
     }
 }

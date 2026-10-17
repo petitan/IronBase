@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: a drop or rename during an open transaction no longer brings the collection back (mcp-server v1.0.600)
+
+WAL/recovery audit 2026-10-14 W4.
+
+- **Symptom:** an explicit transaction wrote to `users`, another thread
+  dropped (or renamed) `users`, then the transaction committed: the commit
+  failed with `CollectionNotFound` after its other operations were already
+  applied, and after a crash the dropped collection came back with the
+  transaction's documents.
+- **Root cause:** `drop_collection`, `force_drop_collection` and
+  `rename_collection` did not wait for the transaction write lock, so they
+  ran between the transaction's buffered writes and its commit. The storage
+  commit then wrote BEGIN/operations/COMMIT to the WAL and fsynced it before
+  applying the operations; applying stopped at the missing collection, and
+  crash recovery replayed the whole committed transaction, recreating the
+  collection.
+- **Fix:** drop, force-drop and rename hold the write lock shared like an
+  auto-commit write: they wait for an open transaction to commit or roll back
+  (5 s timeout) and keep new ones out until done. The storage commit checks
+  that every collection it touches exists before anything reaches the WAL,
+  so such a commit fails without writing anything.
+
 ### Fixed — MCP jobs: a cancelled job stays cancelled instead of running forever (mcp-server v1.0.599)
 
 MCP audit 2026-10-14 M3.
