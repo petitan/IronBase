@@ -176,3 +176,26 @@ pub mod format {
     pub const WAL_ABORT: u8 = 0x04;
     pub const WAL_INDEX_CHANGE: u8 = 0x05;
 }
+
+/// Set the type byte of the WAL entry at `entry_offset` and rewrite its
+/// checksum, so only the type is invalid (a bare type change also breaks the
+/// checksum, which alone would fail recovery)
+pub fn set_wal_entry_type(path: &Path, entry_offset: u64, entry_type: u8) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut header = [0u8; 13];
+    file.seek(SeekFrom::Start(entry_offset))?;
+    file.read_exact(&mut header)?;
+    header[8] = entry_type;
+    let data_len = u32::from_le_bytes([header[9], header[10], header[11], header[12]]) as usize;
+    let mut data = vec![0u8; data_len];
+    file.read_exact(&mut data)?;
+
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header);
+    hasher.update(&data);
+    file.seek(SeekFrom::Start(entry_offset))?;
+    file.write_all(&header)?;
+    file.seek(SeekFrom::Start(entry_offset + 13 + data_len as u64))?;
+    file.write_all(&hasher.finalize().to_le_bytes())?;
+    file.sync_all()
+}

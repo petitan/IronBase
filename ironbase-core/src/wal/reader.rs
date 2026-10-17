@@ -10,7 +10,8 @@
 //! │  Memória: O(single entry) - NEM O(entire WAL)           │
 //! │  Entry-nként olvas a fájlból                            │
 //! │  EOF → None visszatérés (iterator vége)                 │
-//! │  Checksum hiba → Err(WALCorruption)                     │
+//! │  Hibás rekord, utána nincs ép → None (szakadt vég)      │
+//! │  Hibás rekord, utána van ép → Err(WALCorruption)        │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -55,6 +56,8 @@ impl<R: Read + Seek> WALEntryIterator<R> {
 
     /// Read the next entry from the WAL
     fn read_next(&mut self) -> Result<Option<WALEntry>> {
+        let start = self.reader.stream_position()?;
+
         // Read header: 8 (tx_id) + 1 (type) + 4 (len) = 13 bytes
         let mut header = [0u8; WAL_HEADER_SIZE];
         match self.reader.read_exact(&mut header) {
@@ -71,7 +74,6 @@ impl<R: Read + Seek> WALEntryIterator<R> {
                 .try_into()
                 .map_err(|_| IronBaseError::WALCorruption)?,
         );
-        let entry_type = WALEntryType::from_u8(header[8])?;
         let data_len = u32::from_le_bytes(
             header[9..13]
                 .try_into()
@@ -80,19 +82,19 @@ impl<R: Read + Seek> WALEntryIterator<R> {
 
         // SECURITY: Prevent OOM from malformed WAL with huge data_len
         if data_len > MAX_WAL_ENTRY_SIZE {
-            return Err(IronBaseError::WALCorruption);
+            return self.invalid_record(start);
         }
 
         // Read data. A SHORT read here is a torn trailing entry: the process
         // crashed while appending this record, so its data/checksum never fully
-        // reached disk. That entry was never committed — discard it (and anything
-        // after) as a clean end-of-log, exactly like a short header above.
-        // Without this, a torn tail surfaced as an Err that aborted recovery and
-        // bricked DB startup after an ordinary crash (audit 2026-06-08 P1-2).
+        // reached disk (audit 2026-06-08 P1-2). Unless a valid record follows
+        // (a damaged length inside the log), it ends the log.
         let mut data = vec![0u8; data_len];
         match self.reader.read_exact(&mut data) {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return self.invalid_record(start)
+            }
             Err(e) => return Err(IronBaseError::Io(e)),
         }
 
@@ -100,24 +102,129 @@ impl<R: Read + Seek> WALEntryIterator<R> {
         let mut checksum_bytes = [0u8; 4];
         match self.reader.read_exact(&mut checksum_bytes) {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return self.invalid_record(start)
+            }
             Err(e) => return Err(IronBaseError::Io(e)),
         }
         let checksum = u32::from_le_bytes(checksum_bytes);
 
-        let entry = WALEntry {
+        // The checksum covers the raw header bytes and the data
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header);
+        hasher.update(&data);
+        if hasher.finalize() != checksum {
+            return self.invalid_record(start);
+        }
+
+        // A checksummed record of a type this version does not know was
+        // written by a newer one: an error, never a torn tail to drop
+        let entry_type = WALEntryType::from_u8(header[8])?;
+
+        Ok(Some(WALEntry {
             transaction_id: tx_id,
             entry_type,
             data,
             checksum,
-        };
+        }))
+    }
 
-        // Verify checksum
-        if entry.compute_checksum() != checksum {
+    /// An invalid record at `start`: the end of the log if no valid record
+    /// follows it, corruption otherwise.
+    ///
+    /// A crash can leave a tail the WAL never finished writing: cut short,
+    /// zero-filled (the file grew but its blocks never reached the disk) or
+    /// with a bad checksum (only part of the record reached it). Nothing
+    /// after it was committed, so it ends the log; failing on it made the
+    /// database impossible to open (WAL/recovery audit 2026-10-14 W6). A
+    /// valid record after it means the damage is inside the log: stopping
+    /// there would silently drop committed transactions, so it is an error,
+    /// and the reader is left at that record for callers that skip errors.
+    fn invalid_record(&mut self, start: u64) -> Result<Option<WALEntry>> {
+        if let Some(next) = self.valid_entry_after(start)? {
+            self.reader.seek(SeekFrom::Start(next))?;
             return Err(IronBaseError::WALCorruption);
         }
+        let end = self.reader.seek(SeekFrom::End(0))?;
+        tracing::warn!(
+            offset = start,
+            discarded_bytes = end - start,
+            "WAL ends in an invalid record (torn write); treating it as the end of the log"
+        );
+        Ok(None)
+    }
 
-        Ok(Some(entry))
+    /// Offset of the first checksummed record after `start`, if any.
+    ///
+    /// Scans the rest of the file in chunks (O(chunk) memory). Offsets whose
+    /// length fits the file are checksummed in the chunk; a longer candidate
+    /// is checksummed from the file in pieces. That second kind of work is
+    /// bounded: past `SCAN_VERIFY_BUDGET` bytes the tail cannot be shown to
+    /// be torn and is reported as corruption, never dropped.
+    fn valid_entry_after(&mut self, start: u64) -> Result<Option<u64>> {
+        const CHUNK: usize = 1024 * 1024;
+        const SCAN_VERIFY_BUDGET: u64 = 256 * 1024 * 1024;
+        let end = self.reader.seek(SeekFrom::End(0))?;
+        let min_entry = WAL_HEADER_SIZE + 4;
+        let mut verified: u64 = 0;
+        let mut pos = start + 1;
+        let mut buf = Vec::new();
+        while pos + min_entry as u64 <= end {
+            // The window also holds the header of its last candidate offset
+            let window = (end - pos).min((CHUNK + WAL_HEADER_SIZE) as u64) as usize;
+            buf.resize(window, 0);
+            self.reader.seek(SeekFrom::Start(pos))?;
+            self.reader.read_exact(&mut buf)?;
+            let candidates = (window - WAL_HEADER_SIZE + 1).min(CHUNK);
+            for i in 0..candidates {
+                let header = &buf[i..i + WAL_HEADER_SIZE];
+                let data_len =
+                    u32::from_le_bytes([header[9], header[10], header[11], header[12]]) as usize;
+                let offset = pos + i as u64;
+                let entry_len = min_entry + data_len;
+                if data_len > MAX_WAL_ENTRY_SIZE || offset + entry_len as u64 > end {
+                    continue;
+                }
+                let valid = if i + entry_len <= window {
+                    let body_end = i + entry_len - 4;
+                    let stored = &buf[body_end..body_end + 4];
+                    crc32fast::hash(&buf[i..body_end])
+                        == u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]])
+                } else {
+                    verified += entry_len as u64;
+                    if verified > SCAN_VERIFY_BUDGET {
+                        tracing::warn!(
+                            offset = start,
+                            "WAL tail scan exceeded its budget; reporting the invalid record as corruption"
+                        );
+                        return Err(IronBaseError::WALCorruption);
+                    }
+                    self.entry_valid_at(offset, data_len)?
+                };
+                if valid {
+                    return Ok(Some(offset));
+                }
+            }
+            pos += candidates as u64;
+        }
+        Ok(None)
+    }
+
+    /// Whether the record at `offset` checksums, read in pieces from the file.
+    fn entry_valid_at(&mut self, offset: u64, data_len: usize) -> Result<bool> {
+        let mut piece = vec![0u8; 64 * 1024];
+        let mut hasher = crc32fast::Hasher::new();
+        self.reader.seek(SeekFrom::Start(offset))?;
+        let mut left = WAL_HEADER_SIZE + data_len;
+        while left > 0 {
+            let n = left.min(piece.len());
+            self.reader.read_exact(&mut piece[..n])?;
+            hasher.update(&piece[..n]);
+            left -= n;
+        }
+        let mut checksum = [0u8; 4];
+        self.reader.read_exact(&mut checksum)?;
+        Ok(hasher.finalize() == u32::from_le_bytes(checksum))
     }
 }
 
@@ -192,15 +299,77 @@ mod tests {
         let entry = WALEntry::new(1, WALEntryType::Begin, vec![]);
         let mut data = entry.serialize();
 
-        // Corrupt checksum
+        // Corrupt checksum, then a valid record: damage inside the log
         let len = data.len();
         data[len - 1] ^= 0xFF;
+        data.extend_from_slice(&WALEntry::new(2, WALEntryType::Begin, vec![]).serialize());
 
         let cursor = Cursor::new(data);
         let mut iter = WALEntryIterator::new(cursor).unwrap();
         let result = iter.next();
 
         assert!(matches!(result, Some(Err(IronBaseError::WALCorruption))));
+    }
+
+    #[test]
+    fn test_iterator_ends_at_invalid_tail() {
+        // Invalid records with nothing valid after them are a torn tail
+        // (WAL/recovery audit 2026-10-14 W6): a bad checksum, zeros, an
+        // unknown type or an oversized length all end the log cleanly
+        let valid = WALEntry::new(1, WALEntryType::Begin, vec![]).serialize();
+        let mut bad_checksum = WALEntry::new(1, WALEntryType::Commit, vec![]).serialize();
+        let len = bad_checksum.len();
+        bad_checksum[len - 1] ^= 0xFF;
+        let mut huge = vec![0u8; WAL_HEADER_SIZE];
+        huge[8] = WALEntryType::Operation as u8;
+        huge[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge.extend_from_slice(&[0u8; 64]);
+
+        for tail in [bad_checksum, vec![0u8; 4096], vec![0xFF; 100], huge] {
+            let mut data = valid.clone();
+            data.extend_from_slice(&tail);
+            let entries: Vec<_> = WALEntryIterator::new(Cursor::new(data)).unwrap().collect();
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].is_ok());
+        }
+    }
+
+    #[test]
+    fn test_iterator_rejects_checksummed_unknown_type() {
+        // A record of a type this version does not know, with a valid
+        // checksum, was written by a newer version: never a torn tail to drop
+        let mut data = WALEntry::new(1, WALEntryType::Begin, vec![]).serialize();
+        let mut unknown = WALEntry::new(2, WALEntryType::Commit, b"new".to_vec()).serialize();
+        unknown[8] = 0x7F;
+        let body_end = unknown.len() - 4;
+        let checksum = crc32fast::hash(&unknown[..body_end]);
+        unknown[body_end..].copy_from_slice(&checksum.to_le_bytes());
+        data.extend_from_slice(&unknown);
+
+        let entries: Vec<_> = WALEntryIterator::new(Cursor::new(data)).unwrap().collect();
+        assert!(entries[0].is_ok());
+        assert!(matches!(entries[1], Err(IronBaseError::WALCorruption)));
+    }
+
+    #[test]
+    fn test_iterator_short_read_inside_log_is_corruption() {
+        // A damaged length that reaches past the end of the file, with valid
+        // records after it: not a torn tail. The reader is left at the next
+        // valid record, so a caller that skips the error still reads it.
+        let mut damaged = WALEntry::new(1, WALEntryType::Operation, b"op".to_vec()).serialize();
+        damaged[9..13].copy_from_slice(&1_000_000u32.to_le_bytes());
+        let mut data = damaged;
+        data.extend_from_slice(&WALEntry::new(2, WALEntryType::Begin, vec![]).serialize());
+        data.extend_from_slice(&WALEntry::new(2, WALEntryType::Commit, vec![]).serialize());
+
+        let mut iter = WALEntryIterator::new(Cursor::new(data)).unwrap();
+        assert!(matches!(
+            iter.next(),
+            Some(Err(IronBaseError::WALCorruption))
+        ));
+        let next = iter.next().unwrap().unwrap();
+        assert_eq!(next.transaction_id, 2);
+        assert_eq!(next.entry_type, WALEntryType::Begin);
     }
 
     #[test]

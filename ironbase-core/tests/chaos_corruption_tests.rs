@@ -318,32 +318,37 @@ fn test_wal_all_invalid_entry_types() {
     let temp_dir = TempDir::new().unwrap();
     let wal_path = temp_dir.path().join("test.wal");
 
-    // Create WAL with some entries
+    // Create WAL with some entries. The second one keeps the damaged first
+    // entry inside the log: an invalid last record is a torn tail, not an
+    // error (WAL/recovery audit 2026-10-14 W6)
     {
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
             .unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .unwrap();
         wal.flush().unwrap();
     }
 
-    // Test all invalid type bytes
-    let invalid_types = [0x00, 0x06, 0x10, 0x80, 0xFF];
+    // Test all invalid type bytes (0x06 is MetadataSnapshot, a valid type)
+    let invalid_types = [0x00, 0x07, 0x10, 0x80, 0xFF];
 
     for invalid_type in invalid_types {
-        // Corrupt entry type
-        corrupt_bytes_at(&wal_path, 8, &[invalid_type]).unwrap();
+        // Corrupt entry type, with a checksum that matches it: only the type
+        // can fail recovery
+        set_wal_entry_type(&wal_path, 0, invalid_type).unwrap();
 
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         let result = wal.recover();
 
         assert!(
-            result.is_err(),
+            matches!(result, Err(IronBaseError::WALCorruption)),
             "Invalid type 0x{:02X} should fail",
             invalid_type
         );
 
         // Restore valid type for next iteration
-        corrupt_bytes_at(&wal_path, 8, &[format::WAL_BEGIN]).unwrap();
+        set_wal_entry_type(&wal_path, 0, format::WAL_BEGIN).unwrap();
     }
 }
 

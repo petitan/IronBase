@@ -109,8 +109,9 @@
 //!    - Áramszünet után is megmarad
 //!
 //! 4. **CRC32 Checksum**: Minden entry ellenőrzött
-//!    - Sérült entry → `IronBaseError::WALCorruption`
-//!    - Félbehagyott írás detektálható
+//!    - Sérült entry a napló végén (utána nincs ép entry) → a napló vége,
+//!      a recovery eldobja (szakadt írás, nullákkal kitöltött vég)
+//!    - Sérült entry, utána ép entry is van → `IronBaseError::WALCorruption`
 //!
 //! 5. **Streaming Recovery**: O(aktív tranzakciók) memória
 //!    - `WALEntryIterator`: entry-nként olvas
