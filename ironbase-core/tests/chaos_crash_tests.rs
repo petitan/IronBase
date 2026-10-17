@@ -176,14 +176,18 @@ fn test_wal_invalid_entry_type() {
         wal.flush().unwrap();
     }
 
-    // Corrupt entry type byte (offset 8 in first entry)
-    corrupt_bytes_at(&wal_path, 8, &[0xFF]).unwrap();
+    // Corrupt entry type byte (offset 8 in first entry), with a checksum
+    // that matches it: only the type can fail recovery
+    set_wal_entry_type(&wal_path, 0, 0xFF).unwrap();
 
     // Recovery should fail gracefully
     let mut wal = WriteAheadLog::open(&wal_path).unwrap();
     let result = wal.recover();
 
-    assert!(result.is_err(), "Should detect invalid entry type");
+    assert!(
+        matches!(result, Err(IronBaseError::WALCorruption)),
+        "Should detect invalid entry type"
+    );
 }
 
 /// Test: WAL entry with bad CRC written directly

@@ -117,11 +117,13 @@ impl WriteAheadLog {
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
         let mut committed = Vec::new();
         let budget = Self::recovery_memory_budget();
+        // Bytes of the entries still held (`txs` + `committed`)
         let mut held: u64 = 0;
+        let group_bytes = |group: &[WALEntry]| group.iter().map(Self::held_bytes).sum::<u64>();
 
         for entry_result in iter {
             let entry = entry_result?;
-            held += (std::mem::size_of::<WALEntry>() + entry.data.len()) as u64;
+            held += Self::held_bytes(&entry);
 
             // OOM protection: abort if the entries no longer fit in memory
             if held > budget {
@@ -143,7 +145,9 @@ impl WriteAheadLog {
                 // A BEGIN starts a new transaction: drop a torn group left
                 // under the same id, so it cannot merge into this one
                 // (audit 2026-10-06 #34).
-                txs.remove(&tx_id);
+                if let Some(torn) = txs.remove(&tx_id) {
+                    held -= group_bytes(&torn);
+                }
             }
             txs.entry(tx_id).or_default().push(entry);
             match entry_type {
@@ -159,12 +163,13 @@ impl WriteAheadLog {
                     // be replayed.
                     // The ABORT itself was just pushed: a group holding only
                     // it means no open transaction had this id.
-                    let open_group = txs.remove(&tx_id).is_some_and(|group| group.len() > 1);
-                    if !open_group {
+                    let group = txs.remove(&tx_id).unwrap_or_default();
+                    held -= group_bytes(&group);
+                    if group.len() <= 1 {
                         if let Some(pos) = committed.iter().rposition(|tx: &Vec<WALEntry>| {
                             tx.first().map(|e| e.transaction_id) == Some(tx_id)
                         }) {
-                            committed.remove(pos);
+                            held -= group_bytes(&committed.remove(pos));
                         }
                     }
                 }
@@ -258,6 +263,11 @@ impl WriteAheadLog {
 
     /// Recovery budget when the available RAM cannot be detected (Windows)
     const RECOVERY_FALLBACK_BUDGET: u64 = 1024 * 1024 * 1024;
+
+    /// Memory one entry held by `recover` takes.
+    fn held_bytes(entry: &WALEntry) -> u64 {
+        (std::mem::size_of::<WALEntry>() + entry.data.len()) as u64
+    }
 
     /// Bytes of WAL entries `recover` may hold: a quarter of the available
     /// RAM (the replay also parses every operation and keeps it for index
