@@ -38,6 +38,9 @@ use super::reader::WALEntryIterator;
 pub struct WriteAheadLog {
     file: File,
     path: PathBuf,
+    /// Test hook: the next append writes only this many bytes, then fails
+    #[cfg(test)]
+    fail_next_append_after: Option<usize>,
 }
 
 impl WriteAheadLog {
@@ -59,13 +62,36 @@ impl WriteAheadLog {
             }
         }
 
+        // A `retain_after` that did not finish: an unpublished keep file is
+        // discarded (the WAL was not touched yet); a published one holds every
+        // entry the WAL must keep, so it replaces the WAL (WAL/recovery audit
+        // 2026-10-14 W7)
+        let keep_temp_path = path.with_extension("wal.keep.tmp");
+        if keep_temp_path.exists() {
+            std::fs::remove_file(&keep_temp_path)?;
+        }
+
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&path)?;
 
-        Ok(WriteAheadLog { file, path })
+        let mut wal = WriteAheadLog {
+            file,
+            path,
+            #[cfg(test)]
+            fail_next_append_after: None,
+        };
+        let keep_path = wal.path.with_extension("wal.keep");
+        if keep_path.exists() {
+            tracing::warn!(
+                keep_path = %keep_path.display(),
+                "Restoring the WAL from an interrupted checkpoint"
+            );
+            wal.restore_kept(&keep_path)?;
+        }
+        Ok(wal)
     }
 
     /// Get the path to this WAL file
@@ -79,11 +105,49 @@ impl WriteAheadLog {
     }
 
     /// Append an entry to the WAL
+    ///
+    /// A failed write (e.g. disk full) is cut off again: left in the file,
+    /// its partial bytes would sit in front of every later entry, and
+    /// recovery reports an invalid record followed by valid ones as
+    /// corruption (WAL/recovery audit 2026-10-14 W6).
     pub fn append(&mut self, entry: &WALEntry) -> Result<u64> {
         let serialized = entry.serialize();
         let offset = self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&serialized)?;
+        if let Err(e) = self.write_entry_bytes(&serialized) {
+            if let Err(truncate_err) = self.truncate_to(offset) {
+                tracing::error!(
+                    error = %truncate_err,
+                    offset,
+                    "Failed to cut a partial WAL entry; the WAL now ends in an invalid record"
+                );
+            }
+            return Err(e.into());
+        }
         Ok(offset)
+    }
+
+    #[cfg(not(test))]
+    fn write_entry_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(bytes)
+    }
+
+    #[cfg(test)]
+    fn write_entry_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self.fail_next_append_after.take() {
+            Some(n) => {
+                self.file.write_all(&bytes[..n.min(bytes.len())])?;
+                Err(std::io::Error::other("injected write failure"))
+            }
+            None => self.file.write_all(bytes),
+        }
+    }
+
+    /// Cut the WAL back to `len` bytes. Through a second handle: Windows
+    /// refuses `set_len` on the append-mode one (see [`clear`](Self::clear)).
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()> {
+        let file = OpenOptions::new().write(true).open(&self.path)?;
+        file.set_len(len)?;
+        file.sync_all()
     }
 
     /// Flush WAL to disk (fsync)
@@ -213,16 +277,21 @@ impl WriteAheadLog {
     /// WAL entries are still needed for index replay after a crash
     /// (`tx_id > last_flushed_tx_id`). Clearing the whole WAL lost them.
     ///
-    /// Streams the kept entries through a temp file (O(1) memory), then
+    /// Streams the kept entries through a temp file (O(1) memory) that is
+    /// fsynced and renamed to `.wal.keep` before the WAL is touched, then
     /// truncates the WAL the same way as [`clear`](Self::clear) (no rename
-    /// over the open file, which Windows refuses) and appends them back.
+    /// over the open file, which Windows refuses) and appends them back. A
+    /// crash at any point after the rename leaves the keep file, and
+    /// [`open`](Self::open) finishes the job; before, a crash between the
+    /// truncate and the copy lost the kept entries (WAL/recovery audit
+    /// 2026-10-14 W7).
     pub fn retain_after(&mut self, keep_after: TransactionId) -> Result<usize> {
         use std::io::{BufReader, BufWriter};
 
         if self.file_size()? == 0 {
             return Ok(0);
         }
-        let temp_path = self.path.with_extension("wal.keep");
+        let keep_temp_path = self.path.with_extension("wal.keep.tmp");
         let mut kept = 0usize;
         {
             let iter = WALEntryIterator::new(BufReader::new(File::open(&self.path)?))?;
@@ -231,7 +300,7 @@ impl WriteAheadLog {
                     .create(true)
                     .write(true)
                     .truncate(true)
-                    .open(&temp_path)?,
+                    .open(&keep_temp_path)?,
             );
             for entry in iter {
                 let entry = entry?;
@@ -240,17 +309,34 @@ impl WriteAheadLog {
                     kept += 1;
                 }
             }
-            temp.flush()?;
+            temp.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         }
 
-        self.clear()?;
-        if kept > 0 {
-            let mut temp = BufReader::new(File::open(&temp_path)?);
-            std::io::copy(&mut temp, &mut self.file)?;
-            self.file.sync_all()?;
+        if kept == 0 {
+            std::fs::remove_file(&keep_temp_path)?;
+            self.clear()?;
+            return Ok(0);
         }
-        let _ = std::fs::remove_file(&temp_path);
+        let keep_path = self.path.with_extension("wal.keep");
+        crate::fs_utils::atomic_rename_and_sync(&keep_temp_path, &keep_path)?;
+        self.restore_kept(&keep_path)?;
         Ok(kept)
+    }
+
+    /// Replace the WAL with the published keep file, then delete it.
+    ///
+    /// Idempotent: run again after a crash it gives the same WAL. The keep
+    /// file's removal is made durable before returning, so a later open
+    /// cannot restore it over entries appended since.
+    fn restore_kept(&mut self, keep_path: &Path) -> Result<()> {
+        self.clear()?;
+        let mut keep = std::io::BufReader::new(File::open(keep_path)?);
+        std::io::copy(&mut keep, &mut self.file)?;
+        self.file.sync_all()?;
+        drop(keep);
+        std::fs::remove_file(keep_path)?;
+        sync_parent_dir(keep_path);
+        Ok(())
     }
 
     /// Maximum WAL entries for `checkpoint` (OOM protection)
@@ -336,6 +422,19 @@ impl WriteAheadLog {
     }
 }
 
+/// fsync the directory holding `path`, so a removal in it is durable.
+/// Failures are logged, as in [`crate::fs_utils::atomic_rename_and_sync`].
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(e) = File::open(parent).and_then(|dir| dir.sync_all()) {
+            tracing::warn!(error = %e, path = ?parent, "WAL directory fsync failed (non-fatal)");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 impl Drop for WriteAheadLog {
     fn drop(&mut self) {
         if let Err(e) = self.file.sync_all() {
@@ -347,6 +446,110 @@ impl Drop for WriteAheadLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WAL after a checkpoint kept tx 2 (watermark 1), crashed at
+    /// `stage` of `retain_after` (WAL/recovery audit 2026-10-14 W7).
+    fn wal_after_interrupted_retain(stage: &str) -> Vec<TransactionId> {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal_path = temp_dir.path().join("w7.wal");
+        let entries = |tx| {
+            vec![
+                WALEntry::new(tx, WALEntryType::Begin, vec![]),
+                WALEntry::new(tx, WALEntryType::Operation, b"op".to_vec()),
+                WALEntry::new(tx, WALEntryType::Commit, vec![]),
+            ]
+        };
+        {
+            let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+            for e in entries(1).iter().chain(entries(2).iter()) {
+                wal.append(e).unwrap();
+            }
+            wal.flush().unwrap();
+        }
+        let keep: Vec<u8> = entries(2).iter().flat_map(|e| e.serialize()).collect();
+        match stage {
+            // Keep file published, WAL truncated, entries not copied back yet
+            "truncated" => {
+                std::fs::write(wal_path.with_extension("wal.keep"), &keep).unwrap();
+                std::fs::write(&wal_path, b"").unwrap();
+            }
+            // Keep file published, WAL not touched yet
+            "published" => {
+                std::fs::write(wal_path.with_extension("wal.keep"), &keep).unwrap();
+            }
+            // Keep file still being written: the WAL is intact
+            "writing" => {
+                std::fs::write(wal_path.with_extension("wal.keep.tmp"), &keep[..10]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+        assert!(!wal_path.with_extension("wal.keep").exists());
+        assert!(!wal_path.with_extension("wal.keep.tmp").exists());
+        wal.recover()
+            .unwrap()
+            .iter()
+            .map(|tx| tx[0].transaction_id)
+            .collect()
+    }
+
+    #[test]
+    fn interrupted_retain_after_keeps_the_kept_entries() {
+        assert_eq!(wal_after_interrupted_retain("truncated"), vec![2]);
+        assert_eq!(wal_after_interrupted_retain("published"), vec![2]);
+        assert_eq!(wal_after_interrupted_retain("writing"), vec![1, 2]);
+    }
+
+    #[test]
+    fn retain_after_leaves_no_keep_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal_path = temp_dir.path().join("w7b.wal");
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+        for tx in [1, 2] {
+            wal.append(&WALEntry::new(tx, WALEntryType::Begin, vec![]))
+                .unwrap();
+            wal.append(&WALEntry::new(tx, WALEntryType::Commit, vec![]))
+                .unwrap();
+        }
+        assert_eq!(wal.retain_after(1).unwrap(), 2);
+        assert!(!wal_path.with_extension("wal.keep").exists());
+        assert!(!wal_path.with_extension("wal.keep.tmp").exists());
+        let ids: Vec<_> = wal
+            .recover()
+            .unwrap()
+            .iter()
+            .map(|t| t[0].transaction_id)
+            .collect();
+        assert_eq!(ids, vec![2]);
+
+        // Nothing to keep: the WAL is just cleared
+        assert_eq!(wal.retain_after(5).unwrap(), 0);
+        assert_eq!(wal.file_size().unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_append_is_cut_off() {
+        // A partial write left in the WAL would sit in front of every later
+        // entry, and recovery reports that as corruption (audit W6)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal_path = temp_dir.path().join("w6.wal");
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+        let size = wal.file_size().unwrap();
+
+        wal.fail_next_append_after = Some(7);
+        assert!(wal
+            .append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .is_err());
+        assert_eq!(wal.file_size().unwrap(), size);
+
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .unwrap();
+        let recovered = wal.recover().unwrap();
+        assert_eq!(recovered.len(), 1);
+    }
 
     #[test]
     fn test_wal_append_and_recover() {

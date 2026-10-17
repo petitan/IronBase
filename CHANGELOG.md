@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: a crash during a checkpoint or a failed append no longer loses or blocks WAL entries (mcp-server v1.0.602)
+
+WAL/recovery audit 2026-10-14 W7, and the partial-append part of W6.
+
+- **Symptom (W7):** a crash in the middle of a checkpoint's WAL trim
+  (`retain_after`) could lose the entries it was meant to keep — the
+  transactions after the index flush watermark. The next open then
+  trusted index files that miss those writes.
+- **Symptom (W6, partial append):** a WAL append that failed part-way (disk
+  full) left its bytes in the file; every later entry followed an invalid
+  record, so the database could not be opened and checkpoints failed.
+- **Root cause:** `retain_after` truncated the WAL, then copied the kept
+  entries back from `.wal.keep`, and `WriteAheadLog::open` ignored a leftover
+  keep file. `WriteAheadLog::append` did not cut a failed write off.
+- **Fix:** the kept entries are written to `.wal.keep.tmp`, fsynced and
+  renamed to `.wal.keep` before the WAL is touched; `open` restores the WAL
+  from a published keep file and discards an unpublished one. The keep
+  file's removal is fsynced before new entries can follow. A failed append
+  truncates the WAL back to where the entry started.
+
 ### Fixed — WAL: a long WAL or one ending in garbage no longer stops the database from opening (mcp-server v1.0.601)
 
 WAL/recovery audit 2026-10-14 W5, W6.
