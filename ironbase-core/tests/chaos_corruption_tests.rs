@@ -318,10 +318,14 @@ fn test_wal_all_invalid_entry_types() {
     let temp_dir = TempDir::new().unwrap();
     let wal_path = temp_dir.path().join("test.wal");
 
-    // Create WAL with some entries
+    // Create WAL with some entries. The second one keeps the damaged first
+    // entry inside the log: an invalid last record is a torn tail, not an
+    // error (WAL/recovery audit 2026-10-14 W6)
     {
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
             .unwrap();
         wal.flush().unwrap();
     }

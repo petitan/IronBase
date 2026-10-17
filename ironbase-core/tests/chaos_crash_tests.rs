@@ -164,10 +164,14 @@ fn test_wal_invalid_entry_type() {
     let temp_dir = TempDir::new().unwrap();
     let wal_path = temp_dir.path().join("test.wal");
 
-    // Write valid entry
+    // Write valid entries. The second one keeps the damaged first entry
+    // inside the log: an invalid last record is a torn tail, not an error
+    // (WAL/recovery audit 2026-10-14 W6)
     {
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
             .unwrap();
         wal.flush().unwrap();
     }
@@ -191,8 +195,16 @@ fn test_wal_entry_with_bad_crc_direct() {
     // Create empty WAL
     WriteAheadLog::open(&wal_path).unwrap();
 
-    // Write entry with bad CRC
+    // Write entry with bad CRC, then a valid one: the damage is inside the
+    // log (an invalid last record is a torn tail, WAL/recovery audit
+    // 2026-10-14 W6)
     write_wal_entry_bad_crc(&wal_path, 1, format::WAL_BEGIN, &[]).unwrap();
+    {
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+        wal.append(&WALEntry::new(2, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.flush().unwrap();
+    }
 
     // Recovery should fail
     let mut wal = WriteAheadLog::open(&wal_path).unwrap();
