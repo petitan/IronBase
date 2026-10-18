@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: a commit reported as failed is no longer replayed after a crash (mcp-server v1.0.603)
+
+WAL/recovery audit 2026-10-14 W8.
+
+- **Symptom:** if the WAL fsync of a commit failed (or any WAL write after
+  BEGIN), the caller got an error, but the transaction's entries — COMMIT
+  included — stayed in the WAL. After a crash, recovery replayed the
+  "failed" write.
+- **Root cause:** `StorageEngine::commit_transaction_internal` returned the
+  error from `append`/`flush` without removing what it had already logged.
+- **Fix:** the commit records the WAL length before BEGIN and, if logging or
+  the fsync fails, cuts the WAL back to it (`WriteAheadLog::discard_after`).
+  If that cut fails too, appends are refused until it succeeds, so the
+  orphaned COMMIT cannot be followed by later entries.
+
 ### Fixed — WAL: a crash during a checkpoint or a failed append no longer loses or blocks WAL entries (mcp-server v1.0.602)
 
 WAL/recovery audit 2026-10-14 W7, and the partial-append part of W6.

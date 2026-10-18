@@ -45,6 +45,9 @@ pub struct WriteAheadLog {
     /// Test hook: the next append writes only this many bytes, then fails
     #[cfg(test)]
     fail_next_append_after: Option<usize>,
+    /// Test hook: the next flush fails
+    #[cfg(test)]
+    pub(crate) fail_next_flush: bool,
 }
 
 /// Work a failed WAL operation still owes the file.
@@ -105,6 +108,8 @@ impl WriteAheadLog {
             pending_repair: None,
             #[cfg(test)]
             fail_next_append_after: None,
+            #[cfg(test)]
+            fail_next_flush: false,
         };
 
         // A published file holds every entry the WAL must keep: it replaces
@@ -205,7 +210,22 @@ impl WriteAheadLog {
 
     /// Flush WAL to disk (fsync)
     pub fn flush(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_flush) {
+            return Err(std::io::Error::other("injected fsync failure").into());
+        }
         self.file.sync_all()?;
+        Ok(())
+    }
+
+    /// Drop everything after the first `len` bytes: the entries of a
+    /// transaction whose commit failed before it was durable. If the cut
+    /// fails, appends are refused until it succeeds.
+    pub fn discard_after(&mut self, len: u64) -> Result<()> {
+        if let Err(e) = self.truncate_to(len) {
+            self.pending_repair = Some(Repair::Truncate(len));
+            return Err(e.into());
+        }
         Ok(())
     }
 
