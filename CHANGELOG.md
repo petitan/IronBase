@@ -17,10 +17,12 @@ WAL/recovery audit 2026-10-14 W8.
   "failed" write.
 - **Root cause:** `StorageEngine::commit_transaction_internal` returned the
   error from `append`/`flush` without removing what it had already logged.
-- **Fix:** the commit records the WAL length before BEGIN and, if logging or
-  the fsync fails, cuts the WAL back to it (`WriteAheadLog::discard_after`).
-  If that cut fails too, appends are refused until it succeeds, so the
-  orphaned COMMIT cannot be followed by later entries.
+- **Fix:** the commit records the WAL length before BEGIN
+  (`WriteAheadLog::commit_mark`, after any repair a failed operation left
+  pending) and, if logging or the fsync fails, cuts the WAL back to it
+  (`WriteAheadLog::discard_after`, which replaces a pending cut from inside
+  the commit). If that cut fails too, appends are refused until it
+  succeeds, so the orphaned COMMIT cannot be followed by later entries.
 
 ### Fixed — WAL: a crash during a checkpoint or a failed append no longer loses or blocks WAL entries (mcp-server v1.0.602)
 

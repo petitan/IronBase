@@ -1881,7 +1881,7 @@ impl StorageEngine {
         // back to where it started: a COMMIT that never became durable must
         // not be replayed after a crash, since the caller is told the commit
         // failed (WAL audit 2026-10-14 W8)
-        let wal_start = self.wal.file_size()?;
+        let wal_start = self.wal.commit_mark()?;
         let wal = &mut self.wal;
         let logged = (|| -> Result<()> {
             // Step 1: Write BEGIN marker to WAL

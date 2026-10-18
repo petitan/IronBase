@@ -218,15 +218,27 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    /// Drop everything after the first `len` bytes: the entries of a
-    /// transaction whose commit failed before it was durable. If the cut
-    /// fails, appends are refused until it succeeds.
+    /// The WAL length to pass to [`discard_after`](Self::discard_after) if
+    /// the commit that starts now fails. A repair a failed operation left
+    /// pending runs first, since it changes the length.
+    pub fn commit_mark(&mut self) -> Result<u64> {
+        self.repair()?;
+        self.file_size()
+    }
+
+    /// Drop everything after the first `len` bytes (a
+    /// [`commit_mark`](Self::commit_mark)): the entries of a transaction
+    /// whose commit failed before it was durable. If the cut fails, appends
+    /// are refused until it succeeds.
     pub fn discard_after(&mut self, len: u64) -> Result<()> {
-        if let Err(e) = self.truncate_to(len) {
+        // A pending restore rewrites the WAL from the retained entries,
+        // which this transaction is not part of: it stays the repair to do.
+        // A pending cut is from an append after the mark, so this cut
+        // replaces it.
+        if !matches!(self.pending_repair, Some(Repair::FinishRestore)) {
             self.pending_repair = Some(Repair::Truncate(len));
-            return Err(e.into());
         }
-        Ok(())
+        self.repair()
     }
 
     /// Recover transactions from WAL using streaming iterator
@@ -682,6 +694,54 @@ mod tests {
             .unwrap();
         let recovered = wal.recover().unwrap();
         assert_eq!(recovered.len(), 1);
+    }
+
+    /// The bytes of an append whose cut failed: `Repair::Truncate(offset)`
+    /// pending with partial bytes past `offset`
+    fn leave_uncut_partial_append(wal: &mut WriteAheadLog) -> u64 {
+        let offset = wal.file_size().unwrap();
+        wal.file.write_all(b"partial").unwrap();
+        wal.pending_repair = Some(Repair::Truncate(offset));
+        offset
+    }
+
+    #[test]
+    fn commit_mark_is_taken_after_a_pending_cut() {
+        // Taken before the cut, the mark lies past the WAL end once the cut
+        // runs, and discarding back to it pads the WAL (audit W8 review)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wal = WriteAheadLog::open(temp_dir.path().join("w8m.wal")).unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+        let offset = leave_uncut_partial_append(&mut wal);
+
+        assert_eq!(wal.commit_mark().unwrap(), offset);
+        assert_eq!(wal.file_size().unwrap(), offset);
+    }
+
+    #[test]
+    fn discard_replaces_a_pending_cut_past_it() {
+        // A failed cut inside the discarded commit must not be retried after
+        // the discard: it would pad the WAL past its end (audit W8 review)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut wal = WriteAheadLog::open(temp_dir.path().join("w8d.wal")).unwrap();
+        for entry_type in [WALEntryType::Begin, WALEntryType::Commit] {
+            wal.append(&WALEntry::new(1, entry_type, vec![])).unwrap();
+        }
+        let mark = wal.commit_mark().unwrap();
+        wal.append(&WALEntry::new(2, WALEntryType::Begin, vec![]))
+            .unwrap();
+        leave_uncut_partial_append(&mut wal);
+
+        wal.discard_after(mark).unwrap();
+        assert_eq!(wal.file_size().unwrap(), mark);
+
+        for entry_type in [WALEntryType::Begin, WALEntryType::Commit] {
+            wal.append(&WALEntry::new(3, entry_type, vec![])).unwrap();
+        }
+        let recovered = wal.recover().unwrap();
+        let ids: Vec<_> = recovered.iter().map(|tx| tx[0].transaction_id).collect();
+        assert_eq!(ids, vec![1, 3]);
     }
 
     #[test]
