@@ -1374,9 +1374,9 @@ impl StorageEngine {
             // Read document length (4 bytes)
             self.file.seek(SeekFrom::Start(offset))?;
             let mut len_bytes = [0u8; 4];
-            if self.file.read_exact(&mut len_bytes).is_err() {
-                break; // EOF or read error
-            }
+            // In bounds (checked above): an error is an I/O error, not the
+            // end of the data. Stopping here persisted a partial catalog.
+            self.file.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
             // Every flush appends a metadata block at data_end_offset and later
@@ -1391,9 +1391,7 @@ impl StorageEngine {
                 None
             } else {
                 let mut data = vec![0u8; len];
-                if self.file.read_exact(&mut data).is_err() {
-                    break;
-                }
+                self.file.read_exact(&mut data)?;
                 serde_json::from_slice::<serde_json::Value>(&data).ok()
             };
 
@@ -1576,7 +1574,13 @@ impl StorageEngine {
         let mut count_bytes = [0u8; 4];
         self.file.read_exact(&mut count_bytes)?;
         let count = u32::from_le_bytes(count_bytes);
-        Ok(Self::read_collection_metas(&mut self.file, count).ok())
+        match Self::read_collection_metas(&mut self.file, count) {
+            Ok(collections) => Ok(Some(collections)),
+            // A read error is not an unreadable block: scanning on without
+            // it would persist a catalog missing the documents it places
+            Err(IronBaseError::Io(e)) => Err(IronBaseError::Io(e)),
+            Err(_) => Ok(None),
+        }
     }
 
     /// The one collection whose catalog holds the `_id` of `doc`, if exactly
@@ -1610,10 +1614,13 @@ impl StorageEngine {
         let mut reader = BufReader::new(&self.file);
         let mut pos = offset;
 
+        // Reads stay in bounds (checked first): a read error is an I/O
+        // error, not the end of a block
         let mut count_bytes = [0u8; 4];
-        if pos + 4 > file_len || reader.read_exact(&mut count_bytes).is_err() {
+        if pos + 4 > file_len {
             return Ok(None);
         }
+        reader.read_exact(&mut count_bytes)?;
         pos += 4;
         let count = u32::from_le_bytes(count_bytes) as u64;
         // Each entry needs at least a 4-byte length and a non-empty JSON body
@@ -1623,9 +1630,10 @@ impl StorageEngine {
 
         for _ in 0..count {
             let mut len_bytes = [0u8; 4];
-            if pos + 4 > file_len || reader.read_exact(&mut len_bytes).is_err() {
+            if pos + 4 > file_len {
                 return Ok(None);
             }
+            reader.read_exact(&mut len_bytes)?;
             pos += 4;
             let len = u32::from_le_bytes(len_bytes) as u64;
             if len == 0 || pos + len > file_len {
@@ -1633,8 +1641,10 @@ impl StorageEngine {
             }
 
             let mut de = serde_json::Deserializer::from_reader((&mut reader).take(len));
-            if IgnoredAny::deserialize(&mut de).is_err() || de.end().is_err() {
-                return Ok(None);
+            match IgnoredAny::deserialize(&mut de).and_then(|_| de.end()) {
+                Ok(()) => {}
+                Err(e) if e.is_io() => return Err(IronBaseError::Io(e.into())),
+                Err(_) => return Ok(None),
             }
             pos += len;
         }
@@ -2415,9 +2425,9 @@ impl StorageEngine {
             // Read document length (4 bytes)
             self.file.seek(SeekFrom::Start(offset))?;
             let mut len_bytes = [0u8; 4];
-            if self.file.read_exact(&mut len_bytes).is_err() {
-                break; // EOF or read error
-            }
+            // In bounds (checked above): an error is an I/O error, not the
+            // end of the data. Stopping here persisted a partial catalog.
+            self.file.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
             // Validate length - must not exceed document region boundary
@@ -2427,9 +2437,7 @@ impl StorageEngine {
 
             // Read document data
             let mut data = vec![0u8; len];
-            if self.file.read_exact(&mut data).is_err() {
-                break; // EOF or read error
-            }
+            self.file.read_exact(&mut data)?;
 
             // Parse JSON to extract _id and _collection
             if let Ok(doc_value) = serde_json::from_slice::<serde_json::Value>(&data) {

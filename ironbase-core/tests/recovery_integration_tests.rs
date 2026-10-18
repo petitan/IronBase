@@ -987,3 +987,116 @@ fn test_corrupted_data_end_offset_recovery() {
         assert_eq!(count, 11, "Should have 11 documents after all operations");
     }
 }
+
+/// Corrupt collection metadata JSON must go through the recovery path, like
+/// any other metadata corruption: a JSON syntax error surfaced as
+/// `Deserialization`, which `open` did not treat as recoverable, so the
+/// database could not be opened at all (WAL/recovery audit 2026-10-14 W9)
+#[test]
+fn test_corrupted_metadata_json_recovery() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("w9.mlite");
+
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 1..=10 {
+            db.insert_one("test", doc_with_id(i, &format!("User{}", i)))
+                .unwrap();
+        }
+        db.close().unwrap();
+    }
+
+    // Header (bincode): magic(8), version(4), page_size(4),
+    // collection_count(4), free_list_head(8), index_section_offset(8), then
+    // metadata_offset(8) at byte 36.
+    // Metadata: [count: u32][len: u32][CollectionMeta JSON]...
+    corrupt_metadata_json(&db_path);
+
+    let db = DatabaseCore::open(&db_path).expect("corrupt metadata JSON must be recovered");
+    let coll = db.collection("test").unwrap();
+    assert_eq!(coll.count_documents(&json!({})).unwrap(), 10);
+    db.close().unwrap();
+    drop(db);
+
+    // The recovered metadata was persisted
+    let db = DatabaseCore::open(&db_path).unwrap();
+    assert_eq!(
+        db.collection("test")
+            .unwrap()
+            .count_documents(&json!({}))
+            .unwrap(),
+        10
+    );
+}
+
+/// Overwrite the first byte of the current metadata block's first
+/// collection JSON. Header (bincode): magic(8), version(4), page_size(4),
+/// collection_count(4), free_list_head(8), index_section_offset(8), then
+/// metadata_offset(8) at byte 36. Metadata: [count: u32][len: u32][JSON]...
+fn corrupt_metadata_json(db_path: &std::path::Path) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(db_path)
+        .unwrap();
+    let mut offset_bytes = [0u8; 8];
+    file.seek(SeekFrom::Start(36)).unwrap();
+    file.read_exact(&mut offset_bytes).unwrap();
+    let json_start = u64::from_le_bytes(offset_bytes) + 8;
+
+    let mut first = [0u8; 1];
+    file.seek(SeekFrom::Start(json_start)).unwrap();
+    file.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"{", "metadata JSON expected at {}", json_start);
+    file.seek(SeekFrom::Start(json_start)).unwrap();
+    file.write_all(b"X").unwrap();
+    file.sync_all().unwrap();
+}
+
+/// The documents written after the corrupt (latest) metadata block are past
+/// the point where the document scan stops, but they are still in the WAL
+/// until the next flush writes a newer block, and its replay restores them
+/// (W9 review)
+#[test]
+fn test_corrupted_metadata_json_keeps_later_documents() {
+    let temp_dir = TempDir::new().unwrap();
+    let crashed = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("w9l.mlite");
+
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 1..=10 {
+            db.insert_one("test", doc_with_id(i, &format!("User{}", i)))
+                .unwrap();
+        }
+        db.close().unwrap();
+    }
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 11..=13 {
+            db.insert_one("test", doc_with_id(i, &format!("User{}", i)))
+                .unwrap();
+        }
+        // Simulate a crash: copy every file but the lock while it is open
+        for e in fs::read_dir(temp_dir.path()).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".lock") {
+                fs::copy(e.path(), crashed.path().join(&name)).unwrap();
+            }
+        }
+    }
+
+    let crashed_path = crashed.path().join("w9l.mlite");
+    corrupt_metadata_json(&crashed_path);
+    let db = DatabaseCore::open(&crashed_path).unwrap();
+    assert_eq!(
+        db.collection("test")
+            .unwrap()
+            .count_documents(&json!({}))
+            .unwrap(),
+        13
+    );
+}
