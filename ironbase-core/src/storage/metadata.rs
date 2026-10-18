@@ -228,15 +228,22 @@ impl StorageEngine {
         Ok(collections)
     }
 
-    /// Unreadable collection metadata JSON is corruption, so `open` recovers
-    /// it from the WAL or the documents; as `Deserialization` it failed the
-    /// open (WAL/recovery audit 2026-10-14 W9). A read error stays an I/O
-    /// error.
-    fn metadata_json_error(e: serde_json::Error) -> IronBaseError {
-        if e.is_io() {
-            IronBaseError::Io(e.into())
-        } else {
-            IronBaseError::Corruption(format!("Invalid collection metadata: {}", e))
+    /// Unreadable collection metadata JSON (a syntax error or a cut-off
+    /// value) is corruption, so `open` recovers it from the WAL or the
+    /// documents; as `Deserialization` it failed the open (WAL/recovery audit
+    /// 2026-10-14 W9). Well-formed JSON this build cannot map (e.g. a value
+    /// a newer release added) stays `Deserialization`: rebuilding over it
+    /// would drop the indexes and schemas a document scan cannot restore.
+    /// A read error stays an I/O error.
+    pub(super) fn metadata_json_error(e: serde_json::Error) -> IronBaseError {
+        use serde_json::error::Category;
+
+        match e.classify() {
+            Category::Io => IronBaseError::Io(e.into()),
+            Category::Syntax | Category::Eof => {
+                IronBaseError::Corruption(format!("Invalid collection metadata: {}", e))
+            }
+            Category::Data => IronBaseError::Deserialization(e),
         }
     }
 
@@ -920,5 +927,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("suspiciously large"));
+    }
+
+    /// Only damaged JSON is corruption to recover from; well-formed JSON this
+    /// build cannot map stays a deserialization error (W9 review)
+    #[test]
+    fn metadata_json_error_classifies_by_cause() {
+        let syntax = serde_json::from_str::<CollectionMeta>("X").unwrap_err();
+        assert!(matches!(
+            StorageEngine::metadata_json_error(syntax),
+            IronBaseError::Corruption(_)
+        ));
+        let cut_off = serde_json::from_str::<CollectionMeta>("{\"name\": \"a").unwrap_err();
+        assert!(matches!(
+            StorageEngine::metadata_json_error(cut_off),
+            IronBaseError::Corruption(_)
+        ));
+        let unmapped = serde_json::from_str::<CollectionMeta>("{\"name\": 5}").unwrap_err();
+        assert!(matches!(
+            StorageEngine::metadata_json_error(unmapped),
+            IronBaseError::Deserialization(_)
+        ));
     }
 }

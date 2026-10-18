@@ -18,9 +18,14 @@ WAL/recovery audit 2026-10-14 W9.
   `Deserialization`; `StorageEngine::open` only treats `Corruption` and
   `Serialization` as recoverable, so it never reached the WAL snapshot or
   document-scan recovery.
-- **Fix:** an unreadable metadata JSON is reported as `Corruption`, like the
-  other metadata checks next to it; a read error inside the parser stays an
-  I/O error and still fails the open.
+- **Fix:** a metadata JSON syntax error or cut-off value is reported as
+  `Corruption`, like the other metadata checks next to it. Well-formed JSON
+  this build cannot map (e.g. a value a newer release added) stays
+  `Deserialization` and still fails the open, since rebuilding over it
+  would drop indexes and schemas; a read error stays an I/O error. The
+  recovery scans (`rebuild_from_documents`, `rebuild_catalog_from_file`)
+  now fail on a read error instead of treating it as the end of the data
+  and persisting a partial catalog.
 
 ### Fixed — WAL: a commit reported as failed is no longer replayed after a crash (mcp-server v1.0.603)
 
