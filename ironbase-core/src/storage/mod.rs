@@ -1877,66 +1877,84 @@ impl StorageEngine {
             }
         }
 
-        // Step 1: Write BEGIN marker to WAL
-        let begin_entry = WALEntry::new(transaction.id, WALEntryType::Begin, vec![]);
-        self.wal.append(&begin_entry)?;
+        // Steps 1-4 log the transaction. If any of them fails, cut the WAL
+        // back to where it started: a COMMIT that never became durable must
+        // not be replayed after a crash, since the caller is told the commit
+        // failed (WAL audit 2026-10-14 W8)
+        let wal_start = self.wal.commit_mark()?;
+        let wal = &mut self.wal;
+        let logged = (|| -> Result<()> {
+            // Step 1: Write BEGIN marker to WAL
+            let begin_entry = WALEntry::new(transaction.id, WALEntryType::Begin, vec![]);
+            wal.append(&begin_entry)?;
 
-        // Step 2: Write all operations to WAL (use JSON instead of bincode for compatibility)
-        // PHASE 5: Centralize _collection injection here instead of in callers
-        for operation in transaction.operations() {
-            let op_with_collection = add_collection_to_operation(operation);
-            let op_json = serde_json::to_string(&op_with_collection)
-                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-            let op_entry = WALEntry::new(
-                transaction.id,
-                WALEntryType::Operation,
-                op_json.as_bytes().to_vec(),
-            );
-            self.wal.append(&op_entry)?;
-        }
-
-        // Step 2.5: Write index changes to WAL (for two-phase commit recovery)
-        // Each index change is written as an IndexChange entry
-        // Format: {collection: string, index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
-        // Extract collection name from first operation (all operations in a transaction are for the same collection)
-        let collection_name = transaction.operations().first().map(|op| match op {
-            crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
-            crate::transaction::Operation::Update { collection, .. } => collection.clone(),
-            crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
-        });
-
-        for (index_name, changes) in transaction.index_changes() {
-            for change in changes {
-                // Serialize index change to JSON (now includes collection name)
-                let change_data = serde_json::json!({
-                    "collection": collection_name.as_ref().unwrap_or(&"unknown".to_string()),
-                    "index_name": index_name,
-                    "operation": match change.operation {
-                        crate::transaction::IndexOperation::Insert => "Insert",
-                        crate::transaction::IndexOperation::Delete => "Delete",
-                    },
-                    "key": change.key,
-                    "doc_id": change.doc_id,
-                });
-
-                let change_json = serde_json::to_string(&change_data)
+            // Step 2: Write all operations to WAL (use JSON instead of bincode for compatibility)
+            // PHASE 5: Centralize _collection injection here instead of in callers
+            for operation in transaction.operations() {
+                let op_with_collection = add_collection_to_operation(operation);
+                let op_json = serde_json::to_string(&op_with_collection)
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-
-                let index_entry = WALEntry::new(
+                let op_entry = WALEntry::new(
                     transaction.id,
-                    WALEntryType::IndexChange,
-                    change_json.as_bytes().to_vec(),
+                    WALEntryType::Operation,
+                    op_json.as_bytes().to_vec(),
                 );
-                self.wal.append(&index_entry)?;
+                wal.append(&op_entry)?;
             }
+
+            // Step 2.5: Write index changes to WAL (for two-phase commit recovery)
+            // Each index change is written as an IndexChange entry
+            // Format: {collection: string, index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
+            // Extract collection name from first operation (all operations in a transaction are for the same collection)
+            let collection_name = transaction.operations().first().map(|op| match op {
+                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+            });
+
+            for (index_name, changes) in transaction.index_changes() {
+                for change in changes {
+                    // Serialize index change to JSON (now includes collection name)
+                    let change_data = serde_json::json!({
+                        "collection": collection_name.as_ref().unwrap_or(&"unknown".to_string()),
+                        "index_name": index_name,
+                        "operation": match change.operation {
+                            crate::transaction::IndexOperation::Insert => "Insert",
+                            crate::transaction::IndexOperation::Delete => "Delete",
+                        },
+                        "key": change.key,
+                        "doc_id": change.doc_id,
+                    });
+
+                    let change_json = serde_json::to_string(&change_data)
+                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+                    let index_entry = WALEntry::new(
+                        transaction.id,
+                        WALEntryType::IndexChange,
+                        change_json.as_bytes().to_vec(),
+                    );
+                    wal.append(&index_entry)?;
+                }
+            }
+
+            // Step 3: Write COMMIT marker to WAL
+            let commit_entry = WALEntry::new(transaction.id, WALEntryType::Commit, vec![]);
+            wal.append(&commit_entry)?;
+
+            // Step 4: Fsync WAL (durability guarantee)
+            wal.flush()
+        })();
+        if let Err(e) = logged {
+            if let Err(discard_err) = self.wal.discard_after(wal_start) {
+                log_error!(
+                    "Failed to discard WAL entries of failed commit (tx {}): {}",
+                    transaction.id,
+                    discard_err
+                );
+            }
+            return Err(e);
         }
-
-        // Step 3: Write COMMIT marker to WAL
-        let commit_entry = WALEntry::new(transaction.id, WALEntryType::Commit, vec![]);
-        self.wal.append(&commit_entry)?;
-
-        // Step 4: Fsync WAL (durability guarantee)
-        self.wal.flush()?;
 
         // Step 5: Apply operations to storage
         if !already_applied {
@@ -3916,5 +3934,47 @@ mod tests {
         let db = crate::DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         assert!(!db.list_collections().contains(&"b".to_string()));
         assert_eq!(db.count_documents("a", &serde_json::json!({})).unwrap(), 0);
+    }
+    /// A commit whose WAL fsync fails must not be replayed after a crash:
+    /// the caller was told it failed (WAL audit 2026-10-14 W8)
+    #[test]
+    fn failed_commit_fsync_is_not_recovered() {
+        use crate::transaction::{Operation, Transaction};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("w8_storage.mlite");
+        let insert = |id: i64| Operation::Insert {
+            collection: "a".to_string(),
+            doc_id: crate::document::DocumentId::Int(id),
+            doc: std::sync::Arc::new(serde_json::json!({"_id": id, "v": id})),
+        };
+
+        {
+            let mut storage = StorageEngine::open(&db_path).unwrap();
+            storage.create_collection("a").unwrap();
+
+            let mut failed = Transaction::new(1);
+            failed.add_operation(insert(1)).unwrap();
+            storage.wal.fail_next_flush = true;
+            assert!(storage.commit_transaction(&mut failed).is_err());
+
+            // The WAL keeps working: a later commit is durable
+            let mut ok = Transaction::new(2);
+            ok.add_operation(insert(2)).unwrap();
+            storage.commit_transaction(&mut ok).unwrap();
+
+            // Simulate a crash: free the lock, then skip Drop (no flush)
+            storage.release_lock().unwrap();
+            std::mem::forget(storage);
+        }
+
+        let db = crate::DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let docs = db
+            .collection("a")
+            .unwrap()
+            .find(&serde_json::json!({}))
+            .unwrap();
+        let ids: Vec<_> = docs.iter().map(|d| d["v"].clone()).collect();
+        assert_eq!(ids, vec![serde_json::json!(2)]);
     }
 }
