@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Storage: corrupt collection metadata JSON is recovered instead of failing the open (mcp-server v1.0.604)
+
+WAL/recovery audit 2026-10-14 W9.
+
+- **Symptom:** a database whose collection metadata JSON was damaged (a
+  torn or overwritten metadata block) could not be opened:
+  `Deserialization(Error("expected value", ...))`.
+- **Root cause:** `read_collection_metas` passed the JSON parse error on as
+  `Deserialization`; `StorageEngine::open` only treats `Corruption` and
+  `Serialization` as recoverable, so it never reached the WAL snapshot or
+  document-scan recovery.
+- **Fix:** an unreadable metadata JSON is reported as `Corruption`, like the
+  other metadata checks next to it; a read error inside the parser stays an
+  I/O error and still fails the open.
+
 ### Fixed — WAL: a commit reported as failed is no longer replayed after a crash (mcp-server v1.0.603)
 
 WAL/recovery audit 2026-10-14 W8.

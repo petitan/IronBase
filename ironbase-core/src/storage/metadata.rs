@@ -217,15 +217,27 @@ impl StorageEngine {
             let meta = {
                 let mut reader = BufReader::new(&*file).take(len as u64);
                 let mut de = serde_json::Deserializer::from_reader(&mut reader);
-                let meta = CollectionMeta::deserialize(&mut de)?;
-                de.end()?;
-                meta
+                CollectionMeta::deserialize(&mut de)
+                    .and_then(|meta| de.end().map(|()| meta))
+                    .map_err(Self::metadata_json_error)?
             };
             file.seek(SeekFrom::Start(start + len as u64))?;
             collections.insert(meta.name.clone(), meta);
         }
 
         Ok(collections)
+    }
+
+    /// Unreadable collection metadata JSON is corruption, so `open` recovers
+    /// it from the WAL or the documents; as `Deserialization` it failed the
+    /// open (WAL/recovery audit 2026-10-14 W9). A read error stays an I/O
+    /// error.
+    fn metadata_json_error(e: serde_json::Error) -> IronBaseError {
+        if e.is_io() {
+            IronBaseError::Io(e.into())
+        } else {
+            IronBaseError::Corruption(format!("Invalid collection metadata: {}", e))
+        }
     }
 
     /// Write metadata to writer
