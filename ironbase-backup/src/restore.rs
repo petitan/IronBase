@@ -221,12 +221,17 @@ pub fn restore(
     // the writes since the snapshot's checkpoint, replayed on the first open
     // (audit 2026-10-06 #32). Any other WAL at that path belongs to a
     // different database state and must not be replayed.
+    // The same holds for the files of a checkpoint that was interrupted while
+    // trimming that other WAL: opening would restore them over this one
+    // (WAL/recovery audit 2026-10-14 W7).
     let target = &chain.backups[target_idx];
     let wal_path = output_path.with_extension("wal");
-    match std::fs::remove_file(&wal_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+    for ext in ["wal", "wal.retain", "wal.retain.tmp", "wal.keep"] {
+        match std::fs::remove_file(output_path.with_extension(ext)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     if let Some(wal_len) = restore_wal_section(&target.path, &target.header, &wal_path)? {
         println!(

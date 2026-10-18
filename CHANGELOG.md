@@ -21,11 +21,16 @@ WAL/recovery audit 2026-10-14 W7, and the partial-append part of W6.
 - **Root cause:** `retain_after` truncated the WAL, then copied the kept
   entries back from `.wal.keep`, and `WriteAheadLog::open` ignored a leftover
   keep file. `WriteAheadLog::append` did not cut a failed write off.
-- **Fix:** the kept entries are written to `.wal.keep.tmp`, fsynced and
-  renamed to `.wal.keep` before the WAL is touched; `open` restores the WAL
-  from a published keep file and discards an unpublished one. The keep
-  file's removal is fsynced before new entries can follow. A failed append
-  truncates the WAL back to where the entry started.
+- **Fix:** the kept entries are written to `.wal.retain.tmp`, fsynced and
+  renamed to `.wal.retain` (directory fsync checked) before the WAL is
+  touched; `open` restores the WAL from a published `.wal.retain` and
+  discards an unpublished temp file. An older release's `.wal.keep` may be
+  partial, so it is used only when the WAL is empty, otherwise deleted. A
+  failed append truncates the WAL back to where the entry started. If that
+  truncation or a restore fails, appends are refused until the repair
+  succeeds (retried on the next append or checkpoint), so no entry can
+  follow a partial record or be overwritten by the retained entries.
+  `ironbase-backup restore` removes stale retain/keep files at the target.
 
 ### Fixed — WAL: a long WAL or one ending in garbage no longer stops the database from opening (mcp-server v1.0.601)
 
