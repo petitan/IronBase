@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — WAL: a crash during a checkpoint or a failed append no longer loses or blocks WAL entries (mcp-server v1.0.602)
+
+WAL/recovery audit 2026-10-14 W7, and the partial-append part of W6.
+
+- **Symptom (W7):** a crash in the middle of a checkpoint's WAL trim
+  (`retain_after`) could lose the entries it was meant to keep — the
+  transactions after the index flush watermark. The next open then
+  trusted index files that miss those writes.
+- **Symptom (W6, partial append):** a WAL append that failed part-way (disk
+  full) left its bytes in the file; every later entry followed an invalid
+  record, so the database could not be opened and checkpoints failed.
+- **Root cause:** `retain_after` truncated the WAL, then copied the kept
+  entries back from `.wal.keep`, and `WriteAheadLog::open` ignored a leftover
+  keep file. `WriteAheadLog::append` did not cut a failed write off.
+- **Fix:** the kept entries are written to `.wal.retain.tmp`, fsynced and
+  renamed to `.wal.retain` (directory fsync checked) before the WAL is
+  touched; `open` restores the WAL from a published `.wal.retain` and
+  discards an unpublished temp file. An older release's `.wal.keep` may be
+  partial, so it is used only when the WAL is empty, otherwise deleted. A
+  failed append truncates the WAL back to where the entry started. If that
+  truncation or a restore fails, appends are refused until the repair
+  succeeds (retried on the next append or checkpoint), so no entry can
+  follow a partial record or be overwritten by the retained entries.
+  `ironbase-backup restore` removes stale retain/keep files at the target.
+
 ### Fixed — WAL: a long WAL or one ending in garbage no longer stops the database from opening (mcp-server v1.0.601)
 
 WAL/recovery audit 2026-10-14 W5, W6.

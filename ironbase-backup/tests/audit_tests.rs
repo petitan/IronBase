@@ -253,6 +253,39 @@ fn restore_removes_foreign_wal_at_target() {
     assert_eq!(ids_in(&restored), vec![0, 1, 2]);
 }
 
+/// A checkpoint of another database interrupted while trimming its WAL left
+/// its retained entries next to the target; opening the restored file must
+/// not restore them over the backup's WAL (WAL/recovery audit 2026-10-14 W7).
+#[test]
+fn restore_removes_foreign_retained_wal_at_target() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    std::fs::create_dir(&backups).unwrap();
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        insert(&db, 0..3);
+        db.close().unwrap();
+    }
+    create_backup(&db_path, &backups, true, None).unwrap();
+
+    let other = dir.path().join("other.mlite");
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&other).unwrap();
+        insert(&db, 0..3);
+        db.checkpoint().unwrap();
+        insert(&db, 99..100);
+        std::mem::forget(db);
+    }
+    let restored = dir.path().join("restored.mlite");
+    for ext in ["wal.retain", "wal.keep"] {
+        std::fs::copy(other.with_extension("wal"), restored.with_extension(ext)).unwrap();
+    }
+
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(ids_in(&restored), vec![0, 1, 2]);
+}
+
 fn insert_incompressible(db: &DatabaseCore<StorageEngine>, n: i64) {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     for i in 0..n {
