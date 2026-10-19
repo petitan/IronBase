@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Search: document grouping keeps what only the vector lane found (mcp-server v1.0.605)
+
+Hybrid search review 2026-10-17 H1.
+
+- **Symptom:** `search` (and Rhai `db_hybrid_search` with grouping) dropped a
+  document whose relevant chunk shares no word with the query, even when it
+  was the best vector match; in a returned document, a chunk matched only by
+  the vector lane was missing from its passages.
+- **Root cause:** `build_doc_groups` took the top documents from the fused
+  (vector + BM25) ranking, then rebuilt each document's chunks only from a
+  BM25 re-query (Phase 2). A chunk without a BM25 hit was not in that
+  result, and a document with no such chunk was skipped.
+- **Fix:** every fused chunk of a top document is kept, in fused order with
+  its full score shape; Phase 2 only adds the further BM25 chunks after them.
+  Passages now start with the best fused chunk instead of the best BM25 one.
+
 ### Fixed — Storage: corrupt collection metadata JSON is recovered instead of failing the open (mcp-server v1.0.604)
 
 WAL/recovery audit 2026-10-14 W9.
