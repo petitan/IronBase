@@ -596,9 +596,12 @@ pub(crate) struct DocGroup {
 /// Two-phase document grouping over an already-fused, sorted result set.
 ///
 /// Phase 1: top-N unique doc_ids from `fused` (first occurrence = best score),
-/// recording per-chunk Phase-1 score info. Phase 2: one fulltext OR search
-/// filtered to those doc_ids → all relevant chunks; Phase-1 chunks are re-enriched
-/// with the full score shape, Phase-2-only chunks carry just `_text_score` (#71).
+/// keeping every fused chunk of those docs. Phase 2: one fulltext OR search
+/// filtered to those doc_ids → further relevant chunks. A doc's chunks are its
+/// Phase-1 chunks in fused order (full score shape) followed by its Phase-2-only
+/// chunks in BM25 order (just `_text_score`, #71). Phase 2 is lexical, so the
+/// Phase-1 chunks are kept as they are: a chunk or a whole doc found only by
+/// the vector lane has no BM25 hit and was dropped (hybrid review H1).
 /// Adjacent-merge `lift_common_fields` runs before `max_chunks_per_doc` truncation
 /// so doc-level fields are derived from the full set.
 ///
@@ -617,14 +620,8 @@ pub(crate) fn build_doc_groups(
     effective_text_field: &str,
     effective_text_fields: &Option<Vec<String>>,
 ) -> Result<(Vec<DocGroup>, usize)> {
-    // Phase 1: top N unique doc_ids + per-chunk score info
-    let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
-    let mut doc_order: Vec<String> = Vec::new();
-    let mut phase1_chunk_info: HashMap<String, FusedScoreInfo> = HashMap::new();
-
-    for item in fused {
-        let doc_id = item
-            .doc
+    let fused_doc_id = |item: &FusedResult| -> String {
+        item.doc
             .get("doc_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -633,12 +630,14 @@ pub(crate) fn build_doc_groups(
                     .get("_id")
                     .and_then(id_to_string)
                     .unwrap_or_else(|| item.id.clone())
-            });
+            })
+    };
 
-        if let Some(chunk_id) = item.doc.get("_id").and_then(id_to_string) {
-            phase1_chunk_info.insert(chunk_id, FusedScoreInfo::from(item));
-        }
-
+    // Phase 1: top N unique doc_ids (first occurrence = best score)
+    let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
+    let mut doc_order: Vec<String> = Vec::new();
+    for item in fused {
+        let doc_id = fused_doc_id(item);
         if !doc_best_scores.contains_key(&doc_id) {
             doc_best_scores.insert(doc_id.clone(), item.final_score);
             doc_order.push(doc_id);
@@ -646,6 +645,29 @@ pub(crate) fn build_doc_groups(
                 break;
             }
         }
+    }
+
+    // Every fused chunk of those docs, in fused order, with its score shape
+    let mut doc_groups: HashMap<String, Vec<Value>> = HashMap::with_capacity(doc_order.len());
+    let mut phase1_chunk_ids: HashSet<String> = HashSet::new();
+    for item in fused {
+        let doc_id = fused_doc_id(item);
+        if !doc_best_scores.contains_key(&doc_id) {
+            continue;
+        }
+        let chunk_id = item.doc.get("_id").and_then(id_to_string);
+        if let Some(ref id) = chunk_id {
+            phase1_chunk_ids.insert(id.clone());
+        }
+        let mut chunk = if let Some(ref proj) = projection {
+            apply_projection(&item.doc, proj)
+        } else {
+            item.doc.clone()
+        };
+        if let Value::Object(ref mut obj) = chunk {
+            apply_score_fields(obj, &FusedScoreInfo::from(item));
+        }
+        doc_groups.entry(doc_id).or_default().push(chunk);
     }
 
     // Phase 2: single fulltext OR search for the top doc_ids' chunks
@@ -672,8 +694,7 @@ pub(crate) fn build_doc_groups(
         adapter.fulltext_search(collection, effective_text_field, query, phase2_options)?
     };
 
-    // Group Phase 2 chunks by doc_id
-    let mut doc_groups: HashMap<String, Vec<Value>> = HashMap::with_capacity(doc_order.len());
+    // Append the Phase-2-only chunks after each doc's Phase-1 chunks
     for res in phase2_results {
         let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
             Some(did) => did.to_string(),
@@ -687,21 +708,19 @@ pub(crate) fn build_doc_groups(
         };
 
         let chunk_id = res.document.get("_id").and_then(id_to_string);
+        if chunk_id
+            .as_ref()
+            .is_some_and(|id| phase1_chunk_ids.contains(id))
+        {
+            continue; // already in the group from Phase 1
+        }
         let mut chunk = if let Some(ref proj) = projection {
             apply_projection(&res.document, proj)
         } else {
             res.document
         };
         if let Value::Object(ref mut obj) = chunk {
-            if let Some(ref id) = chunk_id {
-                if let Some(info) = phase1_chunk_info.get(id) {
-                    apply_score_fields(obj, info);
-                } else {
-                    obj.insert("_text_score".to_string(), json!(res.score));
-                }
-            } else {
-                obj.insert("_text_score".to_string(), json!(res.score));
-            }
+            obj.insert("_text_score".to_string(), json!(res.score));
         }
 
         doc_groups.entry(doc_id).or_default().push(chunk);
@@ -1378,6 +1397,102 @@ mod pipeline_integration_tests {
             }
         }
         counts
+    }
+
+    /// Hybrid review H1: grouping must keep what the vector lane found. Phase 2
+    /// re-queries BM25 only, so a document whose matching chunk shares no query
+    /// token ("sem") was dropped, and a chunk matched only by the vector lane
+    /// ("mixed" chunk 0) was dropped from a document that also had a BM25 hit.
+    #[test]
+    fn grouped_keeps_vector_only_documents_and_chunks() {
+        let (a, _t) = adapter();
+        let chunks = [
+            (
+                "sem",
+                0,
+                "The automobile needs periodic servicing.",
+                [1.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "mixed",
+                0,
+                "Engine oil and tyre pressure.",
+                [0.9, 0.1, 0.0, 0.0],
+            ),
+            (
+                "mixed",
+                1,
+                "Maintenance log template.",
+                [0.0, 0.0, 1.0, 0.0],
+            ),
+            (
+                "lex",
+                0,
+                "Maintenance schedule for printers.",
+                [0.0, 1.0, 0.0, 0.0],
+            ),
+        ];
+        for (id, idx, content, emb) in chunks {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id": id, "chunk_index": idx, "content": content, "embedding": emb }}),
+            );
+        }
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"car maintenance",
+            "vector":[1.0,0.0,0.0,0.0],"group_by_document":true,"limit":5}),
+        );
+        let (groups, total) = group(&a, &p, &fo);
+
+        let contents = |doc: &str| -> Vec<String> {
+            groups
+                .iter()
+                .find(|g| g.doc_id == doc)
+                .map(|g| {
+                    g.chunks
+                        .iter()
+                        .map(|c| c["content"].as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            contents("sem"),
+            vec!["The automobile needs periodic servicing."],
+            "vector-only document dropped from the groups"
+        );
+        let fused_mixed: Vec<String> = fo
+            .fused
+            .iter()
+            .filter(|f| f.doc["doc_id"] == "mixed")
+            .map(|f| f.doc["content"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            fused_mixed.len(),
+            2,
+            "both chunks must be fused: {fused_mixed:?}"
+        );
+        assert_eq!(
+            contents("mixed"),
+            fused_mixed,
+            "vector-only chunk dropped, or passages not in fused order"
+        );
+        assert!(!contents("lex").is_empty(), "BM25 document lost");
+        assert_eq!(total, groups.iter().map(|g| g.chunks.len()).sum::<usize>());
     }
 
     /// #71: grouped chunks carry the full Phase-1 engine score shape (not just _text_score).
