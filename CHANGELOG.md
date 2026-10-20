@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Hybrid search review 2026-10-17 H2.
 
 - **Symptom:** `vector_search_with_filter` (the vector lane of `search` with a
-  `filter`, and Rhai `db_vector_search` with a filter) returned few or none of
+  `filter`, and Rhai `db_vector_search_filter`) returned few or none of
   the nearest matching documents when the filter matched a small share of the
   collection: with 1% matching, 0 of the true top-10 in the regression test
   (the review measured recall 0.13 at 1%, 0.008 at 0.1%). Filters matching
