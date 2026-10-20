@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Fulltext: stop words and stemming run before accent folding (mcp-server v1.0.607)
+
+Hybrid search review 2026-10-17 F7. **Action needed: rebuild existing
+fulltext indexes** (see below).
+
+- **Symptom:** Hungarian (and other accented-language) fulltext search
+  missed inflected forms whose suffix has an accented vowel: "házból"
+  indexed as `hazbol` instead of `haz`, "tűzoltóságnál" as `tuzoltosagnal`
+  instead of `tuzoltosag`; accented stop words ("és", "már", "után",
+  "által", ...) were indexed instead of dropped.
+- **Root cause:** the tokenizers folded accents first, then matched stop
+  words and ran the Snowball stemmer, which both expect the accented word.
+- **Fix:** lowercase → stop words → stemming → accent folding, in
+  `tokenize`, `tokenize_case_sensitive`, `tokenize_raw`, highlighting and
+  `analyze_text` (shared `stem_and_fold`).
+- **Existing indexes:** an index built before this version holds the old
+  tokens, so queries for the affected words (e.g. "házból") no longer match
+  their old `hazbol` entries until the index is rebuilt. Rebuild each
+  fulltext index with `index_drop` + `index_create` (same field and
+  options). Indexes created from this version on need nothing.
+
 ### Fixed — Vector search: a selective filter returns the true nearest matches (mcp-server v1.0.606)
 
 Hybrid search review 2026-10-17 H2.
