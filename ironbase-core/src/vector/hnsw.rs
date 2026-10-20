@@ -641,6 +641,60 @@ impl HnswIndex {
             .collect()
     }
 
+    /// Top-`k` among the documents in `allowed` (hybrid review H2).
+    ///
+    /// [`search_with_filter`](Self::search_with_filter) only filters the
+    /// `ef_search * 3` nearest candidates, so a selective filter (1% of the
+    /// documents) left most of the matching neighbours unseen. Here a set no
+    /// larger than that candidate budget is scored exactly, and if the
+    /// graph search finds fewer than `k` allowed results, the allowed set is
+    /// scored exactly instead. The HNSW result is kept only when it already
+    /// holds `k` allowed documents: every allowed document outside the
+    /// candidates is farther than all of them.
+    pub fn search_with_allowed(
+        &self,
+        query: &[f32],
+        k: usize,
+        allowed: &HashSet<String>,
+    ) -> Vec<VectorSearchResult> {
+        let budget = (self.config.ef_search * 3).max(k);
+        if allowed.len() > budget {
+            let results = self.search_with_filter(query, k, |id| allowed.contains(id));
+            if results.len() >= k {
+                return results;
+            }
+        }
+        self.search_exact_among(query, k, allowed.iter().map(String::as_str))
+    }
+
+    /// Exact top-`k` of `ids` by similarity (brute force, O(k) memory).
+    /// Ids not in the index (no vector, or removed) are skipped; equal
+    /// scores are ordered by id so the result is deterministic.
+    pub fn search_exact_among<'a, I>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ids: I,
+    ) -> Vec<VectorSearchResult>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        if query.len() != self.config.dim {
+            return Vec::new();
+        }
+        let scored = ids.into_iter().filter_map(|id| {
+            let &idx = self.id_to_index.get(id)?;
+            let score = self.compute_similarity(query, &self.nodes[idx].vector);
+            Some(VectorSearchResult {
+                id: id.to_string(),
+                score,
+            })
+        });
+        crate::collection_core::topk_select(scored, k, |a: &VectorSearchResult, b| {
+            b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id))
+        })
+    }
+
     /// Batch insert multiple vectors
     pub fn batch_insert(&mut self, items: &[(&str, &[f32])]) -> Result<usize> {
         let mut inserted = 0;

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Vector search: a selective filter returns the true nearest matches (mcp-server v1.0.606)
+
+Hybrid search review 2026-10-17 H2.
+
+- **Symptom:** `vector_search_with_filter` (the vector lane of `search` with a
+  `filter`, and Rhai `db_vector_search` with a filter) returned few or none of
+  the nearest matching documents when the filter matched a small share of the
+  collection: with 1% matching, 0 of the true top-10 in the regression test
+  (the review measured recall 0.13 at 1%, 0.008 at 0.1%). Filters matching
+  more than 100,000 documents silently ignored the rest.
+- **Root cause:** the filter was applied only to the `ef_search * 3` nearest
+  graph candidates, so a selective filter left most matching neighbours
+  unseen; the pre-filter id set was capped at 100,000 in both the B-tree and
+  the scan path.
+- **Fix:** `HnswIndex::search_with_allowed` scores an allowed set no larger
+  than the candidate budget exactly, and falls back to an exact scan of the
+  allowed set when the graph search finds fewer than `k` allowed documents
+  (O(k) memory, deterministic ties). The pre-filter collects every matching
+  id, streaming the scan path instead of loading documents.
+
 ### Fixed — Search: document grouping keeps what only the vector lane found (mcp-server v1.0.605)
 
 Hybrid search review 2026-10-17 H1.
