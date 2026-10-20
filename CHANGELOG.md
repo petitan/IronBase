@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Fulltext: multi-field search orders equal scores deterministically (mcp-server v1.0.610)
+
+Hybrid search review 2026-10-17 M2.
+
+- **Symptom:** `fulltext_search_multi_ext` (multi-field `fulltext_search`,
+  the multi-field lexical lane of `search` / `db_hybrid_search`) returned
+  documents with equal scores in a different order on every call, and with
+  a `limit` a different document set (e.g. chunks sharing a replicated
+  title field all tie).
+- **Root cause:** the per-document merged scores sat in a `HashMap` and the
+  sort compared only the score, so ties kept the hash iteration order,
+  which is randomised per map.
+- **Fix:** score descending, `doc_id` ascending on ties, the same order as
+  single-field search.
+
 ### Fixed — Recovery: a crash no longer leaves fuzzy/fulltext/vector indexes stale for good (mcp-server v1.0.609)
 
 Hybrid search review 2026-10-17 F2.

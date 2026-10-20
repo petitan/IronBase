@@ -1102,12 +1102,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // sorting, so we need the full sorted list (candidate_limit is already
         // capped at 100K by calculate_candidate_limit, so this is bounded).
         let has_post_filter = parsed_filter.is_some() || !phrase_regexes.is_empty();
+        // Score descending, doc_id ascending on ties, as in single-field
+        // search: `doc_scores` is a HashMap, so comparing only the score left
+        // ties in hash order, different on every call (hybrid review M2)
         let score_cmp =
             |a: &(crate::DocumentId, (f64, HashSet<String>, Vec<String>)),
              b: &(crate::DocumentId, (f64, HashSet<String>, Vec<String>))| {
                 b.1 .0
                     .partial_cmp(&a.1 .0)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
             };
 
         let sorted_docs: Vec<_> = if has_post_filter {
