@@ -611,6 +611,13 @@ fn fold_accents(text: &str) -> String {
 // Tokenization
 // ============================================================================
 
+/// Compose decomposed accents (NFC): the stop-word lists and the stemmers
+/// match precomposed letters, so "ha\u{301}z" must reach them as "ház".
+/// Folding used to run first and erased the difference.
+fn compose(text: &str) -> String {
+    text.nfc().collect()
+}
+
 /// Stem a lowercased word (if a stemmer is set), then fold its accents (if
 /// enabled). Stop words and the Snowball stemmers expect accented words, so
 /// folding comes last: folded first, "házból" stayed "hazbol" and "és" was
@@ -641,7 +648,8 @@ pub fn tokenize(text: &str, options: &FtsOptions) -> Vec<String> {
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
     let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
 
-    text.to_lowercase()
+    compose(text)
+        .to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
@@ -660,7 +668,8 @@ pub fn tokenize_case_sensitive(text: &str, options: &FtsOptions) -> Vec<String> 
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
     let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
 
-    text.split_whitespace()
+    compose(text)
+        .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
         .filter(|s| s.chars().count() >= options.min_word_length)
@@ -716,7 +725,8 @@ pub fn tokenize_unique(text: &str, options: &FtsOptions) -> Vec<String> {
 pub fn tokenize_raw(text: &str, options: &FtsOptions) -> Vec<String> {
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
 
-    text.to_lowercase()
+    compose(text)
+        .to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
@@ -1283,7 +1293,7 @@ pub fn generate_highlights(
         } else if in_word {
             // End of word - check if it matches
             let word_end_byte = i;
-            let normalized = current_word.to_lowercase();
+            let normalized = compose(&current_word).to_lowercase();
 
             // Skip short words
             if normalized.chars().count() >= options.min_word_length {
@@ -1304,7 +1314,7 @@ pub fn generate_highlights(
     // Handle last word if text doesn't end with separator
     if in_word && !current_word.is_empty() {
         let word_end_byte = text.len();
-        let normalized = current_word.to_lowercase();
+        let normalized = compose(&current_word).to_lowercase();
 
         if normalized.chars().count() >= options.min_word_length {
             let stemmed = stem_and_fold(&normalized, stemmer.as_ref(), options);
@@ -1489,7 +1499,7 @@ pub fn analyze_text(text: &str, options: &FtsOptions) -> TextAnalysisResult {
 
         // Stop words and stemming see the accented word; `normalized` shows
         // it folded, as the index stores it
-        let lower = original.to_lowercase();
+        let lower = compose(&original).to_lowercase();
         let normalized = stem_and_fold(&lower, None, options);
 
         // Check min length
@@ -3839,6 +3849,11 @@ mod tests {
         assert_eq!(tokenize_case_sensitive("Házból és", &options), vec!["Haz"]);
         let unfolded = FtsOptions::with_settings(FtsLanguage::Hungarian, 2, false);
         assert_eq!(tokenize("házból és", &unfolded), vec!["ház"]);
+        // Decomposed accents (NFD) tokenize like precomposed ones
+        assert_eq!(
+            tokenize("ha\u{301}zbo\u{301}l e\u{301}s", &options),
+            tokenize("házból és", &options)
+        );
     }
 
     #[test]
