@@ -648,9 +648,9 @@ impl HnswIndex {
     /// documents) left most of the matching neighbours unseen. Here a set no
     /// larger than that candidate budget is scored exactly, and if the
     /// graph search finds fewer than `k` allowed results, the allowed set is
-    /// scored exactly instead. The HNSW result is kept only when it already
-    /// holds `k` allowed documents: every allowed document outside the
-    /// candidates is farther than all of them.
+    /// scored exactly instead. When the graph search does return `k` allowed
+    /// documents they are kept: as accurate as the unfiltered graph search,
+    /// i.e. approximate like any HNSW result.
     pub fn search_with_allowed(
         &self,
         query: &[f32],
