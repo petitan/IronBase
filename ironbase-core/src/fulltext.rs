@@ -611,41 +611,43 @@ fn fold_accents(text: &str) -> String {
 // Tokenization
 // ============================================================================
 
+/// Stem a lowercased word (if a stemmer is set), then fold its accents (if
+/// enabled). Stop words and the Snowball stemmers expect accented words, so
+/// folding comes last: folded first, "házból" stayed "hazbol" and "és" was
+/// not a stop word (hybrid review F7).
+fn stem_and_fold(lower: &str, stemmer: Option<&Stemmer>, options: &FtsOptions) -> String {
+    let stem = stemmer
+        .map(|st| st.stem(lower).to_string())
+        .unwrap_or_else(|| lower.to_string());
+    if options.accent_folding {
+        fold_accents(&stem)
+    } else {
+        stem
+    }
+}
+
 /// Tokenize text according to FTS options
 ///
 /// Pipeline:
-/// 1. NFD normalization (separates accents)
-/// 2. Accent folding (á → a)
-/// 3. Lowercase
-/// 4. Split on whitespace
-/// 5. Strip punctuation
-/// 6. Filter by min length
-/// 7. Filter stop words (if language set)
-/// 8. Apply stemming (if language set)
+/// 1. Lowercase
+/// 2. Split on whitespace
+/// 3. Strip punctuation
+/// 4. Filter by min length
+/// 5. Filter stop words (if language set)
+/// 6. Apply stemming (if language set)
+/// 7. Accent folding (á → a), after the stop words and the stemmer, which
+///    expect accented words
 pub fn tokenize(text: &str, options: &FtsOptions) -> Vec<String> {
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
     let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
 
-    // Apply accent folding if enabled
-    let processed = if options.accent_folding {
-        fold_accents(text)
-    } else {
-        text.to_string()
-    };
-
-    processed
-        .to_lowercase()
+    text.to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
         .filter(|s| s.chars().count() >= options.min_word_length)
         .filter(|s| !stop_words.contains(*s))
-        .map(|s| {
-            stemmer
-                .as_ref()
-                .map(|st| st.stem(s).to_string())
-                .unwrap_or_else(|| s.to_string())
-        })
+        .map(|s| stem_and_fold(s, stemmer.as_ref(), options))
         .collect()
 }
 
@@ -658,14 +660,7 @@ pub fn tokenize_case_sensitive(text: &str, options: &FtsOptions) -> Vec<String> 
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
     let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
 
-    let processed = if options.accent_folding {
-        fold_accents(text)
-    } else {
-        text.to_string()
-    };
-
-    processed
-        .split_whitespace()
+    text.split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
         .filter(|s| s.chars().count() >= options.min_word_length)
@@ -684,18 +679,23 @@ pub fn tokenize_case_sensitive(text: &str, options: &FtsOptions) -> Vec<String> 
                 .as_ref()
                 .map(|st| st.stem(&lower_word).to_string())
                 .unwrap_or(lower_word);
-            Some(
-                stem.chars()
-                    .enumerate()
-                    .map(|(i, c)| {
-                        if lower.get(i) == Some(&c) {
-                            chars[i]
-                        } else {
-                            c
-                        }
-                    })
-                    .collect(),
-            )
+            let cased: String = stem
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if lower.get(i) == Some(&c) {
+                        chars[i]
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            // Fold last, like `tokenize` (hybrid review F7)
+            Some(if options.accent_folding {
+                fold_accents(&cased)
+            } else {
+                cased
+            })
         })
         .collect()
 }
@@ -716,20 +716,13 @@ pub fn tokenize_unique(text: &str, options: &FtsOptions) -> Vec<String> {
 pub fn tokenize_raw(text: &str, options: &FtsOptions) -> Vec<String> {
     let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
 
-    let processed = if options.accent_folding {
-        fold_accents(text)
-    } else {
-        text.to_string()
-    };
-
-    processed
-        .to_lowercase()
+    text.to_lowercase()
         .split_whitespace()
         .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|s| !s.is_empty())
         .filter(|s| s.chars().count() >= options.min_word_length)
         .filter(|s| !stop_words.contains(*s))
-        .map(|s| s.to_string())
+        .map(|s| stem_and_fold(s, None, options))
         .collect()
 }
 
@@ -1290,19 +1283,12 @@ pub fn generate_highlights(
         } else if in_word {
             // End of word - check if it matches
             let word_end_byte = i;
-            let normalized = if options.accent_folding {
-                fold_accents(&current_word).to_lowercase()
-            } else {
-                current_word.to_lowercase()
-            };
+            let normalized = current_word.to_lowercase();
 
             // Skip short words
             if normalized.chars().count() >= options.min_word_length {
-                // Apply stemming
-                let stemmed = stemmer
-                    .as_ref()
-                    .map(|st| st.stem(&normalized).to_string())
-                    .unwrap_or_else(|| normalized.clone());
+                // Stem, then fold (as `tokenize` does)
+                let stemmed = stem_and_fold(&normalized, stemmer.as_ref(), options);
 
                 // Check if this word matches any query token
                 if query_set.contains(stemmed.as_str()) {
@@ -1318,17 +1304,10 @@ pub fn generate_highlights(
     // Handle last word if text doesn't end with separator
     if in_word && !current_word.is_empty() {
         let word_end_byte = text.len();
-        let normalized = if options.accent_folding {
-            fold_accents(&current_word).to_lowercase()
-        } else {
-            current_word.to_lowercase()
-        };
+        let normalized = current_word.to_lowercase();
 
         if normalized.chars().count() >= options.min_word_length {
-            let stemmed = stemmer
-                .as_ref()
-                .map(|st| st.stem(&normalized).to_string())
-                .unwrap_or_else(|| normalized.clone());
+            let stemmed = stem_and_fold(&normalized, stemmer.as_ref(), options);
 
             if query_set.contains(stemmed.as_str()) {
                 matches.push((word_start_byte, word_end_byte, current_word.clone()));
@@ -1480,9 +1459,9 @@ pub struct TextAnalysisResult {
 /// This function is useful for debugging and understanding how text
 /// is processed for fulltext search. It shows each step of the pipeline:
 /// 1. Original word extraction
-/// 2. Accent folding and lowercase
-/// 3. Stemming
-/// 4. Stop word filtering
+/// 2. Lowercase (`normalized` also shows the accent folding)
+/// 3. Stop word filtering
+/// 4. Stemming, then accent folding (as in [`tokenize`])
 ///
 /// # Example
 /// ```ignore
@@ -1508,15 +1487,13 @@ pub fn analyze_text(text: &str, options: &FtsOptions) -> TextAnalysisResult {
             continue;
         }
 
-        // Normalize: accent fold + lowercase
-        let normalized = if options.accent_folding {
-            fold_accents(&original).to_lowercase()
-        } else {
-            original.to_lowercase()
-        };
+        // Stop words and stemming see the accented word; `normalized` shows
+        // it folded, as the index stores it
+        let lower = original.to_lowercase();
+        let normalized = stem_and_fold(&lower, None, options);
 
         // Check min length
-        if normalized.chars().count() < options.min_word_length {
+        if lower.chars().count() < options.min_word_length {
             tokens.push(TokenAnalysis {
                 original: original.clone(),
                 normalized: normalized.clone(),
@@ -1531,7 +1508,7 @@ pub fn analyze_text(text: &str, options: &FtsOptions) -> TextAnalysisResult {
         }
 
         // Check stop words
-        if stop_words.contains(normalized.as_str()) {
+        if stop_words.contains(lower.as_str()) {
             stop_words_removed.push(original.clone());
             tokens.push(TokenAnalysis {
                 original: original.clone(),
@@ -1543,11 +1520,8 @@ pub fn analyze_text(text: &str, options: &FtsOptions) -> TextAnalysisResult {
             continue;
         }
 
-        // Apply stemming
-        let stemmed = stemmer
-            .as_ref()
-            .map(|st| st.stem(&normalized).to_string())
-            .unwrap_or_else(|| normalized.clone());
+        // Apply stemming, then accent folding
+        let stemmed = stem_and_fold(&lower, stemmer.as_ref(), options);
 
         tokens.push(TokenAnalysis {
             original,
@@ -3845,6 +3819,26 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|t| t.starts_with("nagy") || t.starts_with("szep") || t.starts_with("haz")));
+    }
+
+    /// Hybrid review F7: stop words and the Snowball stemmer expect accented
+    /// words. Folded first, "házból" stayed "hazbol" (the -ból suffix was not
+    /// recognised) and "és"/"már" were not stop words.
+    #[test]
+    fn test_hungarian_stems_and_stop_words_before_folding() {
+        let options = FtsOptions::new(FtsLanguage::Hungarian);
+        assert_eq!(
+            tokenize("házból házban tűzoltóságnál és már", &options),
+            vec!["haz", "haz", "tuzoltosag"]
+        );
+        assert_eq!(
+            tokenize_raw("házból és már", &options),
+            vec!["hazbol"],
+            "stop words are matched before folding"
+        );
+        assert_eq!(tokenize_case_sensitive("Házból és", &options), vec!["Haz"]);
+        let unfolded = FtsOptions::with_settings(FtsLanguage::Hungarian, 2, false);
+        assert_eq!(tokenize("házból és", &unfolded), vec!["ház"]);
     }
 
     #[test]
