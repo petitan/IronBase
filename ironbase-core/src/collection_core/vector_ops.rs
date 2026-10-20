@@ -565,27 +565,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(ids) = self.resolve_filter_to_ids(filter)? {
                 ids
             } else {
-                // Fallback: load documents with projection (for complex filters without index)
-                use crate::find_options::FindOptions;
-                use std::collections::HashMap;
-
-                let mut projection = HashMap::new();
-                projection.insert("_id".to_string(), 1);
-
-                let options = FindOptions::with_safe_defaults()
-                    .with_projection(projection)
-                    .with_limit(100_000);
-
-                let matching_docs = self.find_with_options(filter, options)?;
-                matching_docs
-                    .iter()
-                    .filter_map(|doc| {
-                        doc.get("_id").and_then(|id| {
-                            let did = serde_json::from_value::<DocumentId>(id.clone()).ok()?;
-                            Some(doc_id_to_string(&did))
-                        })
-                    })
-                    .collect()
+                // Fallback (complex filters without index): stream the matches
+                // and keep only their ids. No cap: a truncated set silently
+                // dropped the matches past it (hybrid review H2); the set is
+                // no larger than the index's own id map.
+                let mut ids = std::collections::HashSet::new();
+                let mut cursor = self.find_streaming(filter)?;
+                while let Some(doc) = cursor.next()? {
+                    if let Some(did) = doc
+                        .get("_id")
+                        .and_then(|id| serde_json::from_value::<DocumentId>(id.clone()).ok())
+                    {
+                        ids.insert(doc_id_to_string(&did));
+                    }
+                }
+                ids
             }
         };
 
@@ -597,8 +591,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let indexes = self.indexes.read();
             if let Some(hnsw) = indexes.get_vector_index(&index_name) {
-                let results =
-                    hnsw.search_with_filter(query_vector, limit, |id| allowed_ids.contains(id));
+                let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids);
                 // Need to release lock before loading documents
                 drop(indexes);
                 return self.load_documents_for_results(results);
@@ -607,7 +600,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Slow path: load from file and add to IndexManager
         let hnsw = self.load_hnsw_index_from_file(&index_meta)?;
-        let results = hnsw.search_with_filter(query_vector, limit, |id| allowed_ids.contains(id));
+        let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids);
 
         // Add to IndexManager for future queries
         {
@@ -631,7 +624,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// - `{"field": {"$eq": value}}`
     ///
     /// Pattern: mod.rs:2557-2577 (QueryPlan::IndexScan equality execution via range_query)
-    /// Memory: O(k) where k = matching doc count, capped at 100K (same limit as find_with_options fallback)
+    /// Memory: O(k) where k = matching doc count (uncapped, like the fallback: hybrid review H2)
     fn resolve_filter_to_ids(
         &self,
         filter: &Value,
@@ -703,10 +696,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         // Point lookup via range_query (pattern: mod.rs:2576-2577)
-        // Limit 100_000 — same cap as find_with_options fallback
         let mode = RangeQueryMode::Scan {
             skip: 0,
-            limit: Some(100_000),
+            limit: None,
             order: ScanOrder::Asc,
         };
         let doc_ids = btree
@@ -1261,5 +1253,63 @@ mod tests {
             assert_eq!(doc.get("category").unwrap(), "a");
         }
         assert!(!results.is_empty());
+    }
+
+    /// Hybrid review H2: a selective filter must still return the true
+    /// nearest matching documents. The filter used to run only on the
+    /// `ef_search * 3` nearest candidates, so with 1% of documents matching
+    /// most of the matching neighbours were never seen.
+    #[test]
+    fn test_vector_search_with_selective_filter_is_exact() {
+        let mut seed = 42u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (1u64 << 31) as f32) - 0.5
+        };
+        for with_btree in [false, true] {
+            let db = create_test_db();
+            let coll = db.collection("test").unwrap();
+            let mut acme: Vec<(String, Vec<f32>)> = Vec::new();
+            for i in 0..2000 {
+                let vector: Vec<f32> = (0..16).map(|_| next()).collect();
+                let customer = if i % 100 == 0 { "acme" } else { "other" };
+                let name = format!("doc{}", i);
+                if customer == "acme" {
+                    acme.push((name.clone(), vector.clone()));
+                }
+                db.insert_one(
+                    "test",
+                    json_to_hashmap(json!({
+                        "name": name, "customer": customer, "embedding": vector
+                    })),
+                )
+                .unwrap();
+            }
+            if with_btree {
+                coll.create_index("customer".to_string(), false, false)
+                    .unwrap();
+            }
+            coll.create_vector_index("embedding", VectorIndexConfig::new(16))
+                .unwrap();
+
+            let query: Vec<f32> = (0..16).map(|_| next()).collect();
+            acme.sort_by(|a, b| {
+                let sa = crate::vector::simd::cosine_similarity(&query, &a.1);
+                let sb = crate::vector::simd::cosine_similarity(&query, &b.1);
+                sb.total_cmp(&sa)
+            });
+            let expected: Vec<&str> = acme.iter().take(10).map(|(n, _)| n.as_str()).collect();
+
+            let results = coll
+                .vector_search_with_filter("embedding", &query, &json!({"customer": "acme"}), 10)
+                .unwrap();
+            let got: Vec<&str> = results
+                .iter()
+                .map(|(doc, _)| doc["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(got, expected, "with_btree={}", with_btree);
+        }
     }
 }
