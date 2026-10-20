@@ -23,6 +23,8 @@ CLAUDE.md-ből (v1.0.544, 2026-06-18). Operatív RAG-referencia: `docs/RAG_PIPEL
 
 **RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
 
+A Σ csak azokon az ágakon fut, amelyek visszaadták a dokumentumot: a hiányzó ág 0-t ad (szabványos RRF, v1.0.611; `_vector_rank`/`_text_rank` = 0). Korábban `internal_limit + 1` büntetőrangot kapott, amitől a sorrend a kért `limit`-től függött (hibrid felmérés M3).
+
 **Reranking pipeline (multiplicatív boost):**
 - Exact phrase match: 1.5x
 - Keyword density: 1.0-1.3x
