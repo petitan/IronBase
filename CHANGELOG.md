@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Auto-embedding: updates that change the source field re-embed the document (mcp-server v1.0.608)
+
+Hybrid search review 2026-10-17 F3 (update path).
+
+- **Symptom:** with auto-embedding enabled, `update_one` / `update_many`
+  that changed the source field (e.g. `content`) kept the embedding of the
+  old text, so vector search ranked the document by content it no longer
+  had. `update_many` never embedded; `update_one` only on upsert.
+- **Root cause:** only `insert_one`, `insert_many` and the upsert branch of
+  `update_one` called the auto-embedding code.
+- **Fix:** when an update writes the source field (or a path above or below
+  it, `$rename` included) and does not write the target field itself, the
+  updated documents are re-embedded in batches of 64. `skip_if_exists` does
+  not apply there (the existing vector is stale); a document whose source
+  is gone or empty loses its embedding. `update_one` pins the update to the
+  document the filter matched (`$and` with its `_id`), so the re-embedded
+  document is the one that changed; `update_many` notes the matching ids
+  before the update. The update is already stored when embedding runs, so
+  an embedding failure is reported as `auto_embed_error` in the response
+  instead of failing the call; `auto_embedded_count` reports the count.
+- **Not covered:** documents already stale from earlier updates; the
+  backfill skips documents that have an embedding (no source hash is
+  stored). Re-embed them with `--force-reembed` or by re-setting the source.
+
 ### Fixed — Fulltext: stop words and stemming run before accent folding (mcp-server v1.0.607)
 
 Hybrid search review 2026-10-17 F7. **Action needed: rebuild existing
