@@ -36,7 +36,7 @@ pub fn dispatch(
         "find" => handle_find(params, adapter, limits, cancel_flag),
         "find_one" => handle_find_one(params, adapter),
         "update_one" => handle_update_one(params, adapter, embedding_manager),
-        "update_many" => handle_update_many(params, adapter),
+        "update_many" => handle_update_many(params, adapter, embedding_manager),
         "delete_one" => handle_delete_one(params, adapter),
         "delete_many" => handle_delete_many(params, adapter),
         "count" => handle_count_documents(params, adapter),
@@ -100,6 +100,145 @@ fn apply_auto_embedding(
     }
 
     Ok(true)
+}
+
+/// Whether `update` writes `field`, or a path above or below it. A
+/// replacement document (no `$` operators) writes every field.
+fn update_touches_field(update: &Value, field: &str) -> bool {
+    let Some(ops) = update.as_object() else {
+        return false;
+    };
+    let related = |path: &str| {
+        path == field
+            || path.starts_with(&format!("{}.", field))
+            || field.starts_with(&format!("{}.", path))
+    };
+    ops.iter().any(|(op, spec)| {
+        if !op.starts_with('$') {
+            return true;
+        }
+        spec.as_object().is_some_and(|paths| {
+            paths.iter().any(|(path, value)| {
+                // $rename also writes the new name
+                related(path) || (op == "$rename" && value.as_str().is_some_and(related))
+            })
+        })
+    })
+}
+
+/// The auto-embedding config of `collection` when `update` changes its
+/// source field and does not write the target itself (a caller-supplied
+/// embedding is kept). Updates used to leave the old embedding in place
+/// (hybrid review F3).
+fn reembed_config_for_update(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    update: &Value,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Option<ironbase_core::storage::AutoEmbeddingConfig> {
+    embedding_manager.as_ref()?;
+    let config = adapter.get_auto_embedding_config(collection).ok()??;
+    (config.enabled
+        && update_touches_field(update, &config.source_field)
+        && !update_touches_field(update, &config.target_field))
+    .then_some(config)
+}
+
+/// Documents re-embedded per provider batch after an update
+const REEMBED_BATCH: usize = 64;
+
+/// Re-embed the documents `ids` from their current source field after an
+/// update changed it. `skip_if_exists` does not apply: the existing
+/// embedding was made from the old text. A document whose source is gone
+/// or empty loses its embedding instead of keeping a stale one. Returns how
+/// many documents were re-embedded.
+fn refresh_auto_embeddings(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    config: &ironbase_core::storage::AutoEmbeddingConfig,
+    manager: &EmbeddingManager,
+    ids: &[Value],
+) -> Result<usize> {
+    let provider = manager.get_provider(&config.provider).ok_or_else(|| {
+        McpError::internal(format!(
+            "Embedding provider '{}' not available",
+            config.provider
+        ))
+    })?;
+    let mut refreshed = 0;
+    for batch in ids.chunks(REEMBED_BATCH) {
+        check_cancelled()?;
+        let mut texts: Vec<(Value, String)> = Vec::new();
+        for id in batch {
+            let Some(doc) = adapter.find_one(collection, json!({"_id": id}))? else {
+                continue; // deleted since
+            };
+            let text = match doc.get(&config.source_field) {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Null) | None => String::new(),
+                Some(other) => other.to_string(),
+            };
+            if text.is_empty() {
+                adapter.update_one(
+                    collection,
+                    json!({"_id": id}),
+                    json!({"$unset": {&config.target_field: ""}}),
+                )?;
+            } else {
+                texts.push((id.clone(), text));
+            }
+        }
+        if texts.is_empty() {
+            continue;
+        }
+        let refs: Vec<&str> = texts.iter().map(|(_, t)| t.as_str()).collect();
+        let embeddings = provider
+            .embed_batch(&refs)
+            .map_err(|e| McpError::internal(format!("Embedding generation failed: {}", e)))?;
+        for ((id, _), embedding) in texts.iter().zip(embeddings) {
+            if let Some(expected_dim) = config.dimension {
+                if embedding.len() != expected_dim {
+                    return Err(McpError::internal(format!(
+                        "Embedding dimension mismatch: expected {}, got {}",
+                        expected_dim,
+                        embedding.len()
+                    )));
+                }
+            }
+            adapter.update_one(
+                collection,
+                json!({"_id": id}),
+                json!({"$set": {&config.target_field: embedding}}),
+            )?;
+            refreshed += 1;
+        }
+    }
+    Ok(refreshed)
+}
+
+/// Re-embed after an update and report the outcome in `response`. The
+/// update is already stored, so an embedding failure is reported, not
+/// returned as the tool's error.
+fn report_refresh(
+    response: &mut Value,
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    config: &ironbase_core::storage::AutoEmbeddingConfig,
+    manager: &EmbeddingManager,
+    ids: &[Value],
+) {
+    match refresh_auto_embeddings(adapter, collection, config, manager, ids) {
+        Ok(0) => {}
+        Ok(n) => response["auto_embedded_count"] = json!(n),
+        Err(e) => {
+            tracing::warn!(
+                "Auto-embedding after update failed in '{}': {}",
+                collection,
+                e
+            );
+            response["auto_embed_error"] = json!(e.to_string());
+        }
+    }
 }
 
 fn handle_insert_one(
@@ -299,8 +438,22 @@ fn handle_update_one(
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
 
+    // When the source field changes, pin the update to the document it
+    // matches now, so the re-embedded document is the one that changed
+    let reembed = reembed_config_for_update(adapter, &p.collection, &p.update, embedding_manager);
+    let mut filter = p.filter;
+    let mut target_id = None;
+    if reembed.is_some() {
+        target_id = adapter
+            .find_one(&p.collection, filter.clone())?
+            .and_then(|doc| doc.get("_id").cloned());
+        if let Some(ref id) = target_id {
+            filter = json!({"$and": [filter, {"_id": id}]});
+        }
+    }
+
     // Use update_one_with_options for upsert support
-    let result = adapter.update_one_with_options(&p.collection, p.filter, p.update, p.upsert)?;
+    let result = adapter.update_one_with_options(&p.collection, filter, p.update, p.upsert)?;
 
     // Build response - include upserted_id if present
     let mut response = json!({
@@ -339,10 +492,27 @@ fn handle_update_one(
         response["auto_embedded"] = json!(true);
     }
 
+    if let (Some(config), Some(id), Some(manager)) = (&reembed, target_id, embedding_manager) {
+        if result.modified_count > 0 {
+            report_refresh(
+                &mut response,
+                adapter,
+                &p.collection,
+                config,
+                manager,
+                &[id],
+            );
+        }
+    }
+
     Ok(response)
 }
 
-fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_update_many(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     check_cancelled()?;
 
     // Note: UpdateManyParams doesn't have upsert field - this is by design.
@@ -353,11 +523,35 @@ fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
 
+    // When the source field changes, note the matching documents first:
+    // the update may make them stop matching the filter
+    let reembed = reembed_config_for_update(adapter, &p.collection, &p.update, embedding_manager);
+    let ids: Vec<Value> = if reembed.is_some() {
+        let options = FindOptions {
+            projection: Some(json!({"_id": 1})),
+            ..Default::default()
+        };
+        adapter
+            .find(&p.collection, p.filter.clone(), options)?
+            .documents
+            .into_iter()
+            .filter_map(|doc| doc.get("_id").cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let result = adapter.update_many(&p.collection, p.filter, p.update)?;
-    Ok(json!({
+    let mut response = json!({
         "matched_count": result.matched_count,
         "modified_count": result.modified_count
-    }))
+    });
+    if let (Some(config), Some(manager)) = (&reembed, embedding_manager) {
+        if result.modified_count > 0 {
+            report_refresh(&mut response, adapter, &p.collection, config, manager, &ids);
+        }
+    }
+    Ok(response)
 }
 
 fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -418,4 +612,171 @@ fn handle_aggregate(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Val
 
     let results = adapter.aggregate(&p.collection, p.pipeline)?;
     Ok(json!({"results": results, "count": results.len()}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::{EmbeddingProvider, EmbeddingResult};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
+
+    /// Embeds a text as [length, 1]; counts the texts it embedded
+    struct CountingProvider(Arc<AtomicUsize>);
+
+    impl EmbeddingProvider for CountingProvider {
+        fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![text.chars().count() as f32, 1.0])
+        }
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn model_name(&self) -> &str {
+            "counting"
+        }
+        fn provider_name(&self) -> &str {
+            "counting"
+        }
+    }
+
+    fn setup() -> (
+        Arc<IronBaseAdapter>,
+        Option<Arc<EmbeddingManager>>,
+        Arc<AtomicUsize>,
+        TempDir,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let adapter = Arc::new(
+            IronBaseAdapter::new(tmp.path().join("t.mlite").to_string_lossy().to_string()).unwrap(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut manager = EmbeddingManager::new();
+        manager.register_provider("counting", Arc::new(CountingProvider(calls.clone())));
+        let manager = Some(Arc::new(manager));
+        for (id, content) in [(1, "abc"), (2, "abcd"), (3, "xy")] {
+            adapter
+                .insert_one(
+                    "kb",
+                    json!({"_id": id, "group": "g", "content": content, "embedding": [0.0, 0.0]}),
+                )
+                .unwrap();
+        }
+        adapter
+            .set_auto_embedding_config(
+                "kb",
+                Some(ironbase_core::storage::AutoEmbeddingConfig {
+                    enabled: true,
+                    source_field: "content".to_string(),
+                    target_field: "embedding".to_string(),
+                    provider: "counting".to_string(),
+                    dimension: Some(2),
+                    skip_if_exists: true,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        (adapter, manager, calls, tmp)
+    }
+
+    fn embedding_of(adapter: &IronBaseAdapter, id: i64) -> Option<Value> {
+        adapter
+            .find_one("kb", json!({"_id": id}))
+            .unwrap()
+            .unwrap()
+            .get("embedding")
+            .cloned()
+    }
+
+    /// Hybrid review F3: an update that changes the source field re-embeds
+    /// the document, even with skip_if_exists (the old vector is stale)
+    #[test]
+    fn update_one_reembeds_changed_source() {
+        let (a, m, calls, _t) = setup();
+        let out = handle_update_one(
+            json!({"collection":"kb","filter":{"content":"abc"},"update":{"$set":{"content":"abcdefg"}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(out["auto_embedded_count"], json!(1));
+        assert_eq!(embedding_of(&a, 1), Some(json!([7.0, 1.0])));
+        assert_eq!(embedding_of(&a, 2), Some(json!([0.0, 0.0])));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn update_without_source_change_does_not_embed() {
+        let (a, m, calls, _t) = setup();
+        handle_update_one(
+            json!({"collection":"kb","filter":{"_id":1},"update":{"$set":{"group":"h"}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        // A caller-supplied embedding next to the new text is kept
+        handle_update_one(
+            json!({"collection":"kb","filter":{"_id":2},
+                   "update":{"$set":{"content":"zz","embedding":[9.0, 9.0]}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(embedding_of(&a, 2), Some(json!([9.0, 9.0])));
+    }
+
+    #[test]
+    fn update_many_reembeds_every_changed_document() {
+        let (a, m, _calls, _t) = setup();
+        // The update makes the documents stop matching the filter
+        let out = handle_update_many(
+            json!({"collection":"kb","filter":{"group":"g"},
+                   "update":{"$set":{"content":"hello","group":"done"}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(out["auto_embedded_count"], json!(3));
+        for id in 1..=3 {
+            assert_eq!(embedding_of(&a, id), Some(json!([5.0, 1.0])));
+        }
+    }
+
+    #[test]
+    fn unsetting_the_source_drops_the_embedding() {
+        let (a, m, _calls, _t) = setup();
+        handle_update_one(
+            json!({"collection":"kb","filter":{"_id":3},"update":{"$unset":{"content":""}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(embedding_of(&a, 3), None);
+    }
+
+    #[test]
+    fn touches_field_paths() {
+        assert!(update_touches_field(
+            &json!({"$set":{"content":1}}),
+            "content"
+        ));
+        assert!(update_touches_field(
+            &json!({"$set":{"content.title":1}}),
+            "content"
+        ));
+        assert!(update_touches_field(&json!({"$set":{"doc":1}}), "doc.text"));
+        assert!(update_touches_field(
+            &json!({"$rename":{"old":"content"}}),
+            "content"
+        ));
+        assert!(!update_touches_field(
+            &json!({"$set":{"contents":1}}),
+            "content"
+        ));
+        assert!(update_touches_field(
+            &json!({"content":"replacement"}),
+            "content"
+        ));
+    }
 }
