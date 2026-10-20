@@ -452,3 +452,56 @@ fn test_multi_field_hungarian_stemming() {
         .collect();
     assert!(tags.contains(&"both_fields"));
 }
+
+/// Hybrid review M2: equal scores are ordered by doc id (as in single-field
+/// search). The merged per-document scores sat in a HashMap and only the
+/// score was compared, so ties came back in hash order: a different order,
+/// and with a limit a different document set, on every call.
+#[test]
+fn test_multi_field_ties_are_deterministic() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for i in 0..12 {
+        db.insert_one(
+            "reports",
+            doc! {
+                "title" => "Budget report",
+                "body" => format!("section {} numbers", i)
+            },
+        )
+        .unwrap();
+    }
+    let coll = db.collection("reports").unwrap();
+    coll.create_fulltext_index("title".to_string(), "none", None, None)
+        .unwrap();
+    coll.create_fulltext_index("body".to_string(), "none", None, None)
+        .unwrap();
+
+    let ids = || -> Vec<String> {
+        let options = FulltextSearchOptions {
+            limit: Some(5),
+            ..Default::default()
+        };
+        coll.fulltext_search_multi_ext(&["title", "body"], "budget", options)
+            .unwrap()
+            .iter()
+            .map(|r| r.document["_id"].to_string())
+            .collect()
+    };
+    let first = ids();
+    let mut all: Vec<serde_json::Value> = coll
+        .find(&json!({}))
+        .unwrap()
+        .into_iter()
+        .map(|d| d["_id"].clone())
+        .collect();
+    all.sort_by(|a, b| {
+        let a: ironbase_core::DocumentId = serde_json::from_value(a.clone()).unwrap();
+        let b: ironbase_core::DocumentId = serde_json::from_value(b.clone()).unwrap();
+        a.cmp(&b)
+    });
+    let expected: Vec<String> = all.iter().take(5).map(|v| v.to_string()).collect();
+    assert_eq!(first, expected, "ties must be ordered by doc id");
+    for _ in 0..20 {
+        assert_eq!(ids(), first, "tie order changed between identical calls");
+    }
+}
