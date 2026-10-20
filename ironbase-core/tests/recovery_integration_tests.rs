@@ -1100,3 +1100,115 @@ fn test_corrupted_metadata_json_keeps_later_documents() {
         13
     );
 }
+
+/// Hybrid review F2: a crash after create_vector_index must not leave the
+/// vector index missing the documents written after it
+#[test]
+fn test_vector_index_after_crash_sees_later_documents() {
+    use ironbase_core::vector::VectorIndexConfig;
+
+    let temp_dir = TempDir::new().unwrap();
+    let crashed = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("vec.mlite");
+    let vec_for = |i: i64| -> Vec<f64> {
+        (0..4)
+            .map(|j| {
+                if j == (i % 4) as usize {
+                    1.0
+                } else {
+                    (i as f64) / 1000.0
+                }
+            })
+            .collect()
+    };
+
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 1..=8 {
+            db.insert_one("test", {
+                let mut d = doc_with_id(i, &format!("User{}", i));
+                d.insert("embedding".to_string(), json!(vec_for(i)));
+                d
+            })
+            .unwrap();
+        }
+        db.collection("test")
+            .unwrap()
+            .create_vector_index("embedding", VectorIndexConfig::new(4))
+            .unwrap();
+        for i in 9..=12 {
+            db.insert_one("test", {
+                let mut d = doc_with_id(i, &format!("User{}", i));
+                d.insert("embedding".to_string(), json!(vec_for(i)));
+                d
+            })
+            .unwrap();
+        }
+        // Simulate a crash: copy every file but the lock while it is open
+        for e in fs::read_dir(temp_dir.path()).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".lock") {
+                fs::copy(e.path(), crashed.path().join(&name)).unwrap();
+            }
+        }
+    }
+
+    let db = DatabaseCore::open(crashed.path().join("vec.mlite")).unwrap();
+    let results = db
+        .collection("test")
+        .unwrap()
+        .vector_search("embedding", &[1.0, 0.0, 0.0, 0.0], 12)
+        .unwrap();
+    let mut names: Vec<String> = results
+        .iter()
+        .map(|(d, _)| d["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        results.len(),
+        12,
+        "vector index lost documents: {:?}",
+        names
+    );
+}
+
+/// Hybrid review F2, fulltext: the same failed-replay path must rebuild a
+/// loaded fulltext index too
+#[test]
+fn test_fulltext_index_after_crash_sees_later_documents() {
+    let temp_dir = TempDir::new().unwrap();
+    let crashed = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("fts.mlite");
+
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 1..=4 {
+            db.insert_one("test", doc_with_id(i, &format!("alpha {}", i)))
+                .unwrap();
+        }
+        db.collection("test")
+            .unwrap()
+            .create_fulltext_index("name".to_string(), "english", None, None)
+            .unwrap();
+        for i in 5..=7 {
+            db.insert_one("test", doc_with_id(i, &format!("bravo {}", i)))
+                .unwrap();
+        }
+        for e in fs::read_dir(temp_dir.path()).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".lock") {
+                fs::copy(e.path(), crashed.path().join(&name)).unwrap();
+            }
+        }
+    }
+
+    let db = DatabaseCore::open(crashed.path().join("fts.mlite")).unwrap();
+    let results = db
+        .collection("test")
+        .unwrap()
+        .fulltext_search("name", "bravo", Some(10), None, None, None)
+        .unwrap();
+    assert_eq!(results.len(), 3, "fulltext index lost the later documents");
+}
