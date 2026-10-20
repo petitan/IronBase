@@ -815,6 +815,73 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         Ok(true)
     }
 
+    /// Register an empty fuzzy index with disk storage (rebuilt from documents)
+    fn create_empty_fuzzy_index(
+        index_manager: &mut IndexManager,
+        db_path: &str,
+        meta: &crate::index::FuzzyIndexMetadata,
+    ) {
+        let storage_path = crate::collection_core::build_fuzzy_index_file_path(db_path, &meta.name);
+        if let Err(e) = index_manager.create_fuzzy_index_with_storage(
+            meta.name.clone(),
+            meta.field.clone(),
+            meta.algorithm,
+            meta.threshold,
+            storage_path,
+        ) {
+            crate::log_debug!(
+                "Warning: Failed to recreate fuzzy index '{}': {}",
+                meta.name,
+                e
+            );
+        }
+    }
+
+    /// Register an empty fulltext index with disk storage (rebuilt from documents)
+    fn create_empty_fulltext_index(
+        index_manager: &mut IndexManager,
+        db_path: &str,
+        meta: &crate::fulltext::FulltextIndexMetadata,
+    ) {
+        let storage_path =
+            crate::collection_core::build_fulltext_index_file_path(db_path, &meta.name);
+        if let Err(e) = index_manager.create_fulltext_index_with_storage(
+            meta.name.clone(),
+            meta.field.clone(),
+            meta.language,
+            Some(meta.min_word_length),
+            Some(meta.accent_folding),
+            storage_path,
+        ) {
+            crate::log_debug!(
+                "Warning: Failed to recreate fulltext index '{}': {}",
+                meta.name,
+                e
+            );
+        }
+    }
+
+    /// Register an empty vector index with its cache path (rebuilt from documents)
+    fn create_empty_vector_index(
+        index_manager: &mut IndexManager,
+        db_path: &str,
+        meta: &crate::vector::VectorIndexMetadata,
+    ) {
+        let storage_path = crate::index::IndexManager::build_vector_cache_path(db_path, &meta.name);
+        if let Err(e) = index_manager.create_vector_index(
+            meta.name.clone(),
+            meta.field.clone(),
+            meta.config.clone(),
+            Some(storage_path),
+        ) {
+            crate::log_debug!(
+                "Warning: Failed to create vector index '{}': {}",
+                meta.name,
+                e
+            );
+        }
+    }
+
     /// Initialize an IndexManager for a collection (internal)
     ///
     /// This creates the _id index, loads persisted indexes, and rebuilds
@@ -1003,22 +1070,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
             if !loaded {
                 all_non_btree_loaded = false;
-                // Create new index with disk storage (will be rebuilt from documents)
-                let storage_path =
-                    crate::collection_core::build_fuzzy_index_file_path(&db_path, &fuzzy_meta.name);
-                if let Err(e) = index_manager.create_fuzzy_index_with_storage(
-                    fuzzy_meta.name.clone(),
-                    fuzzy_meta.field.clone(),
-                    fuzzy_meta.algorithm,
-                    fuzzy_meta.threshold,
-                    storage_path,
-                ) {
-                    log_debug!(
-                        "Warning: Failed to recreate fuzzy index '{}': {}",
-                        fuzzy_meta.name,
-                        e
-                    );
-                }
+                Self::create_empty_fuzzy_index(&mut index_manager, &db_path, fuzzy_meta);
             }
         }
 
@@ -1046,25 +1098,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
             if !loaded {
                 all_non_btree_loaded = false;
-                // Create new index with disk storage (will be rebuilt from documents)
-                let storage_path = crate::collection_core::build_fulltext_index_file_path(
-                    &db_path,
-                    &fts_meta.name,
-                );
-                if let Err(e) = index_manager.create_fulltext_index_with_storage(
-                    fts_meta.name.clone(),
-                    fts_meta.field.clone(),
-                    fts_meta.language,
-                    Some(fts_meta.min_word_length),
-                    Some(fts_meta.accent_folding),
-                    storage_path,
-                ) {
-                    log_debug!(
-                        "Warning: Failed to recreate fulltext index '{}': {}",
-                        fts_meta.name,
-                        e
-                    );
-                }
+                Self::create_empty_fulltext_index(&mut index_manager, &db_path, fts_meta);
             }
         }
 
@@ -1090,7 +1124,6 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
             if !loaded {
                 all_non_btree_loaded = false;
-                // Create new index (will be rebuilt from documents)
                 log_debug!(
                     "Vector index '{}' {} - creating empty (will rebuild)",
                     vec_meta.name,
@@ -1100,20 +1133,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         "dirty shutdown"
                     }
                 );
-                let storage_path =
-                    crate::index::IndexManager::build_vector_cache_path(&db_path, &vec_meta.name);
-                if let Err(e) = index_manager.create_vector_index(
-                    vec_meta.name.clone(),
-                    vec_meta.field.clone(),
-                    vec_meta.config.clone(),
-                    Some(storage_path),
-                ) {
-                    log_debug!(
-                        "Warning: Failed to create vector index '{}': {}",
-                        vec_meta.name,
-                        e
-                    );
-                }
+                Self::create_empty_vector_index(&mut index_manager, &db_path, vec_meta);
             }
         }
 
@@ -1212,6 +1232,32 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             false
         };
         let wal_replay_succeeded = btree_replay_succeeded && non_btree_replay_succeeded;
+
+        // A failed replay leaves the loaded fuzzy/fulltext/vector indexes
+        // untrusted (a watermark-0 file, or ops half applied before an
+        // error), but the slow path rebuilds only empty indexes: the stale
+        // index survived every reopen, e.g. an `.hnsw` written by
+        // `create_vector_index` (watermark 0) missed all later documents
+        // after a crash (hybrid review F2). Replace them with empty ones so
+        // the rebuild below covers them.
+        if can_try_replay && all_non_btree_loaded && !non_btree_replay_succeeded {
+            log_warn!(
+                "Collection '{}': rebuilding the fuzzy/fulltext/vector indexes from documents",
+                name
+            );
+            for meta in &persisted_fuzzy_indexes {
+                let _ = index_manager.drop_index(&meta.name);
+                Self::create_empty_fuzzy_index(&mut index_manager, &db_path, meta);
+            }
+            for meta in &persisted_fulltext_indexes {
+                let _ = index_manager.drop_index(&meta.name);
+                Self::create_empty_fulltext_index(&mut index_manager, &db_path, meta);
+            }
+            for meta in &persisted_vector_indexes {
+                let _ = index_manager.drop_index(&meta.name);
+                Self::create_empty_vector_index(&mut index_manager, &db_path, meta);
+            }
+        }
 
         // (R6: removed `bfad51fa` one-time auto-migration block. R7 BTFT
         // footer + R1 watermark perzisztencia + ad753469 safety rail relax

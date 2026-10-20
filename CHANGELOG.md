@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Recovery: a crash no longer leaves fuzzy/fulltext/vector indexes stale for good (mcp-server v1.0.609)
+
+Hybrid search review 2026-10-17 F2.
+
+- **Symptom:** after a crash, a vector (or fulltext/fuzzy) index created
+  since the last checkpoint missed every document written after its
+  creation, and stayed that way on every later reopen: in the regression
+  test, `vector_search` found 8 of 12 documents, `fulltext_search` 0 of 3.
+- **Root cause:** the index file written at creation carries watermark 0.
+  On a dirty reopen with WAL ops pending, the replay guardrail refuses such
+  a file (it cannot tell which ops it reflects) and falls back to the
+  rebuild path, but `rebuild_indexes_from_catalog` rebuilds only *empty*
+  indexes, so the loaded stale index was kept.
+- **Fix:** when the non-btree WAL replay trips its guardrail or fails, the
+  loaded fuzzy/fulltext/vector indexes are replaced with empty ones (the
+  same creation used when the file is missing), so the rebuild covers
+  them; the post-rebuild flush stamps a watermark, so later crashes replay
+  instead of rebuilding.
+
 ### Fixed — Fulltext: stop words and stemming run before accent folding (mcp-server v1.0.607)
 
 Hybrid search review 2026-10-17 F7. **Action needed: rebuild existing
