@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Hybrid search: standard RRF, the order no longer depends on `limit` (mcp-server v1.0.611)
+
+Hybrid search review 2026-10-17 M3.
+
+- **Symptom:** `search` / Rhai `db_hybrid_search` could rank the same
+  documents differently depending on the requested `limit`: in the
+  regression test a document found only by BM25 (rank 1) beat one found by
+  both lanes (rank 3 each) at `limit: 1`, but not at `limit: 10`.
+- **Root cause:** a lane that did not return a document counted as rank
+  `internal_limit + 1`, where `internal_limit` is `limit` × 3 (× 20 when
+  grouping). That penalty shrinks as `limit` grows, so it reordered
+  documents without any new retrieval.
+- **Change:** standard RRF (Cormack et al.): a missing lane contributes 0.
+  Documents found by only one lane now score lower than before relative to
+  documents both lanes found. `_vector_rank` / `_text_rank` are `0` for a
+  lane that did not return the document (previously `internal_limit + 1`).
+
 ### Fixed — Fulltext: multi-field search orders equal scores deterministically (mcp-server v1.0.610)
 
 Hybrid search review 2026-10-17 M2.

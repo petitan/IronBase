@@ -25,6 +25,7 @@ pub(crate) struct FusedResult {
     pub(crate) rrf_score: f64,
     pub(crate) final_score: f64,
     pub(crate) rerank_boost: f64,
+    /// 1-based rank in the vector / text lane; 0 = the lane did not return it
     pub(crate) v_rank: usize,
     pub(crate) t_rank: usize,
     pub(crate) v_score: Option<f32>,

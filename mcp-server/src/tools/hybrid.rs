@@ -447,18 +447,28 @@ pub(crate) fn retrieve_and_fuse(
 
     // ========================================================================
     // STEP 4: RRF Fusion (zero-copy drain, no intermediate HashSet)
+    //
+    // Standard RRF: a lane that did not return the document adds nothing
+    // (rank 0 = absent). It used to count as rank `internal_limit + 1`, a
+    // penalty that shrinks as `limit` grows, so the same documents were
+    // ordered differently depending on the requested limit (hybrid review M3).
     // ========================================================================
-    let default_rank = internal_limit + 1;
+    let lane = |weight: f64, rank: usize| {
+        if rank == 0 {
+            0.0
+        } else {
+            weight / (p.rrf_k + rank as f64)
+        }
+    };
     let mut fused: Vec<FusedResult> = Vec::with_capacity(vector_docs.len() + text_docs.len());
 
     // Vector docs first — consume matching text docs via remove (no clone)
     for (id, (doc, v_score)) in vector_docs.drain() {
-        let v_rank = vector_ranks.get(&id).copied().unwrap_or(default_rank);
-        let t_rank = text_ranks.get(&id).copied().unwrap_or(default_rank);
+        let v_rank = vector_ranks.get(&id).copied().unwrap_or(0);
+        let t_rank = text_ranks.get(&id).copied().unwrap_or(0);
         let t_score = text_docs.remove(&id).map(|(_, s)| s);
 
-        let rrf_score =
-            vector_weight / (p.rrf_k + v_rank as f64) + fulltext_weight / (p.rrf_k + t_rank as f64);
+        let rrf_score = lane(vector_weight, v_rank) + lane(fulltext_weight, t_rank);
 
         fused.push(FusedResult {
             id,
@@ -475,10 +485,9 @@ pub(crate) fn retrieve_and_fuse(
 
     // Text-only docs (remaining after vector drain consumed overlaps)
     for (id, (doc, t_score)) in text_docs.drain() {
-        let t_rank = text_ranks.get(&id).copied().unwrap_or(default_rank);
+        let t_rank = text_ranks.get(&id).copied().unwrap_or(0);
 
-        let rrf_score = vector_weight / (p.rrf_k + default_rank as f64)
-            + fulltext_weight / (p.rrf_k + t_rank as f64);
+        let rrf_score = lane(fulltext_weight, t_rank);
 
         fused.push(FusedResult {
             id,
@@ -486,7 +495,7 @@ pub(crate) fn retrieve_and_fuse(
             rrf_score,
             final_score: rrf_score,
             rerank_boost: 1.0,
-            v_rank: default_rank,
+            v_rank: 0,
             t_rank,
             v_score: None,
             t_score: Some(t_score),
@@ -1493,6 +1502,46 @@ mod pipeline_integration_tests {
         );
         assert!(!contents("lex").is_empty(), "BM25 document lost");
         assert_eq!(total, groups.iter().map(|g| g.chunks.len()).sum::<usize>());
+    }
+
+    /// Hybrid review M3: a lane that did not return a document contributes
+    /// nothing (standard RRF). It used to count as rank `internal_limit + 1`,
+    /// a penalty that shrinks as `limit` grows, so the order of the same
+    /// documents depended on the requested limit: here "a" (text rank 1, no
+    /// vector) beat "b" (rank 3 in both lanes) at limit 1 but not at limit 10.
+    #[test]
+    fn rrf_order_does_not_depend_on_limit() {
+        let (a, _t) = adapter();
+        let docs = [
+            json!({"_id":"a","content":"alpha alpha alpha alpha"}),
+            json!({"_id":"t2","content":"alpha alpha other"}),
+            json!({"_id":"b","content":"alpha with several more filler words here","embedding":[0.9,0.1,0.0,0.0]}),
+            json!({"_id":"v1","content":"unrelated","embedding":[1.0,0.0,0.0,0.0]}),
+            json!({"_id":"v2","content":"unrelated too","embedding":[0.95,0.05,0.0,0.0]}),
+        ];
+        for d in docs {
+            ok(&a, "insert_one", json!({"collection":"kb","document":d}));
+        }
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+        let top = |limit: usize| -> String {
+            let (_p, fo) = fuse(
+                &a,
+                json!({"collection":"kb","query":"alpha","vector":[1.0,0.0,0.0,0.0],
+                       "rerank":false,"limit":limit}),
+            );
+            fo.fused[0].id.clone()
+        };
+        assert_eq!(top(1), top(10), "the best document changed with the limit");
+        assert_eq!(top(1), "b");
     }
 
     /// #71: grouped chunks carry the full Phase-1 engine score shape (not just _text_score).
