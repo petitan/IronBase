@@ -409,7 +409,9 @@ pub fn create_from_config(
 /// Logs warnings if provider is unavailable but does NOT block startup.
 fn check_http_provider_available(base_url: &str, model: &str) {
     match ureq::get(base_url)
-        .timeout(std::time::Duration::from_secs(2))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(2)))
+        .build()
         .call()
     {
         Ok(_) => {
@@ -417,8 +419,10 @@ fn check_http_provider_available(base_url: &str, model: &str) {
             // Try a probe embedding to verify model is available
             let probe_url = format!("{}/api/embed", base_url.trim_end_matches('/'));
             match ureq::post(&probe_url)
-                .set("Content-Type", "application/json")
-                .timeout(std::time::Duration::from_secs(10))
+                .header("Content-Type", "application/json")
+                .config()
+                .timeout_global(Some(std::time::Duration::from_secs(10)))
+                .build()
                 .send_json(serde_json::json!({
                     "model": model,
                     "input": "test"

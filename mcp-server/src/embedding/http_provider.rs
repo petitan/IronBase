@@ -303,13 +303,16 @@ impl HttpEmbeddingProvider {
     }
 
     /// Apply authentication to request
-    fn apply_auth(&self, request: ureq::Request) -> ureq::Request {
+    fn apply_auth(
+        &self,
+        request: ureq::RequestBuilder<ureq::typestate::WithBody>,
+    ) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
         match &self.config.auth {
             AuthMethod::None => request,
             AuthMethod::Bearer { token } => {
-                request.set("Authorization", &format!("Bearer {}", token))
+                request.header("Authorization", &format!("Bearer {}", token))
             }
-            AuthMethod::Header { name, value } => request.set(name, value),
+            AuthMethod::Header { name, value } => request.header(name, value),
             AuthMethod::QueryParam { .. } => {
                 // Query params handled in URL building
                 request
@@ -461,20 +464,29 @@ impl HttpEmbeddingProvider {
         let mut last_error: Option<String> = None;
 
         for attempt in 0..=max_retries {
+            // Non-2xx statuses come back as Ok so the error body (NaN detection,
+            // API error messages) stays readable — ureq 3 would otherwise reduce
+            // them to a bare `Error::StatusCode`.
             let request = ureq::post(&url)
-                .set("Content-Type", "application/json")
-                .timeout(Duration::from_secs(self.config.timeout_secs));
+                .header("Content-Type", "application/json")
+                .config()
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(self.config.timeout_secs)))
+                .build();
 
             let request = self.apply_auth(request);
 
             match request.send_json(&body) {
-                Ok(response) => {
-                    let json: serde_json::Value = response.into_json().map_err(|e| {
-                        EmbeddingError::ApiError(format!(
-                            "Failed to parse {} response: {}",
-                            self.config.name, e
-                        ))
-                    })?;
+                Ok(mut response) if response.status().is_success() => {
+                    // Unbounded reader on purpose: `read_json()` caps at 10MB, which a
+                    // large native batch (e.g. 2048 × 1536-dim floats) can exceed.
+                    let json: serde_json::Value =
+                        serde_json::from_reader(response.body_mut().as_reader()).map_err(|e| {
+                            EmbeddingError::ApiError(format!(
+                                "Failed to parse {} response: {}",
+                                self.config.name, e
+                            ))
+                        })?;
 
                     let vectors = self.extract_vectors(&json)?;
 
@@ -489,101 +501,97 @@ impl HttpEmbeddingProvider {
 
                     return Ok(vectors);
                 }
-                Err(e) => {
-                    // Destructure to read response body (ureq::Response is not Clone)
-                    match e {
-                        ureq::Error::Status(status, response) => {
-                            let body = response.into_string().unwrap_or_default();
-                            let is_nan = status >= 500 && is_nan_error_body(&body);
+                Ok(mut response) => {
+                    let status = response.status().as_u16();
+                    let body = response.body_mut().read_to_string().unwrap_or_default();
+                    let is_nan = status >= 500 && is_nan_error_body(&body);
 
-                            if is_nan {
-                                // NaN in upstream model — deterministic, retry is pointless
-                                let text_preview: String = effective_texts
-                                    .first()
-                                    .unwrap_or(&"")
-                                    .chars()
-                                    .take(80)
-                                    .collect();
+                    if is_nan {
+                        // NaN in upstream model — deterministic, retry is pointless
+                        let text_preview: String = effective_texts
+                            .first()
+                            .unwrap_or(&"")
+                            .chars()
+                            .take(80)
+                            .collect();
 
-                                // Batch: signal NanResponse so caller can fall back to
-                                // single-text calls (only NaN texts get zero vectors)
-                                if effective_texts.len() > 1 {
-                                    tracing::warn!(
-                                        "{} embedding NaN in batch of {} texts, first: \"{}...\" — falling back to single calls",
-                                        self.config.name,
-                                        effective_texts.len(),
-                                        text_preview,
-                                    );
-                                    return Err(EmbeddingError::NanResponse(format!(
-                                        "NaN in batch of {} texts",
-                                        effective_texts.len()
-                                    )));
-                                }
-
-                                // Single text: return zero vector directly
-                                tracing::warn!(
-                                    "{} embedding NaN for text: \"{}...\" — returning zero vector",
-                                    self.config.name,
-                                    text_preview,
-                                );
-                                let dim = self.dimension();
-                                if dim == 0 {
-                                    // Dimension unknown (no cache, no config) — can't
-                                    // produce a zero vector of the right size
-                                    return Err(EmbeddingError::NanResponse(format!(
-                                        "NaN in {} response and dimension unknown \
-                                         (set default_dimension or model_dimensions in provider config)",
-                                        self.config.name
-                                    )));
-                                }
-                                return Ok(vec![vec![0.0f32; dim]]);
-                            }
-
-                            // Non-NaN server error — retry if applicable
-                            if attempt < max_retries && Self::is_retryable_status(status) {
-                                let delay = base_delay
-                                    .saturating_mul(1 << attempt.min(5))
-                                    .min(max_delay);
-                                tracing::warn!(
-                                    "{} embedding retry {}/{}: HTTP {} (backoff {:?})",
-                                    self.config.name,
-                                    attempt + 1,
-                                    max_retries,
-                                    status,
-                                    delay
-                                );
-                                std::thread::sleep(delay);
-                                last_error = Some(format!("HTTP {}: {}", status, body));
-                            } else {
-                                return Err(EmbeddingError::HttpError(format!(
-                                    "{} API call failed: HTTP {}: {}",
-                                    self.config.name, status, body
-                                )));
-                            }
+                        // Batch: signal NanResponse so caller can fall back to
+                        // single-text calls (only NaN texts get zero vectors)
+                        if effective_texts.len() > 1 {
+                            tracing::warn!(
+                                "{} embedding NaN in batch of {} texts, first: \"{}...\" — falling back to single calls",
+                                self.config.name,
+                                effective_texts.len(),
+                                text_preview,
+                            );
+                            return Err(EmbeddingError::NanResponse(format!(
+                                "NaN in batch of {} texts",
+                                effective_texts.len()
+                            )));
                         }
-                        ureq::Error::Transport(transport) => {
-                            // Connection errors, timeouts — always retryable
-                            if attempt < max_retries {
-                                let delay = base_delay
-                                    .saturating_mul(1 << attempt.min(5))
-                                    .min(max_delay);
-                                tracing::warn!(
-                                    "{} embedding retry {}/{}: {} (backoff {:?})",
-                                    self.config.name,
-                                    attempt + 1,
-                                    max_retries,
-                                    transport,
-                                    delay
-                                );
-                                std::thread::sleep(delay);
-                                last_error = Some(transport.to_string());
-                            } else {
-                                return Err(EmbeddingError::HttpError(format!(
-                                    "{} API call failed: {}",
-                                    self.config.name, transport
-                                )));
-                            }
+
+                        // Single text: return zero vector directly
+                        tracing::warn!(
+                            "{} embedding NaN for text: \"{}...\" — returning zero vector",
+                            self.config.name,
+                            text_preview,
+                        );
+                        let dim = self.dimension();
+                        if dim == 0 {
+                            // Dimension unknown (no cache, no config) — can't
+                            // produce a zero vector of the right size
+                            return Err(EmbeddingError::NanResponse(format!(
+                                "NaN in {} response and dimension unknown \
+                                 (set default_dimension or model_dimensions in provider config)",
+                                self.config.name
+                            )));
                         }
+                        return Ok(vec![vec![0.0f32; dim]]);
+                    }
+
+                    // Non-NaN server error — retry if applicable
+                    if attempt < max_retries && Self::is_retryable_status(status) {
+                        let delay = base_delay
+                            .saturating_mul(1 << attempt.min(5))
+                            .min(max_delay);
+                        tracing::warn!(
+                            "{} embedding retry {}/{}: HTTP {} (backoff {:?})",
+                            self.config.name,
+                            attempt + 1,
+                            max_retries,
+                            status,
+                            delay
+                        );
+                        std::thread::sleep(delay);
+                        last_error = Some(format!("HTTP {}: {}", status, body));
+                    } else {
+                        return Err(EmbeddingError::HttpError(format!(
+                            "{} API call failed: HTTP {}: {}",
+                            self.config.name, status, body
+                        )));
+                    }
+                }
+                Err(transport) => {
+                    // Connection errors, timeouts — always retryable
+                    if attempt < max_retries {
+                        let delay = base_delay
+                            .saturating_mul(1 << attempt.min(5))
+                            .min(max_delay);
+                        tracing::warn!(
+                            "{} embedding retry {}/{}: {} (backoff {:?})",
+                            self.config.name,
+                            attempt + 1,
+                            max_retries,
+                            transport,
+                            delay
+                        );
+                        std::thread::sleep(delay);
+                        last_error = Some(transport.to_string());
+                    } else {
+                        return Err(EmbeddingError::HttpError(format!(
+                            "{} API call failed: {}",
+                            self.config.name, transport
+                        )));
                     }
                 }
             }
@@ -1024,5 +1032,119 @@ mod tests {
             Some(&serde_json::json!("search_document"))
         );
         assert_eq!(body.get("model"), Some(&serde_json::json!("test-model")));
+    }
+
+    // ------------------------------------------------------------------
+    // call_api against a local one-shot HTTP server (ureq 3 behaviour)
+    // ------------------------------------------------------------------
+
+    /// Serve exactly one HTTP response on a local port and return its base URL.
+    fn serve_once(status_line: &'static str, body: String) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            // Drain the request (headers + Content-Length body) before answering
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+            }
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+
+            let mut stream = reader.into_inner();
+            let head = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                status_line,
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        base_url
+    }
+
+    fn local_config(base_url: String) -> HttpProviderConfig {
+        HttpProviderConfig {
+            name: "test".to_string(),
+            display_name: None,
+            base_url,
+            endpoint: None,
+            default_model: "test-model".to_string(),
+            auth: AuthMethod::None,
+            request_format: RequestFormat::default(),
+            response_format: ResponseFormat::default(),
+            model_dimensions: HashMap::new(),
+            default_dimension: 8,
+            supports_batch: false,
+            max_batch_size: 1,
+            timeout_secs: 30,
+            error_path: None,
+            extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 0,
+            retry_base_delay_ms: 1,
+            document_prefix: None,
+            query_prefix: None,
+        }
+    }
+
+    #[test]
+    fn test_call_api_reads_success_body_over_10mb() {
+        // ureq 3's read_json() caps bodies at 10MB; large native batches exceed
+        // that, so the success path must read without the cap (as ureq 2 did).
+        let dim = 1_000_000;
+        let values = vec!["0.123456789"; dim].join(",");
+        let body = format!("{{\"embedding\":[{}]}}", values);
+        assert!(body.len() > 10 * 1024 * 1024);
+
+        let provider = HttpEmbeddingProvider::new(local_config(serve_once("200 OK", body)));
+        let vector = provider.embed("hello").unwrap();
+        assert_eq!(vector.len(), dim);
+    }
+
+    #[test]
+    fn test_call_api_error_status_keeps_body() {
+        let body = r#"{"error":"model \"test-model\" not found"}"#.to_string();
+        let provider = HttpEmbeddingProvider::new(local_config(serve_once("404 Not Found", body)));
+
+        let err = provider.embed("hello").unwrap_err().to_string();
+        assert!(err.contains("HTTP 404"), "{}", err);
+        assert!(err.contains("not found"), "{}", err);
+    }
+
+    #[test]
+    fn test_call_api_nan_error_body_returns_zero_vector() {
+        let body =
+            r#"{"error":"failed to encode response: json: unsupported value: NaN"}"#.to_string();
+        let provider =
+            HttpEmbeddingProvider::new(local_config(serve_once("500 Internal Server Error", body)));
+
+        assert_eq!(provider.embed("hello").unwrap(), vec![0.0f32; 8]);
+    }
+
+    #[test]
+    fn test_call_api_connection_error_is_reported() {
+        // Bind then drop: nothing listens on the port any more
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let provider = HttpEmbeddingProvider::new(local_config(format!("http://{}", addr)));
+
+        let err = provider.embed("hello").unwrap_err().to_string();
+        assert!(err.contains("API call failed"), "{}", err);
     }
 }
