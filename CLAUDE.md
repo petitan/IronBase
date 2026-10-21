@@ -823,6 +823,8 @@ Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pen
 | Dimenzió változott | HNSW rebuild + re-embed |
 | `--force-reembed` flag | Force re-embed mindig |
 
+**A config `model`/`preprocessing_version` a tárolt vektorok terét írja le (F4, v1.0.614):** a startup-ellenőrzés NEM menti előre az új értékeket; a forced backfill job csak akkor rögzíti őket (`commit_embedding_space`), ha minden doksit kezelt (átfedéses skip-lapozás + visited-halmaz) és a config többi része változatlan; a nem beágyazható doksik régi vektora törlődik (health check mellett). Régi verzióban megszakadt re-embed után: egyszer `--force-reembed`. Megszakadt / el sem indult re-embed → a következő induláskor újraindul. A job alatt a keresés vegyes térben fut.
+
 **CLI:**
 ```bash
 ./mcp-ironbase-server --force-reembed              # HTTP mód
