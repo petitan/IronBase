@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Auto-embed: an interrupted re-embed after a model change no longer leaves a mixed vector space for good (mcp-server v1.0.614)
+
+Hybrid search review 2026-10-17 F4.
+
+- **Symptom:** after an embedding model or preprocessing change, a re-embed
+  job that was interrupted (restart, cancel, provider failure) or never
+  started (job queue full) left the old model's vectors in the index, and
+  later startups did not resume it. A dimension change recreated the vector
+  index as `cosine` with M=16 / ef_construction=200, losing the user's metric
+  and parameters.
+- **Root cause:** the startup check saved the new model into the auto-embed
+  config *before* starting the job, so after a restart the saved model
+  matched the current one and no re-embed was detected.
+  `handle_dimension_change` used hardcoded index parameters.
+- **Fix:** the config's `model` / `preprocessing_version` keep describing the
+  stored vectors until a forced re-embed reached the end of the collection;
+  only then does the job record the new values (job result:
+  `embedding_space_committed`). A run that is cancelled, stopped by the
+  no-progress guard (e.g. provider outage) or never started is restarted by
+  the next startup. Documents the new model cannot embed lose their old-model
+  vector rather than staying in the index in the wrong space
+  (`stale_vectors_removed`), so a single unembeddable text does not force a
+  full re-embed on every startup. In a forced run, batches of documents without source text no longer trip the
+  no-progress stop, and a provider returning fewer vectors than texts counts
+  as errors. The index rebuilt for a new dimension keeps the old metric,
+  `max_vectors` and HNSW parameters.
+- **Not changed:** while the re-embed runs, queries still compare new-model
+  query vectors with partly old-model document vectors; avoiding that needs a
+  per-vector space marker or a second index (a new persisted field).
+
 ### Changed — Embedding HTTP client upgraded to ureq 3 (mcp-server v1.0.613)
 
 - **Why:** ureq 2.x pulls in `webpki-roots` 0.26.11, which `cargo audit`
