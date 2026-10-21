@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Search: grouped results merge overlapping neighbour chunks (mcp-server v1.0.612)
+
+Hybrid search review 2026-10-17 H1 (remaining part).
+
+- **Symptom:** `search` (and Rhai `db_hybrid_search` with grouping)
+  returned a document's consecutive chunks as separate passages, so the
+  chunk overlap (~100 characters by default) appeared twice and used the
+  token budget twice. Flat mode merged them; grouped mode did not.
+- **Root cause:** the adjacent-chunk merge ran only on the flat fused list;
+  `build_doc_groups` assembles each document's chunks on its own and never
+  merged them.
+- **Fix:** the merge is generic over the item type and `build_doc_groups`
+  merges each group's chunks (when `merge_chunks`, default on) before
+  lifting and capping. Within a run the chunk earliest in the group order
+  (the best one) carries the merged text, `chunk_merged` and
+  `chunks_in_merge`; overlap and repeated table headers are removed as in
+  flat mode. `max_chunks_per_doc` now counts merged passages.
+
 ### Changed — Hybrid search: standard RRF, the order no longer depends on `limit` (mcp-server v1.0.611)
 
 Hybrid search review 2026-10-17 M3.

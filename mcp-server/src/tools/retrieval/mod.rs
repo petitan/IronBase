@@ -163,6 +163,7 @@ fn handle_search(
         &projection,
         &fo.effective_text_field,
         &fo.effective_text_fields,
+        hp.merge_chunks,
     )?;
 
     let mut out = contract::assemble(

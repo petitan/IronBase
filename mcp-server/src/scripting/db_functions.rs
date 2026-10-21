@@ -1424,6 +1424,7 @@ fn hybrid_search_impl(
             &None,
             &fo.effective_text_field,
             &fo.effective_text_fields,
+            p.merge_chunks,
         ) {
             Ok(g) => g,
             Err(e) => return Dynamic::from(format!("Error: {}", e)),

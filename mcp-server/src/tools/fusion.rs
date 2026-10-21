@@ -210,6 +210,32 @@ pub(crate) fn rerank_results(
 ///
 /// Returns the number of results removed by merging.
 pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: &str) -> usize {
+    merge_adjacent_runs(
+        results,
+        text_field,
+        |r| &r.doc,
+        |r| &mut r.doc,
+        |_, r| r.final_score,
+    )
+}
+
+/// [`merge_adjacent_chunks`] for one document group's chunks
+/// (`build_doc_groups`), which are already best-first: each run keeps its
+/// earliest chunk. Grouped mode never merged, so overlapping neighbours
+/// reached the `search` response twice (hybrid review H1).
+pub(crate) fn merge_adjacent_values(chunks: &mut Vec<Value>, text_field: &str) -> usize {
+    merge_adjacent_runs(chunks, text_field, |c| c, |c| c, |i, _| -(i as f64))
+}
+
+/// Shared merge: `doc` reads an item's chunk document, `score` ranks an item
+/// (by its position and value) to pick the one that carries the run.
+fn merge_adjacent_runs<T>(
+    results: &mut Vec<T>,
+    text_field: &str,
+    doc: impl Fn(&T) -> &Value,
+    doc_mut: impl Fn(&mut T) -> &mut Value,
+    score: impl Fn(usize, &T) -> f64,
+) -> usize {
     if results.len() < 2 {
         return 0;
     }
@@ -217,8 +243,8 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
     // Collect (doc_id, chunk_index, results_index) for RAG chunks only
     let mut chunk_info: Vec<(String, u64, usize)> = Vec::new();
     for (i, item) in results.iter().enumerate() {
-        let doc_id = item.doc.get("doc_id").and_then(|v| v.as_str());
-        let chunk_index = item.doc.get("chunk_index").and_then(|v| v.as_u64());
+        let doc_id = doc(item).get("doc_id").and_then(|v| v.as_str());
+        let chunk_index = doc(item).get("chunk_index").and_then(|v| v.as_u64());
         if let (Some(did), Some(ci)) = (doc_id, chunk_index) {
             chunk_info.push((did.to_string(), ci, i));
         }
@@ -259,9 +285,8 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
                 let best_idx_in_run = run
                     .iter()
                     .max_by(|a, b| {
-                        results[a.1]
-                            .final_score
-                            .partial_cmp(&results[b.1].final_score)
+                        score(a.1, &results[a.1])
+                            .partial_cmp(&score(b.1, &results[b.1]))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap()
@@ -273,8 +298,8 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
                 let mut max_end_char: Option<u64> = None;
 
                 for (i, &(_, res_idx)) in run.iter().enumerate() {
-                    let doc = &results[res_idx].doc;
-                    let raw_text = doc.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
+                    let chunk = doc(&results[res_idx]);
+                    let raw_text = chunk.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
                     // Table header propagation (#63) prepends the table's header to each
                     // continuation chunk; when merging, that header would repeat. Strip it
                     // from chunks after the first, using the EXACT header recorded at chunk
@@ -282,7 +307,7 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
                     // byte-for-byte (CRLF/whitespace safe). Stripping first also restores
                     // the original data text so the overlap offsets below line up.
                     let chunk_text = if i > 0 {
-                        match doc.get("table_header").and_then(|v| v.as_str()) {
+                        match chunk.get("table_header").and_then(|v| v.as_str()) {
                             Some(h) => raw_text
                                 .strip_prefix(format!("{}\n", h).as_str())
                                 .unwrap_or(raw_text),
@@ -296,11 +321,10 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
                         merged_text.push_str(chunk_text);
                     } else {
                         // Calculate overlap from start_char/end_char if available
-                        let prev_end = results[run[i - 1].1]
-                            .doc
+                        let prev_end = doc(&results[run[i - 1].1])
                             .get("end_char")
                             .and_then(|v| v.as_u64());
-                        let curr_start = doc.get("start_char").and_then(|v| v.as_u64());
+                        let curr_start = chunk.get("start_char").and_then(|v| v.as_u64());
 
                         let overlap_chars = match (prev_end, curr_start) {
                             (Some(pe), Some(cs)) if pe > cs => (pe - cs) as usize,
@@ -325,16 +349,16 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
                     }
 
                     // Track start_char/end_char range
-                    if let Some(sc) = doc.get("start_char").and_then(|v| v.as_u64()) {
+                    if let Some(sc) = chunk.get("start_char").and_then(|v| v.as_u64()) {
                         min_start_char = Some(min_start_char.map_or(sc, |m: u64| m.min(sc)));
                     }
-                    if let Some(ec) = doc.get("end_char").and_then(|v| v.as_u64()) {
+                    if let Some(ec) = chunk.get("end_char").and_then(|v| v.as_u64()) {
                         max_end_char = Some(max_end_char.map_or(ec, |m: u64| m.max(ec)));
                     }
                 }
 
                 // Update the best-scored result's doc with merged content
-                if let Value::Object(ref mut obj) = results[best_idx_in_run].doc {
+                if let Value::Object(obj) = doc_mut(&mut results[best_idx_in_run]) {
                     obj.insert(text_field.to_string(), Value::String(merged_text));
                     obj.insert("chunk_index".to_string(), json!(run[0].0));
                     if let Some(sc) = min_start_char {

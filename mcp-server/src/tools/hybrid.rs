@@ -21,7 +21,7 @@ use std::sync::Arc;
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
 use super::fusion::{
     apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
-    mmr_reorder, rerank_results, FusedResult,
+    merge_adjacent_values, mmr_reorder, rerank_results, FusedResult,
 };
 use super::params::{resolve_weights, HybridSearchParams};
 use super::rag::get_rag_config;
@@ -559,11 +559,11 @@ pub(crate) fn retrieve_and_fuse(
     // ========================================================================
     // STEP 5.5: Merge adjacent chunks from same document (overlap dedup)
     // ========================================================================
-    // Flat mode only: in group_by_document mode `build_doc_groups` re-fetches
-    // every chunk via its own Phase-2 search and never reads these merged
-    // bodies, so merging here would be wasted O(n) work. (Doc ordering is
-    // unaffected: merge preserves each doc's max score.) Mutates `fused` in
-    // place; the merge count is no longer surfaced.
+    // Flat mode only: in group_by_document mode `build_doc_groups` merges each
+    // document's assembled chunks itself (`merge_adjacent_values`), so merging
+    // here would be wasted O(n) work. (Doc ordering is unaffected: merge
+    // preserves each doc's max score.) Mutates `fused` in place; the merge
+    // count is no longer surfaced.
     if p.merge_chunks && !p.group_by_document {
         merge_adjacent_chunks(&mut fused, &effective_text_field);
     }
@@ -628,6 +628,7 @@ pub(crate) fn build_doc_groups(
     projection: &Option<HashMap<String, i32>>,
     effective_text_field: &str,
     effective_text_fields: &Option<Vec<String>>,
+    merge_chunks: bool,
 ) -> Result<(Vec<DocGroup>, usize)> {
     let fused_doc_id = |item: &FusedResult| -> String {
         item.doc
@@ -751,6 +752,12 @@ pub(crate) fn build_doc_groups(
             Some(c) if !c.is_empty() => c,
             _ => continue,
         };
+
+        // Merge overlapping neighbours (same as flat mode) before lift and cap,
+        // so each passage carries its text once
+        if merge_chunks {
+            merge_adjacent_values(&mut chunks, effective_text_field);
+        }
 
         // Lift BEFORE cap so doc-level fields are determined from the full set.
         let lifted = lift_common_fields(&mut chunks);
@@ -1394,6 +1401,7 @@ mod pipeline_integration_tests {
             &proj,
             &fo.effective_text_field,
             &fo.effective_text_fields,
+            p.merge_chunks,
         )
         .expect("build_doc_groups")
     }
@@ -1463,7 +1471,9 @@ mod pipeline_integration_tests {
         let (p, fo) = fuse(
             &a,
             json!({"collection":"kb","query":"car maintenance",
-            "vector":[1.0,0.0,0.0,0.0],"group_by_document":true,"limit":5}),
+            "vector":[1.0,0.0,0.0,0.0],"group_by_document":true,"limit":5,
+            // per-chunk membership is checked; merging is covered separately
+            "merge_chunks":false}),
         );
         let (groups, total) = group(&a, &p, &fo);
 
@@ -1542,6 +1552,59 @@ mod pipeline_integration_tests {
         };
         assert_eq!(top(1), top(10), "the best document changed with the limit");
         assert_eq!(top(1), "b");
+    }
+
+    /// Hybrid review H1: grouped mode merges a document's overlapping
+    /// neighbour chunks like flat mode does, so the shared text is returned
+    /// once. It never merged, so each overlap reached the response twice.
+    #[test]
+    fn grouped_merges_adjacent_chunks() {
+        let (a, _t) = adapter();
+        // "alpha one two three four alpha five six" in overlapping chunks
+        let chunks = [
+            (0, "alpha one two three", 0, 19),
+            (1, "two three four alpha", 10, 30),
+            (2, "four alpha five six", 20, 39),
+        ];
+        for (idx, content, start, end) in chunks {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id":"d","chunk_index":idx,"content":content,
+                "start_char":start,"end_char":end,"embedding":[1.0,0.0,0.0,0.0]}}),
+            );
+        }
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+
+        let (p, fo) = fuse(
+            &a,
+            json!({"collection":"kb","query":"alpha","vector":[1.0,0.0,0.0,0.0],
+                   "group_by_document":true,"limit":5}),
+        );
+        let (groups, total) = group(&a, &p, &fo);
+        assert_eq!(groups.len(), 1);
+        let chunks = &groups[0].chunks;
+        assert_eq!(
+            chunks.len(),
+            1,
+            "adjacent chunks were not merged: {chunks:?}"
+        );
+        assert_eq!(chunks[0]["chunks_in_merge"], json!(3));
+        assert_eq!(
+            chunks[0]["content"],
+            json!("alpha one two three four alpha five six")
+        );
+        assert_eq!(total, 1);
     }
 
     /// #71: grouped chunks carry the full Phase-1 engine score shape (not just _text_score).
@@ -1634,7 +1697,9 @@ mod pipeline_integration_tests {
         let (p, fo) = fuse(
             &a,
             json!({"collection":"kb","query":"PEF-35",
-            "vector":[0.9,0.1,0.0,0.0],"group_by_document":true,"limit":5,"max_chunks_per_doc":2}),
+            "vector":[0.9,0.1,0.0,0.0],"group_by_document":true,"limit":5,"max_chunks_per_doc":2,
+            // the cap applies to separate chunks; merging is covered separately
+            "merge_chunks":false}),
         );
         let (groups, total) = group(&a, &p, &fo);
         assert_eq!(groups.len(), 1, "expected single doc group");
