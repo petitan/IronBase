@@ -37,4 +37,15 @@ ignore = [
     #   (or new_closure_bound) anywhere. Real remediation: upgrade pyo3 to >=0.29
     #   (same separate migration as RUSTSEC-2026-0176; 0.28 would not fix it).
     "RUSTSEC-2026-0177",
+
+    # RUSTSEC-2026-0381 — webpki-roots bundles distrusted emSign intermediates
+    #   (fixed in webpki-roots >= 1.0.10).
+    #   The flagged crate is webpki-roots 0.26.11, pulled in by ureq 2.x (latest
+    #   2.12.1 requires ^0.26; mcp-server's HTTP embedding provider). 0.26.11 is
+    #   a compatibility shim with no certificates of its own: it re-exports
+    #   webpki-roots 1.x, which resolves to the fixed >= 1.0.10 (an older 1.x
+    #   would be flagged by this same advisory, so the audit still guards it).
+    #   Real remediation: move mcp-server to ureq 3.x, which depends on
+    #   webpki-roots 1.x directly.
+    "RUSTSEC-2026-0381",
 ]
