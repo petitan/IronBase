@@ -3,12 +3,13 @@
 //! Provides MCP tools for configuring automatic embedding generation on collections.
 
 use crate::adapter::IronBaseAdapter;
-use crate::embedding::EmbeddingManager;
+use crate::embedding::{EmbeddingManager, EmbeddingProvider};
 use crate::error::{McpError, Result};
 use crate::jobs::{JobManager, JobType};
 use ironbase_core::storage::{AutoEmbeddingConfig, ChunkingConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::defaults::{
@@ -529,10 +530,11 @@ fn handle_dimension_change(
 /// If `force` is false, only embeds documents missing the target_field.
 ///
 /// A forced run saves `config.model` / `config.preprocessing_version` to the
-/// collection's auto-embed config only after it reached the end of the
-/// collection; documents it could not embed lose their old vector. Until then the stored values keep describing the old vectors,
-/// so a run that is interrupted, fails or never starts is detected and restarted
-/// by the next startup check instead of leaving a mixed embedding space.
+/// collection's auto-embed config only after it handled every document (see
+/// `settle_failed_documents` for the ones it could not embed). Until then the
+/// stored values keep describing the old vectors, so a run that is interrupted,
+/// fails or never starts is detected and restarted by the next startup check
+/// instead of leaving a mixed embedding space.
 #[allow(clippy::too_many_arguments)]
 fn run_backfill_job(
     job_id: &str,
@@ -597,8 +599,24 @@ fn run_backfill_job(
     // Set only when the loop reaches the end of the collection (not on the
     // no-progress safety stop)
     let mut traversed_all = false;
-    // Forced run: documents left with an old-model vector (embedding failed)
+    // Forced run: documents that may still hold an old-model vector (embedding
+    // failed, or no source text); settled once the pass is complete
     let mut failed_ids: Vec<Value> = Vec::new();
+    // Forced run: ids already handled. The pass pages with skip over the
+    // `_id`-ordered catalog, and a delete before the cursor shifts the rest
+    // left; each page therefore re-reads one batch before the cursor and skips
+    // what it already handled.
+    let mut visited: HashSet<String> = HashSet::new();
+    if force && visited.try_reserve(total_count).is_err() {
+        job_manager.fail_job(
+            job_id,
+            format!(
+                "Cannot allocate re-embed state for {} documents",
+                total_count
+            ),
+        );
+        return;
+    }
     // For force mode: use skip-based pagination since all docs match the empty filter.
     // For non-force mode: no skip needed since processed docs gain target_field and are excluded.
     let mut skip_offset: usize = 0;
@@ -617,9 +635,14 @@ fn run_backfill_job(
             return;
         }
 
+        let (page_start, page_limit) = if force {
+            (skip_offset.saturating_sub(batch_size), batch_size * 2)
+        } else {
+            (0, batch_size)
+        };
         let find_options = crate::adapter::FindOptions {
-            limit: Some(batch_size),
-            skip: if force { Some(skip_offset) } else { None },
+            limit: Some(page_limit),
+            skip: if force { Some(page_start) } else { None },
             ..Default::default()
         };
 
@@ -636,17 +659,49 @@ fn run_backfill_job(
             break;
         }
 
+        if force && page_start > 0 && !visited.contains(&id_key(&result.documents[0])) {
+            // More documents before the cursor were deleted than one batch
+            // covers: back off another batch until the page starts in
+            // documents this pass already handled
+            skip_offset = page_start;
+            continue;
+        }
+
+        // Forced run: only the documents this pass has not handled yet
+        let documents: Vec<&Value> = if force {
+            result
+                .documents
+                .iter()
+                .filter(|doc| visited.insert(id_key(doc)))
+                .collect()
+        } else {
+            result.documents.iter().collect()
+        };
+
         // Extract texts from source field
-        let texts: Vec<&str> = result
-            .documents
+        let texts: Vec<&str> = documents
             .iter()
             .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
             .collect();
 
+        if force {
+            // A vector without source text cannot be re-embedded either
+            for doc in &documents {
+                let has_source = doc
+                    .get(&config.source_field)
+                    .and_then(|v| v.as_str())
+                    .is_some();
+                if !has_source && doc.get(&config.target_field).is_some() {
+                    if let Some(id) = doc.get("_id") {
+                        failed_ids.push(id.clone());
+                    }
+                }
+            }
+        }
+
         let batch_had_updates = if !texts.is_empty() {
             // Generate embeddings — try batch first, fallback to individual on failure
-            let docs_with_source: Vec<_> = result
-                .documents
+            let docs_with_source: Vec<_> = documents
                 .iter()
                 .filter(|doc| {
                     doc.get(&config.source_field)
@@ -661,17 +716,7 @@ fn run_backfill_job(
 
             // Store embedding into document via update_one
             let store_one = |id: &Value, embedding: &[f32]| -> bool {
-                let filter = json!({ "_id": id });
-                let update = json!({
-                    "$set": { &config.target_field: embedding }
-                });
-                match adapter.update_one(collection, filter, update) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        tracing::warn!("Failed to update document {:?}: {}", id, e);
-                        false
-                    }
-                }
+                store_embedding(adapter, collection, &config.target_field, id, embedding)
             };
 
             match embeddings_result {
@@ -743,11 +788,13 @@ fn run_backfill_job(
         } else {
             // All documents in batch are missing source field - they won't be processed
             // but they also won't be excluded by the filter, so we need to track this
-            tracing::warn!(
-                "Batch of {} documents has no valid source field '{}' - skipping",
-                result.documents.len(),
-                config.source_field
-            );
+            if !documents.is_empty() {
+                tracing::warn!(
+                    "Batch of {} documents has no valid source field '{}' - skipping",
+                    documents.len(),
+                    config.source_field
+                );
+            }
             false
         };
 
@@ -781,14 +828,20 @@ fn run_backfill_job(
 
         // Advance skip offset for force mode
         if force {
-            skip_offset += result.documents.len();
+            skip_offset = page_start + result.documents.len();
         }
 
-        // If we got fewer documents than batch_size, we're done
-        if result.documents.len() < batch_size {
+        // If we got a short page, we're done
+        if result.documents.len() < page_limit {
             traversed_all = true;
             break;
         }
+    }
+
+    // A cancel can also land inside the last batch's per-document fallback
+    if job_manager.is_cancelled(job_id) {
+        job_manager.update_progress(job_id, processed, Some(total_count), "Cancelled");
+        return;
     }
 
     let mut summary = json!({
@@ -799,13 +852,21 @@ fn run_backfill_job(
     });
 
     if force {
-        // A document that cannot be embedded with the new model must not keep
-        // its old-model vector (it would be ranked in the wrong space); it is
-        // left without an embedding instead. Only on a full pass: a stopped run
-        // (e.g. provider outage) keeps everything and is restarted.
-        let committed = traversed_all
-            && remove_stale_vectors(adapter, collection, &config.target_field, &failed_ids)
-            && commit_embedding_space(adapter, collection, config);
+        let settled = if traversed_all {
+            settle_failed_documents(
+                job_id,
+                job_manager,
+                adapter,
+                provider.as_ref(),
+                config,
+                collection,
+                &failed_ids,
+                shutdown_flag,
+            )
+        } else {
+            None
+        };
+        let committed = settled.is_some() && commit_embedding_space(adapter, collection, config);
         if !committed {
             tracing::warn!(
                 "Re-embed of '{}' incomplete ({} errors, reached end: {}); the stored model \
@@ -816,55 +877,134 @@ fn run_backfill_job(
             );
         }
         summary["embedding_space_committed"] = json!(committed);
-        summary["stale_vectors_removed"] = json!(if traversed_all { failed_ids.len() } else { 0 });
+        summary["stale_vectors_removed"] = json!(settled.unwrap_or(0));
     }
 
     // Complete the job
     job_manager.complete_job(job_id, summary);
 }
 
-/// Unset the target field of the documents a forced re-embed could not embed.
-/// Returns false if any of them still holds its old vector.
-fn remove_stale_vectors(
+/// Key of a document's `_id` in the forced pass's visited set
+fn id_key(doc: &Value) -> String {
+    doc.get("_id").map(|id| id.to_string()).unwrap_or_default()
+}
+
+/// Store one embedding into a document via update_one
+fn store_embedding(
     adapter: &IronBaseAdapter,
     collection: &str,
     target_field: &str,
-    ids: &[Value],
+    id: &Value,
+    embedding: &[f32],
 ) -> bool {
-    let mut all_removed = true;
-    for id in ids {
-        let update = json!({ "$unset": { target_field: "" } });
-        if let Err(e) = adapter.update_one(collection, json!({ "_id": id }), update) {
-            tracing::warn!("Failed to remove stale vector of {:?}: {}", id, e);
-            all_removed = false;
+    let filter = json!({ "_id": id });
+    let update = json!({
+        "$set": { target_field: embedding }
+    });
+    match adapter.update_one(collection, filter, update) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("Failed to update document {:?}: {}", id, e);
+            false
         }
     }
-    if !ids.is_empty() {
+}
+
+/// Settle the documents a complete forced pass could not re-embed, so no
+/// old-model vector stays in the new space. Each one is re-read (a concurrent
+/// update may have changed or re-embedded it) and its current source text is
+/// tried once more; the vector of a document that still cannot be embedded is
+/// removed.
+///
+/// Returns the number of vectors removed, or None when the run has to count as
+/// incomplete: the provider fails a health check (an outage, not documents it
+/// cannot embed), the job is stopped, or a read or write fails.
+#[allow(clippy::too_many_arguments)]
+fn settle_failed_documents(
+    job_id: &str,
+    job_manager: &JobManager,
+    adapter: &IronBaseAdapter,
+    provider: &dyn EmbeddingProvider,
+    config: &AutoEmbeddingConfig,
+    collection: &str,
+    ids: &[Value],
+    shutdown_flag: &std::sync::atomic::AtomicBool,
+) -> Option<usize> {
+    if ids.is_empty() {
+        return Some(0);
+    }
+    if let Err(e) = provider.embed("health check") {
         tracing::warn!(
-            "Re-embed of '{}': {} documents could not be embedded; their old vectors were removed",
+            "Re-embed of '{}': provider fails a health check ({}); {} failed documents keep \
+             their vectors",
             collection,
+            e,
             ids.len()
         );
+        return None;
     }
-    all_removed
+
+    let mut removed = 0;
+    for id in ids {
+        if job_manager.is_cancelled(job_id)
+            || shutdown_flag.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        let doc = match adapter.find_one(collection, json!({ "_id": id })) {
+            Ok(Some(doc)) => doc,
+            Ok(None) => continue, // deleted meanwhile
+            Err(e) => {
+                tracing::warn!("Failed to re-read document {:?}: {}", id, e);
+                return None;
+            }
+        };
+        if let Some(text) = doc.get(&config.source_field).and_then(|v| v.as_str()) {
+            if let Ok(embedding) = provider.embed(text) {
+                if !store_embedding(adapter, collection, &config.target_field, id, &embedding) {
+                    return None;
+                }
+                continue;
+            }
+        }
+        if doc.get(&config.target_field).is_none() {
+            continue;
+        }
+        let update = json!({ "$unset": { &config.target_field: "" } });
+        if let Err(e) = adapter.update_one(collection, json!({ "_id": id }), update) {
+            tracing::warn!("Failed to remove stale vector of {:?}: {}", id, e);
+            return None;
+        }
+        removed += 1;
+    }
+    if removed > 0 {
+        tracing::warn!(
+            "Re-embed of '{}': {} documents cannot be embedded with the new model; their old \
+             vectors were removed",
+            collection,
+            removed
+        );
+    }
+    Some(removed)
 }
 
 /// Save the model and preprocessing version a forced re-embed produced into the
-/// collection's auto-embed config. Skipped when the config was disabled or
-/// pointed elsewhere while the job ran.
+/// collection's auto-embed config. Skipped when any other setting of the config
+/// changed while the job ran (disabled, other provider, source or target field).
 fn commit_embedding_space(
     adapter: &IronBaseAdapter,
     collection: &str,
     target: &AutoEmbeddingConfig,
 ) -> bool {
+    // Everything but the embedding space itself must still match the job's config
+    let settings = |c: &AutoEmbeddingConfig| {
+        let mut c = c.clone();
+        c.model = None;
+        c.preprocessing_version = None;
+        serde_json::to_value(c).ok()
+    };
     let mut current = match adapter.get_auto_embedding_config(collection) {
-        Ok(Some(c))
-            if c.enabled
-                && c.provider == target.provider
-                && c.target_field == target.target_field =>
-        {
-            c
-        }
+        Ok(Some(c)) if settings(&c).is_some() && settings(&c) == settings(target) => c,
         _ => {
             tracing::warn!(
                 "Auto-embed config of '{}' changed during re-embed; not recording model '{}'",
@@ -919,7 +1059,7 @@ pub fn check_model_changes_and_reembed(
             continue;
         }
 
-        let config = match adapter.get_auto_embedding_config(collection) {
+        let mut config = match adapter.get_auto_embedding_config(collection) {
             Ok(Some(c)) if c.enabled => c,
             _ => continue,
         };
@@ -994,6 +1134,15 @@ pub fn check_model_changes_and_reembed(
                     e
                 );
                 continue;
+            }
+            // The old vectors are gone, so the stored dimension (which inserts
+            // are validated against) follows the provider right away
+            if config.dimension.is_some_and(|d| d != current_dim) {
+                config.dimension = Some(current_dim);
+                if let Err(e) = adapter.set_auto_embedding_config(collection, Some(config.clone()))
+                {
+                    tracing::warn!("Failed to update config for '{}': {}", collection, e);
+                }
             }
         }
 
@@ -1070,23 +1219,55 @@ pub fn check_model_changes_and_reembed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::{EmbeddingError, EmbeddingProvider, EmbeddingResult};
+    use crate::embedding::{EmbeddingError, EmbeddingResult};
     use crate::jobs::JobStatus;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    /// Embeds a text as [length, 2.0] under model "new"; fails on "bad"
-    struct NewModelProvider;
+    /// Embeds a text as [length, 2.0] under model "new". Always fails on "bad",
+    /// on "flaky" for its first `flaky_failures` calls, and on everything when
+    /// `down`. With `deleter`, its n-th call deletes documents 0..8 of "kb"
+    /// (a concurrent delete before the job's cursor).
+    #[derive(Default)]
+    struct NewModelProvider {
+        dim: usize,
+        down: bool,
+        flaky_failures: AtomicUsize,
+        calls: AtomicUsize,
+        deleter: Option<(usize, Arc<IronBaseAdapter>)>,
+    }
+
+    impl NewModelProvider {
+        fn new() -> Self {
+            Self {
+                dim: 2,
+                ..Default::default()
+            }
+        }
+    }
 
     impl EmbeddingProvider for NewModelProvider {
         fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
-            if text == "bad" {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some((at, adapter)) = &self.deleter {
+                if call == *at {
+                    for id in 0..8 {
+                        adapter.delete_one("kb", json!({"_id": id})).unwrap();
+                    }
+                }
+            }
+            let left = self.flaky_failures.load(Ordering::SeqCst);
+            let flaky = text == "flaky" && left > 0;
+            if flaky {
+                self.flaky_failures.store(left - 1, Ordering::SeqCst);
+            }
+            if self.down || text == "bad" || flaky {
                 return Err(EmbeddingError::ApiError("boom".to_string()));
             }
             Ok(vec![text.chars().count() as f32, 2.0])
         }
         fn dimension(&self) -> usize {
-            2
+            self.dim
         }
         fn model_name(&self) -> &str {
             "new"
@@ -1098,6 +1279,13 @@ mod tests {
 
     /// Collection "kb" whose vectors (all [0, 0]) were made by model "old"
     fn setup(contents: &[Option<&str>]) -> (Arc<IronBaseAdapter>, Arc<EmbeddingManager>, TempDir) {
+        setup_with(contents, |_| NewModelProvider::new())
+    }
+
+    fn setup_with(
+        contents: &[Option<&str>],
+        provider: impl FnOnce(&Arc<IronBaseAdapter>) -> NewModelProvider,
+    ) -> (Arc<IronBaseAdapter>, Arc<EmbeddingManager>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let adapter = Arc::new(
             IronBaseAdapter::new(tmp.path().join("t.mlite").to_string_lossy().to_string()).unwrap(),
@@ -1125,7 +1313,7 @@ mod tests {
             )
             .unwrap();
         let mut manager = EmbeddingManager::new();
-        manager.register_provider("mock", Arc::new(NewModelProvider));
+        manager.register_provider("mock", Arc::new(provider(&adapter)));
         (adapter, Arc::new(manager), tmp)
     }
 
@@ -1239,7 +1427,8 @@ mod tests {
     }
 
     /// A forced run pages with skip: batches of documents without source text
-    /// must not trip the no-progress stop before the end of the collection
+    /// must not trip the no-progress stop before the end of the collection.
+    /// Their old vectors cannot be re-embedded, so they are removed.
     #[test]
     fn forced_reembed_passes_documents_without_source() {
         let mut contents = vec![None; 12];
@@ -1248,8 +1437,109 @@ mod tests {
         let result = run_forced(&adapter, &manager, 1, false).unwrap();
 
         assert_eq!(result["processed"], json!(1));
+        assert_eq!(result["stale_vectors_removed"], json!(12));
         assert_eq!(result["embedding_space_committed"], json!(true));
         assert_eq!(stored_model(&adapter).as_deref(), Some("new"));
+        let embedded = adapter
+            .count_documents("kb", json!({"embedding": {"$exists": true}}))
+            .unwrap();
+        assert_eq!(embedded, 1);
+    }
+
+    /// Deletes before the cursor shift the skip window; the pass must still
+    /// reach every remaining document (here more deletes than one batch)
+    #[test]
+    fn forced_reembed_reaches_all_documents_despite_deletes() {
+        let texts: Vec<String> = (0..40).map(|i| format!("t{}", i)).collect();
+        let contents: Vec<Option<&str>> = texts.iter().map(|t| Some(t.as_str())).collect();
+        let (adapter, manager, _t) = setup_with(&contents, |adapter| NewModelProvider {
+            deleter: Some((9, adapter.clone())),
+            ..NewModelProvider::new()
+        });
+        let result = run_forced(&adapter, &manager, 4, false).unwrap();
+
+        assert_eq!(result["embedding_space_committed"], json!(true));
+        let docs = adapter
+            .find("kb", json!({}), Default::default())
+            .unwrap()
+            .documents;
+        assert_eq!(docs.len(), 32);
+        for doc in docs {
+            assert_eq!(doc["embedding"][1], json!(2.0), "{}", doc);
+        }
+    }
+
+    /// A document that failed during the pass is retried with its current
+    /// source before its vector is removed
+    #[test]
+    fn forced_reembed_retries_failed_documents() {
+        let (adapter, manager, _t) = setup_with(&[Some("flaky"), Some("abc")], |_| {
+            let p = NewModelProvider::new();
+            p.flaky_failures.store(2, Ordering::SeqCst); // batch call + fallback
+            p
+        });
+        let result = run_forced(&adapter, &manager, 10, false).unwrap();
+
+        assert_eq!(result["errors"], json!(1));
+        assert_eq!(result["stale_vectors_removed"], json!(0));
+        assert_eq!(result["embedding_space_committed"], json!(true));
+        let flaky = adapter.find_one("kb", json!({"_id": 0})).unwrap().unwrap();
+        assert_eq!(flaky["embedding"], json!([5.0, 2.0]));
+    }
+
+    /// A provider outage on a collection smaller than the no-progress stop
+    /// still reaches the end; the health check keeps it from removing vectors
+    #[test]
+    fn forced_reembed_during_outage_keeps_vectors() {
+        let (adapter, manager, _t) = setup_with(&[Some("abc"), Some("de")], |_| NewModelProvider {
+            down: true,
+            ..NewModelProvider::new()
+        });
+        let result = run_forced(&adapter, &manager, 10, false).unwrap();
+
+        assert_eq!(result["embedding_space_committed"], json!(false));
+        assert_eq!(result["stale_vectors_removed"], json!(0));
+        assert_eq!(stored_model(&adapter).as_deref(), Some("old"));
+        let embedded = adapter
+            .count_documents("kb", json!({"embedding": {"$exists": true}}))
+            .unwrap();
+        assert_eq!(embedded, 2);
+    }
+
+    /// The new model is not recorded over a config whose other settings
+    /// changed while the job ran
+    #[test]
+    fn commit_rejects_changed_config() {
+        let (adapter, _m, _t) = setup(&[Some("abc")]);
+        let mut target = adapter.get_auto_embedding_config("kb").unwrap().unwrap();
+        target.model = Some("new".to_string());
+        target.source_field = "other".to_string();
+
+        assert!(!commit_embedding_space(&adapter, "kb", &target));
+        assert_eq!(stored_model(&adapter).as_deref(), Some("old"));
+    }
+
+    /// After a dimension change the stored dimension (which inserts are
+    /// validated against) follows the provider; the model stays old until the
+    /// re-embed completes
+    #[test]
+    fn startup_dimension_change_updates_stored_dimension() {
+        let (adapter, manager, _t) = setup_with(&[Some("abc")], |_| NewModelProvider {
+            dim: 3,
+            ..NewModelProvider::new()
+        });
+        adapter
+            .create_vector_index("kb", "embedding", 2, "cosine", 1_000, 16, 200, 50)
+            .unwrap();
+        check_model_changes_and_reembed(&adapter, &Some(manager), &None, false);
+
+        let config = adapter.get_auto_embedding_config("kb").unwrap().unwrap();
+        assert_eq!(config.dimension, Some(3));
+        assert_eq!(config.model.as_deref(), Some("old"));
+        assert_eq!(
+            adapter.list_vector_indexes("kb").unwrap()[0]["dim"],
+            json!(3)
+        );
     }
 
     #[test]

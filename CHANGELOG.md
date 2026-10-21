@@ -22,20 +22,36 @@ Hybrid search review 2026-10-17 F4.
   matched the current one and no re-embed was detected.
   `handle_dimension_change` used hardcoded index parameters.
 - **Fix:** the config's `model` / `preprocessing_version` keep describing the
-  stored vectors until a forced re-embed reached the end of the collection;
-  only then does the job record the new values (job result:
-  `embedding_space_committed`). A run that is cancelled, stopped by the
-  no-progress guard (e.g. provider outage) or never started is restarted by
-  the next startup. Documents the new model cannot embed lose their old-model
-  vector rather than staying in the index in the wrong space
-  (`stale_vectors_removed`), so a single unembeddable text does not force a
-  full re-embed on every startup. In a forced run, batches of documents without source text no longer trip the
-  no-progress stop, and a provider returning fewer vectors than texts counts
-  as errors. The index rebuilt for a new dimension keeps the old metric,
-  `max_vectors` and HNSW parameters.
+  stored vectors until a forced re-embed handled every document; only then
+  does the job record the new values (job result: `embedding_space_committed`),
+  and only if no other auto-embed setting changed meanwhile. A run that is
+  cancelled, stopped by the no-progress guard or never started is restarted
+  by the next startup.
+  - **Complete pass:** the forced pass pages over the `_id`-ordered catalog
+    with skip; each page now re-reads one batch before the cursor and skips
+    documents already handled (backing off further if needed), so deletes
+    during the run no longer make it miss documents.
+  - **Failed documents:** after the pass each one is re-read and its current
+    source retried once; a document that still cannot be embedded (or has a
+    vector but no source text) loses its old-model vector rather than
+    staying in the index in the wrong space (`stale_vectors_removed`), so a
+    single unembeddable text does not force a full re-embed on every
+    startup. A provider failing a health check at that point is an outage:
+    nothing is removed and the run counts as incomplete.
+  - Batches of documents without source text no longer trip the no-progress
+    stop, and a provider returning fewer vectors than texts counts as errors.
+  - **Dimension change:** the index rebuilt for a new dimension keeps the old
+    metric, `max_vectors` and HNSW parameters, and the stored `dimension`
+    (which inserts are validated against) follows the provider right away —
+    before, inserts failed with a dimension mismatch after a dimension change.
 - **Not changed:** while the re-embed runs, queries still compare new-model
   query vectors with partly old-model document vectors; avoiding that needs a
   per-vector space marker or a second index (a new persisted field).
+- **Upgrading:** a re-embed interrupted under an earlier version already
+  recorded the new model, so it is not detected. If a model change was ever
+  interrupted (or the collection predates model tracking), start once with
+  `--force-reembed`. The same applies to an interrupted dimension change that
+  kept the model and preprocessing names.
 
 ### Changed — Embedding HTTP client upgraded to ureq 3 (mcp-server v1.0.613)
 
