@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Embedding HTTP client upgraded to ureq 3 (mcp-server v1.0.613)
+
+- **Why:** ureq 2.x pulls in `webpki-roots` 0.26.11, which `cargo audit`
+  flags as RUSTSEC-2026-0381 (distrusted emSign intermediates). 0.26.11 is a
+  shim re-exporting the fixed 1.x line, so this was not exploitable, but it
+  needed an audit ignore. ureq 3 depends on `webpki-roots` 1.x directly; the
+  shim is gone from the dependency tree and the ignore is removed from
+  `.cargo/audit.toml`.
+- **Behaviour kept:** non-2xx responses are still read in full, so NaN
+  detection, retry on 429/5xx and the API's error message in
+  `HTTP <status>: <body>` work as before (`http_status_as_error(false)`).
+  The success body is read without ureq 3's 10MB `read_json()` cap, as with
+  ureq 2 — large native batches (e.g. OpenAI with 2048 texts) exceed 10MB.
+- **Tests:** `call_api` against a local HTTP server: a success body over
+  10MB, a 404 error body, a 500 NaN body, and a refused connection.
+
 ### Fixed — Search: grouped results merge overlapping neighbour chunks (mcp-server v1.0.612)
 
 Hybrid search review 2026-10-17 H1 (remaining part).
