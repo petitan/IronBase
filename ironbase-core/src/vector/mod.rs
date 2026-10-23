@@ -37,7 +37,7 @@ pub use config::{
     MAX_VECTOR_DIM, VECTOR_COUNT_WARNING_THRESHOLD,
 };
 
-pub use hnsw::{HnswIndex, VectorSearchResult};
+pub use hnsw::{HnswIndex, RebuildSnapshot, VectorSearchResult};
 
 pub use simd::{
     cosine_similarity, cosine_similarity_with_norm, dot_product, euclidean_distance, l2_norm,

@@ -664,27 +664,61 @@ impl DatabaseCore<StorageEngine> {
             }
         }
 
-        // 4. HNSW orphan compaction + vector flush
-        {
+        // 4. HNSW orphan compaction + vector flush. The graph work runs
+        // without the write lock (review 2026-10-17 F5): a rebuild builds the
+        // new graph off-lock and swaps it in, and a flush serializes under an
+        // upgradable read lock, so searches are never blocked by either.
+        let rebuild_names = index_manager.read().vector_indexes_needing_rebuild();
+        for name in &rebuild_names {
             let t = std::time::Instant::now();
-            let mut mgr = index_manager.write();
-            let lock_wait_ms = t.elapsed().as_millis() as u64;
-            let rebuilt = mgr.rebuild_vector_indexes_if_needed()?;
-            if rebuilt > 0 {
-                let rebuild_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                tracing::info!(
-                    collection = %collection_name,
-                    rebuilt, lock_wait_ms, rebuild_ms,
-                    "HNSW orphan compaction"
-                );
+            if !index_manager.write().begin_vector_rebuild(name) {
+                continue;
+            }
+            // Copy the vectors under a read lock: searches keep running, and
+            // writes after `begin` are replayed by `finish` anyway
+            let snapshot = index_manager.read().snapshot_vector_index(name);
+            let rebuilt = match snapshot
+                .and_then(|s| s.map(crate::vector::HnswIndex::rebuilt_from).transpose())
+            {
+                Ok(Some(rebuilt)) => rebuilt,
+                Ok(None) => continue, // dropped meanwhile
+                Err(e) => {
+                    index_manager.write().abort_vector_rebuild(name);
+                    return Err(e);
+                }
+            };
+            let build_ms = t.elapsed().as_millis() as u64;
+            let swap_start = std::time::Instant::now();
+            let swapped = index_manager.write().finish_vector_rebuild(name, rebuilt)?;
+            let swap_ms = swap_start.elapsed().as_millis() as u64;
+            tracing::info!(
+                collection = %collection_name, index = %name,
+                swapped, build_ms, swap_ms,
+                "HNSW orphan compaction"
+            );
+        }
+        // A rebuild marks its index dirty: flush those too
+        let mut dirty_vec = dirty_vec;
+        for name in rebuild_names {
+            if !dirty_vec.contains(&name) {
+                dirty_vec.push(name);
             }
         }
         for name in &dirty_vec {
             let t = std::time::Instant::now();
             let mut mgr = index_manager.write();
+            if !mgr.prepare_vector_flush(name, watermark) {
+                continue;
+            }
+            // Downgrade without releasing: the index stamped above is the one
+            // persisted and marked clean (no drop/recreate can slip in)
+            let mgr = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(mgr);
             let lock_wait_ms = t.elapsed().as_millis() as u64;
-            if mgr.flush_one_vector_index(name, db_path, watermark)? {
-                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+            let flush_start = std::time::Instant::now();
+            if mgr.persist_vector_index(name, db_path)? {
+                let mut mgr = parking_lot::RwLockUpgradableReadGuard::upgrade(mgr);
+                mgr.complete_vector_flush(name);
+                let flush_ms = flush_start.elapsed().as_millis() as u64;
                 tracing::info!(
                     collection = %collection_name, index = %name,
                     kind = "vector", lock_wait_ms, flush_ms,
@@ -1190,6 +1224,81 @@ mod compact_vector_rebuild_tests {
             "forced compact must rebuild and remove all orphans"
         );
         assert_top1(&db, 0);
+    }
+
+    fn dirty_vector_indexes(db: &DatabaseCore<StorageEngine>) -> usize {
+        let mgrs = db.index_managers.read();
+        let mgr = mgrs.get("kb").expect("kb index manager").read();
+        mgr.dirty_vector_index_names().len()
+    }
+
+    /// Hybrid review F5: the checkpoint's orphan rebuild (now built outside
+    /// the IndexManager lock and swapped in) clears the orphans, keeps search
+    /// correct, and the rebuilt index is flushed in the same checkpoint
+    #[test]
+    fn checkpoint_rebuilds_orphan_heavy_index_off_lock() {
+        const BIG_DIM: usize = 256;
+        // Same shape as `embedding`: distinct, with graded neighbours (purely
+        // orthogonal one-hot vectors are equidistant, which HNSW cannot navigate)
+        let vector = |d: usize| {
+            let mut v = vec![0.0f32; BIG_DIM];
+            v[d % BIG_DIM] = 1.0;
+            v[(d + 1) % BIG_DIM] = 0.3;
+            v[(d + 2) % BIG_DIM] = 0.1;
+            v
+        };
+        let temp = TempDir::new().unwrap();
+        let db = DatabaseCore::<StorageEngine>::open(temp.path().join("c.mlite")).unwrap();
+        {
+            let coll = db.collection("kb").unwrap();
+            let mut cfg = VectorIndexConfig::new(BIG_DIM);
+            cfg.field = "embedding".to_string();
+            cfg.metric = DistanceMetric::Cosine;
+            coll.create_vector_index("embedding", cfg).unwrap();
+        }
+        for d in 0..200 {
+            db.insert_many("kb", vec![doc(&format!("doc{d}"), &vector(d))])
+                .unwrap();
+        }
+        // 150 orphans of 350 nodes: over both rebuild gates
+        db.delete_many("kb", &json!({ "doc_id": { "$in": (0..150).map(|d| format!("doc{d}")).collect::<Vec<_>>() } }))
+            .unwrap();
+        for d in 0..150 {
+            db.insert_many("kb", vec![doc(&format!("doc{d}"), &vector(d))])
+                .unwrap();
+        }
+        assert!(orphan_count(&db) >= 150);
+
+        db.flush_all_indexes_counted().unwrap();
+
+        assert_eq!(orphan_count(&db), 0);
+        assert_eq!(dirty_vector_indexes(&db), 0, "rebuilt index flushed");
+        let coll = db.collection("kb").unwrap();
+        for d in [0, 149, 199] {
+            let res = coll.vector_search("embedding", &vector(d), 1).unwrap();
+            assert_eq!(
+                res[0].0.get("doc_id").and_then(|v| v.as_str()),
+                Some(format!("doc{d}").as_str())
+            );
+        }
+    }
+
+    /// Hybrid review F5: deleting a document that has no vector does not
+    /// mark the vector index dirty (it forced a full `.hnsw` rewrite)
+    #[test]
+    fn delete_without_vector_leaves_vector_index_clean() {
+        let (_t, db) = build_churned_db();
+        db.insert_many(
+            "kb",
+            vec![HashMap::from([("doc_id".to_string(), json!("plain"))])],
+        )
+        .unwrap();
+        db.flush_all_indexes_counted().unwrap();
+        assert_eq!(dirty_vector_indexes(&db), 0);
+
+        db.delete_many("kb", &json!({ "doc_id": "plain" })).unwrap();
+
+        assert_eq!(dirty_vector_indexes(&db), 0);
     }
 
     /// Regression guard: the default must stay non-forced on every construction

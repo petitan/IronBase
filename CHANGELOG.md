@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — HNSW checkpoint work no longer blocks searches (ironbase-core 0.3.417)
+
+Hybrid search review 2026-10-17 F5.
+
+- **Symptom:** while a checkpoint flushed or rebuilt a vector index, every
+  search and every write on that collection waited. A flush serializes and
+  fsyncs the whole graph; an orphan rebuild re-inserts every active vector
+  single-threaded (measured ~2.3 ms per 64-dim vector: 20K vectors ≈ 48 s,
+  tens of minutes at 1024 dims and 100K+ vectors). And any delete — even of
+  a document without a vector — marked every vector index dirty, forcing a
+  full `.hnsw` rewrite at the next checkpoint.
+- **Root cause:** both ran under the collection's `IndexManager` write lock;
+  `remove_document_from_indexes` marked vector indexes dirty unconditionally.
+- **Fix:**
+  - The vector flush is split into prepare (write, µs) → persist under an
+    **upgradable read** lock, downgraded from that write lock without
+    releasing it (searches run, writers wait, so no write or drop/recreate
+    slips in before the index is marked clean) → complete (write, µs).
+  - The orphan rebuild starts recording writers' changes (write lock, µs),
+    copies the active vectors under a **read** lock, builds the new graph
+    **without any lock** (`HnswIndex::rebuilt_from`), then replays the vectors
+    writers changed meanwhile — removals first — and swaps it in under a short
+    write lock. A rebuild whose index was dropped or recreated is discarded;
+    none starts while the index is being built or already rebuilt.
+  - A vector index is marked dirty only when a vector was actually removed.
+- **Not changed:** the explicit / automatic compaction rebuild still runs
+  under the write lock (operator-initiated or orphan-gated); cosine distance
+  still computes the norms per comparison.
+
 ### Fixed — Auto-embed: an interrupted re-embed after a model change no longer leaves a mixed vector space for good (mcp-server v1.0.614)
 
 Hybrid search review 2026-10-17 F4.
