@@ -923,9 +923,11 @@ fn test_corrupted_data_end_offset_recovery() {
     let original_size = fs::metadata(&db_path).unwrap().len();
     assert!(original_size > 256); // Should have header + documents
 
-    // Step 2: Corrupt the header by setting data_end_offset to 0
-    // Header layout (bincode): magic(8) + version(4) + ...
-    // data_end_offset is at byte 24 (after magic, version, metadata_offset, metadata_size)
+    // Step 2: Corrupt the header by setting data_end_offset to 0. The header
+    // is bincode-serialized; rewrite it through the real `Header` type rather
+    // than a hand-computed byte offset (the field is at byte 52, not 24 — the
+    // old offset hit free_list_head/index_section_offset and left
+    // data_end_offset intact, so the test never exercised the recovery).
     {
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -933,24 +935,24 @@ fn test_corrupted_data_end_offset_recovery() {
             .open(&db_path)
             .unwrap();
 
-        // Read header to verify magic
-        let mut magic = [0u8; 8];
-        file.read_exact(&mut magic).unwrap();
-        assert_eq!(&magic, b"MONGOLTE");
+        let mut bytes = vec![0u8; ironbase_core::storage::HEADER_SIZE as usize];
+        file.read_exact(&mut bytes).unwrap();
+        let mut header: ironbase_core::storage::Header = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(&header.magic, b"MONGOLTE");
+        assert!(header.data_end_offset > 0, "setup: data_end_offset is set");
 
-        // Seek to data_end_offset position (byte 24: magic(8) + version(4) + metadata_offset(8) + metadata_size(4))
-        // Actually in our Header struct with bincode:
-        // - magic: [u8; 8] = 8 bytes
-        // - version: u32 = 4 bytes
-        // - metadata_offset: u64 = 8 bytes
-        // - metadata_size: u32 = 4 bytes
-        // - data_end_offset: u64 = at byte 24
-        file.seek(SeekFrom::Start(24)).unwrap();
-
-        // Write 0 to corrupt data_end_offset
-        let zero: u64 = 0;
-        file.write_all(&zero.to_le_bytes()).unwrap();
+        header.data_end_offset = 0;
+        let corrupted = bincode::serialize(&header).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&corrupted).unwrap();
         file.sync_all().unwrap();
+
+        // The corruption really landed in data_end_offset
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_exact(&mut bytes).unwrap();
+        let reread: ironbase_core::storage::Header = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(reread.data_end_offset, 0);
+        assert_eq!(reread.metadata_offset, header.metadata_offset);
     }
 
     // Step 3: Reopen the database - should recover data_end_offset from catalog
