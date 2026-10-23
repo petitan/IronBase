@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Auto-embed re-embed: no mixed vector space while it runs (ironbase-core 0.3.425, mcp-server v1.0.623)
+
+Hybrid search review 2026-10-17, D3 (design and the new config field approved
+by the owner).
+
+- **Symptom:** during a forced re-embed (model, preprocessing or dimension
+  change) vector search ran over a mix of old- and new-model vectors; after a
+  dimension change the old vectors were removed up front, so the vector lane
+  found nothing until the re-embed reached a document.
+- **Root cause:** one vector field and one index held both spaces, and the
+  query is always embedded with the new model.
+- **Fix:** new `AutoEmbeddingConfig.reembed_field` (`#[serde(default)]`).
+  When the target field has a vector index, a re-embed also writes every new
+  vector (and its source hash, D4) into the shadow field
+  `<target_field>__next`, which gets an index with the target's metric and
+  HNSW parameters. While `reembed_field` is set, every vector search on the
+  target field (MCP `vector_search`, the hybrid / `search` vector lane, Rhai)
+  uses the shadow index: new space only, with a coverage that grows as the
+  re-embed proceeds. Inserts and updates meanwhile write both fields. The
+  target's own index is not searched meanwhile, so a new dimension rebuilds it
+  at the start. Completing the re-embed records the new model and clears
+  `reembed_field` in one config write — searches switch back to the target,
+  now complete in the new space — then the shadow index and fields are removed
+  (an interrupted cleanup is finished at startup). Costs while it runs: a
+  second index and a second copy of each new vector. Without a target vector
+  index nothing changes. `auto_embed_status` shows `reembed_field`; the
+  `search` tool's output leaves the shadow fields out.
+
 ### Added — Auto-embed: source hash next to every embedding (mcp-server v1.0.622)
 
 Hybrid search review 2026-10-17, D4 (field approved by the owner).

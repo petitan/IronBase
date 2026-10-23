@@ -32,6 +32,7 @@ fn is_stripped_chunk_key(k: &str) -> bool {
     k.starts_with('_')
         || CHUNK_TRACKING_KEYS.contains(&k)
         || k.ends_with(crate::tools::auto_embed::SOURCE_HASH_SUFFIX)
+        || k.ends_with(crate::tools::auto_embed::SHADOW_SUFFIX)
 }
 
 /// Build the compact `search` response from the shared pipeline's grouped output.

@@ -185,11 +185,16 @@ fn handle_search(
     Ok(out)
 }
 
-/// The embedding and its auto-embed source hash (D4) are left out of the
-/// `search` output; both are left unparsed in the lanes (T2)
+/// The embedding, its auto-embed source hash (D4) and the shadow of a
+/// running re-embed (D3) are left out of the `search` output, and left
+/// unparsed in the lanes (T2)
 fn search_projection() -> Value {
+    use crate::tools::auto_embed::{shadow_field, source_hash_field};
+    let shadow = shadow_field("embedding");
     json!({
         "embedding": 0,
-        crate::tools::auto_embed::source_hash_field("embedding"): 0,
+        source_hash_field("embedding"): 0,
+        source_hash_field(&shadow): 0,
+        shadow: 0,
     })
 }

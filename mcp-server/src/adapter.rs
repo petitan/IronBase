@@ -2204,6 +2204,31 @@ impl IronBaseAdapter {
         Ok(())
     }
 
+    /// The field a vector search on `field` uses: during an auto-embed
+    /// re-embed into a new space, the shadow field that holds only new-space
+    /// vectors (the query is embedded with the new model), so the search never
+    /// mixes the two spaces (hybrid review D3); otherwise `field` itself
+    fn searched_vector_field(&self, collection: &str, field: &str) -> String {
+        let shadow = self
+            .get_auto_embedding_config(collection)
+            .ok()
+            .flatten()
+            .filter(|config| config.target_field == field)
+            .and_then(|config| config.reembed_field);
+        match shadow {
+            Some(shadow)
+                if self.list_vector_indexes(collection).is_ok_and(|indexes| {
+                    indexes
+                        .iter()
+                        .any(|idx| idx.get("field").and_then(|f| f.as_str()) == Some(&shadow))
+                }) =>
+            {
+                shadow
+            }
+            _ => field.to_string(),
+        }
+    }
+
     /// Perform vector similarity search
     ///
     /// # Arguments
@@ -2221,10 +2246,11 @@ impl IronBaseAdapter {
         query_vector: &[f32],
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        let field = self.searched_vector_field(collection, field);
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let ctx = self.create_execution_context();
-        let results = coll.vector_search_with_ctx(field, query_vector, limit, Some(&ctx))?;
+        let results = coll.vector_search_with_ctx(&field, query_vector, limit, Some(&ctx))?;
         Ok(results)
     }
 
@@ -2236,9 +2262,14 @@ impl IronBaseAdapter {
         field: &str,
         query_vector: &[f32],
         filter: Option<&Value>,
-        exclude_fields: Vec<String>,
+        mut exclude_fields: Vec<String>,
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        let searched = self.searched_vector_field(collection, field);
+        if searched != field && exclude_fields.iter().any(|f| f == field) {
+            exclude_fields.push(searched.clone());
+        }
+        let field = searched.as_str();
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let ctx = self.create_execution_context();
@@ -2270,11 +2301,12 @@ impl IronBaseAdapter {
         filter: &Value,
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        let field = self.searched_vector_field(collection, field);
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let ctx = self.create_execution_context();
         let results = coll.vector_search_with_filter_with_ctx(
-            field,
+            &field,
             query_vector,
             filter,
             limit,
