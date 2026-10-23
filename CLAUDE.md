@@ -381,7 +381,7 @@ let limits = AggregationLimits::from_system_memory();
 | Index | Lazy Loading | Megjegyzés |
 |-------|--------------|------------|
 | B+ Tree | ✅ Igen | `load_from_path()` threshold check |
-| Fulltext | ✅ Igen | V2/V3 format mindig lazy |
+| Fulltext | ✅ Igen | V2/V3 format mindig lazy; parse-olt posting listák korlátos LRU cache-ben (F6, v0.3.418), flush/commit üríti |
 | Fuzzy | ✅ Igen | Dinamikus threshold |
 | HNSW | ❌ Nem (lazy rebuild ✅) | Gráf struktúra miatt komplex, de orphan compaction checkpoint/compact-ban |
 

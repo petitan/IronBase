@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Fulltext: search during a checkpoint flush, posting lists re-read per query (ironbase-core 0.3.418)
+
+Hybrid search review 2026-10-17 F6, plus a race found while fixing it.
+
+- **Search during a two-phase flush lost disk postings.** The checkpoint's
+  fulltext flush renamed the new `.ftidx` over the live file in Phase 2 (no
+  lock), but installed the new `token_offsets` only in Phase 3 under the
+  write lock. In between — while other indexes were still serializing, up to
+  several seconds per checkpoint — searches read the new file at the old
+  offsets and silently dropped every posting not still in memory (a probe:
+  7 hits → 0). The rename now happens in `commit_flush`, under the write
+  lock, together with installing the new offsets. Crash safety is unchanged
+  (the temp file is complete and fsynced before the atomic rename; before the
+  commit the old file and old metadata stay consistent).
+- **Posting lists re-read on every query (F6).** A lazy (V2/V3) index read
+  and JSON-parsed each query token's full posting list from disk for every
+  lookup — several times per query (document frequency, scoring). Parsed
+  lists now go to a bounded, per-index LRU **posting cache** (budget 1/16 of
+  the RAM-based lazy threshold, ≈3–31 MB; a list over half the budget is not
+  cached), cleared whenever the on-disk lists are replaced (flush, commit,
+  new storage path, clear). No file-format change.
+- `search`, `search_with_ctx` and `search_for_doc_ids_with_ctx` no longer
+  allocate a `String` per (document, query token) pair for
+  `matched_tokens`; only the returned top-k get them.
+- **Not changed:** the JSON posting format, full-pass BM25 scoring (no
+  WAND/MaxScore) and filter push-down — a binary posting format is a file
+  format change and needs a separate decision.
+
 ### Fixed — HNSW checkpoint work no longer blocks searches (ironbase-core 0.3.417)
 
 Hybrid search review 2026-10-17 F5.
