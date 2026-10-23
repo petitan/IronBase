@@ -33,8 +33,8 @@ mod hnsw;
 pub mod simd;
 
 pub use config::{
-    DistanceMetric, VectorConfigError, VectorIndexConfig, VectorIndexMetadata, DEFAULT_MAX_VECTORS,
-    MAX_VECTOR_DIM, VECTOR_COUNT_WARNING_THRESHOLD,
+    DistanceMetric, VectorConfigError, VectorIndexConfig, VectorIndexMetadata, VectorSearchOptions,
+    DEFAULT_MAX_VECTORS, MAX_VECTOR_DIM, VECTOR_COUNT_WARNING_THRESHOLD,
 };
 
 pub use hnsw::{HnswIndex, RebuildSnapshot, VectorSearchResult};
