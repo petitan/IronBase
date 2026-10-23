@@ -1415,6 +1415,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
+        // The cursor checks it per document read: the lazy scans below
+        // would otherwise run to the end (hybrid review T7)
+        let ctx = (cancel_flag.is_some() || deadline.is_some()).then(|| {
+            ExecutionContext::new()
+                .with_cancel_flag_opt(cancel_flag.cloned())
+                .with_deadline_opt(deadline)
+        });
         let storage = self.storage.read();
         if storage.get_file_path().is_empty() {
             drop(storage);
@@ -1431,7 +1438,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 cancel_flag,
                 deadline,
             )?;
-            return Ok(FindCursor::new(self, doc_ids));
+            return Ok(FindCursor::new(self, doc_ids).with_ctx(ctx));
         }
         let has_catalog = storage
             .get_collection_meta(&self.name)
@@ -1454,11 +1461,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     cancel_flag,
                     deadline,
                 )?;
-                return Ok(FindCursor::new(self, doc_ids));
+                return Ok(FindCursor::new(self, doc_ids).with_ctx(ctx));
             }
-            // Note: new_scan path doesn't support deadline yet (iterates lazily)
-            // For aggregate, we rely on AggregationLimitContext.check_deadline() in pipeline
-            return FindCursor::new_scan(self, query_json);
+            return Ok(FindCursor::new_scan(self, query_json)?.with_ctx(ctx));
         }
 
         let index_fields = {
@@ -1470,7 +1475,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
         {
             if let Some(cursor) = FindCursor::new_index_scan_from_plan(self, query_json, plan)? {
-                return Ok(cursor);
+                return Ok(cursor.with_ctx(ctx));
             }
         }
 
@@ -1488,11 +1493,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 cancel_flag,
                 deadline,
             )?;
-            return Ok(FindCursor::new(self, doc_ids));
+            return Ok(FindCursor::new(self, doc_ids).with_ctx(ctx));
         }
 
-        // Note: new_scan path doesn't support deadline yet
-        FindCursor::new_scan(self, query_json)
+        Ok(FindCursor::new_scan(self, query_json)?.with_ctx(ctx))
     }
 
     /// Find one document matching query

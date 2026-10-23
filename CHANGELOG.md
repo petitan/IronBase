@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Vector search ignored the request timeout and cancel (ironbase-core 0.3.422, mcp-server v1.0.620)
+
+Hybrid search review 2026-10-17, T7.
+
+- **Symptom:** `vector_search` / `vector_search_with_filter` (MCP `vector_search`,
+  the vector leg of `search`/hybrid, Rhai `db_vector_search*`) ran to the end
+  after the request deadline passed or the client cancelled; fulltext, fuzzy,
+  find and count already stopped.
+- **Root cause:** the vector paths took no `ExecutionContext`. Underneath,
+  `FindCursor` checked nothing while reading: `find_streaming_with_options`
+  accepted a cancel flag and deadline but only the eager id collection used
+  them, so a lazy index or collection scan (a selective filter) could not be
+  stopped — this also affected the aggregation document stream.
+- **Fix:** `vector_search_with_ctx` / `vector_search_with_filter_with_ctx`
+  (the old methods delegate with `None`, as `count_documents` does) check the
+  context before the search, while the filter is resolved, while the allowed
+  set is scored exactly (`HnswIndex::search_with_allowed` /
+  `search_exact_among` take `Option<&ExecutionContext>` and return `Result`)
+  and while the result documents load. `FindCursor` keeps the context of
+  `find_streaming_with_options` and checks it per document read in every
+  mode. The MCP adapter passes the request context. The bounded HNSW graph
+  search itself is not interrupted.
+
 ### Performance — HNSW: vectorizable distance kernels, cached node norms (ironbase-core 0.3.421)
 
 Hybrid search review 2026-10-17, T6. Measured on 20K × 384 and 10K × 768

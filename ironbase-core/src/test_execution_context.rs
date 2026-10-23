@@ -344,3 +344,142 @@ fn test_find_with_options_deadline_and_cancel_flag() {
         err
     );
 }
+
+// ============================================================================
+// Streaming cursor and vector search (hybrid review T7)
+// ============================================================================
+
+/// Read documents until the cursor fails; panics if it reads to the end
+fn drain_until_error<S: crate::storage::Storage + crate::storage::RawStorage>(
+    cursor: &mut crate::collection_core::FindCursor<'_, S>,
+) -> crate::error::IronBaseError {
+    loop {
+        match cursor.next() {
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("the cursor read to the end after the cancel"),
+            Err(e) => return e,
+        }
+    }
+}
+
+/// A cursor checks its context per document read: a cancel after it was
+/// created stops it (it used to read to the end)
+#[test]
+fn test_find_streaming_cursor_stops_on_cancel() {
+    let db = setup_test_db();
+    let coll = db.get_collection("test").unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut cursor = coll
+        .find_streaming_with_options(&json!({"age": {"$gte": 0}}), Some(&flag), None)
+        .unwrap();
+    assert!(cursor.next().unwrap().is_some());
+
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let err = drain_until_error(&mut cursor);
+    assert!(
+        matches!(err, crate::error::IronBaseError::Cancelled(_)),
+        "Expected Cancelled error, got: {:?}",
+        err
+    );
+}
+
+/// The same for the lazy index scan of a file-backed collection
+#[test]
+fn test_find_streaming_index_scan_stops_on_cancel() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let db =
+        DatabaseCore::<crate::storage::StorageEngine>::open(temp.path().join("t.mlite")).unwrap();
+    for i in 0..1000 {
+        let mut doc: HashMap<String, Value> = HashMap::new();
+        doc.insert("age".to_string(), json!(i % 100));
+        db.insert_one("test", doc).unwrap();
+    }
+    let coll = db.get_collection("test").unwrap();
+    coll.create_index("age".to_string(), false, false).unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut cursor = coll
+        .find_streaming_with_options(&json!({"age": {"$gte": 0}}), Some(&flag), None)
+        .unwrap();
+    assert!(cursor.next().unwrap().is_some());
+
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let err = drain_until_error(&mut cursor);
+    assert!(
+        matches!(err, crate::error::IronBaseError::Cancelled(_)),
+        "Expected Cancelled error, got: {:?}",
+        err
+    );
+}
+
+/// 1000 documents with a 2-dimensional "emb" vector index
+fn setup_vector_db() -> DatabaseCore<MemoryStorage> {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for i in 0..1000 {
+        let mut doc: HashMap<String, Value> = HashMap::new();
+        doc.insert("emb".to_string(), json!([i as f64, 1.0]));
+        doc.insert("tag".to_string(), json!(i % 2));
+        db.insert_one("test", doc).unwrap();
+    }
+    db.get_collection("test")
+        .unwrap()
+        .create_vector_index("emb", crate::vector::VectorIndexConfig::new(2))
+        .unwrap();
+    db
+}
+
+#[test]
+fn test_vector_search_with_ctx_no_context() {
+    let db = setup_vector_db();
+    let coll = db.get_collection("test").unwrap();
+
+    let plain = coll.vector_search("emb", &[1.0, 1.0], 5).unwrap();
+    let with_ctx = coll
+        .vector_search_with_ctx("emb", &[1.0, 1.0], 5, None)
+        .unwrap();
+    assert_eq!(plain, with_ctx);
+    let filtered = coll
+        .vector_search_with_filter_with_ctx("emb", &[1.0, 1.0], &json!({"tag": 1}), 5, None)
+        .unwrap();
+    assert_eq!(filtered.len(), 5);
+    assert!(filtered.iter().all(|(doc, _)| doc["tag"] == json!(1)));
+}
+
+#[test]
+fn test_vector_search_with_ctx_expired_deadline() {
+    let db = setup_vector_db();
+    let coll = db.get_collection("test").unwrap();
+    let ctx = ExecutionContext::new().with_deadline(Instant::now() - Duration::from_secs(1));
+
+    let err = coll
+        .vector_search_with_ctx("emb", &[1.0, 1.0], 5, Some(&ctx))
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::IronBaseError::Timeout(_)),
+        "Expected Timeout error, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_vector_search_with_filter_with_ctx_cancelled() {
+    let db = setup_vector_db();
+    let coll = db.get_collection("test").unwrap();
+    let ctx = ExecutionContext::new().with_cancel_flag(Arc::new(AtomicBool::new(true)));
+
+    let err = coll
+        .vector_search_with_filter_with_ctx(
+            "emb",
+            &[1.0, 1.0],
+            &json!({"tag": {"$gte": 1}}),
+            5,
+            Some(&ctx),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::IronBaseError::Cancelled(_)),
+        "Expected Cancelled error, got: {:?}",
+        err
+    );
+}

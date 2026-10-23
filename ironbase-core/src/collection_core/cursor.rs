@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
+use crate::execution::ExecutionContext;
 use crate::index::plan_ranges::PlanRanges;
 use crate::index::{IndexKey, ScanOrder};
 use crate::query::Query;
@@ -84,6 +85,10 @@ pub struct FindCursor<'a, S: Storage + RawStorage> {
     mode: FindCursorMode,
     /// Default batch size for chunk operations
     batch_size: usize,
+    /// Cancellation/timeout, checked per document read (hybrid review T7)
+    ctx: Option<ExecutionContext>,
+    /// Documents read so far, for `ctx.maybe_check`
+    reads: usize,
 }
 
 impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
@@ -96,6 +101,8 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 position: 0,
             },
             batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+            ctx: None,
+            reads: 0,
         }
     }
 
@@ -140,6 +147,8 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 },
             },
             batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+            ctx: None,
+            reads: 0,
         })
     }
 
@@ -208,6 +217,8 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 yielded: 0,
             },
             batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+            ctx: None,
+            reads: 0,
         })
     }
 
@@ -268,20 +279,37 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
 
     /// Fetch the next document, or None if exhausted
     /// Uses iterative loop instead of recursion to avoid stack overflow with many tombstones
+    /// Stop on `ctx` (cancel flag or deadline) while reading documents;
+    /// without it a scan for a selective filter cannot be interrupted.
+    pub(crate) fn with_ctx(mut self, ctx: Option<ExecutionContext>) -> Self {
+        self.ctx = ctx;
+        self
+    }
+
     pub fn next(&mut self) -> Result<Option<Value>> {
         let batch_size = self.batch_size;
         let collection = self.collection;
+        let ctx = self.ctx.as_ref();
+        let reads = &mut self.reads;
+        let mut check = || -> Result<()> {
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(*reads)?;
+            }
+            *reads += 1;
+            Ok(())
+        };
 
         match &mut self.mode {
             FindCursorMode::DocIds { doc_ids, position } => loop {
                 if *position >= doc_ids.len() {
                     return Ok(None);
                 }
+                check()?;
 
                 let doc_id = &doc_ids[*position];
                 *position += 1;
 
-                match self.collection.read_document_by_id(doc_id)? {
+                match collection.read_document_by_id(doc_id)? {
                     Some(doc) => return Ok(Some(doc)),
                     None => continue, // Skip tombstones, continue to next
                 }
@@ -302,6 +330,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
 
                 let doc_id = state.buffer[state.buffer_pos].clone();
                 state.buffer_pos += 1;
+                check()?;
 
                 if state.multikey {
                     if let Some(seen) = state.seen.as_mut() {
@@ -311,7 +340,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                     }
                 }
 
-                if let Some(doc) = self.collection.read_document_by_id(&doc_id)? {
+                if let Some(doc) = collection.read_document_by_id(&doc_id)? {
                     let document = Document::from_value(&doc)?;
                     if query.matches(&document)? {
                         state.yielded += 1;
@@ -329,10 +358,11 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 if *offset >= *data_end {
                     return Ok(None);
                 }
+                check()?;
 
                 let current_offset = *offset;
                 let data = {
-                    let storage = self.collection.storage.read();
+                    let storage = collection.storage.read();
                     storage.read_data_at(current_offset)?
                 };
                 *offset = current_offset + 4 + data.len() as u64;
@@ -366,7 +396,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 };
 
                 let offset_matches = {
-                    let storage = self.collection.storage.read();
+                    let storage = collection.storage.read();
                     let meta = storage
                         .get_collection_meta(collection_name)
                         .ok_or_else(|| {
