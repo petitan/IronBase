@@ -671,11 +671,17 @@ impl DatabaseCore<StorageEngine> {
         let rebuild_names = index_manager.read().vector_indexes_needing_rebuild();
         for name in &rebuild_names {
             let t = std::time::Instant::now();
-            let Some(snapshot) = index_manager.write().begin_vector_rebuild(name)? else {
+            if !index_manager.write().begin_vector_rebuild(name) {
                 continue;
-            };
-            let rebuilt = match crate::vector::HnswIndex::rebuilt_from(snapshot) {
-                Ok(rebuilt) => rebuilt,
+            }
+            // Copy the vectors under a read lock: searches keep running, and
+            // writes after `begin` are replayed by `finish` anyway
+            let snapshot = index_manager.read().snapshot_vector_index(name);
+            let rebuilt = match snapshot
+                .and_then(|s| s.map(crate::vector::HnswIndex::rebuilt_from).transpose())
+            {
+                Ok(Some(rebuilt)) => rebuilt,
+                Ok(None) => continue, // dropped meanwhile
                 Err(e) => {
                     index_manager.write().abort_vector_rebuild(name);
                     return Err(e);
@@ -700,10 +706,13 @@ impl DatabaseCore<StorageEngine> {
         }
         for name in &dirty_vec {
             let t = std::time::Instant::now();
-            if !index_manager.write().prepare_vector_flush(name, watermark) {
+            let mut mgr = index_manager.write();
+            if !mgr.prepare_vector_flush(name, watermark) {
                 continue;
             }
-            let mgr = index_manager.upgradable_read();
+            // Downgrade without releasing: the index stamped above is the one
+            // persisted and marked clean (no drop/recreate can slip in)
+            let mgr = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(mgr);
             let lock_wait_ms = t.elapsed().as_millis() as u64;
             let flush_start = std::time::Instant::now();
             if mgr.persist_vector_index(name, db_path)? {

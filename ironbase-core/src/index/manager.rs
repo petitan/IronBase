@@ -989,23 +989,33 @@ impl IndexManager {
     }
 
     /// Start rebuilding a vector index outside the IndexManager lock (write
-    /// access, one copy of the active vectors). None if the index is gone or
-    /// no longer needs it. Build with `HnswIndex::rebuilt_from`, then hand the
-    /// result to `finish_vector_rebuild` (or call `abort_vector_rebuild`).
-    pub fn begin_vector_rebuild(
-        &mut self,
+    /// access, µs): writers' changes are recorded from here on. False if the
+    /// index is gone, no longer needs it, or is already being (re)built. Then
+    /// take `snapshot_vector_index` (read access), build with
+    /// `HnswIndex::rebuilt_from` (no lock), and hand the result to
+    /// `finish_vector_rebuild` — or call `abort_vector_rebuild`.
+    pub(crate) fn begin_vector_rebuild(&mut self, name: &str) -> bool {
+        match self.vector_indexes.get_mut(name) {
+            Some(index) if index.needs_rebuild() => index.begin_rebuild(),
+            _ => false,
+        }
+    }
+
+    /// The active vectors of a vector index being rebuilt (read access)
+    pub(crate) fn snapshot_vector_index(
+        &self,
         name: &str,
     ) -> Result<Option<crate::vector::RebuildSnapshot>> {
-        match self.vector_indexes.get_mut(name) {
-            Some(index) if index.needs_rebuild() => Ok(Some(index.begin_rebuild()?)),
-            _ => Ok(None),
-        }
+        self.vector_indexes
+            .get(name)
+            .map(|index| index.snapshot())
+            .transpose()
     }
 
     /// Swap in a rebuilt vector index, replaying the writes made while it was
     /// built (write access). Returns false if the rebuild no longer applies
     /// (the index was dropped or recreated meanwhile).
-    pub fn finish_vector_rebuild(
+    pub(crate) fn finish_vector_rebuild(
         &mut self,
         name: &str,
         rebuilt: crate::vector::HnswIndex,
@@ -1021,7 +1031,7 @@ impl IndexManager {
     }
 
     /// Abandon a rebuild started by `begin_vector_rebuild`
-    pub fn abort_vector_rebuild(&mut self, name: &str) {
+    pub(crate) fn abort_vector_rebuild(&mut self, name: &str) {
         if let Some(index) = self.vector_indexes.get_mut(name) {
             index.abort_rebuild();
         }
@@ -1237,7 +1247,7 @@ impl IndexManager {
     /// upgradable read lock: searches keep running, writers wait, and no
     /// write can slip in between serializing and marking the index clean
     /// (hybrid review 2026-10-17 F5).
-    pub fn prepare_vector_flush(&mut self, name: &str, watermark: u64) -> bool {
+    pub(crate) fn prepare_vector_flush(&mut self, name: &str, watermark: u64) -> bool {
         if !self.dirty_vector_indexes.contains(name) {
             return false;
         }
@@ -1252,7 +1262,7 @@ impl IndexManager {
 
     /// Flush step 2 (read access): write the vector index to its `.hnsw`
     /// cache file atomically. Returns false if the index no longer exists.
-    pub fn persist_vector_index(&self, name: &str, db_path: &str) -> Result<bool> {
+    pub(crate) fn persist_vector_index(&self, name: &str, db_path: &str) -> Result<bool> {
         let Some(index) = self.vector_indexes.get(name) else {
             return Ok(false);
         };
@@ -1268,7 +1278,7 @@ impl IndexManager {
     }
 
     /// Flush step 3 (write access, µs): the persisted vector index is clean
-    pub fn complete_vector_flush(&mut self, name: &str) {
+    pub(crate) fn complete_vector_flush(&mut self, name: &str) {
         if let Some(index) = self.vector_indexes.get_mut(name) {
             index.mark_clean();
         }

@@ -434,8 +434,8 @@ index.rebuild_if_needed()  // Rebuild ha needs_rebuild()
 
 **Orphan compaction — gated (automatikus) vs force (explicit):**
 - **Checkpoint** (60s): orphan-gated (>30% vagy ≥10K, és >100 orphan) rebuild **lock nélkül** (F5, v0.3.417):
-  snapshot rövid write lock alatt → `HnswIndex::rebuilt_from` lock nélkül → `finish_vector_rebuild`
-  (a közben írt vektorok visszajátszása + csere). A vektor-flush upgradable read lock alatt szerializál
+  változáskövetés (write, µs) → snapshot read lock alatt → `HnswIndex::rebuilt_from` lock nélkül →
+  `finish_vector_rebuild` (a közben írt vektorok visszajátszása, előbb a törlések + csere). A vektor-flush upgradable read lock alatt szerializál
   (`prepare_vector_flush` → `persist_vector_index` → `complete_vector_flush`) — a keresés nem vár
 - **Automatikus compact** (bloat-trigger, induláskor: `last_compact_size=0` → `bloat_ratio=inf`):
   `force_vector_rebuild=false` → `rebuild_vector_indexes_if_needed()` (orphan-gated, **olcsó**).

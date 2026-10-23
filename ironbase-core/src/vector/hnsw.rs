@@ -797,13 +797,17 @@ impl HnswIndex {
         Ok(())
     }
 
-    /// Start a rebuild that runs outside the index lock: returns the active
-    /// vectors, and from now on `insert`/`remove` record their ids so
-    /// `finish_rebuild` can replay what changed while the new graph was built.
-    pub(crate) fn begin_rebuild(&mut self) -> Result<RebuildSnapshot> {
-        let snapshot = self.snapshot()?;
+    /// Start a rebuild that runs outside the index lock: from now on
+    /// `insert`/`remove` record their ids, so `finish_rebuild` can replay what
+    /// changed after this point. Take the vectors with `snapshot` afterwards
+    /// (read access is enough). Returns false — and starts nothing — while a
+    /// rebuild or a `create_vector_index` build of this index is running.
+    pub(crate) fn begin_rebuild(&mut self) -> bool {
+        if self.rebuild_touched.is_some() || self.build_touched.is_some() {
+            return false;
+        }
         self.rebuild_touched = Some(HashSet::new());
-        Ok(snapshot)
+        true
     }
 
     /// The rebuild is abandoned: writers stop recording.
@@ -820,15 +824,18 @@ impl HnswIndex {
         let Some(touched) = self.rebuild_touched.take() else {
             return Ok(false);
         };
-        // Sorted: graph construction depends on insertion order
+        // Sorted: graph construction depends on insertion order. Removals
+        // first, so a replay at the vector ceiling never overshoots it.
         let mut touched: Vec<String> = touched.into_iter().collect();
         touched.sort();
-        for id in touched {
-            match self.get_vector(&id).map(|v| v.to_vec()) {
-                Some(vector) => rebuilt.insert_node(&id, &vector)?,
-                None => {
-                    rebuilt.remove(&id);
-                }
+        let (current, removed): (Vec<String>, Vec<String>) =
+            touched.into_iter().partition(|id| self.contains(id));
+        for id in &removed {
+            rebuilt.remove(id);
+        }
+        for id in &current {
+            if let Some(vector) = self.get_vector(id).map(|v| v.to_vec()) {
+                rebuilt.insert_node(id, &vector)?;
             }
         }
         self.adopt(rebuilt);
@@ -837,7 +844,7 @@ impl HnswIndex {
 
     /// The active vectors in their original insertion order, plus the
     /// configuration and level RNG state a rebuild continues from.
-    fn snapshot(&self) -> Result<RebuildSnapshot> {
+    pub(crate) fn snapshot(&self) -> Result<RebuildSnapshot> {
         // Collect active vectors using id_to_index as the source of truth.
         // IMPORTANT: iterate id_to_index (HashMap, unique keys) instead of nodes,
         // because nodes may contain duplicate IDs after remove+reinsert cycles
@@ -1846,7 +1853,9 @@ mod tests {
         for i in 0..10 {
             idx.remove(&format!("v{i}"));
         }
-        let snapshot = idx.begin_rebuild().unwrap();
+        assert!(idx.begin_rebuild());
+        assert!(!idx.begin_rebuild(), "a second rebuild must not start");
+        let snapshot = idx.snapshot().unwrap();
 
         // Writers keep going while the new graph is built
         idx.insert("new", &one_hot(dim, 25)).unwrap();
@@ -1866,6 +1875,39 @@ mod tests {
         assert!(idx.orphan_count() <= 2, "orphans: {}", idx.orphan_count());
         let top = idx.search(&one_hot(dim, 25), 1);
         assert_eq!(top[0].id, "new");
+    }
+
+    /// Replaying a delete + insert at the vector ceiling must not overshoot
+    /// it: removals are replayed before insertions
+    #[test]
+    fn off_lock_rebuild_replay_fits_the_ceiling() {
+        let dim = 4;
+        let mut cfg = VectorIndexConfig::new(dim);
+        cfg.max_vectors = 3;
+        let mut idx = HnswIndex::new(cfg);
+        for id in ["b", "c", "d"] {
+            idx.insert(id, &one_hot(dim, id.len())).unwrap();
+        }
+        assert!(idx.begin_rebuild());
+        let snapshot = idx.snapshot().unwrap();
+        idx.remove("d");
+        idx.insert("a", &one_hot(dim, 2)).unwrap(); // sorts before "d"
+
+        let rebuilt = HnswIndex::rebuilt_from(snapshot).unwrap();
+        assert!(idx.finish_rebuild(rebuilt).unwrap());
+        assert_eq!(idx.len(), 3);
+        assert!(idx.contains("a") && !idx.contains("d"));
+    }
+
+    /// No rebuild starts while a `create_vector_index` build is filling the
+    /// index (its scanned vectors are not recorded for a replay)
+    #[test]
+    fn rebuild_does_not_start_during_a_build() {
+        let mut idx = HnswIndex::with_dim(4);
+        idx.begin_build();
+        assert!(!idx.begin_rebuild());
+        idx.end_build();
+        assert!(idx.begin_rebuild());
     }
 
     /// An index replaced while the rebuild ran (no rebuild in progress on the
