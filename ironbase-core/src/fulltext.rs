@@ -932,6 +932,87 @@ pub struct FulltextIndex {
     /// in-memory index. Initialized to 0 for fresh or legacy indexes → full
     /// rebuild fallback.
     last_flushed_tx_id: u64,
+
+    /// Parsed on-disk posting lists of a lazy index (runtime-only), so query
+    /// tokens skip the file read + JSON parse when looked up again (hybrid
+    /// review 2026-10-17 F6). Valid for the current `token_offsets`; cleared
+    /// whenever they are replaced.
+    posting_cache: parking_lot::Mutex<PostingCache>,
+}
+
+/// Bounded cache of parsed on-disk posting lists, keyed by token. The memory
+/// budget follows the RAM-based lazy threshold; the least recently used lists
+/// are evicted first.
+#[derive(Default)]
+struct PostingCache {
+    lists: HashMap<String, CachedPosting>,
+    bytes: usize,
+    clock: u64,
+}
+
+struct CachedPosting {
+    entries: Arc<Vec<TokenEntry>>,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl PostingCache {
+    /// Memory budget of one index's cache: 1/16 of the RAM-based lazy
+    /// threshold (≈3 MB below 2 GB RAM … ≈31 MB from 32 GB), computed once
+    fn budget() -> usize {
+        static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *BUDGET.get_or_init(|| (crate::index::traits::calculate_lazy_threshold() / 16) as usize)
+    }
+
+    /// Approximate heap size of a posting list
+    fn size_of(entries: &[TokenEntry]) -> usize {
+        entries.len() * (std::mem::size_of::<TokenEntry>() + 16)
+    }
+
+    fn get(&mut self, token: &str) -> Option<Arc<Vec<TokenEntry>>> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.lists.get_mut(token).map(|cached| {
+            cached.last_used = clock;
+            Arc::clone(&cached.entries)
+        })
+    }
+
+    fn insert(&mut self, token: &str, entries: Arc<Vec<TokenEntry>>, budget: usize) {
+        let bytes = Self::size_of(&entries);
+        // A list larger than half the budget would evict everything else
+        if bytes > budget / 2 || self.lists.contains_key(token) {
+            return;
+        }
+        while self.bytes + bytes > budget {
+            let Some(oldest) = self
+                .lists
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = self.lists.remove(&oldest) {
+                self.bytes -= evicted.bytes;
+            }
+        }
+        self.clock += 1;
+        self.bytes += bytes;
+        self.lists.insert(
+            token.to_string(),
+            CachedPosting {
+                entries,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+    }
+
+    fn clear(&mut self) {
+        self.lists.clear();
+        self.bytes = 0;
+    }
 }
 
 // ============================================================================
@@ -1001,6 +1082,12 @@ pub(crate) struct FulltextFlushResult {
     /// new offset only if the doc still has the old one (not removed or
     /// re-inserted during Phase 2).
     pub moved_doc_tokens: Vec<(DocumentId, u64, u64)>,
+    /// The fully written and fsynced new file, renamed over `target_path` by
+    /// `commit_flush` — not by `serialize_flush`: until the new offsets are
+    /// installed, searches must keep reading the old file at the old offsets.
+    pub temp_path: PathBuf,
+    /// The live `.ftidx` path the snapshot was taken from
+    pub target_path: PathBuf,
 }
 
 /// Search result with score and matched tokens
@@ -1580,6 +1667,7 @@ impl FulltextIndex {
             chunk_doc_mapping: HashMap::new(),
             parent_doc_id_field: None,
             last_flushed_tx_id: 0,
+            posting_cache: Default::default(),
         }
     }
 
@@ -1612,6 +1700,7 @@ impl FulltextIndex {
             chunk_doc_mapping: HashMap::new(),
             parent_doc_id_field: None,
             last_flushed_tx_id: 0,
+            posting_cache: Default::default(),
         };
 
         // Create and initialize the file with header
@@ -1623,6 +1712,7 @@ impl FulltextIndex {
     /// Set storage path for an existing index (enables disk storage)
     pub fn set_storage_path(&mut self, path: PathBuf) -> Result<()> {
         self.storage_path = Some(path);
+        self.posting_cache.get_mut().clear();
         self.init_storage_file()
     }
 
@@ -1868,6 +1958,50 @@ impl FulltextIndex {
     // NOTE: get_token_entries() removed - superseded by get_token_entries_merged()
     // which properly handles merging memory and disk data with deduplication.
 
+    /// A token's on-disk posting list (V3, or V2 with TF=1), from the posting
+    /// cache or read and parsed from the `.ftidx` file. None if unreadable.
+    fn disk_token_entries(&self, token: &str, offset: u64) -> Option<Arc<Vec<TokenEntry>>> {
+        if let Some(cached) = self.posting_cache.lock().get(token) {
+            return Some(cached);
+        }
+        // Read outside the cache lock: concurrent searches only contend on
+        // the lookup, never on the file I/O
+        let entries = if self.file_version >= FTIDX_VERSION_V3 {
+            self.read_token_entry_v3(offset)
+                .map_err(|e| {
+                    tracing::warn!(
+                        index = %self.name,
+                        token = %token,
+                        error = %e,
+                        "Failed to read V3 token entry from disk, treating as missing"
+                    );
+                    e
+                })
+                .ok()?
+        } else {
+            // V2: Convert HashSet to Vec<TokenEntry> with TF=1 placeholder
+            self.read_token_entry(offset)
+                .map_err(|e| {
+                    tracing::warn!(
+                        index = %self.name,
+                        token = %token,
+                        error = %e,
+                        "Failed to read V2 token entry from disk, treating as missing"
+                    );
+                    e
+                })
+                .ok()?
+                .into_iter()
+                .map(|id| (id, 1))
+                .collect()
+        };
+        let entries = Arc::new(entries);
+        self.posting_cache
+            .lock()
+            .insert(token, Arc::clone(&entries), PostingCache::budget());
+        Some(entries)
+    }
+
     /// Get token entries, merging memory and disk data (V3 format: doc_id + TF)
     ///
     /// In lazy mode, a token may have entries in both:
@@ -1881,37 +2015,10 @@ impl FulltextIndex {
         let mem_entries = self.inverted_index.get(token);
         // During two-phase flush, frozen_inverted holds entries moved from inverted_index
         let frozen_entries = self.frozen_inverted.as_ref().and_then(|f| f.get(token));
-        let disk_entries: Option<Vec<TokenEntry>> = if self.lazy_mode {
-            self.token_offsets.get(token).and_then(|(offset, _)| {
-                if self.file_version >= FTIDX_VERSION_V3 {
-                    // V3: Read entries with TF embedded
-                    self.read_token_entry_v3(*offset)
-                        .map_err(|e| {
-                            tracing::warn!(
-                                index = %self.name,
-                                token = %token,
-                                error = %e,
-                                "Failed to read V3 token entry from disk, treating as missing"
-                            );
-                            e
-                        })
-                        .ok()
-                } else {
-                    // V2: Convert HashSet to Vec<TokenEntry> with TF=1 placeholder
-                    self.read_token_entry(*offset)
-                        .map_err(|e| {
-                            tracing::warn!(
-                                index = %self.name,
-                                token = %token,
-                                error = %e,
-                                "Failed to read V2 token entry from disk, treating as missing"
-                            );
-                            e
-                        })
-                        .ok()
-                        .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1)).collect())
-                }
-            })
+        let disk_entries: Option<Arc<Vec<TokenEntry>>> = if self.lazy_mode {
+            self.token_offsets
+                .get(token)
+                .and_then(|(offset, _)| self.disk_token_entries(token, *offset))
         } else {
             None
         };
@@ -1944,9 +2051,9 @@ impl FulltextIndex {
         }
         // Disk entries last (from previous flush)
         if let Some(disk) = disk_entries {
-            for (doc_id, tf) in disk {
-                if !seen_doc_ids.contains(&doc_id) && !stale(&doc_id) {
-                    merged.push((doc_id, tf));
+            for (doc_id, tf) in disk.iter() {
+                if !seen_doc_ids.contains(doc_id) && !stale(doc_id) {
+                    merged.push((doc_id.clone(), *tf));
                 }
             }
         }
@@ -2242,9 +2349,11 @@ impl FulltextIndex {
         );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
-        let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
+        // Query-token indices per document: a String per (document, token)
+        // pair is only built for the surviving top-k (review 2026-10-17 F6)
+        let mut matched: HashMap<DocumentId, Vec<usize>> = HashMap::new();
 
-        for token in &query_tokens {
+        for (token_idx, token) in query_tokens.iter().enumerate() {
             if let Some(entries) = self.get_token_entries_merged(token) {
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
 
@@ -2253,10 +2362,7 @@ impl FulltextIndex {
                     *doc_scores.entry(doc_id.clone()).or_default() +=
                         bm25.term_score(tf as f64, idf, dl);
 
-                    matched
-                        .entry(doc_id.clone())
-                        .or_default()
-                        .push(token.clone());
+                    matched.entry(doc_id.clone()).or_default().push(token_idx);
                 }
             }
         }
@@ -2272,7 +2378,10 @@ impl FulltextIndex {
         Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
             .map(|(doc_id, score)| FtsSearchResult {
-                matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
+                matched_tokens: matched
+                    .remove(&doc_id)
+                    .map(|idx| idx.into_iter().map(|i| query_tokens[i].clone()).collect())
+                    .unwrap_or_default(),
                 doc_id,
                 score,
             })
@@ -2331,10 +2440,12 @@ impl FulltextIndex {
         );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
-        let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
+        // Query-token indices per document: a String per (document, token)
+        // pair is only built for the surviving top-k (review 2026-10-17 F6)
+        let mut matched: HashMap<DocumentId, Vec<usize>> = HashMap::new();
         let mut ops: usize = 0;
 
-        for token in &query_tokens {
+        for (token_idx, token) in query_tokens.iter().enumerate() {
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(ops)?;
             }
@@ -2353,10 +2464,7 @@ impl FulltextIndex {
                     let dl = self.doc_lengths.get(&doc_id).copied();
                     *doc_scores.entry(doc_id.clone()).or_default() +=
                         bm25.term_score(tf as f64, idf, dl);
-                    matched
-                        .entry(doc_id.clone())
-                        .or_default()
-                        .push(token.clone());
+                    matched.entry(doc_id.clone()).or_default().push(token_idx);
                 }
             }
         }
@@ -2372,7 +2480,10 @@ impl FulltextIndex {
         Ok(Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
             .map(|(doc_id, score)| FtsSearchResult {
-                matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
+                matched_tokens: matched
+                    .remove(&doc_id)
+                    .map(|idx| idx.into_iter().map(|i| query_tokens[i].clone()).collect())
+                    .unwrap_or_default(),
                 doc_id,
                 score,
             })
@@ -2424,10 +2535,12 @@ impl FulltextIndex {
         );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
-        let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
+        // Query-token indices per document: a String per (document, token)
+        // pair is only built for the surviving top-k (review 2026-10-17 F6)
+        let mut matched: HashMap<DocumentId, Vec<usize>> = HashMap::new();
         let mut ops: usize = 0;
 
-        for token in &query_tokens {
+        for (token_idx, token) in query_tokens.iter().enumerate() {
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(ops)?;
             }
@@ -2455,10 +2568,7 @@ impl FulltextIndex {
                     let dl = self.doc_lengths.get(&doc_id).copied();
                     *doc_scores.entry(doc_id.clone()).or_default() +=
                         bm25.term_score(tf as f64, idf, dl);
-                    matched
-                        .entry(doc_id.clone())
-                        .or_default()
-                        .push(token.clone());
+                    matched.entry(doc_id.clone()).or_default().push(token_idx);
                 }
             }
         }
@@ -2474,7 +2584,10 @@ impl FulltextIndex {
         Ok(Self::top_k_scored(doc_scores, skip, limit, min)
             .into_iter()
             .map(|(doc_id, score)| FtsSearchResult {
-                matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
+                matched_tokens: matched
+                    .remove(&doc_id)
+                    .map(|idx| idx.into_iter().map(|i| query_tokens[i].clone()).collect())
+                    .unwrap_or_default(),
                 doc_id,
                 score,
             })
@@ -2666,6 +2779,7 @@ impl FulltextIndex {
     /// Clear all entries from the index
     pub fn clear(&mut self) {
         self.inverted_index.clear();
+        self.posting_cache.get_mut().clear();
         self.doc_tokens_offsets.clear();
         self.doc_tokens_memory.clear();
         self.write_offset = FTIDX_HEADER_SIZE;
@@ -2839,6 +2953,7 @@ impl FulltextIndex {
         // Step 3: Switch to lazy mode with V3 format
         self.write_offset = metadata_offset + metadata_bytes.len() as u64;
         self.token_offsets = new_token_offsets;
+        self.posting_cache.get_mut().clear();
         self.inverted_index.clear();
         self.lazy_mode = true;
         self.file_version = FTIDX_VERSION_V3; // Upgraded to V3
@@ -3085,15 +3200,11 @@ impl FulltextIndex {
         temp.flush()?;
         temp.sync_all()?;
 
-        // Drop file handles before rename to release any held fds.
-        // (POSIX permits rename with open fds, but explicit drop keeps the
-        // ordering obvious and matches the HNSW pattern at manager.rs:930.)
+        // Drop file handles before the (Phase 3) rename to release any held
+        // fds. (POSIX permits rename with open fds, but explicit drop keeps
+        // the ordering obvious and matches the HNSW pattern.)
         drop(temp);
         drop(old_file);
-
-        // Atomic rename + parent-dir fsync. POSIX-atomic on the same
-        // filesystem; on crash either OLD or NEW is visible, never partial.
-        crate::fs_utils::atomic_rename_and_sync(&temp_path, &snapshot.storage_path)?;
 
         let new_write_offset = metadata_offset + metadata_bytes.len() as u64;
 
@@ -3102,6 +3213,8 @@ impl FulltextIndex {
             new_write_offset,
             durably_deleted: snapshot.deleted_doc_ids.clone(),
             moved_doc_tokens,
+            temp_path,
+            target_path: snapshot.storage_path.clone(),
         })
     }
 
@@ -3119,8 +3232,18 @@ impl FulltextIndex {
     /// disk sources, so keeping frozen_inverted live during the
     /// buffered-write loop does not produce duplicate search hits.
     pub(crate) fn commit_flush(&mut self, result: FulltextFlushResult) -> Result<()> {
+        // 0. Make the new file live. Atomic rename + parent-dir fsync:
+        //    POSIX-atomic on the same filesystem, so on crash either the OLD
+        //    or the NEW file is visible, never a partial one. It happens
+        //    here, under the write lock and together with installing the new
+        //    offsets: renaming in Phase 2 made searches read the new file at
+        //    the old offsets until this commit, silently losing every disk
+        //    posting not in memory (hybrid review 2026-10-17 F6 follow-up).
+        crate::fs_utils::atomic_rename_and_sync(&result.temp_path, &result.target_path)?;
+
         // 1. Install new token_offsets and switch to lazy mode
         self.token_offsets = result.new_token_offsets;
+        self.posting_cache.get_mut().clear();
         self.write_offset = result.new_write_offset;
         self.lazy_mode = true;
         self.file_version = FTIDX_VERSION_V3;
@@ -3412,6 +3535,7 @@ impl FulltextIndex {
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
                 parent_doc_id_field: metadata.parent_doc_id_field,
                 last_flushed_tx_id: metadata.last_flushed_tx_id,
+                posting_cache: Default::default(),
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -3502,6 +3626,7 @@ impl FulltextIndex {
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
                 parent_doc_id_field: metadata.parent_doc_id_field,
                 last_flushed_tx_id: metadata.last_flushed_tx_id,
+                posting_cache: Default::default(),
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -4431,6 +4556,114 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    /// Hybrid review F6: a lazy index serves repeated query tokens from the
+    /// posting cache (no file read), and a flush — which replaces the
+    /// on-disk posting lists — invalidates it
+    #[test]
+    fn lazy_posting_cache_hits_and_is_invalidated_by_flush() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cache.ftidx");
+        {
+            let mut index =
+                FulltextIndex::new_with_storage("idx", "content", options, path.clone()).unwrap();
+            index
+                .insert(&DocumentId::Int(1), "quick brown fox")
+                .unwrap();
+            index.insert(&DocumentId::Int(2), "lazy brown dog").unwrap();
+            index.save_to_file().unwrap();
+        }
+        let mut loaded = FulltextIndex::load_from_file(path.clone()).unwrap();
+        assert!(loaded.is_lazy_mode());
+        assert_eq!(loaded.search("fox", 10, 0, None).len(), 1);
+
+        // Corrupt the posting region: only the cache can still answer
+        let len = std::fs::metadata(&path).unwrap().len();
+        let mut bytes = std::fs::read(&path).unwrap();
+        for b in bytes[FTIDX_HEADER_SIZE as usize..len as usize / 2].iter_mut() {
+            *b = 0xFF;
+        }
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            loaded.search("fox", 10, 0, None).len(),
+            1,
+            "served from cache"
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        // A flush rewrites the posting lists: the cached "fox" list is stale
+        loaded.insert(&DocumentId::Int(3), "red fox").unwrap();
+        loaded.flush().unwrap();
+        let hits = loaded.search("fox", 10, 0, None);
+        assert_eq!(hits.len(), 2, "new posting list after flush: {:?}", hits);
+    }
+
+    /// A search between Phase 2 (`serialize_flush`, no lock) and Phase 3
+    /// (`commit_flush`) of a two-phase flush must still see the on-disk
+    /// postings. The new file used to be renamed in during Phase 2, so the
+    /// search read it at the old offsets and found nothing.
+    #[test]
+    fn search_between_serialize_and_commit_sees_disk_postings() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fts.ftidx");
+        let mut idx =
+            FulltextIndex::new_with_storage("fts", "content", FtsOptions::default(), path).unwrap();
+        // Many tokens, so offsets differ between the old and the new file
+        for i in 0..50 {
+            idx.insert(
+                &DocumentId::Int(i),
+                &format!("alpha beta{} gamma{}", i, i % 7),
+            )
+            .unwrap();
+        }
+        idx.flush().unwrap();
+        idx.insert(&DocumentId::Int(100), "zeta alpha").unwrap();
+
+        let snapshot = idx.take_flush_snapshot().expect("snapshot");
+        let result = FulltextIndex::serialize_flush(&snapshot).unwrap();
+        assert_eq!(
+            idx.search("gamma3", 100, 0, None).len(),
+            7,
+            "during the flush"
+        );
+
+        idx.commit_flush(result).unwrap();
+        assert_eq!(
+            idx.search("gamma3", 100, 0, None).len(),
+            7,
+            "after the flush"
+        );
+        assert_eq!(idx.search("zeta", 100, 0, None).len(), 1);
+    }
+
+    /// The posting cache stays within its budget, evicts the least recently
+    /// used list first, and does not cache a list over half the budget
+    #[test]
+    fn posting_cache_is_bounded_lru() {
+        let list = |n: usize| -> Arc<Vec<TokenEntry>> {
+            Arc::new((0..n as i64).map(|i| (DocumentId::Int(i), 1)).collect())
+        };
+        let unit = PostingCache::size_of(&list(10));
+        let budget = unit * 3;
+        let mut cache = PostingCache::default();
+        cache.insert("a", list(10), budget);
+        cache.insert("b", list(10), budget);
+        cache.insert("c", list(10), budget);
+        assert!(cache.get("a").is_some()); // "b" is now the least recently used
+        cache.insert("d", list(10), budget);
+
+        assert!(cache.bytes <= budget);
+        assert!(cache.get("b").is_none(), "LRU entry evicted");
+        assert!(cache.get("a").is_some() && cache.get("c").is_some() && cache.get("d").is_some());
+
+        cache.insert("huge", list(20), budget);
+        assert!(
+            cache.get("huge").is_none(),
+            "over half the budget: not cached"
+        );
     }
 
     #[test]
