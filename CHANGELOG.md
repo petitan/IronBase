@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Auto-embed: re-enabling with another model, and interrupted re-embeds the names cannot reveal (mcp-server v1.0.618)
+
+Hybrid search review 2026-10-17, follow-ups T3 and D1 of F4.
+
+- **`auto_embed_enable` with another model (T3):** enabling auto-embed on a
+  collection whose target field already holds vectors, with a different
+  model, preprocessing, dimension or source field, saved the new model and
+  only backfilled documents *without* a vector — the old vectors stayed in
+  the index next to new ones. It now keeps the old model recorded, sets
+  `reembed_pending`, rebuilds the vector index first if the dimension
+  changed (keeping its metric and HNSW parameters), and re-embeds every
+  document (response: `"reembed": true`). A legacy config without a model
+  name is not forced, as at startup.
+- **`reembed_pending` (D1, new `AutoEmbeddingConfig` field, `#[serde(default)]`):**
+  set before a forced re-embed starts (startup check and `auto_embed_enable`),
+  cleared when the re-embed records the new model. While set, every startup
+  restarts the re-embed — also in cases the stored names cannot reveal, e.g.
+  an interrupted dimension change under the same model name. Shown by
+  `auto_embed_status`. Existing metadata loads with `false`.
+- Not covered: a re-embed interrupted under a version before F4 (v1.0.614)
+  left no marker — start once with `--force-reembed`.
 ### Fixed — Test: `test_corrupted_data_end_offset_recovery` corrupted the wrong header field (ironbase-core 0.3.419)
 
 The test wrote 0 at byte 24, assuming a hand-computed layout. The header is
