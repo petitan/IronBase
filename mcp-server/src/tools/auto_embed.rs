@@ -552,6 +552,26 @@ fn cancel_backfill_jobs(job_manager: &Option<Arc<JobManager>>, collection: &str)
     }
 }
 
+/// Suffix of the field next to an auto-embed target that records which
+/// source text its vector was made from: `<target_field>_source_hash` (D4)
+pub(crate) const SOURCE_HASH_SUFFIX: &str = "_source_hash";
+
+/// The source-hash field of `target_field`
+pub(crate) fn source_hash_field(target_field: &str) -> String {
+    format!("{target_field}{SOURCE_HASH_SUFFIX}")
+}
+
+/// Hash of the text an embedding was made from: the first 64 bits of its
+/// SHA-256, as hex. Stable across versions and machines, so an unchanged
+/// source can be recognised and not re-embedded.
+pub(crate) fn source_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn vector_index_dim(adapter: &IronBaseAdapter, collection: &str, field: &str) -> Option<usize> {
     adapter
         .list_vector_indexes(collection)
@@ -626,7 +646,7 @@ fn handle_dimension_change(
         collection,
         target_field
     );
-    let update = json!({ "$unset": { target_field: "" } });
+    let update = json!({ "$unset": { target_field: "", source_hash_field(target_field): "" } });
     let filter = json!({ target_field: { "$exists": true } });
     if let Err(e) = adapter.update_many(collection, filter, update) {
         tracing::warn!(
@@ -854,9 +874,16 @@ fn run_backfill_job(
 
             // Store embedding into document via update_one
             // A cancelled job writes nothing more: a newer one may own the field
-            let store_one = |id: &Value, embedding: &[f32]| -> bool {
+            let store_one = |id: &Value, text: &str, embedding: &[f32]| -> bool {
                 !job_manager.is_cancelled(job_id)
-                    && store_embedding(adapter, collection, &config.target_field, id, embedding)
+                    && store_embedding(
+                        adapter,
+                        collection,
+                        &config.target_field,
+                        id,
+                        text,
+                        embedding,
+                    )
             };
 
             match embeddings_result {
@@ -868,9 +895,13 @@ fn run_backfill_job(
                             failed_ids.push(id.clone());
                         }
                     }
-                    for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
+                    for ((doc, text), embedding) in docs_with_source
+                        .iter()
+                        .zip(texts.iter())
+                        .zip(embeddings.iter())
+                    {
                         if let Some(id) = doc.get("_id") {
-                            if store_one(id, embedding) {
+                            if store_one(id, text, embedding) {
                                 processed += 1;
                                 batch_processed += 1;
                             } else {
@@ -898,7 +929,7 @@ fn run_backfill_job(
                         if let Some(id) = doc.get("_id") {
                             match provider.embed(text) {
                                 Ok(embedding) => {
-                                    if store_one(id, &embedding) {
+                                    if store_one(id, text, &embedding) {
                                         processed += 1;
                                         batch_processed += 1;
                                     } else {
@@ -1035,11 +1066,15 @@ fn store_embedding(
     collection: &str,
     target_field: &str,
     id: &Value,
+    text: &str,
     embedding: &[f32],
 ) -> bool {
     let filter = json!({ "_id": id });
     let update = json!({
-        "$set": { target_field: embedding }
+        "$set": {
+            target_field: embedding,
+            source_hash_field(target_field): source_hash(text),
+        }
     });
     match adapter.update_one(collection, filter, update) {
         Ok(_) => true,
@@ -1101,7 +1136,14 @@ fn settle_failed_documents(
         };
         if let Some(text) = doc.get(&config.source_field).and_then(|v| v.as_str()) {
             if let Ok(embedding) = provider.embed(text) {
-                if !store_embedding(adapter, collection, &config.target_field, id, &embedding) {
+                if !store_embedding(
+                    adapter,
+                    collection,
+                    &config.target_field,
+                    id,
+                    text,
+                    &embedding,
+                ) {
                     return None;
                 }
                 continue;
@@ -1110,7 +1152,10 @@ fn settle_failed_documents(
         if doc.get(&config.target_field).is_none() {
             continue;
         }
-        let update = json!({ "$unset": { &config.target_field: "" } });
+        let update = json!({ "$unset": {
+            &config.target_field: "",
+            source_hash_field(&config.target_field): "",
+        } });
         if let Err(e) = adapter.update_one(collection, json!({ "_id": id }), update) {
             tracing::warn!("Failed to remove stale vector of {:?}: {}", id, e);
             return None;
@@ -1543,6 +1588,14 @@ mod tests {
             .documents
         {
             assert_eq!(doc["embedding"][1], json!(2.0), "{}", doc);
+            // D4: the source hash is recorded with the vector
+            let text = doc["content"].as_str().unwrap();
+            assert_eq!(
+                doc["embedding_source_hash"],
+                json!(source_hash(text)),
+                "{}",
+                doc
+            );
         }
     }
 
@@ -1559,6 +1612,7 @@ mod tests {
         assert_eq!(stored_model(&adapter).as_deref(), Some("new"));
         let bad = adapter.find_one("kb", json!({"_id": 1})).unwrap().unwrap();
         assert!(bad.get("embedding").is_none(), "{}", bad);
+        assert!(bad.get("embedding_source_hash").is_none(), "{}", bad);
     }
 
     /// Every batch failing (provider outage) stops the run early: nothing is

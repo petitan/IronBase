@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use super::auto_embed::{source_hash, source_hash_field};
 use super::helpers::{
     check_cancelled, parse_sort_value, validate_collection_name, validate_document,
     validate_filter, validate_update, DEFAULT_QUERY_LIMIT,
@@ -94,9 +95,13 @@ fn apply_auto_embedding(
         }
     }
 
-    // Set the embedding in the document
+    // Set the embedding in the document, with the hash of its source (D4)
     if let Some(obj) = document.as_object_mut() {
         obj.insert(config.target_field.clone(), json!(embedding));
+        obj.insert(
+            source_hash_field(&config.target_field),
+            json!(source_hash(&source_text)),
+        );
     }
 
     Ok(true)
@@ -150,8 +155,9 @@ const REEMBED_BATCH: usize = 64;
 /// Re-embed the documents `ids` from their current source field after an
 /// update changed it. `skip_if_exists` does not apply: the existing
 /// embedding was made from the old text. A document whose source is gone
-/// or empty loses its embedding instead of keeping a stale one. Returns how
-/// many documents were re-embedded.
+/// or empty loses its embedding instead of keeping a stale one; one whose
+/// stored source hash shows the text did not change keeps its embedding
+/// (D4). Returns how many documents were re-embedded.
 fn refresh_auto_embeddings(
     adapter: &IronBaseAdapter,
     collection: &str,
@@ -165,6 +171,7 @@ fn refresh_auto_embeddings(
             config.provider
         ))
     })?;
+    let hash_field = source_hash_field(&config.target_field);
     let mut refreshed = 0;
     for batch in ids.chunks(REEMBED_BATCH) {
         check_cancelled()?;
@@ -182,9 +189,11 @@ fn refresh_auto_embeddings(
                 adapter.update_one(
                     collection,
                     json!({"_id": id}),
-                    json!({"$unset": {&config.target_field: ""}}),
+                    json!({"$unset": {&config.target_field: "", &hash_field: ""}}),
                 )?;
-            } else {
+            } else if doc.get(&config.target_field).is_none()
+                || doc.get(&hash_field).and_then(|h| h.as_str()) != Some(&source_hash(&text))
+            {
                 texts.push((id.clone(), text));
             }
         }
@@ -195,7 +204,7 @@ fn refresh_auto_embeddings(
         let embeddings = provider
             .embed_batch(&refs)
             .map_err(|e| McpError::internal(format!("Embedding generation failed: {}", e)))?;
-        for ((id, _), embedding) in texts.iter().zip(embeddings) {
+        for ((id, text), embedding) in texts.iter().zip(embeddings) {
             if let Some(expected_dim) = config.dimension {
                 if embedding.len() != expected_dim {
                     return Err(McpError::internal(format!(
@@ -208,7 +217,7 @@ fn refresh_auto_embeddings(
             adapter.update_one(
                 collection,
                 json!({"_id": id}),
-                json!({"$set": {&config.target_field: embedding}}),
+                json!({"$set": {&config.target_field: embedding, &hash_field: source_hash(text)}}),
             )?;
             refreshed += 1;
         }
@@ -331,11 +340,15 @@ fn handle_insert_many(
                         })?;
 
                         // Apply embeddings to documents
-                        for ((idx, _), embedding) in
+                        for ((idx, text), embedding) in
                             texts_with_indices.iter().zip(embeddings.iter())
                         {
                             if let Some(obj) = documents[*idx].as_object_mut() {
                                 obj.insert(config.target_field.clone(), json!(embedding));
+                                obj.insert(
+                                    source_hash_field(&config.target_field),
+                                    json!(source_hash(text)),
+                                );
                                 embeddings_applied += 1;
                             }
                         }
@@ -747,12 +760,83 @@ mod tests {
     fn unsetting_the_source_drops_the_embedding() {
         let (a, m, _calls, _t) = setup();
         handle_update_one(
+            json!({"collection":"kb","filter":{"_id":3},"update":{"$set":{"content":"new"}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        handle_update_one(
             json!({"collection":"kb","filter":{"_id":3},"update":{"$unset":{"content":""}}}),
             &a,
             &m,
         )
         .unwrap();
         assert_eq!(embedding_of(&a, 3), None);
+        assert_eq!(
+            hash_of(&a, 3),
+            None,
+            "the source hash goes with the embedding"
+        );
+    }
+
+    fn hash_of(adapter: &IronBaseAdapter, id: i64) -> Option<Value> {
+        adapter
+            .find_one("kb", json!({"_id": id}))
+            .unwrap()
+            .unwrap()
+            .get("embedding_source_hash")
+            .cloned()
+    }
+
+    /// D4: an embedding written on insert records the hash of its source
+    #[test]
+    fn inserts_record_the_source_hash() {
+        let (a, m, _calls, _t) = setup();
+        handle_insert_one(
+            json!({"collection":"kb","document":{"_id": 10, "content": "abcde"}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        handle_insert_many(
+            json!({"collection":"kb","documents":[{"_id": 11, "content": "xyz"}]}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        assert_eq!(embedding_of(&a, 10), Some(json!([5.0, 1.0])));
+        assert_eq!(hash_of(&a, 10), Some(json!(source_hash("abcde"))));
+        assert_eq!(hash_of(&a, 11), Some(json!(source_hash("xyz"))));
+        assert_ne!(source_hash("abcde"), source_hash("abcdf"));
+        assert_eq!(source_hash("abcde").len(), 16);
+    }
+
+    /// D4: an update that writes the same source text again keeps the
+    /// embedding; a changed text is re-embedded and its hash updated. A
+    /// document without a hash (embedded before D4) is re-embedded.
+    #[test]
+    fn unchanged_source_is_not_reembedded() {
+        let (a, m, calls, _t) = setup();
+        let set_content = |text: &str| {
+            handle_update_one(
+                json!({"collection":"kb","filter":{"_id":1},"update":{"$set":{"content":text}}}),
+                &a,
+                &m,
+            )
+            .unwrap()
+        };
+        // "abc" has no hash yet: re-embedded
+        assert_eq!(set_content("abc")["auto_embedded_count"], json!(1));
+        assert_eq!(hash_of(&a, 1), Some(json!(source_hash("abc"))));
+
+        let out = set_content("abc");
+        assert!(out.get("auto_embedded_count").is_none(), "{out}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(set_content("abcdef")["auto_embedded_count"], json!(1));
+        assert_eq!(embedding_of(&a, 1), Some(json!([6.0, 1.0])));
+        assert_eq!(hash_of(&a, 1), Some(json!(source_hash("abcdef"))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

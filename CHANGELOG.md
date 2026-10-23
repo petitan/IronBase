@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Auto-embed: source hash next to every embedding (mcp-server v1.0.622)
+
+Hybrid search review 2026-10-17, D4 (field approved by the owner).
+
+- **New document field `<target_field>_source_hash`** (e.g.
+  `embedding_source_hash`): the first 64 bits of the SHA-256 of the text the
+  embedding was made from, as 16 hex digits. Written with the vector by every
+  auto-embed path (`insert_one`, `insert_many`, re-embed after an update,
+  backfill and forced re-embed); removed with it (source emptied, a vector the
+  new model cannot replace, a dimension change).
+- **Use:** an update that writes the source field again with the same text no
+  longer re-embeds the document (one provider call saved); a changed text is
+  re-embedded and the hash updated. Documents embedded before this version
+  have no hash and are re-embedded on their next source update, as before.
+- The `search` tool leaves the field out of its output (and unparsed, T2);
+  `hybrid_search` / `find` return it like any other field.
+
 ### Performance — Hybrid search: embeddings left unparsed when the output drops them (ironbase-core 0.3.423, mcp-server v1.0.621)
 
 Hybrid search review 2026-10-17, T2. Measured on 20K chunks with a
