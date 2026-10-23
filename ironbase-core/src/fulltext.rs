@@ -761,11 +761,12 @@ struct FulltextIndexMetadataForSave {
     name: String,
     field: String,
     options: FtsOptions,
-    #[serde(default)]
+    /// Typed ids (V4); untagged pairs of older files still load
+    #[serde(default, with = "crate::catalog_serde::pairs")]
     doc_lengths: Vec<(DocumentId, u32)>,
     #[serde(default)]
     total_doc_length: u64,
-    #[serde(default)]
+    #[serde(default, with = "crate::catalog_serde::pairs")]
     chunk_doc_mapping: Vec<(DocumentId, String)>,
     #[serde(default)]
     parent_doc_id_field: Option<String>,
@@ -826,6 +827,130 @@ fn read_metadata_ignoring_tail<R: Read>(reader: R) -> Result<FulltextIndexMetada
 const FTIDX_VERSION_V1: u32 = 1;
 const FTIDX_VERSION_V2: u32 = 2; // Lazy loading support
 const FTIDX_VERSION_V3: u32 = 3; // TF embedded in inverted index entries
+const FTIDX_VERSION_V4: u32 = 4; // V3 layout, binary posting lists (D2)
+
+// V4 posting list (`encode_token_entries`): varint entry count, then per
+// entry a tag byte and the id — 0 = Int (zigzag varint of the difference to
+// the previous Int id), 1 = String, 2 = ObjectId (varint byte length + UTF-8)
+// — and the term frequency as varint. About 3.5x smaller and faster to read
+// than V3's JSON, and it keeps ObjectId and String ids apart.
+const POSTING_TAG_INT: u8 = 0;
+const POSTING_TAG_STRING: u8 = 1;
+const POSTING_TAG_OBJECT_ID: u8 = 2;
+
+fn push_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn corrupt_posting(what: &str) -> IronBaseError {
+    IronBaseError::Corruption(format!("Corrupt .ftidx posting list: {}", what))
+}
+
+fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *buf
+            .get(*pos)
+            .ok_or_else(|| corrupt_posting("truncated varint"))?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Ok(value);
+        }
+    }
+    Err(corrupt_posting("varint too long"))
+}
+
+/// Serialize a posting list in the V4 binary format
+fn encode_token_entries(entries: &[TokenEntry]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(entries.len() * 4 + 8);
+    push_varint(&mut out, entries.len() as u64);
+    let mut previous = 0i64;
+    for (id, tf) in entries {
+        match id {
+            DocumentId::Int(n) => {
+                out.push(POSTING_TAG_INT);
+                let delta = n.wrapping_sub(previous);
+                previous = *n;
+                push_varint(&mut out, ((delta << 1) ^ (delta >> 63)) as u64);
+            }
+            DocumentId::String(text) | DocumentId::ObjectId(text) => {
+                out.push(if matches!(id, DocumentId::String(_)) {
+                    POSTING_TAG_STRING
+                } else {
+                    POSTING_TAG_OBJECT_ID
+                });
+                push_varint(&mut out, text.len() as u64);
+                out.extend_from_slice(text.as_bytes());
+            }
+        }
+        push_varint(&mut out, u64::from(*tf));
+    }
+    out
+}
+
+/// Parse a stored posting list: V4 binary, V3 JSON entries, or a V2 JSON id
+/// set (term frequency 1)
+fn decode_token_entries(buf: &[u8], file_version: u32) -> Result<Vec<TokenEntry>> {
+    if file_version < FTIDX_VERSION_V3 {
+        let doc_ids: HashSet<DocumentId> = serde_json::from_slice(buf)?;
+        return Ok(doc_ids.into_iter().map(|id| (id, 1u32)).collect());
+    }
+    if file_version == FTIDX_VERSION_V3 {
+        return Ok(serde_json::from_slice(buf)?);
+    }
+
+    let mut pos = 0;
+    let count = read_varint(buf, &mut pos)? as usize;
+    // Each entry takes at least 3 bytes: a corrupt count cannot over-allocate
+    if count > buf.len() / 3 {
+        return Err(corrupt_posting("entry count exceeds its length"));
+    }
+    let mut entries = Vec::with_capacity(count);
+    let mut previous = 0i64;
+    for _ in 0..count {
+        let tag = *buf
+            .get(pos)
+            .ok_or_else(|| corrupt_posting("truncated entry"))?;
+        pos += 1;
+        let id = match tag {
+            POSTING_TAG_INT => {
+                let zigzag = read_varint(buf, &mut pos)?;
+                let delta = ((zigzag >> 1) as i64) ^ -((zigzag & 1) as i64);
+                previous = previous.wrapping_add(delta);
+                DocumentId::Int(previous)
+            }
+            POSTING_TAG_STRING | POSTING_TAG_OBJECT_ID => {
+                let len = read_varint(buf, &mut pos)? as usize;
+                let end = pos
+                    .checked_add(len)
+                    .filter(|&end| end <= buf.len())
+                    .ok_or_else(|| corrupt_posting("truncated id"))?;
+                let text = std::str::from_utf8(&buf[pos..end])
+                    .map_err(|_| corrupt_posting("id is not UTF-8"))?
+                    .to_string();
+                pos = end;
+                if tag == POSTING_TAG_STRING {
+                    DocumentId::String(text)
+                } else {
+                    DocumentId::ObjectId(text)
+                }
+            }
+            _ => return Err(corrupt_posting("unknown id tag")),
+        };
+        let tf = u32::try_from(read_varint(buf, &mut pos)?)
+            .map_err(|_| corrupt_posting("term frequency out of range"))?;
+        entries.push((id, tf));
+    }
+    if pos != buf.len() {
+        return Err(corrupt_posting("trailing bytes"));
+    }
+    Ok(entries)
+}
 const FTIDX_HEADER_SIZE: u64 = 64;
 
 // Header layout (64 bytes):
@@ -1657,7 +1782,7 @@ impl FulltextIndex {
             doc_tokens_memory: HashMap::new(),
             token_offsets: HashMap::new(),
             lazy_mode: false,
-            file_version: FTIDX_VERSION_V3,
+            file_version: FTIDX_VERSION_V4,
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
@@ -1690,7 +1815,7 @@ impl FulltextIndex {
             doc_tokens_memory: HashMap::new(),
             token_offsets: HashMap::new(),
             lazy_mode: false,
-            file_version: FTIDX_VERSION_V3,
+            file_version: FTIDX_VERSION_V4,
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
@@ -1950,9 +2075,7 @@ impl FulltextIndex {
         let mut entries_buf = vec![0u8; entries_len];
         reader.read_exact(&mut entries_buf)?;
 
-        let entries: Vec<TokenEntry> = serde_json::from_slice(&entries_buf)?;
-
-        Ok(entries)
+        decode_token_entries(&entries_buf, self.file_version)
     }
 
     // NOTE: get_token_entries() removed - superseded by get_token_entries_merged()
@@ -2866,9 +2989,9 @@ impl FulltextIndex {
                 continue;
             }
 
-            // Write token entry with TF (V3 format)
+            // Write token entry with TF (V4 format)
             let token_bytes = token.as_bytes();
-            let entries_bytes = serde_json::to_vec(&entries)?;
+            let entries_bytes = encode_token_entries(&entries);
 
             {
                 let file = self.file_handle.as_mut().ok_or_else(|| {
@@ -2939,7 +3062,7 @@ impl FulltextIndex {
                 IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
             })?;
             file.seek(SeekFrom::Start(8))?; // After magic
-            file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
+            file.write_all(&FTIDX_VERSION_V4.to_le_bytes())?;
             file.write_all(&(self.doc_tokens_offsets.len() as u64).to_le_bytes())?;
             file.write_all(&offsets_offset.to_le_bytes())?;
             file.write_all(&token_entries_offset.to_le_bytes())?;
@@ -2956,7 +3079,7 @@ impl FulltextIndex {
         self.posting_cache.get_mut().clear();
         self.inverted_index.clear();
         self.lazy_mode = true;
-        self.file_version = FTIDX_VERSION_V3; // Upgraded to V3
+        self.file_version = FTIDX_VERSION_V4; // Upgraded to V4
         self.deleted_doc_ids.clear(); // Deleted docs are now permanently removed from disk
 
         Ok(())
@@ -3141,7 +3264,7 @@ impl FulltextIndex {
             }
 
             let token_bytes = token.as_bytes();
-            let entries_bytes = serde_json::to_vec(&entries)?;
+            let entries_bytes = encode_token_entries(&entries);
             let entries_len = checked_len_u32(&entries_bytes, "token entries (serialize_flush)")?;
             // Sequential append to temp — no seek needed.
             temp.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
@@ -3190,7 +3313,7 @@ impl FulltextIndex {
         // Now seek back and write the real V3 header at offset 0.
         temp.seek(SeekFrom::Start(0))?;
         temp.write_all(FTIDX_MAGIC)?;
-        temp.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
+        temp.write_all(&FTIDX_VERSION_V4.to_le_bytes())?;
         temp.write_all(&(snapshot.doc_tokens_offsets.len() as u64).to_le_bytes())?;
         temp.write_all(&offsets_offset.to_le_bytes())?;
         temp.write_all(&token_entries_offset.to_le_bytes())?;
@@ -3246,7 +3369,7 @@ impl FulltextIndex {
         self.posting_cache.get_mut().clear();
         self.write_offset = result.new_write_offset;
         self.lazy_mode = true;
-        self.file_version = FTIDX_VERSION_V3;
+        self.file_version = FTIDX_VERSION_V4;
 
         // 2. Prune deletions that are now permanently filtered out of disk.
         //    `result.durably_deleted` are the snapshot's deleted doc_ids;
@@ -3413,14 +3536,7 @@ impl FulltextIndex {
         let mut entries_buf = vec![0u8; entries_len];
         file.read_exact(&mut entries_buf)?;
 
-        if file_version >= FTIDX_VERSION_V3 {
-            let entries: Vec<TokenEntry> = serde_json::from_slice(&entries_buf)?;
-            Ok(entries)
-        } else {
-            // V2: HashSet<DocumentId> → convert to TokenEntry with TF=1
-            let doc_ids: HashSet<DocumentId> = serde_json::from_slice(&entries_buf)?;
-            Ok(doc_ids.into_iter().map(|id| (id, 1u32)).collect())
-        }
+        decode_token_entries(&entries_buf, file_version)
     }
 
     /// Load index from file (supports both V1 and V2 formats)
@@ -3445,10 +3561,9 @@ impl FulltextIndex {
         file.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
 
-        if version != FTIDX_VERSION_V1 && version != FTIDX_VERSION_V2 && version != FTIDX_VERSION_V3
-        {
+        if !(FTIDX_VERSION_V1..=FTIDX_VERSION_V4).contains(&version) {
             return Err(IronBaseError::IndexError(format!(
-                "Unsupported .ftidx version: {} (supported: 1, 2, 3)",
+                "Unsupported .ftidx version: {} (supported: 1-4)",
                 version
             )));
         }
@@ -3525,7 +3640,7 @@ impl FulltextIndex {
                 doc_tokens_memory: HashMap::new(),
                 token_offsets: HashMap::new(),
                 lazy_mode: false,               // V1: full in-memory mode
-                file_version: FTIDX_VERSION_V1, // Will upgrade to V3 on next flush
+                file_version: FTIDX_VERSION_V1, // Will upgrade to V4 on next flush
                 deleted_doc_ids: HashSet::new(),
                 building: false,
                 frozen_inverted: None,
@@ -3616,7 +3731,7 @@ impl FulltextIndex {
                 doc_tokens_memory: HashMap::new(),
                 token_offsets,
                 lazy_mode: true,       // V2/V3: lazy loading mode
-                file_version: version, // V2 will upgrade to V3 on next flush, V3 stays V3
+                file_version: version, // V2/V3 upgrade to V4 on the next flush
                 deleted_doc_ids: HashSet::new(),
                 building: false,
                 frozen_inverted: None,
@@ -4503,6 +4618,110 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    /// D2: V4 posting lists round-trip every id kind (ObjectId kept apart
+    /// from String, unlike V3's untagged JSON), in any order
+    #[test]
+    fn test_posting_list_v4_roundtrip() {
+        let entries: Vec<TokenEntry> = vec![
+            (DocumentId::Int(5), 1),
+            (DocumentId::Int(-3), 7),
+            (DocumentId::Int(i64::MAX), u32::MAX),
+            (DocumentId::Int(i64::MIN), 0),
+            (DocumentId::String("doc-ü".to_string()), 2),
+            (
+                DocumentId::ObjectId("507f1f77bcf86cd799439011".to_string()),
+                3,
+            ),
+            (DocumentId::Int(6), 1),
+        ];
+        let bytes = encode_token_entries(&entries);
+        assert_eq!(
+            decode_token_entries(&bytes, FTIDX_VERSION_V4).unwrap(),
+            entries
+        );
+        let empty = encode_token_entries(&[]);
+        assert!(decode_token_entries(&empty, FTIDX_VERSION_V4)
+            .unwrap()
+            .is_empty());
+
+        // Sequential ids take about 3 bytes each
+        let seq: Vec<TokenEntry> = (1000..2000).map(|i| (DocumentId::Int(i), 1)).collect();
+        assert!(encode_token_entries(&seq).len() < 3 * seq.len() + 8);
+    }
+
+    /// D2: older posting lists still decode (V3 JSON entries, V2 id sets)
+    #[test]
+    fn test_posting_list_older_versions_decode() {
+        let v3 = br#"[[1,2],["a",1]]"#;
+        assert_eq!(
+            decode_token_entries(v3, FTIDX_VERSION_V3).unwrap(),
+            vec![(DocumentId::Int(1), 2), (DocumentId::String("a".into()), 1)]
+        );
+        let v2 = br#"[4]"#;
+        assert_eq!(
+            decode_token_entries(v2, FTIDX_VERSION_V2).unwrap(),
+            vec![(DocumentId::Int(4), 1)]
+        );
+    }
+
+    /// D2: a corrupt V4 posting list is an error, never a panic or a huge
+    /// allocation
+    #[test]
+    fn test_posting_list_v4_rejects_corruption() {
+        let good = encode_token_entries(&[(DocumentId::String("abc".into()), 1)]);
+        for bad in [
+            &good[..good.len() - 1],       // truncated
+            &[0x05, 0x09, 0x00][..],       // unknown tag
+            &[0xff, 0xff, 0xff, 0x7f][..], // count beyond the length
+            &[0x01, 0x01, 0xff, 0x01][..], // id longer than the buffer
+            &[0xff; 11][..],               // varint too long
+        ] {
+            assert!(
+                decode_token_entries(bad, FTIDX_VERSION_V4).is_err(),
+                "{bad:?}"
+            );
+        }
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(decode_token_entries(&trailing, FTIDX_VERSION_V4).is_err());
+    }
+
+    /// D2: a saved index is written as V4 and searches the same after reload
+    #[test]
+    fn test_saved_index_is_v4_and_searches_the_same() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("fts_v4.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("idx", "content", options, path.clone()).unwrap();
+        let ids = [
+            DocumentId::Int(1),
+            DocumentId::String("s1".into()),
+            DocumentId::ObjectId("507f1f77bcf86cd799439011".into()),
+        ];
+        for (i, id) in ids.iter().enumerate() {
+            index
+                .insert(id, &format!("quick fox number {i} quick"))
+                .unwrap();
+        }
+        let before = index.search("quick fox", 10, 0, None);
+        index.save_to_file().unwrap();
+
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(&header[8..12], &FTIDX_VERSION_V4.to_le_bytes());
+        let loaded = FulltextIndex::load_from_file(path).unwrap();
+        let after = loaded.search("quick fox", 10, 0, None);
+        let key = |r: &Vec<_>| -> Vec<(DocumentId, String)> {
+            r.iter()
+                .map(|x: &FtsSearchResult| (x.doc_id.clone(), format!("{:.6}", x.score)))
+                .collect()
+        };
+        assert_eq!(key(&after), key(&before));
+        assert!(after
+            .iter()
+            .any(|r| r.doc_id == DocumentId::ObjectId("507f1f77bcf86cd799439011".into())));
     }
 
     #[test]

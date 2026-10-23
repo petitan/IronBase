@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Fulltext index file format V4: binary posting lists (ironbase-core 0.3.426)
+
+Hybrid search review 2026-10-17, D2 (approved by the owner).
+
+- **Format:** `.ftidx` V4 keeps the V3 layout; each token's posting list is
+  binary instead of JSON — a varint entry count, then per entry a tag byte
+  (Int / String / ObjectId), the id (Int ids as zigzag varint deltas) and the
+  term frequency as varint. Measured on 100K-entry lists: 3.5x smaller
+  (1.06 MB → 0.30 MB) and 3.7x faster to read (5.5 → 1.5 ms); smaller lists
+  alike. Corrupt input is an error, never a panic or a large allocation.
+- **Migration:** V1–V3 files still load; an index is written as V4 by its next
+  flush or rebuild. A version before 0.3.426 rejects a V4 file (and rebuilds
+  the index from the documents).
+- **Fixed with it:** the BM25 document lengths and the chunk → document
+  mapping in the index metadata stored document ids as untagged JSON, which
+  reloads an ObjectId as a String. V4 posting lists keep the id kind, so these
+  two maps are now written with typed ids (`catalog_serde::pairs`, the
+  catalog's `[tag, value, …]` form); the untagged pairs of older files still
+  load. Without it an ObjectId document's length was not found after a reload
+  and its BM25 score changed (found by the round-trip test).
+
 ### Fixed — Auto-embed re-embed: no mixed vector space while it runs (ironbase-core 0.3.425, mcp-server v1.0.623)
 
 Hybrid search review 2026-10-17, D3 (design and the new config field approved
