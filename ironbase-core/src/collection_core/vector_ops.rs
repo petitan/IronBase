@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::execution::ExecutionContext;
 use crate::index::{IndexKey, RangeQueryMode, ScanOrder};
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
@@ -472,9 +473,27 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_vector: &[f32],
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        self.vector_search_with_ctx(field, query_vector, limit, None)
+    }
+
+    /// Vector similarity search with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `vector_search`: `ctx` is
+    /// checked before the search and while the result documents are loaded
+    /// (hybrid review T7).
+    pub fn vector_search_with_ctx(
+        &self,
+        field: &str,
+        query_vector: &[f32],
+        limit: usize,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f32)>> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
+        if let Some(exec_ctx) = ctx {
+            exec_ctx.check_cancelled()?;
+        }
 
         // Find the vector index metadata
         let index_meta = self.get_vector_index_meta(field)?;
@@ -496,7 +515,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let results = hnsw.search(query_vector, limit);
                 // Need to release lock before loading documents
                 drop(indexes);
-                return self.load_documents_for_results(results);
+                return self.load_documents_for_results(results, ctx);
             }
         }
 
@@ -511,7 +530,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Load documents for results
-        self.load_documents_for_results(results)
+        self.load_documents_for_results(results, ctx)
     }
 
     /// Perform vector similarity search with attribute filter
@@ -541,9 +560,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         filter: &Value,
         limit: usize,
     ) -> Result<Vec<(Value, f32)>> {
+        self.vector_search_with_filter_with_ctx(field, query_vector, filter, limit, None)
+    }
+
+    /// Filtered vector search with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `vector_search_with_filter`:
+    /// `ctx` is checked while the filter is resolved by a scan, while the
+    /// allowed documents are scored exactly and while the result documents
+    /// are loaded (hybrid review T7).
+    pub fn vector_search_with_filter_with_ctx(
+        &self,
+        field: &str,
+        query_vector: &[f32],
+        filter: &Value,
+        limit: usize,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f32)>> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
+        if let Some(exec_ctx) = ctx {
+            exec_ctx.check_cancelled()?;
+        }
 
         // Find the vector index metadata
         let index_meta = self.get_vector_index_meta(field)?;
@@ -570,8 +609,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 // dropped the matches past it (hybrid review H2); the set is
                 // no larger than the index's own id map.
                 let mut ids = std::collections::HashSet::new();
-                let mut cursor = self.find_streaming(filter)?;
+                let mut cursor = self.find_streaming_with_options(
+                    filter,
+                    ctx.and_then(ExecutionContext::cancel_flag),
+                    ctx.and_then(ExecutionContext::deadline),
+                )?;
+                let mut iteration = 0;
                 while let Some(doc) = cursor.next()? {
+                    // The scan reads documents lazily: check here too
+                    if let Some(exec_ctx) = ctx {
+                        exec_ctx.maybe_check(iteration)?;
+                    }
+                    iteration += 1;
                     if let Some(did) = doc
                         .get("_id")
                         .and_then(|id| serde_json::from_value::<DocumentId>(id.clone()).ok())
@@ -591,25 +640,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let indexes = self.indexes.read();
             if let Some(hnsw) = indexes.get_vector_index(&index_name) {
-                let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids);
+                let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids, ctx)?;
                 // Need to release lock before loading documents
                 drop(indexes);
-                return self.load_documents_for_results(results);
+                return self.load_documents_for_results(results, ctx);
             }
         }
 
         // Slow path: load from file and add to IndexManager
         let hnsw = self.load_hnsw_index_from_file(&index_meta)?;
-        let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids);
+        let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids, ctx);
 
-        // Add to IndexManager for future queries
+        // Add to IndexManager for future queries (also when the search was
+        // stopped: the load is done)
         {
             let mut indexes = self.indexes.write();
             indexes.add_loaded_vector_index(index_name, hnsw);
         }
 
         // Load documents for results
-        self.load_documents_for_results(results)
+        self.load_documents_for_results(results?, ctx)
     }
 
     // === Private helper methods ===
@@ -816,10 +866,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     fn load_documents_for_results(
         &self,
         results: Vec<VectorSearchResult>,
+        ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f32)>> {
         let mut docs_with_scores = Vec::with_capacity(results.len());
 
-        for result in results {
+        for (iteration, result) in results.into_iter().enumerate() {
+            // Check for cancellation every N iterations
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
             // Parse the document ID
             let doc_id = string_to_doc_id(&result.id);
 

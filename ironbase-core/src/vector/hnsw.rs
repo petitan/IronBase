@@ -32,6 +32,7 @@
 use super::config::{DistanceMetric, VectorIndexConfig};
 use super::simd;
 use crate::error::{IronBaseError, Result};
+use crate::execution::ExecutionContext;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -709,48 +710,68 @@ impl HnswIndex {
     /// scored exactly instead. When the graph search does return `k` allowed
     /// documents they are kept: as accurate as the unfiltered graph search,
     /// i.e. approximate like any HNSW result.
+    ///
+    /// `ctx` stops the exact scoring of a large set on timeout or cancel
+    /// (hybrid review T7); the graph search is bounded by its visit budget.
     pub fn search_with_allowed(
         &self,
         query: &[f32],
         k: usize,
         allowed: &HashSet<String>,
-    ) -> Vec<VectorSearchResult> {
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<VectorSearchResult>> {
         let budget = (self.config.ef_search * 3).max(k);
         if allowed.len() > budget {
             let results = self.search_with_filter(query, k, |id| allowed.contains(id));
             if results.len() >= k {
-                return results;
+                return Ok(results);
             }
         }
-        self.search_exact_among(query, k, allowed.iter().map(String::as_str))
+        self.search_exact_among(query, k, allowed.iter().map(String::as_str), ctx)
     }
 
     /// Exact top-`k` of `ids` by similarity (brute force, O(k) memory).
     /// Ids not in the index (no vector, or removed) are skipped; equal
-    /// scores are ordered by id so the result is deterministic.
+    /// scores are ordered by id so the result is deterministic. `ctx` is
+    /// checked every `check_frequency` ids.
     pub fn search_exact_among<'a, I>(
         &self,
         query: &[f32],
         k: usize,
         ids: I,
-    ) -> Vec<VectorSearchResult>
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<VectorSearchResult>>
     where
         I: IntoIterator<Item = &'a str>,
     {
         if query.len() != self.config.dim {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let query = PreparedQuery::new(query);
-        let scored = ids.into_iter().filter_map(|id| {
-            let &idx = self.id_to_index.get(id)?;
-            Some(VectorSearchResult {
-                id: id.to_string(),
-                score: self.similarity_to(&query, idx),
-            })
-        });
-        crate::collection_core::topk_select(scored, k, |a: &VectorSearchResult, b| {
+        let mut stopped = Ok(());
+        let scored = ids
+            .into_iter()
+            .enumerate()
+            .map_while(
+                |(iteration, id)| match ctx.map(|c| c.maybe_check(iteration)) {
+                    Some(Err(e)) => {
+                        stopped = Err(e);
+                        None
+                    }
+                    _ => Some(id),
+                },
+            )
+            .filter_map(|id| {
+                let &idx = self.id_to_index.get(id)?;
+                Some(VectorSearchResult {
+                    id: id.to_string(),
+                    score: self.similarity_to(&query, idx),
+                })
+            });
+        let top = crate::collection_core::topk_select(scored, k, |a: &VectorSearchResult, b| {
             b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id))
-        })
+        });
+        stopped.map(|()| top)
     }
 
     /// Batch insert multiple vectors
@@ -2246,7 +2267,7 @@ mod tests {
                         expected
                     );
                 }
-                let exact = idx.search_exact_among(query, 1, ["zero"]);
+                let exact = idx.search_exact_among(query, 1, ["zero"], None).unwrap();
                 assert_eq!(
                     exact[0].score,
                     reference_similarity(metric, query, &[0.0; 4]),
@@ -2254,6 +2275,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// T7: the exact scoring of an allowed set stops on cancel or timeout
+    #[test]
+    fn exact_search_stops_on_cancel() {
+        let vectors: Vec<Vec<f32>> = (0..300).map(|i| vec![i as f32, 1.0, 0.0, 0.5]).collect();
+        let idx = build_index(VectorIndexConfig::new(4), &vectors);
+        let allowed: HashSet<String> = (0..300).map(|i| format!("v{i}")).collect();
+        let query = [1.0, 1.0, 0.0, 0.5];
+
+        let cancelled = ExecutionContext::new().with_cancel_flag(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        let err = idx
+            .search_exact_among(
+                query.as_slice(),
+                5,
+                allowed.iter().map(String::as_str),
+                Some(&cancelled),
+            )
+            .unwrap_err();
+        assert!(matches!(err, IronBaseError::Cancelled(_)), "{err:?}");
+
+        let results = idx.search_with_allowed(&query, 5, &allowed, None).unwrap();
+        assert_eq!(results.len(), 5);
     }
 
     /// T6: norms are not serialized; every load path and `upsert` sets them.

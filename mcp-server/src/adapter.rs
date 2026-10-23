@@ -2223,7 +2223,8 @@ impl IronBaseAdapter {
     ) -> Result<Vec<(Value, f32)>> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
-        let results = coll.vector_search(field, query_vector, limit)?;
+        let ctx = self.create_execution_context();
+        let results = coll.vector_search_with_ctx(field, query_vector, limit, Some(&ctx))?;
         Ok(results)
     }
 
@@ -2248,7 +2249,14 @@ impl IronBaseAdapter {
     ) -> Result<Vec<(Value, f32)>> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
-        let results = coll.vector_search_with_filter(field, query_vector, filter, limit)?;
+        let ctx = self.create_execution_context();
+        let results = coll.vector_search_with_filter_with_ctx(
+            field,
+            query_vector,
+            filter,
+            limit,
+            Some(&ctx),
+        )?;
         Ok(results)
     }
 }
