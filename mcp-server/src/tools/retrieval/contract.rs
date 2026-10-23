@@ -29,7 +29,9 @@ const CHUNK_TRACKING_KEYS: &[&str] = &[
 const DEFAULT_MAX_CONTEXT_CHARS: usize = 12_000;
 
 fn is_stripped_chunk_key(k: &str) -> bool {
-    k.starts_with('_') || CHUNK_TRACKING_KEYS.contains(&k)
+    k.starts_with('_')
+        || CHUNK_TRACKING_KEYS.contains(&k)
+        || k.ends_with(crate::tools::auto_embed::SOURCE_HASH_SUFFIX)
 }
 
 /// Build the compact `search` response from the shared pipeline's grouped output.
@@ -359,6 +361,7 @@ mod tests {
             lifted: Map::new(),
             chunks: vec![json!({
                 "doc_id": "a", F: "hello", "embedding": [0.1],
+                "embedding_source_hash": "0123456789abcdef",
                 "chunk_index": 2, "_text_score": 3.0, "title": "T"
             })],
         };
@@ -366,6 +369,7 @@ mod tests {
         assert_eq!(out.get("verdict").unwrap(), &json!("unknown"));
         let obj = docs(&out)[0].as_object().unwrap();
         assert!(!obj.contains_key("embedding"));
+        assert!(!obj.contains_key("embedding_source_hash"));
         assert!(!obj.contains_key("chunk_index"));
         assert!(!obj.keys().any(|k| k.starts_with('_')));
         assert_eq!(obj.get("title").unwrap(), &json!("T"));

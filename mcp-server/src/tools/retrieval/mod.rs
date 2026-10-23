@@ -141,7 +141,7 @@ fn handle_search(
     }
     hp_map.insert("limit".to_string(), json!(p.limit));
     hp_map.insert("group_by_document".to_string(), json!(true));
-    hp_map.insert("projection".to_string(), json!({ "embedding": 0 }));
+    hp_map.insert("projection".to_string(), search_projection());
     if !semantic_available {
         hp_map.insert("vector_weight".to_string(), json!(0.0));
         hp_map.insert("fulltext_weight".to_string(), json!(1.0));
@@ -151,7 +151,7 @@ fn handle_search(
     // Run the SHARED pipeline directly (no JSON round-trip into hybrid_search):
     // retrieve+fuse → grouped builder → compact contract.
     let fo = retrieve_and_fuse(&hp, adapter, embedding_manager)?;
-    let projection = parse_projection_value(Some(json!({ "embedding": 0 })))?;
+    let projection = parse_projection_value(Some(search_projection()))?;
     let (groups, total_chunks) = build_doc_groups(
         &fo.fused,
         adapter,
@@ -183,4 +183,13 @@ fn handle_search(
         }
     }
     Ok(out)
+}
+
+/// The embedding and its auto-embed source hash (D4) are left out of the
+/// `search` output; both are left unparsed in the lanes (T2)
+fn search_projection() -> Value {
+    json!({
+        "embedding": 0,
+        crate::tools::auto_embed::source_hash_field("embedding"): 0,
+    })
 }
