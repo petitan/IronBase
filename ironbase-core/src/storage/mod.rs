@@ -268,6 +268,12 @@ pub struct AutoEmbeddingConfig {
     /// change under the same model name).
     #[serde(default)]
     pub reembed_pending: bool,
+    /// While a forced re-embed runs: the shadow field (with its own vector
+    /// index) that receives the new-space vectors next to `target_field`, and
+    /// that vector searches on `target_field` use meanwhile, so they never
+    /// mix the old and the new space. Cleared when the re-embed completes.
+    #[serde(default)]
+    pub reembed_field: Option<String>,
 }
 
 /// Configuration for text chunking before embedding

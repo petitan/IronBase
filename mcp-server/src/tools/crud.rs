@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::auto_embed::{source_hash, source_hash_field};
+use super::auto_embed::{source_hash, source_hash_field, write_fields};
 use super::helpers::{
     check_cancelled, parse_sort_value, validate_collection_name, validate_document,
     validate_filter, validate_update, DEFAULT_QUERY_LIMIT,
@@ -95,13 +95,14 @@ fn apply_auto_embedding(
         }
     }
 
-    // Set the embedding in the document, with the hash of its source (D4)
+    // Set the embedding in the document, with the hash of its source (D4);
+    // during a re-embed also in its shadow field (D3)
     if let Some(obj) = document.as_object_mut() {
-        obj.insert(config.target_field.clone(), json!(embedding));
-        obj.insert(
-            source_hash_field(&config.target_field),
-            json!(source_hash(&source_text)),
-        );
+        let hash = source_hash(&source_text);
+        for field in write_fields(config) {
+            obj.insert(source_hash_field(&field), json!(hash));
+            obj.insert(field, json!(embedding));
+        }
     }
 
     Ok(true)
@@ -171,7 +172,15 @@ fn refresh_auto_embeddings(
             config.provider
         ))
     })?;
-    let hash_field = source_hash_field(&config.target_field);
+    let fields = write_fields(config);
+    let vector_and_hash = |hash: Option<&str>, embedding: Option<&[f32]>| {
+        let mut map = serde_json::Map::new();
+        for field in &fields {
+            map.insert(field.clone(), embedding.map_or(json!(""), |e| json!(e)));
+            map.insert(source_hash_field(field), json!(hash.unwrap_or("")));
+        }
+        Value::Object(map)
+    };
     let mut refreshed = 0;
     for batch in ids.chunks(REEMBED_BATCH) {
         check_cancelled()?;
@@ -189,11 +198,13 @@ fn refresh_auto_embeddings(
                 adapter.update_one(
                     collection,
                     json!({"_id": id}),
-                    json!({"$unset": {&config.target_field: "", &hash_field: ""}}),
+                    json!({"$unset": vector_and_hash(None, None)}),
                 )?;
-            } else if doc.get(&config.target_field).is_none()
-                || doc.get(&hash_field).and_then(|h| h.as_str()) != Some(&source_hash(&text))
-            {
+            } else if fields.iter().any(|field| {
+                doc.get(field).is_none()
+                    || doc.get(source_hash_field(field)).and_then(|h| h.as_str())
+                        != Some(&source_hash(&text))
+            }) {
                 texts.push((id.clone(), text));
             }
         }
@@ -217,7 +228,7 @@ fn refresh_auto_embeddings(
             adapter.update_one(
                 collection,
                 json!({"_id": id}),
-                json!({"$set": {&config.target_field: embedding, &hash_field: source_hash(text)}}),
+                json!({"$set": vector_and_hash(Some(&source_hash(text)), Some(&embedding))}),
             )?;
             refreshed += 1;
         }
@@ -344,11 +355,11 @@ fn handle_insert_many(
                             texts_with_indices.iter().zip(embeddings.iter())
                         {
                             if let Some(obj) = documents[*idx].as_object_mut() {
-                                obj.insert(config.target_field.clone(), json!(embedding));
-                                obj.insert(
-                                    source_hash_field(&config.target_field),
-                                    json!(source_hash(text)),
-                                );
+                                let hash = source_hash(text);
+                                for field in write_fields(&config) {
+                                    obj.insert(source_hash_field(&field), json!(hash));
+                                    obj.insert(field, json!(embedding));
+                                }
                                 embeddings_applied += 1;
                             }
                         }
@@ -809,6 +820,34 @@ mod tests {
         assert_eq!(hash_of(&a, 11), Some(json!(source_hash("xyz"))));
         assert_ne!(source_hash("abcde"), source_hash("abcdf"));
         assert_eq!(source_hash("abcde").len(), 16);
+    }
+
+    /// D3: during a re-embed a new vector goes to the target and the shadow
+    #[test]
+    fn writes_during_a_reembed_fill_the_shadow_too() {
+        let (a, m, _calls, _t) = setup();
+        let mut config = a.get_auto_embedding_config("kb").unwrap().unwrap();
+        config.reembed_field = Some("embedding__next".to_string());
+        a.set_auto_embedding_config("kb", Some(config)).unwrap();
+
+        handle_insert_one(
+            json!({"collection":"kb","document":{"_id": 10, "content": "abcde"}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        handle_update_one(
+            json!({"collection":"kb","filter":{"_id":1},"update":{"$set":{"content":"xyz"}}}),
+            &a,
+            &m,
+        )
+        .unwrap();
+        for (id, text) in [(10, "abcde"), (1, "xyz")] {
+            let doc = a.find_one("kb", json!({"_id": id})).unwrap().unwrap();
+            assert_eq!(doc["embedding__next"], doc["embedding"], "{doc}");
+            assert_eq!(doc["embedding__next_source_hash"], json!(source_hash(text)));
+            assert_eq!(doc["embedding_source_hash"], json!(source_hash(text)));
+        }
     }
 
     /// D4: an update that writes the same source text again keeps the

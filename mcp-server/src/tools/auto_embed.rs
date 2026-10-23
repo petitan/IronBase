@@ -250,6 +250,7 @@ fn handle_auto_embed_enable(
         chunking,
         preprocessing_version: Some(provider.preprocessing_version().to_string()),
         reembed_pending: false,
+        reembed_field: None,
     };
 
     // Vectors already in the target field that another provider, model,
@@ -286,25 +287,24 @@ fn handle_auto_embed_enable(
     // it cannot overwrite the vectors of the one started below
     cancel_backfill_jobs(job_manager, &p.collection);
 
+    let mut config = config;
     if space_changed {
         // The stored model/preprocessing keep describing the stored vectors
-        // until the forced re-embed records the new ones. Saved before the
-        // old vectors go: an interrupted dimension change leaves an index
-        // that already matches, which only the pending marker tells apart.
+        // until the forced re-embed records the new ones
         let mut stored = config.clone();
         stored.model = previous.as_ref().and_then(|prev| prev.model.clone());
         stored.preprocessing_version = previous
             .as_ref()
             .and_then(|prev| prev.preprocessing_version.clone());
-        stored.reembed_pending = true;
-        adapter.set_auto_embedding_config(&p.collection, Some(stored))?;
-    }
-    // A different dimension: the old index and vectors go
-    if index_dim_changed {
-        handle_dimension_change(adapter, &p.collection, &config.target_field, dimension)
+        begin_reembed(adapter, &p.collection, &mut stored, dimension)
             .map_err(McpError::internal)?;
-    }
-    if !space_changed {
+        config.reembed_field = stored.reembed_field;
+    } else {
+        // A different dimension without vectors to keep: the old index goes
+        if index_dim_changed {
+            handle_dimension_change(adapter, &p.collection, &config.target_field, dimension)
+                .map_err(McpError::internal)?;
+        }
         // Save to collection metadata
         adapter.set_auto_embedding_config(&p.collection, Some(config.clone()))?;
     }
@@ -448,7 +448,8 @@ fn handle_auto_embed_status(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
                         "overlap": c.overlap
                     }))
                 },
-                "reembed_pending": config.reembed_pending
+                "reembed_pending": config.reembed_pending,
+                    "reembed_field": config.reembed_field
             });
             if requires_reconfiguration {
                 response["requires_reconfiguration"] = json!(true);
@@ -572,6 +573,172 @@ pub(crate) fn source_hash(text: &str) -> String {
         .collect()
 }
 
+/// Suffix of the shadow field a forced re-embed fills next to its target:
+/// `<target_field>__next` (D3)
+pub(crate) const SHADOW_SUFFIX: &str = "__next";
+
+/// The shadow field of `target_field`
+pub(crate) fn shadow_field(target_field: &str) -> String {
+    format!("{target_field}{SHADOW_SUFFIX}")
+}
+
+/// The fields a new vector is written to: the target, and while a shadow
+/// re-embed runs also the shadow (D3). The target's index is not searched
+/// meanwhile, so writing the new space there early mixes nothing, and the
+/// target is complete when the searches switch back to it.
+pub(crate) fn write_fields(config: &AutoEmbeddingConfig) -> Vec<String> {
+    let mut fields = vec![config.target_field.clone()];
+    fields.extend(config.reembed_field.clone());
+    fields
+}
+
+/// Metric and HNSW parameters of the vector index on `field`
+struct VectorIndexParams {
+    dim: usize,
+    metric: String,
+    max_vectors: usize,
+    m: usize,
+    ef_construction: usize,
+    ef_search: usize,
+}
+
+impl Default for VectorIndexParams {
+    fn default() -> Self {
+        Self {
+            dim: 0,
+            metric: "cosine".to_string(),
+            max_vectors: 100_000,
+            m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+        }
+    }
+}
+
+/// The parameters of the vector index on `field`, with its name; None when
+/// the field has no vector index
+fn vector_index_params(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    field: &str,
+) -> Option<(String, VectorIndexParams)> {
+    let indexes = adapter.list_vector_indexes(collection).ok()?;
+    let idx = indexes
+        .iter()
+        .find(|idx| idx.get("field").and_then(|v| v.as_str()) == Some(field))?;
+    let defaults = VectorIndexParams::default();
+    let param = |key: &str, default: usize| -> usize {
+        idx.get("hnsw_params")
+            .and_then(|p| p.get(key))
+            .or_else(|| idx.get(key))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(default)
+    };
+    let params = VectorIndexParams {
+        dim: param("dim", 0),
+        metric: idx
+            .get("metric")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&defaults.metric)
+            .to_string(),
+        max_vectors: param("max_vectors", defaults.max_vectors),
+        m: param("m", defaults.m),
+        ef_construction: param("ef_construction", defaults.ef_construction),
+        ef_search: param("ef_search", defaults.ef_search),
+    };
+    let name = idx.get("name").and_then(|v| v.as_str())?.to_string();
+    Some((name, params))
+}
+
+fn create_vector_index_like(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    field: &str,
+    dim: usize,
+    params: &VectorIndexParams,
+) -> std::result::Result<(), String> {
+    adapter
+        .create_vector_index(
+            collection,
+            field,
+            dim,
+            &params.metric,
+            params.max_vectors,
+            params.m,
+            params.ef_construction,
+            params.ef_search,
+        )
+        .map(|_| ())
+        .map_err(|e| format!("Failed to create vector index on '{}': {}", field, e))
+}
+
+/// Remove the shadow vectors of `target_field` and their index
+fn remove_shadow(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    target_field: &str,
+) -> std::result::Result<(), String> {
+    let shadow = shadow_field(target_field);
+    if let Some((name, _)) = vector_index_params(adapter, collection, &shadow) {
+        adapter
+            .drop_vector_index(collection, &name)
+            .map_err(|e| format!("Failed to drop shadow vector index '{}': {}", name, e))?;
+    }
+    adapter
+        .update_many(
+            collection,
+            json!({ &shadow: { "$exists": true } }),
+            json!({ "$unset": { &shadow: "", source_hash_field(&shadow): "" } }),
+        )
+        .map_err(|e| format!("Failed to remove shadow vectors '{}': {}", shadow, e))?;
+    Ok(())
+}
+
+/// Prepare a forced re-embed into the new space of dimension `dim`, given
+/// `stored`, the config to persist (it keeps describing the old vectors).
+///
+/// When the target has a vector index, the new vectors also go into a shadow
+/// field with an index of its own that vector searches on the target use
+/// until the re-embed completes: they see only the new space (the query is
+/// embedded with the new model), with a coverage that grows as the re-embed
+/// proceeds, instead of a mix of both spaces (D3).
+///
+/// Order, for interruptions: the pending marker and the shadow field are
+/// saved first; the shadow index is created or resumed (rebuilt when its
+/// dimension differs); a target index of another dimension is rebuilt last,
+/// unsearched by then.
+fn begin_reembed(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    stored: &mut AutoEmbeddingConfig,
+    dim: usize,
+) -> std::result::Result<(), String> {
+    let target = stored.target_field.clone();
+    let target_index = vector_index_params(adapter, collection, &target);
+    stored.reembed_pending = true;
+    stored.reembed_field = target_index.as_ref().map(|_| shadow_field(&target));
+    adapter
+        .set_auto_embedding_config(collection, Some(stored.clone()))
+        .map_err(|e| format!("Failed to save the re-embed marker: {}", e))?;
+    let Some((_, params)) = target_index else {
+        return Ok(());
+    };
+
+    let shadow = shadow_field(&target);
+    match vector_index_params(adapter, collection, &shadow) {
+        Some((_, existing)) if existing.dim == dim => {} // resumed
+        _ => {
+            remove_shadow(adapter, collection, &target)?;
+            create_vector_index_like(adapter, collection, &shadow, dim, &params)?;
+        }
+    }
+    if params.dim != dim {
+        handle_dimension_change(adapter, collection, &target, dim)?;
+    }
+    Ok(())
+}
+
 fn vector_index_dim(adapter: &IronBaseAdapter, collection: &str, field: &str) -> Option<usize> {
     adapter
         .list_vector_indexes(collection)
@@ -593,7 +760,7 @@ fn vector_index_dim(adapter: &IronBaseAdapter, collection: &str, field: &str) ->
 /// 2. $unset old vectors → if crash: no vector data, re-embed will fix
 /// 3. Create new HNSW → if crash: empty index, re-embed will populate
 fn handle_dimension_change(
-    adapter: &Arc<IronBaseAdapter>,
+    adapter: &IronBaseAdapter,
     collection: &str,
     target_field: &str,
     new_dimension: usize,
@@ -605,27 +772,9 @@ fn handle_dimension_change(
 
     // The new index keeps the old one's metric and HNSW parameters; only the
     // dimension changes (defaults only if no index existed on the field)
-    let old = indexes
-        .iter()
-        .find(|idx| idx.get("field").and_then(|v| v.as_str()) == Some(target_field));
-    let old_param = |key: &str, default: usize| -> usize {
-        old.and_then(|idx| {
-            idx.get("hnsw_params")
-                .and_then(|p| p.get(key))
-                .or_else(|| idx.get(key))
-        })
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(default)
-    };
-    let metric = old
-        .and_then(|idx| idx.get("metric").and_then(|v| v.as_str()))
-        .unwrap_or("cosine")
-        .to_string();
-    let max_vectors = old_param("max_vectors", 100_000);
-    let m = old_param("m", 16);
-    let ef_construction = old_param("ef_construction", 200);
-    let ef_search = old_param("ef_search", 50);
+    let params = vector_index_params(adapter, collection, target_field)
+        .map(|(_, params)| params)
+        .unwrap_or_default();
 
     for idx in &indexes {
         let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
@@ -662,24 +811,11 @@ fn handle_dimension_change(
         collection,
         target_field,
         new_dimension,
-        metric,
-        m,
-        ef_construction
+        params.metric,
+        params.m,
+        params.ef_construction
     );
-    adapter
-        .create_vector_index(
-            collection,
-            target_field,
-            new_dimension,
-            &metric,
-            max_vectors,
-            m,
-            ef_construction,
-            ef_search,
-        )
-        .map_err(|e| format!("Failed to create vector index: {}", e))?;
-
-    Ok(())
+    create_vector_index_like(adapter, collection, target_field, new_dimension, &params)
 }
 
 /// Background job execution for async backfill.
@@ -705,6 +841,9 @@ fn run_backfill_job(
     force: bool,
     shutdown_flag: &std::sync::atomic::AtomicBool,
 ) {
+    // The new vectors' fields (target, and the shadow of a re-embed)
+    let fields = write_fields(config);
+
     // Build filter: if not force, only documents without target field
     let mut query = json!({});
     if !force {
@@ -730,8 +869,13 @@ fn run_backfill_job(
         });
         if force {
             // Nothing to re-embed: the (empty) space is already the new one
-            summary["embedding_space_committed"] =
-                json!(commit_embedding_space(adapter, collection, config));
+            let committed = commit_embedding_space(adapter, collection, config);
+            if committed && config.reembed_field.is_some() {
+                if let Err(e) = remove_shadow(adapter, collection, &config.target_field) {
+                    tracing::warn!("Re-embed of '{}': {}", collection, e);
+                }
+            }
+            summary["embedding_space_committed"] = json!(committed);
         }
         job_manager.complete_job(job_id, summary);
         return;
@@ -876,14 +1020,7 @@ fn run_backfill_job(
             // A cancelled job writes nothing more: a newer one may own the field
             let store_one = |id: &Value, text: &str, embedding: &[f32]| -> bool {
                 !job_manager.is_cancelled(job_id)
-                    && store_embedding(
-                        adapter,
-                        collection,
-                        &config.target_field,
-                        id,
-                        text,
-                        embedding,
-                    )
+                    && store_embedding(adapter, collection, &fields, id, text, embedding)
             };
 
             match embeddings_result {
@@ -1038,6 +1175,12 @@ fn run_backfill_job(
             None
         };
         let committed = settled.is_some() && commit_embedding_space(adapter, collection, config);
+        if committed && config.reembed_field.is_some() {
+            if let Err(e) = remove_shadow(adapter, collection, &config.target_field) {
+                // The next startup removes it
+                tracing::warn!("Re-embed of '{}': {}", collection, e);
+            }
+        }
         if !committed {
             tracing::warn!(
                 "Re-embed of '{}' incomplete ({} errors, reached end: {}); the stored model \
@@ -1064,18 +1207,19 @@ fn id_key(doc: &Value) -> String {
 fn store_embedding(
     adapter: &IronBaseAdapter,
     collection: &str,
-    target_field: &str,
+    fields: &[String],
     id: &Value,
     text: &str,
     embedding: &[f32],
 ) -> bool {
     let filter = json!({ "_id": id });
-    let update = json!({
-        "$set": {
-            target_field: embedding,
-            source_hash_field(target_field): source_hash(text),
-        }
-    });
+    let hash = source_hash(text);
+    let mut set = serde_json::Map::new();
+    for field in fields {
+        set.insert(field.clone(), json!(embedding));
+        set.insert(source_hash_field(field), json!(hash));
+    }
+    let update = json!({ "$set": set });
     match adapter.update_one(collection, filter, update) {
         Ok(_) => true,
         Err(e) => {
@@ -1139,7 +1283,7 @@ fn settle_failed_documents(
                 if !store_embedding(
                     adapter,
                     collection,
-                    &config.target_field,
+                    &write_fields(config),
                     id,
                     text,
                     &embedding,
@@ -1149,13 +1293,16 @@ fn settle_failed_documents(
                 continue;
             }
         }
-        if doc.get(&config.target_field).is_none() {
+        let fields = write_fields(config);
+        if fields.iter().all(|f| doc.get(f).is_none()) {
             continue;
         }
-        let update = json!({ "$unset": {
-            &config.target_field: "",
-            source_hash_field(&config.target_field): "",
-        } });
+        let mut unset = serde_json::Map::new();
+        for field in &fields {
+            unset.insert(field.clone(), json!(""));
+            unset.insert(source_hash_field(field), json!(""));
+        }
+        let update = json!({ "$unset": unset });
         if let Err(e) = adapter.update_one(collection, json!({ "_id": id }), update) {
             tracing::warn!("Failed to remove stale vector of {:?}: {}", id, e);
             return None;
@@ -1187,6 +1334,7 @@ fn commit_embedding_space(
         c.model = None;
         c.preprocessing_version = None;
         c.reembed_pending = false;
+        c.reembed_field = None;
         serde_json::to_value(c).ok()
     };
     let mut current = match adapter.get_auto_embedding_config(collection) {
@@ -1203,6 +1351,8 @@ fn commit_embedding_space(
     current.model = target.model.clone();
     current.preprocessing_version = target.preprocessing_version.clone();
     current.reembed_pending = false;
+    // Searches on the target switch back to it: complete, in the new space
+    current.reembed_field = None;
     match adapter.set_auto_embedding_config(collection, Some(current)) {
         Ok(()) => true,
         Err(e) => {
@@ -1294,33 +1444,20 @@ pub fn check_model_changes_and_reembed(
         let was_pending = config.reembed_pending;
         if dimension_changed {
             tracing::info!(
-                "Dimension change detected for '{}': {} → {} on field '{}', rebuilding HNSW index",
+                "Dimension change detected for '{}': {} → {} on field '{}'",
                 collection,
                 saved_dim,
                 current_dim,
                 config.target_field
             );
-            // Persist the pending marker before the old vectors go: an
-            // interrupted rebuild leaves an index that already matches the
-            // provider, which only the marker tells apart. The stored
-            // dimension (which inserts are validated against) follows the
-            // provider.
-            config.reembed_pending = true;
-            if config.dimension.is_some() {
-                config.dimension = Some(current_dim);
-            }
-            if let Err(e) = adapter.set_auto_embedding_config(collection, Some(config.clone())) {
-                tracing::warn!("Failed to update config for '{}': {}", collection, e);
-            }
-            if let Err(e) =
-                handle_dimension_change(adapter, collection, &config.target_field, current_dim)
-            {
-                tracing::error!(
-                    "Failed to handle dimension change for '{}': {}",
-                    collection,
-                    e
-                );
-                continue;
+        }
+        // A shadow left by a re-embed whose cleanup was interrupted
+        if !was_pending
+            && vector_index_params(adapter, collection, &shadow_field(&config.target_field))
+                .is_some()
+        {
+            if let Err(e) = remove_shadow(adapter, collection, &config.target_field) {
+                tracing::warn!("Collection '{}': {}", collection, e);
             }
         }
 
@@ -1382,22 +1519,23 @@ pub fn check_model_changes_and_reembed(
 
             // The stored model/preprocessing describe the existing vectors, so
             // they are NOT updated here: the job records the new values once all
-            // documents are re-embedded (see run_backfill_job)
+            // documents are re-embedded (see run_backfill_job). The pending
+            // marker is persisted first: if the re-embed is interrupted or never
+            // starts, the next startup restarts it even when names alone cannot
+            // tell (e.g. a dimension change, same model name). The stored
+            // dimension (which inserts are validated against) follows the
+            // provider.
+            if config.dimension.is_some() {
+                config.dimension = Some(current_dim);
+            }
+            if let Err(e) = begin_reembed(adapter, collection, &mut config, current_dim) {
+                tracing::error!("Failed to prepare the re-embed of '{}': {}", collection, e);
+                continue;
+            }
             let mut target_config = config.clone();
             target_config.model = Some(current_model);
             target_config.preprocessing_version = Some(current_preproc);
             target_config.reembed_pending = false;
-
-            // Persist the pending marker first: if the re-embed is interrupted
-            // or never starts, the next startup restarts it even when names
-            // alone cannot tell (e.g. a dimension change, same model name)
-            if !pending {
-                config.reembed_pending = true;
-                if let Err(e) = adapter.set_auto_embedding_config(collection, Some(config.clone()))
-                {
-                    tracing::warn!("Failed to update config for '{}': {}", collection, e);
-                }
-            }
 
             // Start force backfill (re-embed ALL documents)
             if start_backfill_job(
@@ -1748,6 +1886,135 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("re-embed did not complete: {:?}", stored_config(adapter));
+    }
+
+    fn ids_found(adapter: &IronBaseAdapter, query: &[f32]) -> Vec<Value> {
+        let mut ids: Vec<Value> = adapter
+            .vector_search("kb", "embedding", query, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(doc, _)| doc["_id"].clone())
+            .collect();
+        ids.sort_by_key(|id| id.as_i64());
+        ids
+    }
+
+    fn has_shadow_index(adapter: &IronBaseAdapter) -> bool {
+        vector_index_params(adapter, "kb", "embedding__next").is_some()
+    }
+
+    /// D3: while a re-embed runs, vector searches on the target use the
+    /// shadow index — only new-space vectors, never the old ones
+    #[test]
+    fn reembed_searches_the_shadow_until_done() {
+        let (adapter, manager, _t) = setup(&[Some("abc"), Some("de"), Some("f")]);
+        adapter
+            .create_vector_index("kb", "embedding", 2, "cosine", 1_000, 16, 200, 50)
+            .unwrap();
+        assert_eq!(
+            ids_found(&adapter, &[1.0, 1.0]).len(),
+            3,
+            "old space before"
+        );
+
+        // The job cannot start: the re-embed stays half done
+        check_model_changes_and_reembed(&adapter, &Some(manager), &None, false);
+        let config = stored_config(&adapter);
+        assert_eq!(config.reembed_field.as_deref(), Some("embedding__next"));
+        assert!(has_shadow_index(&adapter));
+        assert!(
+            ids_found(&adapter, &[1.0, 1.0]).is_empty(),
+            "no old-space vectors"
+        );
+
+        // One document re-embedded: the only one found, in both fields
+        assert!(store_embedding(
+            &adapter,
+            "kb",
+            &write_fields(&config),
+            &json!(1),
+            "de",
+            &[2.0, 2.0],
+        ));
+        assert_eq!(ids_found(&adapter, &[1.0, 1.0]), vec![json!(1)]);
+        let doc = adapter.find_one("kb", json!({"_id": 1})).unwrap().unwrap();
+        assert_eq!(doc["embedding"], doc["embedding__next"]);
+        assert_eq!(doc["embedding__next_source_hash"], json!(source_hash("de")));
+    }
+
+    /// D3: when the re-embed completes, searches switch back to the target
+    /// (all new vectors) and the shadow index and fields are removed
+    #[test]
+    fn completed_reembed_removes_the_shadow() {
+        let (adapter, manager, _t) = setup(&[Some("abc"), Some("de"), Some("f")]);
+        adapter
+            .create_vector_index("kb", "embedding", 2, "cosine", 1_000, 16, 200, 50)
+            .unwrap();
+        let jobs = Arc::new(JobManager::new());
+        check_model_changes_and_reembed(&adapter, &Some(manager), &Some(jobs.clone()), false);
+        wait_for_commit(&adapter);
+        jobs.shutdown();
+
+        assert_eq!(stored_config(&adapter).reembed_field, None);
+        assert!(!has_shadow_index(&adapter));
+        assert_eq!(ids_found(&adapter, &[1.0, 1.0]).len(), 3);
+        for doc in adapter
+            .find("kb", json!({}), Default::default())
+            .unwrap()
+            .documents
+        {
+            assert_eq!(doc["embedding"][1], json!(2.0), "{}", doc);
+            assert!(doc.get("embedding__next").is_none(), "{}", doc);
+            assert!(doc.get("embedding__next_source_hash").is_none(), "{}", doc);
+        }
+    }
+
+    /// D3: with a new dimension the target index is rebuilt at once — it is
+    /// not searched meanwhile — and searches with the new dimension work
+    #[test]
+    fn reembed_with_new_dimension_searches_the_shadow() {
+        let (adapter, manager, _t) = setup_with(&[Some("abc")], |_| NewModelProvider {
+            dim: 3,
+            ..NewModelProvider::new()
+        });
+        adapter
+            .create_vector_index("kb", "embedding", 2, "euclidean", 1_000, 16, 200, 50)
+            .unwrap();
+        check_model_changes_and_reembed(&adapter, &Some(manager), &None, false);
+
+        let shadow = vector_index_params(&adapter, "kb", "embedding__next")
+            .unwrap()
+            .1;
+        assert_eq!((shadow.dim, shadow.metric.as_str()), (3, "euclidean"));
+        assert_eq!(vector_index_dim(&adapter, "kb", "embedding"), Some(3));
+        assert!(ids_found(&adapter, &[1.0, 1.0, 1.0]).is_empty());
+    }
+
+    /// D3: a shadow left by an interrupted cleanup is removed at startup
+    #[test]
+    fn startup_removes_a_leftover_shadow() {
+        let (adapter, manager, _t) = setup(&[Some("abc")]);
+        let mut config = stored_config(&adapter);
+        config.model = Some("new".to_string());
+        adapter
+            .set_auto_embedding_config("kb", Some(config))
+            .unwrap();
+        adapter
+            .update_many(
+                "kb",
+                json!({}),
+                json!({"$set": {"embedding__next": [1.0, 1.0]}}),
+            )
+            .unwrap();
+        adapter
+            .create_vector_index("kb", "embedding__next", 2, "cosine", 1_000, 16, 200, 50)
+            .unwrap();
+
+        check_model_changes_and_reembed(&adapter, &Some(manager), &None, false);
+
+        assert!(!has_shadow_index(&adapter));
+        let doc = adapter.find_one("kb", json!({"_id": 0})).unwrap().unwrap();
+        assert!(doc.get("embedding__next").is_none(), "{}", doc);
     }
 
     /// D1: the pending marker is stored before the re-embed starts, so a
