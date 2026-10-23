@@ -6,10 +6,21 @@
 //!
 //! # Optimizations
 //!
-//! 1. **Loop unrolling**: Process 8 elements at a time for better SIMD utilization
+//! 1. **Independent lanes**: 8 partial sums, so LLVM can keep them in one SIMD
+//!    register (a single running sum is a serial chain it may not reorder)
 //! 2. **Squared distance**: Avoid sqrt in inner loops where possible
 //! 3. **Pre-computed norms**: Cache vector norms for cosine similarity
 //! 4. **Aligned access patterns**: Predictable memory access for prefetching
+
+/// Independent partial sums per kernel: LLVM keeps each in a SIMD lane
+/// (8 × f32 = one AVX2 register)
+const LANES: usize = 8;
+
+/// Add up the partial sums pairwise
+#[inline]
+fn sum_lanes(acc: &[f32; LANES]) -> f32 {
+    ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]))
+}
 
 /// Compute squared Euclidean distance between two vectors (no sqrt)
 ///
@@ -25,33 +36,23 @@
 pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
-    let len = a.len();
-    let mut sum = 0.0f32;
-
-    // Process 8 elements at a time for SIMD-friendly access pattern
-    // This enables LLVM to auto-vectorize using AVX2 (256-bit = 8 floats)
-    let chunks = len / 8;
-    let remainder = len % 8;
-
-    for i in 0..chunks {
-        let base = i * 8;
-        // Explicit unrolling helps auto-vectorization
-        let d0 = a[base] - b[base];
-        let d1 = a[base + 1] - b[base + 1];
-        let d2 = a[base + 2] - b[base + 2];
-        let d3 = a[base + 3] - b[base + 3];
-        let d4 = a[base + 4] - b[base + 4];
-        let d5 = a[base + 5] - b[base + 5];
-        let d6 = a[base + 6] - b[base + 6];
-        let d7 = a[base + 7] - b[base + 7];
-
-        sum += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6 + d7 * d7;
+    // LANES independent sums: one running sum is a serial chain of
+    // dependent additions that LLVM may not reorder (strict float
+    // semantics), so it never vectorized (hybrid review T6)
+    let mut acc = [0.0f32; LANES];
+    let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for i in 0..LANES {
+            let d = x[i] - y[i];
+            acc[i] += d * d;
+        }
     }
+    let mut sum = sum_lanes(&acc);
 
     // Handle remainder
-    let base = chunks * 8;
-    for i in 0..remainder {
-        let d = a[base + i] - b[base + i];
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        let d = x - y;
         sum += d * d;
     }
 
@@ -75,27 +76,18 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
-    let len = a.len();
-    let mut sum = 0.0f32;
-
-    let chunks = len / 8;
-    let remainder = len % 8;
-
-    for i in 0..chunks {
-        let base = i * 8;
-        sum += a[base] * b[base]
-            + a[base + 1] * b[base + 1]
-            + a[base + 2] * b[base + 2]
-            + a[base + 3] * b[base + 3]
-            + a[base + 4] * b[base + 4]
-            + a[base + 5] * b[base + 5]
-            + a[base + 6] * b[base + 6]
-            + a[base + 7] * b[base + 7];
+    let mut acc = [0.0f32; LANES];
+    let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for i in 0..LANES {
+            acc[i] += x[i] * y[i];
+        }
     }
+    let mut sum = sum_lanes(&acc);
 
-    let base = chunks * 8;
-    for i in 0..remainder {
-        sum += a[base + i] * b[base + i];
+    for (x, y) in a_rest.iter().zip(b_rest) {
+        sum += x * y;
     }
 
     sum
@@ -130,50 +122,28 @@ pub fn squared_l2_norm(v: &[f32]) -> f32 {
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
-    let len = a.len();
-    let mut dot = 0.0f32;
-    let mut norm_a_sq = 0.0f32;
-    let mut norm_b_sq = 0.0f32;
-
-    let chunks = len / 8;
-    let remainder = len % 8;
+    let mut dot = [0.0f32; LANES];
+    let mut norm_a_sq = [0.0f32; LANES];
+    let mut norm_b_sq = [0.0f32; LANES];
+    let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<LANES>();
 
     // Single pass: compute dot product and both norms simultaneously
-    for i in 0..chunks {
-        let base = i * 8;
-
-        // Load values
-        let a0 = a[base];
-        let a1 = a[base + 1];
-        let a2 = a[base + 2];
-        let a3 = a[base + 3];
-        let a4 = a[base + 4];
-        let a5 = a[base + 5];
-        let a6 = a[base + 6];
-        let a7 = a[base + 7];
-
-        let b0 = b[base];
-        let b1 = b[base + 1];
-        let b2 = b[base + 2];
-        let b3 = b[base + 3];
-        let b4 = b[base + 4];
-        let b5 = b[base + 5];
-        let b6 = b[base + 6];
-        let b7 = b[base + 7];
-
-        // Dot product
-        dot += a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3 + a4 * b4 + a5 * b5 + a6 * b6 + a7 * b7;
-
-        // Norms
-        norm_a_sq += a0 * a0 + a1 * a1 + a2 * a2 + a3 * a3 + a4 * a4 + a5 * a5 + a6 * a6 + a7 * a7;
-        norm_b_sq += b0 * b0 + b1 * b1 + b2 * b2 + b3 * b3 + b4 * b4 + b5 * b5 + b6 * b6 + b7 * b7;
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for i in 0..LANES {
+            dot[i] += x[i] * y[i];
+            norm_a_sq[i] += x[i] * x[i];
+            norm_b_sq[i] += y[i] * y[i];
+        }
     }
+    let (mut dot, mut norm_a_sq, mut norm_b_sq) = (
+        sum_lanes(&dot),
+        sum_lanes(&norm_a_sq),
+        sum_lanes(&norm_b_sq),
+    );
 
     // Handle remainder
-    let base = chunks * 8;
-    for i in 0..remainder {
-        let ai = a[base + i];
-        let bi = b[base + i];
+    for (&ai, &bi) in a_rest.iter().zip(b_rest) {
         dot += ai * bi;
         norm_a_sq += ai * ai;
         norm_b_sq += bi * bi;
