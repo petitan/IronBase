@@ -261,6 +261,13 @@ pub struct AutoEmbeddingConfig {
     /// Used by startup detection to trigger re-embed when preprocessing changes
     #[serde(default)]
     pub preprocessing_version: Option<String>,
+    /// A forced re-embed into a new embedding space was started and has not
+    /// completed yet. Set before the re-embed starts, cleared when it records
+    /// the new model; while set, every startup restarts the re-embed — also
+    /// when model and preprocessing names alone cannot tell (e.g. a dimension
+    /// change under the same model name).
+    #[serde(default)]
+    pub reembed_pending: bool,
 }
 
 /// Configuration for text chunking before embedding
