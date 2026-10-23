@@ -76,6 +76,70 @@ where
     deserializer.deserialize_seq(CatalogVisitor)
 }
 
+/// `Vec<(DocumentId, T)>` as `[type_tag, value, T]` triples; reads the
+/// untagged `[id, T]` pairs of older files too. Untagged JSON turns an
+/// ObjectId into a String on reload, so per-document data keyed by it (e.g.
+/// the fulltext index's BM25 document lengths) was no longer found
+/// (hybrid review D2).
+pub mod pairs {
+    use super::*;
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry<T> {
+        Typed(String, String, T),
+        Legacy(DocumentId, T),
+    }
+
+    pub fn serialize<S, T>(pairs: &[(DocumentId, T)], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        let mut seq = serializer.serialize_seq(Some(pairs.len()))?;
+        for (doc_id, value) in pairs {
+            let (tag, id) = match doc_id {
+                DocumentId::Int(i) => ("i", i.to_string()),
+                DocumentId::String(s) => ("s", s.clone()),
+                DocumentId::ObjectId(oid) => ("o", oid.clone()),
+            };
+            seq.serialize_element(&(tag, id, value))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Vec<(DocumentId, T)>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: DeserializeOwned,
+    {
+        Vec::<Entry<T>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|entry| match entry {
+                Entry::Legacy(doc_id, value) => Ok((doc_id, value)),
+                Entry::Typed(tag, id, value) => {
+                    let doc_id = match tag.as_str() {
+                        "i" => DocumentId::Int(id.parse().map_err(|e| {
+                            serde::de::Error::custom(format!("Invalid Int value: {}", e))
+                        })?),
+                        "s" => DocumentId::String(id),
+                        "o" => DocumentId::ObjectId(id),
+                        _ => {
+                            return Err(serde::de::Error::custom(format!(
+                                "Unknown type tag: {}",
+                                tag
+                            )))
+                        }
+                    };
+                    Ok((doc_id, value))
+                }
+            })
+            .collect()
+    }
+}
+
 pub mod vec {
     use super::*;
     use serde::de::{SeqAccess, Visitor};
@@ -465,5 +529,34 @@ mod tests {
         let restored: TestIdVec = serde_json::from_str(&json).unwrap();
 
         assert_eq!(original, restored);
+    }
+
+    /// D2: typed pairs keep the id kind; untagged pairs of older files load
+    #[test]
+    fn test_pairs_typed_roundtrip_and_legacy() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Holder {
+            #[serde(with = "super::pairs")]
+            pairs: Vec<(DocumentId, u32)>,
+        }
+        let holder = Holder {
+            pairs: vec![
+                (DocumentId::Int(-4), 1),
+                (DocumentId::String("507f1f77bcf86cd799439011".into()), 2),
+                (DocumentId::ObjectId("507f1f77bcf86cd799439011".into()), 3),
+            ],
+        };
+        let json = serde_json::to_string(&holder).unwrap();
+        assert_eq!(serde_json::from_str::<Holder>(&json).unwrap(), holder);
+
+        let legacy: Holder = serde_json::from_str(r#"{"pairs":[[7,5],["abc",2]]}"#).unwrap();
+        assert_eq!(
+            legacy.pairs,
+            vec![
+                (DocumentId::Int(7), 5),
+                (DocumentId::String("abc".into()), 2)
+            ]
+        );
+        assert!(serde_json::from_str::<Holder>(r#"{"pairs":[["x","1",2]]}"#).is_err());
     }
 }
