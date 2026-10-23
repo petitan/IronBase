@@ -218,6 +218,20 @@ pub struct HnswIndex {
     /// `BPlusTree::build_touched` (audit 2026-10-07 T2).
     #[serde(skip)]
     build_touched: Option<HashSet<String>>,
+    /// While a rebuild runs outside the index lock (runtime-only): the node
+    /// ids writers changed in this index meanwhile, replayed onto the rebuilt
+    /// graph by `finish_rebuild` (hybrid review 2026-10-17 F5).
+    #[serde(skip)]
+    rebuild_touched: Option<HashSet<String>>,
+}
+
+/// What a rebuild outside the index lock needs from the index: taken by
+/// `HnswIndex::begin_rebuild`, turned into the new graph by
+/// `HnswIndex::rebuilt_from`.
+pub struct RebuildSnapshot {
+    config: VectorIndexConfig,
+    items: Vec<(String, Vec<f32>)>,
+    rng_state: u64,
 }
 
 impl HnswIndex {
@@ -239,6 +253,7 @@ impl HnswIndex {
             // where serde(skip) defaults this to None).
             effective_max_vectors: None,
             build_touched: None,
+            rebuild_touched: None,
         }
     }
 
@@ -376,10 +391,18 @@ impl HnswIndex {
     /// If `id` already exists, the prior entry is removed first (idempotent)
     /// so WAL-replay based recovery can re-apply ops without error.
     pub fn insert(&mut self, id: &str, vector: &[f32]) -> Result<()> {
+        self.touch(id);
+        self.insert_node(id, vector)
+    }
+
+    /// Record a writer's change of `id` for a running build or rebuild
+    fn touch(&mut self, id: &str) {
         if let Some(touched) = self.build_touched.as_mut() {
             touched.insert(id.to_string());
         }
-        self.insert_node(id, vector)
+        if let Some(touched) = self.rebuild_touched.as_mut() {
+            touched.insert(id.to_string());
+        }
     }
 
     /// Start building this index from a document scan while writers keep
@@ -725,6 +748,7 @@ impl HnswIndex {
 
         if let Some(&node_idx) = self.id_to_index.get(id) {
             // Update existing node's vector
+            self.touch(id);
             self.nodes[node_idx].vector = vector.to_vec();
             self.dirty = true;
             Ok(true) // was update
@@ -740,9 +764,7 @@ impl HnswIndex {
     /// Note: This marks the node as deleted but doesn't fully update
     /// the graph structure. Call rebuild() after many deletions.
     pub fn remove(&mut self, id: &str) -> bool {
-        if let Some(touched) = self.build_touched.as_mut() {
-            touched.insert(id.to_string());
-        }
+        self.touch(id);
         if let Some(&idx) = self.id_to_index.get(id) {
             // Lazy removal: drop from the lookup; the node and its edges stay in
             // the graph as an orphan (search_layer traverses through but never
@@ -770,6 +792,52 @@ impl HnswIndex {
 
     /// Rebuild the index (useful after many deletions)
     pub fn rebuild(&mut self) -> Result<()> {
+        let rebuilt = Self::rebuilt_from(self.snapshot()?)?;
+        self.adopt(rebuilt);
+        Ok(())
+    }
+
+    /// Start a rebuild that runs outside the index lock: returns the active
+    /// vectors, and from now on `insert`/`remove` record their ids so
+    /// `finish_rebuild` can replay what changed while the new graph was built.
+    pub(crate) fn begin_rebuild(&mut self) -> Result<RebuildSnapshot> {
+        let snapshot = self.snapshot()?;
+        self.rebuild_touched = Some(HashSet::new());
+        Ok(snapshot)
+    }
+
+    /// The rebuild is abandoned: writers stop recording.
+    pub(crate) fn abort_rebuild(&mut self) {
+        self.rebuild_touched = None;
+    }
+
+    /// Replace this index with `rebuilt` (built by `rebuilt_from` from this
+    /// index's `begin_rebuild` snapshot), after replaying onto it every node
+    /// writers changed meanwhile. Returns false, leaving the index as it is,
+    /// when no rebuild of this index is running (e.g. it was dropped and
+    /// recreated under the same name).
+    pub(crate) fn finish_rebuild(&mut self, mut rebuilt: HnswIndex) -> Result<bool> {
+        let Some(touched) = self.rebuild_touched.take() else {
+            return Ok(false);
+        };
+        // Sorted: graph construction depends on insertion order
+        let mut touched: Vec<String> = touched.into_iter().collect();
+        touched.sort();
+        for id in touched {
+            match self.get_vector(&id).map(|v| v.to_vec()) {
+                Some(vector) => rebuilt.insert_node(&id, &vector)?,
+                None => {
+                    rebuilt.remove(&id);
+                }
+            }
+        }
+        self.adopt(rebuilt);
+        Ok(true)
+    }
+
+    /// The active vectors in their original insertion order, plus the
+    /// configuration and level RNG state a rebuild continues from.
+    fn snapshot(&self) -> Result<RebuildSnapshot> {
         // Collect active vectors using id_to_index as the source of truth.
         // IMPORTANT: iterate id_to_index (HashMap, unique keys) instead of nodes,
         // because nodes may contain duplicate IDs after remove+reinsert cycles
@@ -801,26 +869,42 @@ impl HnswIndex {
         // the original insertion order (fresh builds have node index i == vector i).
         items.sort_by_key(|(idx, _, _)| *idx);
 
-        // Floor the effective ceiling at the rebuild population BEFORE clearing:
-        // rebuild re-inserts EXISTING active vectors, which must never be
-        // rejected by the RAM-derived growth cap (#8). Resolve fresh (machine RAM
-        // may have changed since load) but never below items.len(), so a large
-        // index on a memory-constrained box still rebuilds intact rather than
-        // aborting mid-loop and breaking checkpoint/compaction.
-        self.effective_max_vectors = Some(self.config.resolve_max_vectors().max(items.len()));
+        Ok(RebuildSnapshot {
+            config: self.config.clone(),
+            items: items.into_iter().map(|(_, id, v)| (id, v)).collect(),
+            rng_state: self.rng_state,
+        })
+    }
 
-        // Clear and reinsert
-        self.nodes.clear();
-        self.entry_point = None;
-        self.max_level = 0;
-        self.id_to_index.clear();
-
-        for (_idx, id, vector) in items {
-            self.insert_node(&id, &vector)?;
+    /// Build a new graph from a snapshot. Needs no access to the original
+    /// index, so it can run without holding its lock.
+    pub fn rebuilt_from(snapshot: RebuildSnapshot) -> Result<HnswIndex> {
+        let RebuildSnapshot {
+            config,
+            items,
+            rng_state,
+        } = snapshot;
+        let mut rebuilt = HnswIndex::new(config);
+        rebuilt.rng_state = rng_state;
+        // Floor the effective ceiling at the rebuild population: rebuild
+        // re-inserts EXISTING active vectors, which must never be rejected by
+        // the RAM-derived growth cap (#8). Resolve fresh (machine RAM may have
+        // changed since load) but never below items.len(), so a large index on
+        // a memory-constrained box still rebuilds intact rather than aborting
+        // mid-loop and breaking checkpoint/compaction.
+        rebuilt.effective_max_vectors = Some(rebuilt.config.resolve_max_vectors().max(items.len()));
+        for (id, vector) in items {
+            rebuilt.insert_node(&id, &vector)?;
         }
+        Ok(rebuilt)
+    }
 
-        self.dirty = true;
-        Ok(())
+    /// Take over a rebuilt graph, keeping this index's runtime state
+    fn adopt(&mut self, mut rebuilt: HnswIndex) {
+        rebuilt.last_flushed_tx_id = self.last_flushed_tx_id;
+        rebuilt.build_touched = self.build_touched.take();
+        rebuilt.dirty = true;
+        *self = rebuilt;
     }
 
     /// Get vector by ID
@@ -1742,6 +1826,60 @@ mod tests {
             idx.needs_rebuild(),
             "absolute orphan cap should trigger rebuild even below the ratio threshold"
         );
+    }
+
+    fn one_hot(dim: usize, i: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; dim];
+        v[i % dim] = 1.0;
+        v
+    }
+
+    /// Hybrid review F5: a rebuild built outside the lock replays the writes
+    /// made meanwhile — new, replaced and removed vectors — before the swap
+    #[test]
+    fn off_lock_rebuild_replays_concurrent_writes() {
+        let dim = 32;
+        let mut idx = HnswIndex::with_dim(dim);
+        for i in 0..20 {
+            idx.insert(&format!("v{i}"), &one_hot(dim, i)).unwrap();
+        }
+        for i in 0..10 {
+            idx.remove(&format!("v{i}"));
+        }
+        let snapshot = idx.begin_rebuild().unwrap();
+
+        // Writers keep going while the new graph is built
+        idx.insert("new", &one_hot(dim, 25)).unwrap();
+        idx.insert("v12", &one_hot(dim, 30)).unwrap(); // replaced vector
+        idx.remove("v15");
+        idx.set_flushed_tx_id(7);
+
+        let rebuilt = HnswIndex::rebuilt_from(snapshot).unwrap();
+        assert!(idx.finish_rebuild(rebuilt).unwrap());
+
+        assert_eq!(idx.len(), 10); // v10..v19 - v15 + new
+        assert!(idx.contains("new") && !idx.contains("v15") && !idx.contains("v3"));
+        assert_eq!(idx.get_vector("v12").unwrap(), one_hot(dim, 30).as_slice());
+        assert_eq!(idx.last_flushed_tx_id(), 7);
+        assert!(idx.is_dirty());
+        // Only the replayed replace/remove leave orphans, not the old churn
+        assert!(idx.orphan_count() <= 2, "orphans: {}", idx.orphan_count());
+        let top = idx.search(&one_hot(dim, 25), 1);
+        assert_eq!(top[0].id, "new");
+    }
+
+    /// An index replaced while the rebuild ran (no rebuild in progress on the
+    /// current instance) is left alone
+    #[test]
+    fn finish_rebuild_without_begin_is_rejected() {
+        let mut idx = HnswIndex::with_dim(4);
+        idx.insert("a", &one_hot(4, 0)).unwrap();
+        let snapshot = idx.snapshot().unwrap();
+        let rebuilt = HnswIndex::rebuilt_from(snapshot).unwrap();
+        idx.mark_clean();
+
+        assert!(!idx.finish_rebuild(rebuilt).unwrap());
+        assert!(!idx.is_dirty());
     }
 
     #[test]

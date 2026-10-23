@@ -979,6 +979,54 @@ impl IndexManager {
     ///
     /// Returns the number of indexes rebuilt.
     /// Called during checkpoint to compact HNSW indexes with >30% orphan ratio.
+    /// Names of the vector indexes whose orphans call for a rebuild
+    pub fn vector_indexes_needing_rebuild(&self) -> Vec<String> {
+        self.vector_indexes
+            .iter()
+            .filter(|(_, index)| index.needs_rebuild())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Start rebuilding a vector index outside the IndexManager lock (write
+    /// access, one copy of the active vectors). None if the index is gone or
+    /// no longer needs it. Build with `HnswIndex::rebuilt_from`, then hand the
+    /// result to `finish_vector_rebuild` (or call `abort_vector_rebuild`).
+    pub fn begin_vector_rebuild(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<crate::vector::RebuildSnapshot>> {
+        match self.vector_indexes.get_mut(name) {
+            Some(index) if index.needs_rebuild() => Ok(Some(index.begin_rebuild()?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Swap in a rebuilt vector index, replaying the writes made while it was
+    /// built (write access). Returns false if the rebuild no longer applies
+    /// (the index was dropped or recreated meanwhile).
+    pub fn finish_vector_rebuild(
+        &mut self,
+        name: &str,
+        rebuilt: crate::vector::HnswIndex,
+    ) -> Result<bool> {
+        let Some(index) = self.vector_indexes.get_mut(name) else {
+            return Ok(false);
+        };
+        let swapped = index.finish_rebuild(rebuilt)?;
+        if swapped {
+            self.dirty_vector_indexes.insert(name.to_string());
+        }
+        Ok(swapped)
+    }
+
+    /// Abandon a rebuild started by `begin_vector_rebuild`
+    pub fn abort_vector_rebuild(&mut self, name: &str) {
+        if let Some(index) = self.vector_indexes.get_mut(name) {
+            index.abort_rebuild();
+        }
+    }
+
     pub fn rebuild_vector_indexes_if_needed(&mut self) -> Result<usize> {
         let mut rebuilt = 0;
         let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
@@ -1174,25 +1222,57 @@ impl IndexManager {
         db_path: &str,
         watermark: u64,
     ) -> Result<bool> {
-        if !self.dirty_vector_indexes.contains(name) {
+        if !self.prepare_vector_flush(name, watermark) {
             return Ok(false);
         }
-        if let Some(index) = self.vector_indexes.get_mut(name) {
-            index.set_flushed_tx_id(watermark);
-            let cache_path = Self::build_vector_cache_path(db_path, name);
-            let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
-            index.mark_clean();
-            self.dirty_vector_indexes.remove(name);
-            crate::log_debug!(
-                "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
-                name,
-                cache_path.display(),
-                file_size as f64 / (1024.0 * 1024.0)
-            );
-            Ok(true)
-        } else {
-            Ok(false)
+        self.persist_vector_index(name, db_path)?;
+        self.complete_vector_flush(name);
+        Ok(true)
+    }
+
+    /// Flush step 1 (write access, µs): stamp a dirty vector index with the
+    /// checkpoint watermark. Returns false if there is nothing to flush.
+    ///
+    /// The three steps let the checkpoint serialize the graph under an
+    /// upgradable read lock: searches keep running, writers wait, and no
+    /// write can slip in between serializing and marking the index clean
+    /// (hybrid review 2026-10-17 F5).
+    pub fn prepare_vector_flush(&mut self, name: &str, watermark: u64) -> bool {
+        if !self.dirty_vector_indexes.contains(name) {
+            return false;
         }
+        match self.vector_indexes.get_mut(name) {
+            Some(index) => {
+                index.set_flushed_tx_id(watermark);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Flush step 2 (read access): write the vector index to its `.hnsw`
+    /// cache file atomically. Returns false if the index no longer exists.
+    pub fn persist_vector_index(&self, name: &str, db_path: &str) -> Result<bool> {
+        let Some(index) = self.vector_indexes.get(name) else {
+            return Ok(false);
+        };
+        let cache_path = Self::build_vector_cache_path(db_path, name);
+        let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
+        crate::log_debug!(
+            "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
+            name,
+            cache_path.display(),
+            file_size as f64 / (1024.0 * 1024.0)
+        );
+        Ok(true)
+    }
+
+    /// Flush step 3 (write access, µs): the persisted vector index is clean
+    pub fn complete_vector_flush(&mut self, name: &str) {
+        if let Some(index) = self.vector_indexes.get_mut(name) {
+            index.mark_clean();
+        }
+        self.dirty_vector_indexes.remove(name);
     }
 
     /// HNSW cache file name of an index. The index name embeds the
@@ -1766,9 +1846,14 @@ impl IndexManager {
             if let Some(index) = self.vector_indexes.get_mut(&index_name) {
                 // Prefixed node id (audit 2026-10-06 #24), plus the legacy
                 // unprefixed id that older live inserts stored
-                index.remove(&crate::collection_core::doc_id_to_string(doc_id));
-                index.remove(&crate::collection_core::legacy_hnsw_id(doc_id));
-                self.dirty_vector_indexes.insert(index_name.clone());
+                // Non-short-circuit `|`: both id forms are removed. Only an
+                // actual removal makes the index dirty — otherwise every
+                // delete forced a full `.hnsw` rewrite (review 2026-10-17 F5)
+                let removed = index.remove(&crate::collection_core::doc_id_to_string(doc_id))
+                    | index.remove(&crate::collection_core::legacy_hnsw_id(doc_id));
+                if removed {
+                    self.dirty_vector_indexes.insert(index_name.clone());
+                }
             }
         }
 
