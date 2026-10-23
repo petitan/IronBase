@@ -342,6 +342,17 @@ pub struct VectorIndexMetadata {
     pub created_at: String,
 }
 
+/// Options of [`CollectionCore::vector_search_with_options`](crate::collection_core::CollectionCore::vector_search_with_options)
+#[derive(Debug, Clone, Default)]
+pub struct VectorSearchOptions {
+    /// MongoDB-style filter: only matching documents are searched
+    pub filter: Option<serde_json::Value>,
+    /// Top-level fields left out of the returned documents. They are not
+    /// even parsed: for a chunk, leaving out its embedding avoids most of the
+    /// load cost (hybrid review T2). `_id` is always returned.
+    pub exclude_fields: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

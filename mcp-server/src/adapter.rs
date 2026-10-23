@@ -2228,6 +2228,29 @@ impl IronBaseAdapter {
         Ok(results)
     }
 
+    /// Vector similarity search with an optional filter, leaving `exclude_fields`
+    /// out of the returned documents without parsing them (hybrid review T2)
+    pub fn vector_search_with_options(
+        &self,
+        collection: &str,
+        field: &str,
+        query_vector: &[f32],
+        filter: Option<&Value>,
+        exclude_fields: Vec<String>,
+        limit: usize,
+    ) -> Result<Vec<(Value, f32)>> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        let ctx = self.create_execution_context();
+        let options = ironbase_core::VectorSearchOptions {
+            filter: filter.cloned(),
+            exclude_fields,
+        };
+        let results =
+            coll.vector_search_with_options(field, query_vector, limit, &options, Some(&ctx))?;
+        Ok(results)
+    }
+
     /// Perform vector similarity search with attribute filter
     ///
     /// # Arguments

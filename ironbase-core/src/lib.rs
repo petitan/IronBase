@@ -120,5 +120,5 @@ pub use aggregation::{
 // Vector index exports (HNSW-based ANN search)
 pub use vector::{
     DistanceMetric, HnswIndex, VectorConfigError, VectorIndexConfig, VectorIndexMetadata,
-    VectorSearchResult, DEFAULT_MAX_VECTORS, MAX_VECTOR_DIM,
+    VectorSearchOptions, VectorSearchResult, DEFAULT_MAX_VECTORS, MAX_VECTOR_DIM,
 };

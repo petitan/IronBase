@@ -815,6 +815,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Process results: load doc, filter, project, highlight
         let mut results = Vec::new();
         let mut skipped = 0;
+        let parse_skip = projection_parse_skip(
+            options.projection.as_ref(),
+            &[field],
+            options.filter.as_ref(),
+        );
 
         for (iteration, fts_result) in search_results.into_iter().enumerate() {
             // Cancellation check
@@ -823,7 +828,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             // Load document
-            let doc = match self.read_document_by_id(&fts_result.doc_id)? {
+            let doc = match self.read_document_by_id_skipping(&fts_result.doc_id, &parse_skip)? {
                 Some(d) => d,
                 None => continue, // Deleted doc, skip
             };
@@ -1143,6 +1148,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Process results: load doc, filter, project, highlight
         let mut results = Vec::new();
         let mut skipped = 0;
+        let parse_skip =
+            projection_parse_skip(options.projection.as_ref(), fields, options.filter.as_ref());
 
         for (iteration, (doc_id, (score, matched_token_set, matched_fields))) in
             sorted_docs.into_iter().enumerate()
@@ -1153,7 +1160,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             // Load document
-            let doc = match self.read_document_by_id(&doc_id)? {
+            let doc = match self.read_document_by_id_skipping(&doc_id, &parse_skip)? {
                 Some(d) => d,
                 None => continue,
             };
@@ -1383,5 +1390,58 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
         })?;
         Ok(index.has_parent_doc_id_field())
+    }
+}
+
+/// Top-level fields a search may leave unparsed when it loads its results:
+/// the ones an exclusion `projection` drops anyway, unless the search reads
+/// them before projecting (`fields`, the filter). Nothing for an inclusion
+/// projection, a nested exclusion, or a filter that may read any field
+/// (`$expr`, `$where`, `$**`) (hybrid review T2).
+pub(crate) fn projection_parse_skip(
+    projection: Option<&HashMap<String, i32>>,
+    fields: &[&str],
+    filter: Option<&Value>,
+) -> HashSet<String> {
+    let Some(projection) = projection else {
+        return HashSet::new();
+    };
+    if projection.values().any(|&v| v != 0) {
+        return HashSet::new();
+    }
+    let mut read = HashSet::new();
+    if let Some(filter) = filter {
+        if !collect_filter_roots(filter, &mut read) {
+            return HashSet::new();
+        }
+    }
+    read.extend(fields.iter().map(|f| field_root(f).to_string()));
+    projection
+        .keys()
+        .filter(|k| !k.contains('.') && !read.contains(k.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn field_root(path: &str) -> &str {
+    path.split('.').next().unwrap_or(path)
+}
+
+/// Add the top-level fields `filter` reads to `roots`; false when it may read
+/// any field
+fn collect_filter_roots(filter: &Value, roots: &mut HashSet<String>) -> bool {
+    match filter {
+        Value::Object(map) => map.iter().all(|(key, value)| {
+            if key == "$expr" || key == "$where" || key.starts_with("$**") {
+                false
+            } else if key.starts_with('$') {
+                collect_filter_roots(value, roots)
+            } else {
+                roots.insert(field_root(key).to_string());
+                true
+            }
+        }),
+        Value::Array(items) => items.iter().all(|item| collect_filter_roots(item, roots)),
+        _ => true,
     }
 }

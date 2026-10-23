@@ -23,6 +23,7 @@ use super::fusion::{
     apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
     merge_adjacent_values, mmr_reorder, rerank_results, FusedResult,
 };
+use super::helpers::parse_projection_value;
 use super::params::{resolve_weights, HybridSearchParams};
 use super::rag::get_rag_config;
 
@@ -383,23 +384,31 @@ pub(crate) fn retrieve_and_fuse(
     let mut vector_ranks: HashMap<String, usize> = HashMap::new();
     let mut vector_docs: HashMap<String, (Value, f32)> = HashMap::new();
 
+    // The candidates' vectors are left unparsed when the output drops them
+    // anyway and MMR does not read them: an embedding is most of a chunk's
+    // bytes, and parsing it cost ~50 µs per candidate (hybrid review T2)
+    let output_projection = parse_projection_value(p.projection.clone())?;
+    let mmr = p.deduplicate && !p.group_by_document;
+    let lane_exclude: Vec<String> = match output_projection {
+        Some(ref proj)
+            if !mmr
+                && !effective_vector_field.contains('.')
+                && projection_drops(proj, &effective_vector_field) =>
+        {
+            vec![effective_vector_field.clone()]
+        }
+        _ => Vec::new(),
+    };
+
     if !skip_vector {
-        let vector_results = if let Some(ref filter) = p.filter {
-            adapter.vector_search_with_filter(
-                &p.collection,
-                &effective_vector_field,
-                &query_vector,
-                filter,
-                internal_limit,
-            )?
-        } else {
-            adapter.vector_search(
-                &p.collection,
-                &effective_vector_field,
-                &query_vector,
-                internal_limit,
-            )?
-        };
+        let vector_results = adapter.vector_search_with_options(
+            &p.collection,
+            &effective_vector_field,
+            &query_vector,
+            p.filter.as_ref(),
+            lane_exclude.clone(),
+            internal_limit,
+        )?;
 
         vector_ranks.reserve(vector_results.len());
         vector_docs.reserve(vector_results.len());
@@ -419,7 +428,8 @@ pub(crate) fn retrieve_and_fuse(
         limit: Some(internal_limit),
         skip: None,
         min_score: None,
-        projection: None, // Get full docs for merging
+        // Full docs for merging, but for the dropped vector field (above)
+        projection: exclusion_projection(&lane_exclude),
         filter: qual.effective_filter.clone(),
         and_mode: qual.effective_and_mode,
         highlight: false,
@@ -684,11 +694,23 @@ pub(crate) fn build_doc_groups(
     let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
 
     let phase2_limit = limit.saturating_mul(100).min(MAX_INTERNAL_LIMIT);
+    // The fields `projection` drops are left unparsed: a Phase-2 chunk is
+    // projected right away, after only `doc_id` and `_id` are read (T2)
+    let phase2_exclude: Vec<String> = projection
+        .as_ref()
+        .filter(|proj| proj.values().all(|&v| v == 0))
+        .map(|proj| {
+            proj.keys()
+                .filter(|k| proj[k.as_str()] == 0 && *k != "doc_id" && *k != "_id")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     let phase2_options = FulltextSearchOptions {
         limit: Some(phase2_limit),
         skip: None,
         min_score: None,
-        projection: None,
+        projection: exclusion_projection(&phase2_exclude),
         filter: filter.clone(),
         and_mode: false, // OR mode: any query word → relevant chunk
         highlight: false,
@@ -779,6 +801,21 @@ pub(crate) fn build_doc_groups(
 }
 
 // qualify_documents moved to fusion.rs (shared between hybrid and fulltext search)
+
+/// Whether the top-level `projection` (as [`apply_projection`] applies it)
+/// drops `field` from a document
+fn projection_drops(projection: &HashMap<String, i32>, field: &str) -> bool {
+    if projection.values().any(|&v| v == 1) {
+        field != "_id" && projection.get(field) != Some(&1)
+    } else {
+        projection.get(field) == Some(&0)
+    }
+}
+
+/// `{field: 0, ...}`, or None for no fields
+fn exclusion_projection(fields: &[String]) -> Option<HashMap<String, i32>> {
+    (!fields.is_empty()).then(|| fields.iter().map(|f| (f.clone(), 0)).collect())
+}
 
 /// Calculate RRF score for given ranks and weights
 /// Exposed for testing
@@ -1512,6 +1549,89 @@ mod pipeline_integration_tests {
         );
         assert!(!contents("lex").is_empty(), "BM25 document lost");
         assert_eq!(total, groups.iter().map(|g| g.chunks.len()).sum::<usize>());
+    }
+
+    /// Hybrid review T2: the lanes leave the embedding unparsed only when the
+    /// output drops it and MMR does not read it; the fused results are
+    /// otherwise the same, and so are the grouped passages
+    #[test]
+    fn lanes_skip_the_embedding_only_when_projected_out() {
+        let (a, _t) = adapter();
+        for i in 0..6 {
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                "doc_id": format!("d{}", i / 2), "chunk_index": i % 2,
+                "content": format!("maintenance step {i}"),
+                "embedding": [1.0, i as f64, 0.5, 0.0] }}),
+            );
+        }
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+        let params = |extra: Value| {
+            let mut p = json!({"collection":"kb","query":"maintenance",
+                "vector":[1.0,2.0,0.5,0.0],"limit":6,"merge_chunks":false});
+            for (k, v) in extra.as_object().unwrap() {
+                p[k] = v.clone();
+            }
+            p
+        };
+        let summary = |fo: &FusionOutcome| -> Vec<(String, f64)> {
+            fo.fused
+                .iter()
+                .map(|f| (f.id.clone(), f.final_score))
+                .collect()
+        };
+
+        let (_, full) = fuse(&a, params(json!({})));
+        assert!(full.fused.iter().all(|f| f.doc.get("embedding").is_some()));
+
+        let (_, lean) = fuse(&a, params(json!({"projection": {"embedding": 0}})));
+        assert!(lean.fused.iter().all(|f| f.doc.get("embedding").is_none()));
+        assert_eq!(summary(&lean), summary(&full));
+
+        let (_, mmr) = fuse(
+            &a,
+            params(json!({"projection": {"embedding": 0}, "deduplicate": true})),
+        );
+        assert!(
+            mmr.fused.iter().all(|f| f.doc.get("embedding").is_some()),
+            "MMR reads the embedding"
+        );
+
+        let grouped = |extra: Value| {
+            let (p, fo) = fuse(&a, params(extra));
+            let (groups, _) = group(&a, &p, &fo);
+            groups
+                .into_iter()
+                .map(|g| (g.doc_id, g.chunks))
+                .collect::<Vec<_>>()
+        };
+        let lean_groups =
+            grouped(json!({"group_by_document": true, "projection": {"embedding": 0}}));
+        let full_groups = grouped(json!({"group_by_document": true}));
+        assert_eq!(lean_groups.len(), full_groups.len());
+        for ((lean_id, lean_chunks), (id, chunks)) in lean_groups.iter().zip(&full_groups) {
+            assert_eq!(lean_id, id);
+            let expected: Vec<Value> = chunks
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    c.as_object_mut().unwrap().remove("embedding");
+                    c
+                })
+                .collect();
+            assert_eq!(lean_chunks, &expected);
+        }
     }
 
     /// Hybrid review M3: a lane that did not return a document contributes

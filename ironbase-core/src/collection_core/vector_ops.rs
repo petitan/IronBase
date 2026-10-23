@@ -9,6 +9,7 @@
 //! - Hybrid search (vector + attribute filter)
 //! - Automatic index persistence as .hnsw cache files
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -19,7 +20,9 @@ use crate::execution::ExecutionContext;
 use crate::index::{IndexKey, RangeQueryMode, ScanOrder};
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
-use crate::vector::{HnswIndex, VectorIndexConfig, VectorIndexMetadata, VectorSearchResult};
+use crate::vector::{
+    HnswIndex, VectorIndexConfig, VectorIndexMetadata, VectorSearchOptions, VectorSearchResult,
+};
 
 use super::CollectionCore;
 
@@ -488,6 +491,43 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         limit: usize,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f32)>> {
+        self.vector_search_with_options(
+            field,
+            query_vector,
+            limit,
+            &VectorSearchOptions::default(),
+            ctx,
+        )
+    }
+
+    /// Vector similarity search with options: an optional filter and fields
+    /// left out of the returned documents (see [`VectorSearchOptions`]), and
+    /// an execution context for cancellation support.
+    pub fn vector_search_with_options(
+        &self,
+        field: &str,
+        query_vector: &[f32],
+        limit: usize,
+        options: &VectorSearchOptions,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f32)>> {
+        let skip: HashSet<String> = options.exclude_fields.iter().cloned().collect();
+        match &options.filter {
+            Some(filter) => {
+                self.filtered_vector_search(field, query_vector, filter, limit, &skip, ctx)
+            }
+            None => self.unfiltered_vector_search(field, query_vector, limit, &skip, ctx),
+        }
+    }
+
+    fn unfiltered_vector_search(
+        &self,
+        field: &str,
+        query_vector: &[f32],
+        limit: usize,
+        skip: &HashSet<String>,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f32)>> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
@@ -515,7 +555,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let results = hnsw.search(query_vector, limit);
                 // Need to release lock before loading documents
                 drop(indexes);
-                return self.load_documents_for_results(results, ctx);
+                return self.load_documents_for_results(results, skip, ctx);
             }
         }
 
@@ -530,7 +570,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Load documents for results
-        self.load_documents_for_results(results, ctx)
+        self.load_documents_for_results(results, skip, ctx)
     }
 
     /// Perform vector similarity search with attribute filter
@@ -575,6 +615,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_vector: &[f32],
         filter: &Value,
         limit: usize,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f32)>> {
+        let options = VectorSearchOptions {
+            filter: Some(filter.clone()),
+            ..Default::default()
+        };
+        self.vector_search_with_options(field, query_vector, limit, &options, ctx)
+    }
+
+    fn filtered_vector_search(
+        &self,
+        field: &str,
+        query_vector: &[f32],
+        filter: &Value,
+        limit: usize,
+        skip: &HashSet<String>,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f32)>> {
         // Batch mode: see the inserts acknowledged before this call
@@ -643,7 +699,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let results = hnsw.search_with_allowed(query_vector, limit, &allowed_ids, ctx)?;
                 // Need to release lock before loading documents
                 drop(indexes);
-                return self.load_documents_for_results(results, ctx);
+                return self.load_documents_for_results(results, skip, ctx);
             }
         }
 
@@ -659,7 +715,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Load documents for results
-        self.load_documents_for_results(results?, ctx)
+        self.load_documents_for_results(results?, skip, ctx)
     }
 
     // === Private helper methods ===
@@ -866,6 +922,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     fn load_documents_for_results(
         &self,
         results: Vec<VectorSearchResult>,
+        skip: &HashSet<String>,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f32)>> {
         let mut docs_with_scores = Vec::with_capacity(results.len());
@@ -880,7 +937,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let doc_id = string_to_doc_id(&result.id);
 
             // Load the document
-            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+            if let Some(doc) = self.read_document_by_id_skipping(&doc_id, skip)? {
                 docs_with_scores.push((doc, result.score));
             }
         }
@@ -1367,5 +1424,129 @@ mod tests {
                 .collect();
             assert_eq!(got, expected, "with_btree={}", with_btree);
         }
+    }
+
+    /// T2: skipped fields are not parsed; identity and deletion fields are
+    /// kept even when listed; the rest of the document is unchanged
+    #[test]
+    fn test_parse_document_skipping() {
+        let bytes = br#"{"_id":3,"_collection":"c","embedding":[1.0,2.0],"meta":{"embedding":1},"content":"x"}"#;
+        let skip: HashSet<String> = ["embedding", "_id", "_collection"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let doc = crate::collection_core::parse_document_skipping(bytes, &skip).unwrap();
+        assert_eq!(
+            doc,
+            json!({"_id":3,"_collection":"c","meta":{"embedding":1},"content":"x"})
+        );
+        assert!(crate::collection_core::parse_document_skipping(b"{} x", &skip).is_err());
+    }
+
+    /// 6 chunks with a 3-dimensional "embedding", a "tag" and fulltext "content"
+    fn create_t2_db() -> DatabaseCore<MemoryStorage> {
+        let db = create_test_db();
+        for i in 0..6 {
+            db.insert_one(
+                "kb",
+                json_to_hashmap(json!({
+                    "content": format!("maintenance note {i}"),
+                    "tag": i % 2,
+                    "embedding": [1.0, i as f64, 0.5]
+                })),
+            )
+            .unwrap();
+        }
+        let coll = db.collection("kb").unwrap();
+        coll.create_vector_index("embedding", VectorIndexConfig::new(3))
+            .unwrap();
+        coll.create_fulltext_index("content".to_string(), "english", None, None)
+            .unwrap();
+        db
+    }
+
+    /// T2: `exclude_fields` leaves the field out of the returned documents;
+    /// the results are otherwise those of a plain search
+    #[test]
+    fn test_vector_search_with_options_excludes_fields() {
+        let db = create_t2_db();
+        let coll = db.collection("kb").unwrap();
+        let query = [1.0, 2.0, 0.5];
+
+        let plain = coll.vector_search("embedding", &query, 4).unwrap();
+        let options = VectorSearchOptions {
+            exclude_fields: vec!["embedding".to_string()],
+            ..Default::default()
+        };
+        let lean = coll
+            .vector_search_with_options("embedding", &query, 4, &options, None)
+            .unwrap();
+        assert_eq!(lean.len(), plain.len());
+        for ((lean_doc, lean_score), (doc, score)) in lean.iter().zip(&plain) {
+            let mut expected = doc.clone();
+            expected.as_object_mut().unwrap().remove("embedding");
+            assert_eq!(lean_doc, &expected);
+            assert_eq!(lean_score, score);
+        }
+
+        let filtered = VectorSearchOptions {
+            filter: Some(json!({"tag": 1})),
+            exclude_fields: vec!["embedding".to_string()],
+        };
+        let results = coll
+            .vector_search_with_options("embedding", &query, 4, &filtered, None)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results
+            .iter()
+            .all(|(doc, _)| doc["tag"] == json!(1) && doc.get("embedding").is_none()));
+    }
+
+    /// T2: a fulltext exclusion projection is applied while parsing, but a
+    /// field the filter reads is still parsed for the filter
+    #[test]
+    fn test_fulltext_projection_skips_while_parsing() {
+        let db = create_t2_db();
+        let coll = db.collection("kb").unwrap();
+        let options = crate::fulltext::FulltextSearchOptions::new()
+            .with_limit(10)
+            .with_filter(json!({"tag": 1}))
+            .with_projection(
+                [("embedding".to_string(), 0), ("tag".to_string(), 0)]
+                    .into_iter()
+                    .collect(),
+            );
+        let results = coll
+            .fulltext_search_ext("content", "maintenance", options)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "the filter on the projected-out tag still applies"
+        );
+        for r in &results {
+            assert!(r.document.get("embedding").is_none());
+            assert!(r.document.get("tag").is_none());
+            assert!(r.document.get("content").is_some());
+        }
+    }
+
+    /// T2: fields the filter or the search reads are never skipped
+    #[test]
+    fn test_projection_parse_skip_keeps_read_fields() {
+        use crate::collection_core::search::projection_parse_skip;
+        let proj: HashMap<String, i32> = [("embedding", 0), ("tag", 0), ("content", 0)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+        let filter = json!({"$or": [{"tag.x": 1}, {"other": 2}]});
+        let skip = projection_parse_skip(Some(&proj), &["content"], Some(&filter));
+        assert_eq!(skip, ["embedding".to_string()].into_iter().collect());
+        assert!(
+            projection_parse_skip(Some(&proj), &["content"], Some(&json!({"$expr": {}})))
+                .is_empty()
+        );
+        let include: HashMap<String, i32> = [("content".to_string(), 1)].into_iter().collect();
+        assert!(projection_parse_skip(Some(&include), &["content"], None).is_empty());
     }
 }

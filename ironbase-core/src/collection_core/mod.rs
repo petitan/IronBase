@@ -2354,6 +2354,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Read a single document by _id using document_catalog (O(1) lookup)
     /// Returns None if document not found or is tombstone
     fn read_document_by_id(&self, doc_id: &DocumentId) -> Result<Option<Value>> {
+        self.read_document_by_id_skipping(doc_id, &HashSet::new())
+    }
+
+    /// `read_document_by_id` without the top-level fields in `skip`, which
+    /// are not even parsed (see [`parse_document_skipping`])
+    pub(crate) fn read_document_by_id_skipping(
+        &self,
+        doc_id: &DocumentId,
+        skip: &HashSet<String>,
+    ) -> Result<Option<Value>> {
         // PERF: Use read lock + read_data_at() for concurrent reads (pread-based)
         // This is ACID-safe because:
         // 1. We only read catalog and data - no modifications
@@ -2375,7 +2385,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             log_trace!("Found doc_id {:?} at offset {}", doc_id, offset);
             // Use read_data_at() - positioned read without changing file position
             let doc_bytes = storage.read_data_at(offset)?;
-            let doc: Value = serde_json::from_slice(&doc_bytes)?;
+            let doc = if skip.is_empty() {
+                serde_json::from_slice(&doc_bytes)?
+            } else {
+                parse_document_skipping(&doc_bytes, skip)?
+            };
 
             // Check if document is a tombstone (deleted)
             if doc
@@ -3592,4 +3606,54 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         Ok(Some((index_name, doc_ids)))
     }
+}
+
+/// Fields a document read never skips: identity, collection and deletion state
+const UNSKIPPABLE_FIELDS: [&str; 3] = ["_id", "_collection", "_tombstone"];
+
+/// Parse a stored document, leaving out its top-level `skip` fields without
+/// building their values (hybrid review T2: a chunk's embedding is most of
+/// its bytes, and parsing it into a `Value` cost ~50 µs per document that
+/// nothing used). `_id`, `_collection` and `_tombstone` are always kept.
+pub(crate) fn parse_document_skipping(bytes: &[u8], skip: &HashSet<String>) -> Result<Value> {
+    use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    struct Skipping<'a>(&'a HashSet<String>);
+
+    impl<'de> Visitor<'de> for Skipping<'_> {
+        type Value = Value;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(
+            self,
+            mut access: A,
+        ) -> std::result::Result<Value, A::Error> {
+            let mut map = serde_json::Map::new();
+            while let Some(key) = access.next_key::<String>()? {
+                if self.0.contains(&key) && !UNSKIPPABLE_FIELDS.contains(&key.as_str()) {
+                    access.next_value::<IgnoredAny>()?;
+                } else {
+                    let value: Value = access.next_value()?;
+                    map.insert(key, value);
+                }
+            }
+            Ok(Value::Object(map))
+        }
+    }
+
+    impl<'de> DeserializeSeed<'de> for Skipping<'_> {
+        type Value = Value;
+
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+            d.deserialize_map(self)
+        }
+    }
+
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let doc = Skipping(skip).deserialize(&mut de)?;
+    de.end()?;
+    Ok(doc)
 }

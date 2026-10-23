@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — Hybrid search: embeddings left unparsed when the output drops them (ironbase-core 0.3.423, mcp-server v1.0.621)
+
+Hybrid search review 2026-10-17, T2. Measured on 20K chunks with a
+768-dimensional embedding (~15 KB of a 15.8 KB document), 200 candidates per
+lane: vector lane 20.6 → 13.4 ms, fulltext lane 16.8 → 8.3 ms per query.
+
+- **Root cause:** each lane parsed its candidates into full `serde_json::Value`
+  documents, embedding included (~50 µs each), and the `search` tool then
+  projected the embedding out (`{"embedding": 0}`); only MMR reads it.
+- **Core:** a document read can skip top-level fields without building their
+  values (`parse_document_skipping`, serde `IgnoredAny`; `_id`, `_collection`
+  and `_tombstone` are always kept).
+  - New `VectorSearchOptions { filter, exclude_fields }` and
+    `CollectionCore::vector_search_with_options`; the T7 `_with_ctx` methods
+    delegate to it.
+  - `fulltext_search_ext` / `fulltext_search_multi_ext` skip, while parsing,
+    the fields an exclusion `projection` drops, except the searched fields and
+    those the filter reads (none for `$expr` / `$where` / `$**`).
+- **MCP:** the hybrid lanes leave the vector field unparsed when the output
+  projection drops it and MMR is off; Phase 2 of the document grouping skips
+  the projection's excluded fields (it projects right away, after reading only
+  `doc_id` / `_id`). Results are unchanged; calls without a projection (e.g.
+  Rhai `db_hybrid_search`) still get the embedding.
+
 ### Fixed — Vector search ignored the request timeout and cancel (ironbase-core 0.3.422, mcp-server v1.0.620)
 
 Hybrid search review 2026-10-17, T7.
