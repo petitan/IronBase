@@ -200,8 +200,32 @@ fn handle_auto_embed_enable(
         ))
     })?;
 
-    // Get dimension from provider if not specified
-    let dimension = p.dimension.unwrap_or_else(|| provider.dimension());
+    // Get dimension from provider if not specified. The provider decides the
+    // vector size, so a different explicit one is accepted only when its output
+    // confirms it (its configured dimension may be a default): an index of
+    // another dimension would skip every vector (review 2026-10-17 T3).
+    let dimension = match p.dimension {
+        Some(requested) if requested != provider.dimension() => {
+            let actual = provider
+                .embed("dimension check")
+                .map_err(|e| {
+                    McpError::internal(format!(
+                        "Cannot check dimension {} against provider '{}': {}",
+                        requested, provider_name, e
+                    ))
+                })?
+                .len();
+            if actual != requested {
+                return Err(McpError::invalid_params(format!(
+                    "dimension {} does not match provider '{}', which returns {}-dimensional vectors",
+                    requested, provider_name, actual
+                )));
+            }
+            requested
+        }
+        Some(requested) => requested,
+        None => provider.dimension(),
+    };
 
     // Build config — auto-save model name from provider
     let model_name = p
@@ -228,15 +252,22 @@ fn handle_auto_embed_enable(
         reembed_pending: false,
     };
 
-    // Vectors already in the target field that another model, preprocessing,
-    // dimension or source field produced must be re-embedded, not kept next
-    // to new ones (review 2026-10-17 F4/T3). A legacy config without a model
-    // name leaves the space unknown and is not forced (as at startup).
+    // Vectors already in the target field that another provider, model,
+    // preprocessing, dimension or source field produced must be re-embedded,
+    // not kept next to new ones (review 2026-10-17 F4/T3). A legacy config
+    // without a model name leaves the model unknown, so only the other
+    // differences force (as at startup); a re-embed still pending always does.
     let previous = adapter
         .get_auto_embedding_config(&p.collection)?
         .filter(|prev| prev.target_field == config.target_field);
-    let space_changed = previous.as_ref().is_some_and(|prev| {
-        prev.reembed_pending
+    let index_dim_changed = vector_index_dim(adapter, &p.collection, &config.target_field)
+        .is_some_and(|d| d != dimension);
+    let has_vectors = adapter.count_documents(
+        &p.collection,
+        json!({ &config.target_field: { "$exists": true } }),
+    )? > 0;
+    let config_changed = previous.as_ref().is_some_and(|prev| {
+        prev.provider != config.provider
             || prev
                 .model
                 .as_ref()
@@ -247,31 +278,33 @@ fn handle_auto_embed_enable(
                 .is_some_and(|v| Some(v) != config.preprocessing_version.as_ref())
             || prev.dimension.is_some_and(|d| d != dimension)
             || prev.source_field != config.source_field
-    }) && adapter
-        .count_documents(
-            &p.collection,
-            json!({ &config.target_field: { "$exists": true } }),
-        )
-        .unwrap_or(0)
-        > 0;
+    });
+    let space_changed = previous.as_ref().is_some_and(|prev| prev.reembed_pending)
+        || (has_vectors && (config_changed || index_dim_changed));
+
+    // A backfill still running embeds with the previous config: stop it, so
+    // it cannot overwrite the vectors of the one started below
+    cancel_backfill_jobs(job_manager, &p.collection);
 
     if space_changed {
-        // A different dimension: the old index and vectors go first
-        if vector_index_dim(adapter, &p.collection, &config.target_field)
-            .is_some_and(|d| d != dimension)
-        {
-            handle_dimension_change(adapter, &p.collection, &config.target_field, dimension)
-                .map_err(McpError::internal)?;
-        }
         // The stored model/preprocessing keep describing the stored vectors
-        // until the forced re-embed records the new ones
-        let previous = previous.as_ref().expect("space_changed implies previous");
+        // until the forced re-embed records the new ones. Saved before the
+        // old vectors go: an interrupted dimension change leaves an index
+        // that already matches, which only the pending marker tells apart.
         let mut stored = config.clone();
-        stored.model = previous.model.clone();
-        stored.preprocessing_version = previous.preprocessing_version.clone();
+        stored.model = previous.as_ref().and_then(|prev| prev.model.clone());
+        stored.preprocessing_version = previous
+            .as_ref()
+            .and_then(|prev| prev.preprocessing_version.clone());
         stored.reembed_pending = true;
         adapter.set_auto_embedding_config(&p.collection, Some(stored))?;
-    } else {
+    }
+    // A different dimension: the old index and vectors go
+    if index_dim_changed {
+        handle_dimension_change(adapter, &p.collection, &config.target_field, dimension)
+            .map_err(McpError::internal)?;
+    }
+    if !space_changed {
         // Save to collection metadata
         adapter.set_auto_embedding_config(&p.collection, Some(config.clone()))?;
     }
@@ -300,8 +333,13 @@ fn handle_auto_embed_enable(
         None
     };
 
-    // Count existing documents that need embedding (missing target_field)
-    let backfill_query = json!({ &config.target_field: { "$exists": false } });
+    // Count existing documents that need embedding: missing target_field, or
+    // all of them for a forced re-embed
+    let backfill_query = if space_changed {
+        json!({})
+    } else {
+        json!({ &config.target_field: { "$exists": false } })
+    };
     let existing_count = adapter
         .count_documents(&p.collection, backfill_query)
         .unwrap_or(0);
@@ -353,8 +391,9 @@ fn handle_auto_embed_enable(
     if space_changed {
         response["reembed"] = json!(true);
         response["message"] = json!(
-            "Auto-embedding enabled with a different model, preprocessing, dimension or source \
-             field: all existing vectors are being re-embedded (retried on startup until done)."
+            "Auto-embedding enabled with a different provider, model, preprocessing, dimension \
+             or source field: all existing vectors are being re-embedded (retried on startup \
+             until done)."
         );
     }
     if let Some(ref job_id) = backfill_job_id {
@@ -495,6 +534,24 @@ fn start_backfill_job(
 }
 
 /// Dimension of the vector index on `field`, if there is one
+/// Cancel the backfill jobs of `collection` that have not finished
+fn cancel_backfill_jobs(job_manager: &Option<Arc<JobManager>>, collection: &str) {
+    let Some(job_mgr) = job_manager.as_ref() else {
+        return;
+    };
+    for job in job_mgr.list_jobs() {
+        if matches!(&job.job_type, JobType::EmbedBackfill { collection: c, .. } if c == collection)
+            && job_mgr.cancel_job(&job.id)
+        {
+            tracing::info!(
+                "Backfill job {} for '{}' cancelled: auto-embed reconfigured",
+                job.id,
+                collection
+            );
+        }
+    }
+}
+
 fn vector_index_dim(adapter: &IronBaseAdapter, collection: &str, field: &str) -> Option<usize> {
     adapter
         .list_vector_indexes(collection)
@@ -796,8 +853,10 @@ fn run_backfill_job(
             let mut batch_processed = 0;
 
             // Store embedding into document via update_one
+            // A cancelled job writes nothing more: a newer one may own the field
             let store_one = |id: &Value, embedding: &[f32]| -> bool {
-                store_embedding(adapter, collection, &config.target_field, id, embedding)
+                !job_manager.is_cancelled(job_id)
+                    && store_embedding(adapter, collection, &config.target_field, id, embedding)
             };
 
             match embeddings_result {
@@ -1187,6 +1246,7 @@ pub fn check_model_changes_and_reembed(
 
         let dimension_changed = saved_dim > 0 && saved_dim != current_dim;
 
+        let was_pending = config.reembed_pending;
         if dimension_changed {
             tracing::info!(
                 "Dimension change detected for '{}': {} → {} on field '{}', rebuilding HNSW index",
@@ -1195,6 +1255,18 @@ pub fn check_model_changes_and_reembed(
                 current_dim,
                 config.target_field
             );
+            // Persist the pending marker before the old vectors go: an
+            // interrupted rebuild leaves an index that already matches the
+            // provider, which only the marker tells apart. The stored
+            // dimension (which inserts are validated against) follows the
+            // provider.
+            config.reembed_pending = true;
+            if config.dimension.is_some() {
+                config.dimension = Some(current_dim);
+            }
+            if let Err(e) = adapter.set_auto_embedding_config(collection, Some(config.clone())) {
+                tracing::warn!("Failed to update config for '{}': {}", collection, e);
+            }
             if let Err(e) =
                 handle_dimension_change(adapter, collection, &config.target_field, current_dim)
             {
@@ -1204,15 +1276,6 @@ pub fn check_model_changes_and_reembed(
                     e
                 );
                 continue;
-            }
-            // The old vectors are gone, so the stored dimension (which inserts
-            // are validated against) follows the provider right away
-            if config.dimension.is_some_and(|d| d != current_dim) {
-                config.dimension = Some(current_dim);
-                if let Err(e) = adapter.set_auto_embedding_config(collection, Some(config.clone()))
-                {
-                    tracing::warn!("Failed to update config for '{}': {}", collection, e);
-                }
             }
         }
 
@@ -1245,13 +1308,16 @@ pub fn check_model_changes_and_reembed(
             // Something changed or force requested — start re-embed
             let reason = if force_reembed {
                 "force flag".to_string()
-            } else if pending && saved_model == current_model && saved_preproc == current_preproc {
-                "an earlier re-embed did not complete".to_string()
             } else if dimension_changed
                 && saved_model == current_model
                 && saved_preproc == current_preproc
             {
                 format!("dimension {} → {}", saved_dim, current_dim)
+            } else if was_pending
+                && saved_model == current_model
+                && saved_preproc == current_preproc
+            {
+                "an earlier re-embed did not complete".to_string()
             } else if saved_model != current_model && saved_preproc != current_preproc {
                 format!(
                     "model '{}' → '{}' and preprocessing '{}' → '{}'",
@@ -1719,6 +1785,104 @@ mod tests {
         assert!(!stored_config(&adapter).reembed_pending);
         let doc = adapter.find_one("kb", json!({"_id": 0})).unwrap().unwrap();
         assert_eq!(doc["embedding"], json!([0.0, 0.0]), "untouched");
+    }
+
+    fn enable_mock(
+        adapter: &Arc<IronBaseAdapter>,
+        manager: Arc<EmbeddingManager>,
+        extra: Value,
+        jobs: &Option<Arc<JobManager>>,
+    ) -> Result<Value> {
+        let mut params = json!({"collection": "kb", "source_field": "content",
+                                "target_field": "embedding", "provider": "mock"});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        handle_auto_embed_enable(params, adapter, &Some(manager), jobs)
+    }
+
+    /// T3: another provider with the same model name is another space; the
+    /// response counts every document the forced re-embed covers
+    #[test]
+    fn enable_with_new_provider_reembeds() {
+        let (adapter, manager, _t) = setup(&[Some("abc"), Some("de")]);
+        let mut config = stored_config(&adapter);
+        config.provider = "other".to_string();
+        config.model = Some("new".to_string());
+        adapter
+            .set_auto_embedding_config("kb", Some(config))
+            .unwrap();
+
+        let response = enable_mock(&adapter, manager, json!({}), &None).unwrap();
+
+        assert_eq!(response["reembed"], json!(true), "{}", response);
+        assert_eq!(response["existing_documents"], json!(2), "{}", response);
+        let config = stored_config(&adapter);
+        assert!(config.reembed_pending);
+        assert_eq!(config.provider, "mock");
+    }
+
+    /// T3: a dimension the provider does not return is rejected before
+    /// anything changes
+    #[test]
+    fn enable_rejects_dimension_the_provider_does_not_return() {
+        let (adapter, manager, _t) = setup(&[Some("abc")]);
+        adapter
+            .create_vector_index("kb", "embedding", 2, "cosine", 1_000, 16, 200, 50)
+            .unwrap();
+
+        let err = enable_mock(&adapter, manager, json!({"dimension": 5}), &None).unwrap_err();
+
+        assert!(err.to_string().contains("2-dimensional"), "{}", err);
+        assert_eq!(stored_config(&adapter).model.as_deref(), Some("old"));
+        assert_eq!(
+            adapter.list_vector_indexes("kb").unwrap()[0]["dim"],
+            json!(2)
+        );
+        let doc = adapter.find_one("kb", json!({"_id": 0})).unwrap().unwrap();
+        assert_eq!(doc["embedding"], json!([0.0, 0.0]));
+    }
+
+    /// T3: a pending re-embed stays pending and forced even when no vector
+    /// is left in the field
+    #[test]
+    fn enable_keeps_pending_reembed_without_vectors() {
+        let (adapter, manager, _t) = setup(&[Some("abc")]);
+        adapter
+            .update_many("kb", json!({}), json!({"$unset": {"embedding": ""}}))
+            .unwrap();
+        let mut config = stored_config(&adapter);
+        config.reembed_pending = true;
+        adapter
+            .set_auto_embedding_config("kb", Some(config))
+            .unwrap();
+
+        let response = enable_mock(&adapter, manager, json!({}), &None).unwrap();
+
+        assert_eq!(response["reembed"], json!(true), "{}", response);
+        assert!(stored_config(&adapter).reembed_pending);
+    }
+
+    /// T3: enabling again cancels the backfill still running for the
+    /// collection, so it cannot overwrite the new job's vectors
+    #[test]
+    fn enable_cancels_running_backfill() {
+        let (adapter, manager, _t) = setup(&[Some("abc")]);
+        let jobs = Arc::new(JobManager::new());
+        let (old_job, _) = jobs.create_job(JobType::EmbedBackfill {
+            collection: "kb".to_string(),
+            provider: "mock".to_string(),
+        });
+        let (other_job, _) = jobs.create_job(JobType::EmbedBackfill {
+            collection: "other".to_string(),
+            provider: "mock".to_string(),
+        });
+
+        enable_mock(&adapter, manager, json!({}), &Some(jobs.clone())).unwrap();
+
+        assert!(jobs.is_cancelled(&old_job));
+        assert!(!jobs.is_cancelled(&other_job));
+        jobs.shutdown();
     }
 
     /// T3: a new dimension rebuilds the vector index (keeping its metric)

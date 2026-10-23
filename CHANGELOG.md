@@ -18,8 +18,17 @@ Hybrid search review 2026-10-17, follow-ups T3 and D1 of F4.
   the index next to new ones. It now keeps the old model recorded, sets
   `reembed_pending`, rebuilds the vector index first if the dimension
   changed (keeping its metric and HNSW parameters), and re-embeds every
-  document (response: `"reembed": true`). A legacy config without a model
-  name is not forced, as at startup.
+  document (response: `"reembed": true`, `existing_documents` = all of
+  them). A provider change counts too, and so does a vector index of another
+  dimension (also without a previous config). A legacy config without a
+  model name is not forced by the model comparison alone, as at startup.
+  The pending marker is saved before the old vectors are removed (here and
+  in the startup dimension change), so an interruption cannot leave an index
+  that matches with no re-embed recorded. A still-pending re-embed stays
+  forced even when no vector is left. Backfill jobs still running for the
+  collection are cancelled (a cancelled job writes no further vectors). An
+  explicit `dimension` other than the provider's configured one is checked
+  with one embedding call and rejected if the provider returns another size.
 - **`reembed_pending` (D1, new `AutoEmbeddingConfig` field, `#[serde(default)]`):**
   set before a forced re-embed starts (startup check and `auto_embed_enable`),
   cleared when the re-embed records the new model. While set, every startup
