@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance — HNSW: vectorizable distance kernels, cached node norms (ironbase-core 0.3.421)
+
+Hybrid search review 2026-10-17, T6. Measured on 20K × 384 and 10K × 768
+random vectors (cosine, M=16, ef_construction=200): index build 247 s → 53 s
+and 202 s → 35 s, search 1.83 ms → 0.63 ms and 1.97 ms → 0.64 ms per query,
+self-retrieval unchanged (2000/2000).
+
+- **Root cause (callgrind):** 93% of the build instructions ran in
+  `simd::dot_product`, mostly from the neighbour-selection heuristic
+  (node-to-node distances). The kernels summed into one running total, a
+  serial chain of dependent additions that LLVM may not reorder under strict
+  float semantics — so, contrary to the module docs, they never vectorized.
+  `dot_product`, `squared_euclidean_distance` and `cosine_similarity` now
+  keep 8 independent partial sums (`as_chunks`), added pairwise at the end.
+  Results may differ from before in the last bits (summation order).
+- **Cached norms:** each HNSW node keeps the L2 norm of its vector
+  (runtime-only, `#[serde(skip)]`, set on insert/`upsert` and after every
+  load path — the `.hnsw` format is unchanged); a search computes the query
+  norm once. A cosine distance is then one dot product: build 1.4–1.6× faster
+  than with the fast kernel alone. Node-to-node distances no longer clone the
+  base vector. Zero-norm vectors still score 0.
+
 ### Fixed — Auto-embed: re-enabling with another model, and interrupted re-embeds the names cannot reveal (mcp-server v1.0.618)
 
 Hybrid search review 2026-10-17, follow-ups T3 and D1 of F4.
