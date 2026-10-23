@@ -71,6 +71,40 @@ struct HnswNode {
     neighbors: Vec<Vec<usize>>,
     /// Maximum layer this node appears in
     max_layer: usize,
+    /// L2 norm of `vector`, so a cosine distance costs one dot product
+    /// (hybrid review T6). Runtime-only (`#[serde(skip)]`, `.hnsw` format
+    /// unchanged): `fill_norms` sets it after deserialization.
+    #[serde(skip)]
+    norm: f32,
+}
+
+/// A query vector with its L2 norm, computed once per search instead of once
+/// per distance (hybrid review T6).
+#[derive(Clone, Copy)]
+struct PreparedQuery<'a> {
+    vector: &'a [f32],
+    norm: f32,
+}
+
+impl<'a> PreparedQuery<'a> {
+    fn new(vector: &'a [f32]) -> Self {
+        Self {
+            vector,
+            norm: simd::l2_norm(vector),
+        }
+    }
+}
+
+/// Cosine similarity of `query` and `vector` (whose norm is `norm`); 0 when
+/// either norm is 0, like `simd::cosine_similarity`.
+#[inline]
+fn cosine_from_norms(query: &PreparedQuery, vector: &[f32], norm: f32) -> f32 {
+    let norm_product = query.norm * norm;
+    if norm_product > 0.0 {
+        simd::dot_product(query.vector, vector) / norm_product
+    } else {
+        0.0
+    }
 }
 
 /// Entry for priority queue during search (max-heap by distance for furthest removal)
@@ -492,6 +526,7 @@ impl HnswIndex {
             vector: vector.to_vec(),
             neighbors: vec![Vec::new(); node_level + 1],
             max_layer: node_level,
+            norm: simd::l2_norm(vector),
         });
         self.id_to_index.insert(id.to_string(), node_index);
 
@@ -505,7 +540,8 @@ impl HnswIndex {
 
         // Own a copy of the query vector: the link loop mutates `self.nodes`, so we
         // cannot hold a borrow of `self.nodes[node_index].vector` across it.
-        let query = self.nodes[node_index].vector.clone();
+        let query_vector = self.nodes[node_index].vector.clone();
+        let query = PreparedQuery::new(&query_vector);
         let m_max0 = self.config.m * 2;
         let m_max = self.config.m;
 
@@ -534,10 +570,9 @@ impl HnswIndex {
                 self.nodes[nbr].neighbors[level].push(node_index);
                 let cap = if level == 0 { m_max0 } else { m_max };
                 if self.nodes[nbr].neighbors[level].len() > cap {
-                    let base = self.nodes[nbr].vector.clone();
                     let mut cand: Vec<(usize, f32)> = self.nodes[nbr].neighbors[level]
                         .iter()
-                        .map(|&x| (x, self.compute_distance(&base, &self.nodes[x].vector)))
+                        .map(|&x| (x, self.node_distance(nbr, x)))
                         .collect();
                     cand.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
                     let mut pruned = self.select_neighbors_heuristic(&cand, cap);
@@ -588,28 +623,28 @@ impl HnswIndex {
         if query.len() != self.config.dim {
             return Vec::new();
         }
+        let query = PreparedQuery::new(query);
         let mut current = entry_point;
 
         // Navigate through layers from top to 1
         for level in (1..=self.max_level).rev() {
-            current = self.search_layer_greedy(query, current, level);
+            current = self.search_layer_greedy(&query, current, level);
         }
 
         // Search at layer 0. search_layer already excludes orphan (lazy-removed)
         // nodes; use ef = max(ef_search, k) so a request for more than ef_search
         // results can still be satisfied.
         let ef = self.config.ef_search.max(k);
-        let candidates = self.search_layer(query, current, ef, 0);
+        let candidates = self.search_layer(&query, current, ef, 0);
 
         candidates
             .into_iter()
             .take(k)
             .map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
-                let score = self.compute_similarity(query, &node.vector);
                 VectorSearchResult {
                     id: node.id.clone(),
-                    score,
+                    score: self.similarity_to(&query, idx),
                 }
             })
             .collect()
@@ -633,28 +668,28 @@ impl HnswIndex {
         if query.len() != self.config.dim {
             return Vec::new();
         }
+        let query = PreparedQuery::new(query);
         let mut current = entry_point;
 
         // Navigate through layers from top to 1
         for level in (1..=self.max_level).rev() {
-            current = self.search_layer_greedy(query, current, level);
+            current = self.search_layer_greedy(&query, current, level);
         }
 
         // Search at layer 0 with extra candidates to compensate for the caller's
         // filter dropping results. Orphan (lazy-removed) nodes are already
         // excluded by search_layer, so this budget only covers the caller filter.
         let ef = (self.config.ef_search * 3).max(k); // Expand search space
-        let candidates = self.search_layer(query, current, ef, 0);
+        let candidates = self.search_layer(&query, current, ef, 0);
 
         candidates
             .into_iter()
             .filter_map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
                 if filter(&node.id) {
-                    let score = self.compute_similarity(query, &node.vector);
                     Some(VectorSearchResult {
                         id: node.id.clone(),
-                        score,
+                        score: self.similarity_to(&query, idx),
                     })
                 } else {
                     None
@@ -705,12 +740,12 @@ impl HnswIndex {
         if query.len() != self.config.dim {
             return Vec::new();
         }
+        let query = PreparedQuery::new(query);
         let scored = ids.into_iter().filter_map(|id| {
             let &idx = self.id_to_index.get(id)?;
-            let score = self.compute_similarity(query, &self.nodes[idx].vector);
             Some(VectorSearchResult {
                 id: id.to_string(),
-                score,
+                score: self.similarity_to(&query, idx),
             })
         });
         crate::collection_core::topk_select(scored, k, |a: &VectorSearchResult, b| {
@@ -750,6 +785,7 @@ impl HnswIndex {
             // Update existing node's vector
             self.touch(id);
             self.nodes[node_idx].vector = vector.to_vec();
+            self.nodes[node_idx].norm = simd::l2_norm(vector);
             self.dirty = true;
             Ok(true) // was update
         } else {
@@ -1026,6 +1062,7 @@ impl HnswIndex {
             IronBaseError::Serialization(format!("Failed to deserialize HNSW index: {}", e))
         })?;
         index.last_flushed_tx_id = watermark;
+        index.fill_norms();
         Ok(index)
     }
 
@@ -1075,16 +1112,26 @@ impl HnswIndex {
                 )))
             })?;
             index.last_flushed_tx_id = watermark;
+            index.fill_norms();
             return Ok(index);
         }
 
         // v1 (legacy): no header, raw bincode
-        bincode::deserialize(bytes).map_err(|e| {
+        let mut index: Self = bincode::deserialize(bytes).map_err(|e| {
             IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to deserialize HNSW index (legacy format): {}", e),
             )))
-        })
+        })?;
+        index.fill_norms();
+        Ok(index)
+    }
+
+    /// Set the node norms, which are not serialized.
+    fn fill_norms(&mut self) {
+        for node in &mut self.nodes {
+            node.norm = simd::l2_norm(&node.vector);
+        }
     }
 
     /// WAL-replay recovery watermark. Returns the `tx_id` of the most-recent
@@ -1105,32 +1152,47 @@ impl HnswIndex {
 
     // === Private helper methods ===
 
-    /// Compute distance based on configured metric
+    /// Distance from `query` to node `idx` based on the configured metric
     #[inline]
-    fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+    fn distance_to(&self, query: &PreparedQuery, idx: usize) -> f32 {
+        let node = &self.nodes[idx];
         match self.config.metric {
-            DistanceMetric::Euclidean => simd::squared_euclidean_distance(a, b),
+            DistanceMetric::Euclidean => {
+                simd::squared_euclidean_distance(query.vector, &node.vector)
+            }
             DistanceMetric::Cosine => {
                 // Convert cosine similarity to distance (1 - similarity)
-                1.0 - simd::cosine_similarity(a, b)
+                1.0 - cosine_from_norms(query, &node.vector, node.norm)
             }
             DistanceMetric::DotProduct => {
                 // Negate dot product (higher is better -> lower distance)
-                -simd::dot_product(a, b)
+                -simd::dot_product(query.vector, &node.vector)
             }
         }
     }
 
-    /// Compute similarity score for results (higher = more similar)
+    /// Distance between nodes `a` and `b`
     #[inline]
-    fn compute_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
+    fn node_distance(&self, a: usize, b: usize) -> f32 {
+        let node = &self.nodes[a];
+        let query = PreparedQuery {
+            vector: &node.vector,
+            norm: node.norm,
+        };
+        self.distance_to(&query, b)
+    }
+
+    /// Similarity score of node `idx` for results (higher = more similar)
+    #[inline]
+    fn similarity_to(&self, query: &PreparedQuery, idx: usize) -> f32 {
+        let node = &self.nodes[idx];
         match self.config.metric {
             DistanceMetric::Euclidean => {
                 // Convert distance to similarity: 1 / (1 + distance)
-                1.0 / (1.0 + simd::euclidean_distance(a, b))
+                1.0 / (1.0 + simd::euclidean_distance(query.vector, &node.vector))
             }
-            DistanceMetric::Cosine => simd::cosine_similarity(a, b),
-            DistanceMetric::DotProduct => simd::dot_product(a, b),
+            DistanceMetric::Cosine => cosine_from_norms(query, &node.vector, node.norm),
+            DistanceMetric::DotProduct => simd::dot_product(query.vector, &node.vector),
         }
     }
 
@@ -1174,12 +1236,11 @@ impl HnswIndex {
             if selected.len() >= m {
                 break;
             }
-            let cand_vec = &self.nodes[cand_idx].vector;
             // Keep the candidate only if it is closer to the base than to every
             // already-selected neighbor (diversity / long-range bridge retention).
-            let is_diverse = selected.iter().all(|&s_idx| {
-                dist_to_base < self.compute_distance(cand_vec, &self.nodes[s_idx].vector)
-            });
+            let is_diverse = selected
+                .iter()
+                .all(|&s_idx| dist_to_base < self.node_distance(cand_idx, s_idx));
             if is_diverse {
                 selected.push(cand_idx);
             } else {
@@ -1200,9 +1261,9 @@ impl HnswIndex {
     }
 
     /// Greedy ef=1 hill-climb within a single upper layer (returns the closest node).
-    fn search_layer_greedy(&self, query: &[f32], entry: usize, level: usize) -> usize {
+    fn search_layer_greedy(&self, query: &PreparedQuery, entry: usize, level: usize) -> usize {
         let mut current = entry;
-        let mut current_dist = self.compute_distance(query, &self.nodes[current].vector);
+        let mut current_dist = self.distance_to(query, current);
 
         loop {
             let mut changed = false;
@@ -1210,7 +1271,7 @@ impl HnswIndex {
 
             if level < neighbors.len() {
                 for &neighbor_idx in &neighbors[level] {
-                    let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
+                    let dist = self.distance_to(query, neighbor_idx);
                     if dist < current_dist {
                         current = neighbor_idx;
                         current_dist = dist;
@@ -1242,7 +1303,7 @@ impl HnswIndex {
     /// → canonical HNSW → connected, navigable graph by construction.
     fn search_layer(
         &self,
-        query: &[f32],
+        query: &PreparedQuery,
         entry: usize,
         ef: usize,
         level: usize,
@@ -1284,7 +1345,7 @@ impl HnswIndex {
             }
         };
 
-        let entry_dist = self.compute_distance(query, &self.nodes[entry].vector);
+        let entry_dist = self.distance_to(query, entry);
         visited.insert(entry);
         candidates.push(NearestCandidate {
             index: entry,
@@ -1314,7 +1375,7 @@ impl HnswIndex {
             if level < neighbors.len() {
                 for &neighbor_idx in &neighbors[level] {
                     if visited.insert(neighbor_idx) {
-                        let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
+                        let dist = self.distance_to(query, neighbor_idx);
                         // Expand if the navigable set isn't full, or this node is no
                         // farther than its current furthest. `<=` (not `<`) admits
                         // distance ties so that, in a dense same-distance cluster
@@ -1491,7 +1552,7 @@ mod tests {
         );
         let mut cands: Vec<(usize, f32)> = [ia, ib, ic]
             .iter()
-            .map(|&i| (i, idx.compute_distance(&base, &idx.nodes[i].vector)))
+            .map(|&i| (i, idx.distance_to(&PreparedQuery::new(&base), i)))
             .collect();
         cands.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         assert_eq!(
@@ -1513,7 +1574,7 @@ mod tests {
         );
         let mut cands2: Vec<(usize, f32)> = [ja, jb, jc]
             .iter()
-            .map(|&i| (i, idx2.compute_distance(&base, &idx2.nodes[i].vector)))
+            .map(|&i| (i, idx2.distance_to(&PreparedQuery::new(&base), i)))
             .collect();
         cands2.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         assert_eq!(
@@ -1586,6 +1647,25 @@ mod tests {
         (0..n).map(|_| (0..dim).map(|_| next()).collect()).collect()
     }
 
+    /// The distance computed straight from the two vectors, as before the
+    /// norms were cached (T6): an independent reference for the index.
+    fn reference_distance(metric: DistanceMetric, a: &[f32], b: &[f32]) -> f32 {
+        match metric {
+            DistanceMetric::Euclidean => simd::squared_euclidean_distance(a, b),
+            DistanceMetric::Cosine => 1.0 - simd::cosine_similarity(a, b),
+            DistanceMetric::DotProduct => -simd::dot_product(a, b),
+        }
+    }
+
+    /// The similarity score computed straight from the two vectors.
+    fn reference_similarity(metric: DistanceMetric, a: &[f32], b: &[f32]) -> f32 {
+        match metric {
+            DistanceMetric::Euclidean => 1.0 / (1.0 + simd::euclidean_distance(a, b)),
+            DistanceMetric::Cosine => simd::cosine_similarity(a, b),
+            DistanceMetric::DotProduct => simd::dot_product(a, b),
+        }
+    }
+
     fn build_index(cfg: VectorIndexConfig, vectors: &[Vec<f32>]) -> HnswIndex {
         let mut idx = HnswIndex::new(cfg);
         for (i, v) in vectors.iter().enumerate() {
@@ -1603,8 +1683,7 @@ mod tests {
         queries: &[usize],
         k: usize,
     ) -> f64 {
-        let metric_cfg = idx.config().clone();
-        let dummy = HnswIndex::new(metric_cfg); // for compute_distance with same metric
+        let metric = idx.config().metric;
         let mut total = 0.0f64;
         for &qi in queries {
             let q = &vectors[qi];
@@ -1612,7 +1691,7 @@ mod tests {
             let mut all: Vec<(usize, f32)> = vectors
                 .iter()
                 .enumerate()
-                .map(|(j, v)| (j, dummy.compute_distance(q, v)))
+                .map(|(j, v)| (j, reference_distance(metric, q, v)))
                 .collect();
             all.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             let exact: std::collections::HashSet<usize> =
@@ -1737,7 +1816,7 @@ mod tests {
         for (i, v) in vectors.iter().enumerate() {
             let mut current = entry;
             for level in (1..=idx.max_level).rev() {
-                current = idx.search_layer_greedy(v, current, level);
+                current = idx.search_layer_greedy(&PreparedQuery::new(v), current, level);
             }
             if current % clusters != i % clusters {
                 miss += 1;
@@ -2127,6 +2206,88 @@ mod tests {
 
         // Headerless / legacy input → Err (caller uses from_bytes fallback).
         assert!(HnswIndex::from_reader(&b"not-an-hnsw-stream-0123456789abcd"[..]).is_err());
+    }
+
+    fn assert_norms_match_vectors(idx: &HnswIndex) {
+        for node in &idx.nodes {
+            assert_eq!(node.norm, simd::l2_norm(&node.vector), "node {}", node.id);
+        }
+    }
+
+    /// T6: the cached norms make the scores no different from computing them
+    /// from the two vectors, for every metric, the zero vector included.
+    #[test]
+    fn cached_norms_give_reference_scores() {
+        let vectors: Vec<Vec<f32>> = (0..60)
+            .map(|i| {
+                let x = i as f32;
+                vec![(x * 0.37).sin(), (x * 0.11).cos() * 2.0, x / 60.0, -0.5]
+            })
+            .collect();
+        let queries = [vec![0.3, -1.2, 0.5, 2.0], vec![0.0; 4]];
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+        ] {
+            let mut idx = build_index(VectorIndexConfig::new(4).with_metric(metric), &vectors);
+            idx.insert("zero", &[0.0; 4]).unwrap();
+            for query in &queries {
+                let results = idx.search(query, 61);
+                assert_eq!(results.len(), 61, "{metric:?}");
+                for result in &results {
+                    let vector = idx.get_vector(&result.id).unwrap();
+                    let expected = reference_similarity(metric, query, vector);
+                    assert!(
+                        (result.score - expected).abs() <= 1e-6,
+                        "{metric:?} {}: {} != {}",
+                        result.id,
+                        result.score,
+                        expected
+                    );
+                }
+                let exact = idx.search_exact_among(query, 1, ["zero"]);
+                assert_eq!(
+                    exact[0].score,
+                    reference_similarity(metric, query, &[0.0; 4]),
+                    "{metric:?}"
+                );
+            }
+        }
+    }
+
+    /// T6: norms are not serialized; every load path and `upsert` sets them.
+    #[test]
+    fn norms_are_set_after_load_and_upsert() {
+        let mut idx = HnswIndex::with_dim(3);
+        idx.insert("a", &[3.0, 4.0, 0.0]).unwrap();
+        idx.insert("b", &[0.0, 1.0, 1.0]).unwrap();
+        idx.upsert("a", &[1.0, 2.0, 2.0]).unwrap();
+        assert_norms_match_vectors(&idx);
+        assert_eq!(idx.nodes[idx.id_to_index["a"]].norm, 3.0);
+
+        let bytes = idx.to_bytes().unwrap();
+        assert_norms_match_vectors(&HnswIndex::from_bytes(&bytes).unwrap());
+        assert_norms_match_vectors(&HnswIndex::from_reader(&bytes[..]).unwrap());
+        // v2 (header without watermark) and v1 (headerless) files.
+        let body = &bytes[16..];
+        let v2 = [&b"HNSW"[..], &2u32.to_le_bytes(), body].concat();
+        assert_norms_match_vectors(&HnswIndex::from_bytes(&v2).unwrap());
+        assert_norms_match_vectors(&HnswIndex::from_bytes(body).unwrap());
+
+        let loaded = HnswIndex::from_bytes(&bytes).unwrap();
+        let query = [0.5, 0.2, 0.9];
+        let before: Vec<(String, f32)> = idx
+            .search(&query, 2)
+            .into_iter()
+            .map(|r| (r.id, r.score))
+            .collect();
+        let after: Vec<(String, f32)> = loaded
+            .search(&query, 2)
+            .into_iter()
+            .map(|r| (r.id, r.score))
+            .collect();
+        assert_eq!(before, after);
     }
 
     #[test]
