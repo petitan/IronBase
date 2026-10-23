@@ -899,17 +899,45 @@ fn test_database_reopen_after_error() {
 // CORRUPTED data_end_offset RECOVERY TEST (Fix for sparse hole bug)
 // ============================================================================
 
-/// Test that corrupted data_end_offset (set to 0) is recovered from catalog
-/// This prevents the sparse hole creation bug where SeekFrom::End(0) was used
-/// as fallback when data_end_offset was invalid.
-#[test]
-fn test_corrupted_data_end_offset_recovery() {
-    use std::io::{Read, Seek, SeekFrom, Write};
+/// Read the on-disk header through the real (bincode) `Header` type
+fn read_header(path: &std::path::Path) -> ironbase_core::storage::Header {
+    use std::io::Read;
+    let mut bytes = vec![0u8; ironbase_core::storage::HEADER_SIZE as usize];
+    fs::File::open(path)
+        .unwrap()
+        .read_exact(&mut bytes)
+        .unwrap();
+    bincode::deserialize(&bytes).unwrap()
+}
 
+/// Overwrite the header's data_end_offset through the real `Header` type
+/// (a hand-computed byte offset hit the wrong field before: the field is at
+/// byte 52, not 24)
+fn corrupt_data_end_offset(path: &std::path::Path, value: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut header = read_header(path);
+    assert_eq!(&header.magic, b"MONGOLTE");
+    assert!(header.data_end_offset > 0, "setup: data_end_offset is set");
+    header.data_end_offset = value;
+    let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&bincode::serialize(&header).unwrap())
+        .unwrap();
+    file.sync_all().unwrap();
+    assert_eq!(
+        read_header(path).data_end_offset,
+        value,
+        "corruption landed"
+    );
+}
+
+/// Corrupt data_end_offset to `value`, reopen, and check the documents, the
+/// recovered offset and that inserts create no sparse hole. With
+/// `persisted_on_open`, the recovered value must already be on disk right
+/// after open (the open-time validation writes it immediately).
+fn check_data_end_offset_recovery(value: u64, persisted_on_open: bool) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("corrupt_test.mlite");
-
-    // Step 1: Create a database with some documents
     {
         let db = DatabaseCore::open(&db_path).unwrap();
         for i in 1..=10 {
@@ -918,74 +946,57 @@ fn test_corrupted_data_end_offset_recovery() {
         }
         db.close().unwrap();
     }
-
-    // Get file size before corruption
     let original_size = fs::metadata(&db_path).unwrap().len();
-    assert!(original_size > 256); // Should have header + documents
+    assert!(original_size > 256);
 
-    // Step 2: Corrupt the header by setting data_end_offset to 0
-    // Header layout (bincode): magic(8) + version(4) + ...
-    // data_end_offset is at byte 24 (after magic, version, metadata_offset, metadata_size)
-    {
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&db_path)
-            .unwrap();
+    corrupt_data_end_offset(&db_path, value);
 
-        // Read header to verify magic
-        let mut magic = [0u8; 8];
-        file.read_exact(&mut magic).unwrap();
-        assert_eq!(&magic, b"MONGOLTE");
-
-        // Seek to data_end_offset position (byte 24: magic(8) + version(4) + metadata_offset(8) + metadata_size(4))
-        // Actually in our Header struct with bincode:
-        // - magic: [u8; 8] = 8 bytes
-        // - version: u32 = 4 bytes
-        // - metadata_offset: u64 = 8 bytes
-        // - metadata_size: u32 = 4 bytes
-        // - data_end_offset: u64 = at byte 24
-        file.seek(SeekFrom::Start(24)).unwrap();
-
-        // Write 0 to corrupt data_end_offset
-        let zero: u64 = 0;
-        file.write_all(&zero.to_le_bytes()).unwrap();
-        file.sync_all().unwrap();
-    }
-
-    // Step 3: Reopen the database - should recover data_end_offset from catalog
     {
         let db = DatabaseCore::open(&db_path).unwrap();
-
-        // Verify all documents are still accessible
+        if persisted_on_open {
+            let recovered = read_header(&db_path).data_end_offset;
+            assert!(
+                recovered >= ironbase_core::storage::HEADER_SIZE && recovered <= original_size,
+                "recovered offset {} persisted on open (file {})",
+                recovered,
+                original_size
+            );
+        }
         let coll = db.collection("test").unwrap();
-        let count = coll.count_documents(&json!({})).unwrap();
-        assert_eq!(count, 10, "Should have all 10 documents after recovery");
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 10);
 
-        // Insert a new document - this should NOT create a sparse hole
+        // Must NOT create a sparse hole
         db.insert_one("test", doc_with_id(11, "User11")).unwrap();
-
         db.close().unwrap();
     }
 
-    // Step 4: Verify file size is reasonable (no sparse hole created)
     let final_size = fs::metadata(&db_path).unwrap().len();
-    // New size should be slightly larger than original (one new doc + metadata)
-    // but NOT massively larger (which would indicate sparse hole)
     assert!(
         final_size < original_size * 2,
         "File size {} should not be much larger than original {} (no sparse hole)",
         final_size,
         original_size
     );
+    let header = read_header(&db_path);
+    assert!(header.data_end_offset >= ironbase_core::storage::HEADER_SIZE);
+    assert!(header.data_end_offset <= final_size);
 
-    // Step 5: Final verification - reopen and check all documents
-    {
-        let db = DatabaseCore::open(&db_path).unwrap();
-        let coll = db.collection("test").unwrap();
-        let count = coll.count_documents(&json!({})).unwrap();
-        assert_eq!(count, 11, "Should have 11 documents after all operations");
-    }
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let coll = db.collection("test").unwrap();
+    assert_eq!(coll.count_documents(&json!({})).unwrap(), 11);
+}
+
+/// A corrupted data_end_offset is recovered from the catalog instead of
+/// falling back to SeekFrom::End(0), which created sparse holes.
+#[test]
+fn test_corrupted_data_end_offset_recovery() {
+    // Garbage beyond the file end and a value inside the header: both go
+    // through the open-time validation, which persists the fix at once
+    check_data_end_offset_recovery(u64::MAX / 2, true);
+    check_data_end_offset_recovery(7, true);
+    // 0 is repaired by the v2 → v3 migration in load_metadata and reaches
+    // the disk with the next metadata flush
+    check_data_end_offset_recovery(0, false);
 }
 
 /// Corrupt collection metadata JSON must go through the recovery path, like

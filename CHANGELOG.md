@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Test: `test_corrupted_data_end_offset_recovery` corrupted the wrong header field (ironbase-core 0.3.419)
+
+The test wrote 0 at byte 24, assuming a hand-computed layout. The header is
+bincode-serialized with fixed-width integers, so `data_end_offset` is at byte
+52; byte 24 lies in `free_list_head` / `index_section_offset`. The test passed
+without ever exercising the `data_end_offset` recovery. It now rewrites the
+header through the real `Header` type and asserts the corruption landed, for
+three values: beyond the file end and inside the header (both recovered by
+the open-time validation, which must persist the fix at once — asserted), and
+0 (repaired by the v2 → v3 migration in `load_metadata`). The recovery passes.
+
 ### Fixed — Fulltext: search during a checkpoint flush, posting lists re-read per query (ironbase-core 0.3.418)
 
 Hybrid search review 2026-10-17 F6, plus a race found while fixing it.
