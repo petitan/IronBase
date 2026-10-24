@@ -39,6 +39,9 @@ pub use config::{
 
 pub use hnsw::{HnswIndex, RebuildSnapshot, VectorSearchResult};
 
+#[cfg(test)]
+pub(crate) use hnsw::DISTANCE_EVALS;
+
 pub use simd::{
     cosine_similarity, cosine_similarity_with_norm, dot_product, euclidean_distance, l2_norm,
     normalize, normalize_in_place, squared_euclidean_distance, squared_l2_norm,

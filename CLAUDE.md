@@ -643,6 +643,7 @@ Systemd: `TimeoutStopSec=60`, `KillSignal=SIGTERM`
 |-------|--------------|
 | Rust unit | `cargo test -p ironbase-core` |
 | Property | `ironbase-core/tests/property_tests.rs` |
+| Perf regression | `cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1` (munkaszámláló + arány, CI `Performance regression` job) |
 | Python | `test_*.py`, `run_all_tests.py` |
 | C# | `IronBase.NET/src/IronBase.Tests/` |
 | MCP | `cd mcp-server && cargo test` |

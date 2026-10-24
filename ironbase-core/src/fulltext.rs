@@ -826,8 +826,8 @@ fn read_metadata_ignoring_tail<R: Read>(reader: R) -> Result<FulltextIndexMetada
 }
 const FTIDX_VERSION_V1: u32 = 1;
 const FTIDX_VERSION_V2: u32 = 2; // Lazy loading support
-const FTIDX_VERSION_V3: u32 = 3; // TF embedded in inverted index entries
-const FTIDX_VERSION_V4: u32 = 4; // V3 layout, binary posting lists (D2)
+pub(crate) const FTIDX_VERSION_V3: u32 = 3; // TF embedded in inverted index entries
+pub(crate) const FTIDX_VERSION_V4: u32 = 4; // V3 layout, binary posting lists (D2)
 
 // V4 posting list (`encode_token_entries`): varint entry count, then per
 // entry a tag byte and the id — 0 = Int (zigzag varint of the difference to
@@ -866,7 +866,7 @@ fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64> {
 }
 
 /// Serialize a posting list in the V4 binary format
-fn encode_token_entries(entries: &[TokenEntry]) -> Vec<u8> {
+pub(crate) fn encode_token_entries(entries: &[TokenEntry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(entries.len() * 4 + 8);
     push_varint(&mut out, entries.len() as u64);
     let mut previous = 0i64;
@@ -895,7 +895,7 @@ fn encode_token_entries(entries: &[TokenEntry]) -> Vec<u8> {
 
 /// Parse a stored posting list: V4 binary, V3 JSON entries, or a V2 JSON id
 /// set (term frequency 1)
-fn decode_token_entries(buf: &[u8], file_version: u32) -> Result<Vec<TokenEntry>> {
+pub(crate) fn decode_token_entries(buf: &[u8], file_version: u32) -> Result<Vec<TokenEntry>> {
     if file_version < FTIDX_VERSION_V3 {
         let doc_ids: HashSet<DocumentId> = serde_json::from_slice(buf)?;
         return Ok(doc_ids.into_iter().map(|id| (id, 1u32)).collect());
