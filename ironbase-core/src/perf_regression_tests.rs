@@ -13,6 +13,9 @@
 //!   went missing unnoticed: distance kernels that never vectorized (T6),
 //!   documents parsed with their embedding (T2), JSON posting lists (D2).
 //!
+//! Every test first checks that the measured path returns the right result,
+//! so a path that got "faster" by doing the wrong thing fails.
+//!
 //! Run locally: `cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1`.
 //! A bound or ratio that an intended change moves is updated here, with the
 //! new measurement in the commit message.
@@ -68,11 +71,27 @@ fn perf_hnsw_distance_evaluations() {
             }
         });
         let queries = vectors(200, 16, 7);
+        let mut returned = 0;
         let search = distance_evals(|| {
             for q in &queries {
-                black_box(index.search(q, 10));
+                returned += black_box(index.search(q, 10)).len();
             }
         });
+        assert_eq!(index.len(), 1000, "{metric:?}: indexed vectors");
+        assert_eq!(
+            returned,
+            200 * 10,
+            "{metric:?}: results of 200 top-10 searches"
+        );
+        // An indexed vector finds itself (outside the counted work)
+        for i in (0..1000).step_by(20) {
+            let top = index.search(&data[i], 1);
+            assert_eq!(
+                top[0].id,
+                format!("v{i}"),
+                "{metric:?}: self-search of v{i}"
+            );
+        }
         let (per_insert, per_search) = (build / 1000, search / 200);
         assert!(
             per_insert <= INSERT_BOUND,
@@ -176,6 +195,13 @@ fn perf_distance_kernels_vectorize() {
     ];
     let data = &data;
     for (name, reference, fast) in kernels {
+        for v in data {
+            let (expected, actual) = (reference(query, v), fast(query, v));
+            assert!(
+                (expected - actual).abs() <= 1e-3 * expected.abs().max(1.0),
+                "{name}: {actual} != reference {expected}"
+            );
+        }
         let run = |kernel: Kernel| {
             move || {
                 let mut acc = 0.0f32;
@@ -206,6 +232,15 @@ fn perf_document_parse_skips_embedding() {
     });
     let bytes = serde_json::to_vec(&doc).unwrap();
     let skip: std::collections::HashSet<String> = ["embedding".to_string()].into_iter().collect();
+    let mut without_embedding = doc.clone();
+    without_embedding
+        .as_object_mut()
+        .unwrap()
+        .remove("embedding");
+    assert_eq!(
+        crate::collection_core::parse_document_skipping(&bytes, &skip).unwrap(),
+        without_embedding
+    );
     assert_speedup(
         "parse_document_skipping",
         1.6,
@@ -225,8 +260,8 @@ fn perf_document_parse_skips_embedding() {
     );
 }
 
-/// D2: V4 binary posting lists decode faster than V3 JSON. Measured 3.7x on
-/// 100K entries.
+/// D2: V4 binary posting lists decode faster than V3 JSON. Measured ~4x on
+/// 20K entries.
 #[test]
 fn perf_posting_list_v4_decode() {
     if !release_build() {
@@ -240,6 +275,14 @@ fn perf_posting_list_v4_decode() {
         .collect();
     let json = serde_json::to_vec(&entries).unwrap();
     let binary = encode_token_entries(&entries);
+    assert_eq!(
+        decode_token_entries(&json, FTIDX_VERSION_V3).unwrap(),
+        entries
+    );
+    assert_eq!(
+        decode_token_entries(&binary, FTIDX_VERSION_V4).unwrap(),
+        entries
+    );
     assert_speedup(
         "decode_token_entries V4",
         2.0,
