@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Performance regression tests in CI (ironbase-core 0.3.427)
+
+- **New CI job `Performance regression`** (ubuntu, `--release`):
+  `cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1`.
+- **No absolute timings.** On shared runners those are noise. The tests
+  check two kinds of measurement instead:
+  - **Work counts (deterministic, debug and release):**
+    `perf_hnsw_distance_evaluations` counts HNSW distance evaluations
+    through a test-only thread-local counter in `distance_to`. It runs 1000
+    inserts and 200 top-10 searches of 16-dimensional vectors with Cosine
+    and Euclidean. Measured: ~5.8K evaluations per insert and ~590 per
+    search. Bounds: 7,300 and 740.
+  - **Speed ratios (release only):** fast path vs a plain reference in
+    the same process, best of 15 rounds:
+    - T6 SIMD distance kernels vs a serial sum, ≥1.5x (measured 3.5–4x);
+    - T2 `parse_document_skipping` vs a full parse, ≥1.6x (measured
+      ~2.4x);
+    - D2 V4 posting-list decode vs V3 JSON, ≥2x (measured ~4x).
+- When an intended change moves a measurement, update its bound in the
+  same change.
+
 ### Changed — Fulltext index file format V4: binary posting lists (ironbase-core 0.3.426)
 
 Hybrid search review 2026-10-17, D2 (approved by the owner).

@@ -79,6 +79,14 @@ struct HnswNode {
     norm: f32,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Distance evaluations made on this thread (graph search, neighbour
+    /// selection, pruning): the work count the performance regression tests
+    /// bound. Test builds only.
+    pub(crate) static DISTANCE_EVALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A query vector with its L2 norm, computed once per search instead of once
 /// per distance (hybrid review T6).
 #[derive(Clone, Copy)]
@@ -1176,6 +1184,8 @@ impl HnswIndex {
     /// Distance from `query` to node `idx` based on the configured metric
     #[inline]
     fn distance_to(&self, query: &PreparedQuery, idx: usize) -> f32 {
+        #[cfg(test)]
+        DISTANCE_EVALS.with(|evals| evals.set(evals.get() + 1));
         let node = &self.nodes[idx];
         match self.config.metric {
             DistanceMetric::Euclidean => {

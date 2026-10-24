@@ -55,6 +55,24 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+  perf:
+    name: Performance regression
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Work counts and speed ratios against an in-process reference, not
+      # absolute timings: see ironbase-core/src/perf_regression_tests.rs
+      - name: Run performance regression tests (release)
+        run: cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
