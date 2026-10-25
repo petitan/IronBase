@@ -574,3 +574,49 @@ fn perf_index_paths_survive_a_delete() {
         "index sort after a delete read {sort_reads} documents"
     );
 }
+
+/// E: converting a stored document for query matching moves the object's
+/// entries instead of going through the derived `#[serde(flatten)]`, which
+/// buffers every value through serde's intermediate representation.
+#[test]
+fn perf_document_from_value_skips_flatten() {
+    use crate::document::Document;
+    if !release_build() {
+        return;
+    }
+    let doc = serde_json::json!({
+        "_id": 12345, "name": "User_12345", "email": "user12345@example.com",
+        "age": 42, "score": 415, "category": "electronics", "city": "London",
+        "active": true, "balance": 18517.5,
+        "profile": {"level": 5, "points": 1234, "rank": "rank_45"},
+        "tags": ["tag_5", "tag_6", "tag_7"],
+    });
+    let owned = Document::from_value_owned(doc.clone()).unwrap();
+    assert_eq!(owned.id, crate::document::DocumentId::Int(12345));
+    assert_eq!(owned.fields.len(), 11);
+    // Each round clones the input (both paths take it owned): the clone
+    // alone is timed too and left out of both sides
+    let rounds = |convert: fn(serde_json::Value)| {
+        best_time(15, || {
+            for _ in 0..200 {
+                convert(black_box(&doc).clone());
+            }
+        })
+    };
+    let clone = rounds(|value| drop(black_box(value)));
+    let derived = rounds(|value| {
+        drop(black_box(
+            serde_json::from_value::<Document>(value).unwrap(),
+        ))
+    });
+    let owned = rounds(|value| drop(black_box(Document::from_value_owned(value).unwrap())));
+    let speedup = derived.saturating_sub(clone).as_secs_f64()
+        / owned.saturating_sub(clone).as_secs_f64().max(1e-9);
+    eprintln!(
+        "Document::from_value_owned: {speedup:.2}x (derived {derived:?}, owned {owned:?}, clone {clone:?})"
+    );
+    assert!(
+        speedup >= 2.5,
+        "Document::from_value_owned: only {speedup:.2}x faster than the derived path (expected >= 2.5x)"
+    );
+}
