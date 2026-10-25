@@ -248,18 +248,22 @@ fn speed_benchmark_full_suite() {
     // and then undone, not an insert + delete: a deleted document turns off
     // the index-based $group count measured below.
     let marker = json!({"name": "User_0"});
-    db.update_one(
-        "benchmark",
-        &marker,
-        &json!({"$set": {"bench_marker": true}}),
-    )
-    .unwrap();
-    db.update_one(
-        "benchmark",
-        &marker,
-        &json!({"$unset": {"bench_marker": ""}}),
-    )
-    .unwrap();
+    let set = db
+        .update_one(
+            "benchmark",
+            &marker,
+            &json!({"$set": {"bench_marker": true}}),
+        )
+        .unwrap();
+    let unset = db
+        .update_one(
+            "benchmark",
+            &marker,
+            &json!({"$unset": {"bench_marker": ""}}),
+        )
+        .unwrap();
+    // (matched, modified): both writes must happen, or the cache stays
+    assert_eq!((set, unset), ((1, 1), (1, 1)), "cache-invalidating writes");
 
     // 3e. Indexed range query
     let start = Instant::now();
