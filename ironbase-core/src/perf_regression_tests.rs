@@ -316,7 +316,14 @@ fn perf_btree_insert_vs_btreemap() {
     for (key, doc_id) in entries.iter().cloned() {
         tree.insert(key, doc_id).unwrap();
     }
-    assert_eq!(tree.size(), 100_000);
+    let mut stored = tree.get_all_entries();
+    stored.sort();
+    let mut expected = entries.clone();
+    expected.sort();
+    assert!(
+        stored == expected,
+        "the tree must hold exactly the inserted entries"
+    );
     let btree = best_time(5, || {
         let mut tree = BPlusTree::new("i".into(), "f".into(), false, false);
         for (key, doc_id) in entries.iter().cloned() {
