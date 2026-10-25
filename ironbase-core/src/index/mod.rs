@@ -1878,6 +1878,80 @@ mod pair_order_tests {
         assert!((0..5).all(|key| count(&tree, key) == 0));
     }
 
+    /// Review on #220: a key-only `search` finds every key however the
+    /// separators route it. Deleting and re-inserting each key of a unique
+    /// index (separators included: a re-inserted separator key may land
+    /// left of it) keeps it visible to `search` and to the unique check
+    #[test]
+    fn unique_reinserted_separator_keys_stay_visible() {
+        let mut tree = BPlusTree::new("u".to_string(), "k".to_string(), true, false);
+        for i in 0..2000i64 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        for i in 0..2000i64 {
+            tree.delete(&IndexKey::Int(i), &DocumentId::Int(i)).unwrap();
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+            assert_eq!(
+                tree.search(&IndexKey::Int(i)),
+                Some(DocumentId::Int(i)),
+                "key {i}"
+            );
+            assert!(
+                tree.insert(IndexKey::Int(i), DocumentId::Int(i + 10_000))
+                    .is_err(),
+                "duplicate of key {i} accepted"
+            );
+        }
+        assert!(tree.entries_pair_ordered());
+    }
+
+    /// Review on #220: entries of a key left of its separator are found
+    /// after the entries right of it are deleted
+    #[test]
+    fn search_finds_key_left_of_emptied_children() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        for i in 0..3000i64 {
+            tree.insert(IndexKey::Int(5), DocumentId::Int(i)).unwrap();
+        }
+        for i in 100..3000i64 {
+            tree.delete(&IndexKey::Int(5), &DocumentId::Int(i)).unwrap();
+        }
+        assert!(tree.search(&IndexKey::Int(5)).is_some());
+        assert_eq!(count(&tree, 5), 100);
+    }
+
+    /// Review on #220: -0.0 and 0.0 are equal keys to the ordering but not
+    /// to `==`: entries with either stay ordered and deletable, also when
+    /// one document holds both
+    #[test]
+    fn signed_zero_keys_stay_ordered_and_deletable() {
+        let zero = IndexKey::Float(OrderedFloat(0.0));
+        let neg_zero = IndexKey::Float(OrderedFloat(-0.0));
+        let mut tree = BPlusTree::new("f".to_string(), "x".to_string(), false, false);
+        let mut entries = Vec::new();
+        for i in 0..600i64 {
+            let key = if i % 2 == 0 {
+                zero.clone()
+            } else {
+                neg_zero.clone()
+            };
+            entries.push((key, DocumentId::Int((i * 7919) % 601)));
+        }
+        // One document under both zeros (a multikey array [0.0, -0.0])
+        entries.push((zero.clone(), DocumentId::Int(1000)));
+        entries.push((neg_zero.clone(), DocumentId::Int(1000)));
+        for (key, doc_id) in &entries {
+            tree.insert(key.clone(), doc_id.clone()).unwrap();
+        }
+        assert!(tree.entries_pair_ordered());
+        assert_eq!(tree.size(), entries.len() as u64);
+        for (key, doc_id) in &entries {
+            tree.delete(key, doc_id).unwrap();
+        }
+        assert_eq!(tree.size(), 0);
+        assert!(tree.get_all_entries().is_empty());
+    }
+
     /// An index file written before 0.3.429 keeps equal keys in insertion
     /// order: loading it (eager or lazy) puts it in (key, doc_id) order, so
     /// every entry stays deletable

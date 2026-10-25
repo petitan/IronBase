@@ -886,54 +886,14 @@ impl BPlusTree {
     fn search_in_node(&self, node: &BTreeNode, key: &IndexKey) -> Option<DocumentId> {
         match node {
             BTreeNode::Internal(internal) => {
-                // Find which child to descend into
-                let child_index = self.find_child_index(&internal.keys, key);
-
-                // Use in-memory children if available
-                if child_index < internal.children.len() {
-                    self.search_in_node(&internal.children[child_index], key)
-                } else if child_index < internal.children_offsets.len() {
-                    // Lazy loading: load child from disk on-demand
-                    if let Some(ref path) = self.source_path {
-                        let offset = internal.children_offsets[child_index];
-                        match File::open(path) {
-                            Ok(mut file) => match Self::load_node(&mut file, offset) {
-                                Ok(child_node) => self.search_in_node(&child_node, key),
-                                Err(e) => {
-                                    log_warn!(
-                                        "[LAZY_LOAD_ERROR] Failed to load node at offset {}: {:?}",
-                                        offset,
-                                        e
-                                    );
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                log_warn!(
-                                    "[LAZY_LOAD_ERROR] Failed to open file {:?}: {:?}",
-                                    path,
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        log_warn!(
-                            "[LAZY_LOAD_ERROR] No source_path for lazy loading! children={}, offsets={}",
-                            internal.children.len(),
-                            internal.children_offsets.len()
-                        );
-                        None
-                    }
-                } else {
-                    log_warn!(
-                        "[LAZY_LOAD_ERROR] child_index {} out of bounds: children={}, offsets={}",
-                        child_index,
-                        internal.children.len(),
-                        internal.children_offsets.len()
-                    );
-                    None
-                }
+                // A leaf split by position leaves equal keys on both sides of
+                // a separator, and deletes can empty either side, so every
+                // child from the first separator >= key to the first one >
+                // key may hold `key` (as in `child_for_pair`)
+                let first = internal.keys.partition_point(|k| k < key);
+                let last = internal.keys.partition_point(|k| k <= key);
+                (first..=last)
+                    .find_map(|child_index| self.search_in_child(internal, child_index, key))
             }
             BTreeNode::Leaf(leaf) => {
                 // Binary search in leaf
@@ -942,6 +902,57 @@ impl BPlusTree {
                     Err(_) => None,
                 }
             }
+        }
+    }
+
+    /// `search_in_node` on child `child_index` of `internal`, loading it from
+    /// the index file in lazy mode
+    fn search_in_child(
+        &self,
+        internal: &InternalNode,
+        child_index: usize,
+        key: &IndexKey,
+    ) -> Option<DocumentId> {
+        // Use in-memory children if available
+        if child_index < internal.children.len() {
+            self.search_in_node(&internal.children[child_index], key)
+        } else if child_index < internal.children_offsets.len() {
+            // Lazy loading: load child from disk on-demand
+            if let Some(ref path) = self.source_path {
+                let offset = internal.children_offsets[child_index];
+                match File::open(path) {
+                    Ok(mut file) => match Self::load_node(&mut file, offset) {
+                        Ok(child_node) => self.search_in_node(&child_node, key),
+                        Err(e) => {
+                            log_warn!(
+                                "[LAZY_LOAD_ERROR] Failed to load node at offset {}: {:?}",
+                                offset,
+                                e
+                            );
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        log_warn!("[LAZY_LOAD_ERROR] Failed to open file {:?}: {:?}", path, e);
+                        None
+                    }
+                }
+            } else {
+                log_warn!(
+                    "[LAZY_LOAD_ERROR] No source_path for lazy loading! children={}, offsets={}",
+                    internal.children.len(),
+                    internal.children_offsets.len()
+                );
+                None
+            }
+        } else {
+            log_warn!(
+                "[LAZY_LOAD_ERROR] child_index {} out of bounds: children={}, offsets={}",
+                child_index,
+                internal.children.len(),
+                internal.children_offsets.len()
+            );
+            None
         }
     }
 
@@ -1330,14 +1341,16 @@ impl BPlusTree {
         key: &IndexKey,
         doc_id: &DocumentId,
     ) -> std::result::Result<usize, usize> {
+        // The run of keys equal to `key` by the ordering, which (unlike
+        // `==`) does not tell -0.0 from 0.0; within it, by doc_id
         let start = leaf.keys.partition_point(|k| k < key);
-        let end = start + leaf.keys[start..].partition_point(|k| k == key);
+        let end = start + leaf.keys[start..].partition_point(|k| k <= key);
         let pos = start + leaf.document_ids[start..end].partition_point(|d| d < doc_id);
-        if pos < end && &leaf.document_ids[pos] == doc_id {
-            Ok(pos)
-        } else {
-            Err(pos)
-        }
+        // The same document may hold both zeros (multikey): match the key exactly
+        (pos..end)
+            .take_while(|&i| &leaf.document_ids[i] == doc_id)
+            .find(|&i| &leaf.keys[i] == key)
+            .ok_or(pos)
     }
 
     /// The child of `internal` that holds `(key, doc_id)`, or must take it to
@@ -1679,15 +1692,6 @@ impl BPlusTree {
         }
 
         Ok(())
-    }
-
-    /// Find child index for key in internal node
-    /// B+ tree convention: left child has keys < separator, right child has keys >= separator
-    fn find_child_index(&self, keys: &[IndexKey], key: &IndexKey) -> usize {
-        match keys.binary_search(key) {
-            Ok(pos) => pos + 1, // Key equals separator: go to right child (keys >= separator)
-            Err(pos) => pos,    // Key less than separator: go to left child (keys < separator)
-        }
     }
 
     // ========================================================================
