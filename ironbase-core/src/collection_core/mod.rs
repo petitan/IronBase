@@ -3678,13 +3678,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let Some(meta) = storage.get_collection_meta(&self.name) else {
                 return Ok(None);
             };
-            let catalog = &meta.document_catalog;
             let sortable = self.query_cache.fact(
                 &self.name,
                 &index_ops::index_fact_key("sortable", btree),
                 || {
-                    index_ops::index_covers_every_doc(btree, catalog)
-                        && index_ops::index_keys_single_type(btree, catalog)
+                    index_ops::index_covers_every_doc(btree, meta)
+                        && index_ops::index_keys_single_type(btree, meta)
                 },
             );
             if !sortable {

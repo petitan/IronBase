@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Index-based `$group`, distinct and sort no longer turn off after a delete (ironbase-core 0.3.432)
+
+Speed review 2026-10-25, F.
+
+- **Root cause:** `index_covers_every_doc` and `index_keys_single_type`
+  decide whether an index can stand in for a scan. They compared the
+  index's validated entry count with `document_catalog.len()`. A delete
+  keeps the document's id in the catalog, pointing at its tombstone, until
+  a reload or compaction. So after a single delete the counts never
+  matched, and every empty-filter `$group` count, `distinct` and
+  index-ordered sort fell back to a full scan. In the benchmark the
+  `$group` count went from ~20 ms to ~1 s.
+- **Fix:** both checks compare against `live_document_count`, which a
+  delete decrements. The catalog is still used to validate each entry.
+  Without deletes nothing changes, because the catalog size equals the
+  live count.
+- The old check also accepted the wrong case after deletes: it matched
+  only when the index still held entries for every tombstoned document,
+  that is, exactly when an index count would include deleted documents.
+- **Guard:** `perf_index_paths_survive_a_delete`. After one delete, the
+  index still covers every document, the `$group` count leaves the deleted
+  document out, and an empty-filter sort served by the index skips it in
+  order. The old code fails the test.
+
 ### Fixed — Speed benchmark measures the indexed path, not the query cache (ironbase-core 0.3.431)
 
 Speed review 2026-10-25, D.
