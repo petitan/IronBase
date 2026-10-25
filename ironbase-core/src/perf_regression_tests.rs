@@ -447,11 +447,14 @@ fn perf_indexed_find_reads_each_document_once() {
         "find_with_options: (documents, reads)"
     );
 
-    // Results agree with a collection scan
+    // Results agree with a collection scan (`n` is not indexed), filtered here
     let indexed = coll.find(&json!({"category": 0})).unwrap();
-    let scanned = coll
-        .find(&json!({"category": {"$in": [0]}, "n": {"$gte": 0}}))
-        .unwrap();
+    let scanned: Vec<serde_json::Value> = coll
+        .find(&json!({"n": {"$gte": 0}}))
+        .unwrap()
+        .into_iter()
+        .filter(|d| d["category"] == json!(0))
+        .collect();
     assert_eq!(indexed.len(), 1000);
     let key = |d: &serde_json::Value| d["n"].as_i64().unwrap();
     let mut indexed_n: Vec<i64> = indexed.iter().map(key).collect();

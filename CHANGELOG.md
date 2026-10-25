@@ -22,10 +22,15 @@ Speed review 2026-10-25, C.
   - Memory guarantees are unchanged. The documents are kept only when the
     find would hold them anyway: no sort (the top-k heap and the implicit
     cap stream), and either no projection or a response cap.
-  - The kept documents are bounded by the response cap. Past it they are
-    dropped and the find reads by id as before, reporting the cap
-    exactly as before.
+  - With a response cap set, the kept documents are bounded by it. Past
+    it they are dropped and the find reads by id as before, reporting the
+    cap exactly as before. Without a cap (`find`, uncapped
+    `find_with_options` without projection) they are the result the find
+    returns anyway.
   - A cached or non-index result keeps nothing and reads once, as before.
+  - Scope: the single index plan of `find` / `find_with_options`. The
+    per-clause fallback of `$and` / `$or` and `find_with_hint` still read
+    twice.
 - **Measured:** the equality find on `category` (20K of 100K documents)
   went from 257 ms to 228 ms. The gain is small because the verification
   is dominated by converting each document for matching:
