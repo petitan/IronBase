@@ -377,6 +377,21 @@ fn perf_btree_build_low_cardinality() {
             black_box(tree);
         }
     };
+    // The low-cardinality build holds exactly its entries, in order
+    let mut tree = BPlusTree::new("i".into(), "f".into(), false, false);
+    tree.begin_build();
+    let mut expected: Vec<(IndexKey, DocumentId)> = (0..100_000i64)
+        .map(|i| (IndexKey::String(format!("k{}", i % 5)), DocumentId::Int(i)))
+        .collect();
+    for (key, doc_id) in expected.iter().cloned() {
+        tree.build_insert(key, doc_id).unwrap();
+    }
+    tree.end_build();
+    expected.sort();
+    assert!(
+        tree.get_all_entries() == expected,
+        "the build must hold exactly its entries, in order"
+    );
     let low = best_time(5, build(5));
     let unique = best_time(5, build(100_000));
     let slowdown = low.as_secs_f64() / unique.as_secs_f64().max(1e-9);
