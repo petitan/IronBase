@@ -241,6 +241,26 @@ fn speed_benchmark_full_suite() {
     println!();
     println!("  --- Indexed Queries (vs Collection Scan) ---");
 
+    // The scans above cached their results (up to 10K ids each), and an
+    // index build changes no data, so the same queries would be answered
+    // from the query cache. A write invalidates it: the indexed path is
+    // measured, not the cache (speed review 2026-10-25, D). An update set
+    // and then undone, not an insert + delete: a deleted document turns off
+    // the index-based $group count measured below.
+    let marker = json!({"name": "User_0"});
+    db.update_one(
+        "benchmark",
+        &marker,
+        &json!({"$set": {"bench_marker": true}}),
+    )
+    .unwrap();
+    db.update_one(
+        "benchmark",
+        &marker,
+        &json!({"$unset": {"bench_marker": ""}}),
+    )
+    .unwrap();
+
     // 3e. Indexed range query
     let start = Instant::now();
     let result = coll.find(&json!({"score": {"$gte": 900}})).unwrap();
