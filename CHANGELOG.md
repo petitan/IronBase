@@ -13,9 +13,12 @@ Speed review 2026-10-25, F.
 
 - **Root cause:** `index_covers_every_doc` and `index_keys_single_type`
   decide whether an index can stand in for a scan. They compared the
-  index's validated entry count with `document_catalog.len()`. A delete
-  keeps the document's id in the catalog, pointing at its tombstone, until
-  a reload or compaction. So after a single delete the counts never
+  index's validated entry count with `document_catalog.len()`. A runtime
+  delete writes the tombstone through `write_document_raw`, in both file
+  and memory storage, so it keeps the document's id in the catalog,
+  pointing at the tombstone. Only a reload, compaction or WAL replay
+  (`write_tombstone_full`) drops it. Verified on a file-backed database:
+  100 documents, one delete → catalog 100, live 99. So after a single delete the counts never
   matched, and every empty-filter `$group` count, `distinct` and
   index-ordered sort fell back to a full scan. In the benchmark the
   `$group` count went from ~20 ms to ~1 s.
@@ -26,10 +29,16 @@ Speed review 2026-10-25, F.
 - The old check also accepted the wrong case after deletes: it matched
   only when the index still held entries for every tombstoned document,
   that is, exactly when an index count would include deleted documents.
-- **Guard:** `perf_index_paths_survive_a_delete`. After one delete, the
-  index still covers every document, the `$group` count leaves the deleted
-  document out, and an empty-filter sort served by the index skips it in
-  order. The old code fails the test.
+- **Guard:** `perf_index_paths_survive_a_delete`. After deletes:
+  - the index still covers every document;
+  - the `$group` count and `distinct` leave the deleted documents out
+    and read no documents;
+  - an empty-filter sort served by the index skips them in order and
+    reads only its page.
+
+  The test-only `DOC_READS` counter now also counts the streaming cursor's
+  scan, which is how the guard tells the index path from a scan. The old
+  code fails the test: `$group` reads 999 documents.
 
 ### Fixed — Speed benchmark measures the indexed path, not the query cache (ironbase-core 0.3.431)
 

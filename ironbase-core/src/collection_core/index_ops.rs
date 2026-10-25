@@ -994,9 +994,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 /// a scan in an empty-filter sort, distinct or `$group` (audit 2026-10-07 Q1,
 /// Q13, A4). O(entries) leaf walk, no document loads.
 ///
-/// The target is the live document count, not the catalog size: a delete
-/// keeps the document's id in the catalog (it points at the tombstone)
-/// until a reload or compaction, so after one delete the catalog size never
+/// The target is the live document count, not the catalog size: a runtime
+/// delete (`write_document_raw` with the tombstone, file or memory storage)
+/// keeps the document's id in the catalog, pointing at the tombstone; only a
+/// reload, compaction or WAL replay drops it. So after one delete the catalog size never
 /// matched and every empty-filter `$group`, distinct and index sort fell
 /// back to a scan (speed review 2026-10-25, F).
 pub(crate) fn index_covers_every_doc(

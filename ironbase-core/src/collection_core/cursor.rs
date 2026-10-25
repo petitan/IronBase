@@ -361,6 +361,8 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 check()?;
 
                 let current_offset = *offset;
+                #[cfg(test)]
+                super::DOC_READS.with(|reads| reads.set(reads.get() + 1));
                 let data = {
                     let storage = collection.storage.read();
                     storage.read_data_at(current_offset)?

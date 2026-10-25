@@ -3727,9 +3727,9 @@ const UNSKIPPABLE_FIELDS: [&str; 3] = ["_id", "_collection", "_tombstone"];
 
 #[cfg(test)]
 thread_local! {
-    /// Documents read from storage by id on this thread (`read_document_by_id`
-    /// and the find load): the work count the performance regression tests
-    /// bound. Test builds only.
+    /// Documents read from storage on this thread (`read_document_by_id`,
+    /// the find load and the streaming cursor's scan): the work count the
+    /// performance regression tests bound. Test builds only.
     pub(crate) static DOC_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 

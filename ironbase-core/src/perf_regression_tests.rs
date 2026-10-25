@@ -507,29 +507,70 @@ fn perf_index_paths_survive_a_delete() {
         "a delete must not turn the index paths off"
     );
 
+    // Each runs on the index: no document is read (a scan reads ~1000)
+    let reads = |work: &mut dyn FnMut()| {
+        crate::collection_core::DOC_READS.with(|reads| reads.set(0));
+        work();
+        crate::collection_core::DOC_READS.with(|reads| reads.get())
+    };
+
     // The index-based count leaves the deleted document out
-    let groups = coll
-        .aggregate(&json!([{"$group": {"_id": "$category", "count": {"$sum": 1}}}]))
-        .unwrap();
-    let mut counts: Vec<(i64, i64)> = groups
-        .iter()
-        .map(|g| (g["_id"].as_i64().unwrap(), g["count"].as_i64().unwrap()))
-        .collect();
+    let mut counts: Vec<(i64, i64)> = Vec::new();
+    let group_reads = reads(&mut || {
+        let groups = coll
+            .aggregate(&json!([{"$group": {"_id": "$category", "count": {"$sum": 1}}}]))
+            .unwrap();
+        counts = groups
+            .iter()
+            .map(|g| (g["_id"].as_i64().unwrap(), g["count"].as_i64().unwrap()))
+            .collect();
+    });
     counts.sort();
     assert_eq!(
         counts,
         vec![(0, 200), (1, 200), (2, 200), (3, 199), (4, 200)]
     );
+    assert_eq!(group_reads, 0, "$group count after a delete read documents");
 
-    // An empty-filter sort served by the index skips it too, in order
-    let sorted = coll
-        .find_with_options(
-            &json!({}),
-            FindOptions::new()
-                .with_sort(vec![("n".to_string(), 1)])
-                .with_limit(5),
-        )
-        .unwrap();
-    let n: Vec<i64> = sorted.iter().map(|d| d["n"].as_i64().unwrap()).collect();
+    // distinct on the index leaves out a value only the deleted document had
+    db.insert_one(
+        "c",
+        std::collections::HashMap::from([("category".to_string(), json!(99))]),
+    )
+    .unwrap();
+    db.delete_one("c", &json!({"category": 99})).unwrap();
+    let mut values: Vec<i64> = Vec::new();
+    let distinct_reads = reads(&mut || {
+        values = coll
+            .distinct("category", &json!({}))
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+    });
+    values.sort();
+    assert_eq!(values, vec![0, 1, 2, 3, 4]);
+    assert_eq!(distinct_reads, 0, "distinct after a delete read documents");
+
+    // An empty-filter sort served by the index skips it too, in order, and
+    // reads only the page
+    let mut n: Vec<i64> = Vec::new();
+    let sort_reads = reads(&mut || {
+        n = coll
+            .find_with_options(
+                &json!({}),
+                FindOptions::new()
+                    .with_sort(vec![("n".to_string(), 1)])
+                    .with_limit(5),
+            )
+            .unwrap()
+            .iter()
+            .map(|d| d["n"].as_i64().unwrap())
+            .collect();
+    });
     assert_eq!(n, vec![0, 1, 2, 4, 5]);
+    assert!(
+        sort_reads <= 10,
+        "index sort after a delete read {sort_reads} documents"
+    );
 }
