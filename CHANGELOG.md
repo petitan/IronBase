@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — B+ tree insert/delete quadratic on low-cardinality fields (ironbase-core 0.3.429)
+
+Speed review 2026-10-25, A.
+
+- **Root cause:** within one key, entries were in insertion order. So
+  `delete_from_node` scanned every entry with the key, across every leaf
+  the key spans. That made it O(D) for a key shared by D documents. The
+  index build (`build_insert`) runs that delete before every insert to
+  stay idempotent, so building an index on a field with few values was
+  O(D²). `create_index` on 5 values over 100K documents took 26 s; on a
+  unique field it took 0.9 s. Every delete and update on such an index
+  paid O(D) too.
+- **Fix:** entries are kept in (key, doc_id) order.
+  - A leaf finds an entry by binary search (`leaf_pair_position`).
+  - An internal node picks the child by binary search over its children's
+    first entries (`child_for_pair`); empty children left by deletes are
+    skipped.
+  - Insert and delete are now O(log² n) however many documents share a
+    key.
+- **Older index files:** files written before 0.3.429 may hold equal keys
+  in insertion order. On a full load (eager, or lazy then
+  `ensure_fully_loaded`) one O(n) pass checks the order, and an unordered
+  tree is rebuilt once in memory (`ensure_pair_order`). The file format
+  is unchanged; the next write of the index stores the ordered tree.
+- **Measured** (benchmark suite, 100K documents):
+
+  | Operation | Before | After |
+  |---|---|---|
+  | `create_index(category)` (5 values) | 26 s | 0.75 s |
+  | `create_index(profile.level)` (10 values) | 5 s | 0.77 s |
+  | `(category, score)` compound index | 5.3 s | 1.5 s |
+  | `delete_many` of 10K documents | 5.8 s | 2.6 s |
+
+- **Guard:** `perf_btree_build_low_cardinality` checks that a build on 5
+  keys is at most 3x a build on unique keys. Measured ~1.3x; the old code
+  measured 308x and fails the test.
+
 ### Fixed — B+ tree insert copied nodes on every insert (ironbase-core 0.3.428)
 
 Speed review 2026-10-25, B.

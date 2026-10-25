@@ -1796,3 +1796,202 @@ mod audit_index_tests {
         assert_eq!(reloaded.search(&IndexKey::Int(1)), Some(DocumentId::Int(1)));
     }
 }
+
+#[cfg(test)]
+mod pair_order_tests {
+    //! Speed review 2026-10-25, A: entries are kept in (key, doc_id) order
+    //! so insert and delete find an entry by binary search however many
+    //! documents share its key.
+
+    use super::*;
+    use crate::collection_core::{persist_index_to_disk, try_load_index_from_file};
+    use crate::document::DocumentId;
+    use crate::index::traits::LazyLoadable;
+    use std::collections::BTreeSet;
+    use tempfile::TempDir;
+
+    fn count(tree: &BPlusTree, key: i64) -> usize {
+        let key = IndexKey::Int(key);
+        tree.range_query(&key, &key, true, true, RangeQueryMode::Count)
+            .unwrap_count()
+    }
+
+    fn assert_matches(tree: &BPlusTree, reference: &BTreeSet<(i64, i64)>) {
+        assert!(tree.entries_pair_ordered());
+        assert_eq!(tree.size(), reference.len() as u64);
+        for key in 0..5 {
+            let expected = reference.iter().filter(|(k, _)| *k == key).count();
+            assert_eq!(count(tree, key), expected, "entries with key {key}");
+        }
+    }
+
+    /// Inserts in scrambled order, deletes that empty whole leaves, deletes
+    /// of absent entries and re-inserts agree with a reference set
+    #[test]
+    fn low_cardinality_inserts_and_deletes_match_reference() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        let mut reference = BTreeSet::new();
+        let pairs: Vec<(i64, i64)> = (0..4000i64)
+            .map(|i| ((i * 7) % 5, (i * 7919) % 4001))
+            .collect();
+        for &(key, doc) in &pairs {
+            tree.insert(IndexKey::Int(key), DocumentId::Int(doc))
+                .unwrap();
+            reference.insert((key, doc));
+        }
+        assert_matches(&tree, &reference);
+
+        // Every doc below 3000 of key 0..=2: empties runs of leaves
+        for &(key, doc) in &pairs {
+            if key <= 2 && doc < 3000 {
+                tree.delete(&IndexKey::Int(key), &DocumentId::Int(doc))
+                    .unwrap();
+                reference.remove(&(key, doc));
+            }
+        }
+        assert_matches(&tree, &reference);
+
+        // Absent entries: a no-op
+        tree.delete(&IndexKey::Int(1), &DocumentId::Int(5)).unwrap();
+        tree.delete(&IndexKey::Int(9), &DocumentId::Int(5)).unwrap();
+        assert_matches(&tree, &reference);
+
+        // Re-inserts land next to the empty leaves in order
+        for doc in (0..3000i64).step_by(3) {
+            tree.insert(IndexKey::Int(1), DocumentId::Int(doc)).unwrap();
+            reference.insert((1, doc));
+        }
+        assert_matches(&tree, &reference);
+
+        // build_insert is idempotent on an entry already present
+        tree.begin_build();
+        tree.build_insert(IndexKey::Int(1), DocumentId::Int(3))
+            .unwrap();
+        tree.end_build();
+        assert_matches(&tree, &reference);
+
+        for &(key, doc) in reference.clone().iter() {
+            tree.delete(&IndexKey::Int(key), &DocumentId::Int(doc))
+                .unwrap();
+        }
+        assert_eq!(tree.size(), 0);
+        assert!((0..5).all(|key| count(&tree, key) == 0));
+    }
+
+    /// Review on #220: a key-only `search` finds every key however the
+    /// separators route it. Deleting and re-inserting each key of a unique
+    /// index (separators included: a re-inserted separator key may land
+    /// left of it) keeps it visible to `search` and to the unique check
+    #[test]
+    fn unique_reinserted_separator_keys_stay_visible() {
+        let mut tree = BPlusTree::new("u".to_string(), "k".to_string(), true, false);
+        for i in 0..2000i64 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        for i in 0..2000i64 {
+            tree.delete(&IndexKey::Int(i), &DocumentId::Int(i)).unwrap();
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+            assert_eq!(
+                tree.search(&IndexKey::Int(i)),
+                Some(DocumentId::Int(i)),
+                "key {i}"
+            );
+            assert!(
+                tree.insert(IndexKey::Int(i), DocumentId::Int(i + 10_000))
+                    .is_err(),
+                "duplicate of key {i} accepted"
+            );
+        }
+        assert!(tree.entries_pair_ordered());
+    }
+
+    /// Review on #220: entries of a key left of its separator are found
+    /// after the entries right of it are deleted
+    #[test]
+    fn search_finds_key_left_of_emptied_children() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        for i in 0..3000i64 {
+            tree.insert(IndexKey::Int(5), DocumentId::Int(i)).unwrap();
+        }
+        for i in 100..3000i64 {
+            tree.delete(&IndexKey::Int(5), &DocumentId::Int(i)).unwrap();
+        }
+        assert!(tree.search(&IndexKey::Int(5)).is_some());
+        assert_eq!(count(&tree, 5), 100);
+    }
+
+    /// Review on #220: -0.0 and 0.0 are equal keys to the ordering but not
+    /// to `==`: entries with either stay ordered and deletable, also when
+    /// one document holds both
+    #[test]
+    fn signed_zero_keys_stay_ordered_and_deletable() {
+        let zero = IndexKey::Float(OrderedFloat(0.0));
+        let neg_zero = IndexKey::Float(OrderedFloat(-0.0));
+        let mut tree = BPlusTree::new("f".to_string(), "x".to_string(), false, false);
+        let mut entries = Vec::new();
+        for i in 0..600i64 {
+            let key = if i % 2 == 0 {
+                zero.clone()
+            } else {
+                neg_zero.clone()
+            };
+            entries.push((key, DocumentId::Int((i * 7919) % 601)));
+        }
+        // One document under both zeros (a multikey array [0.0, -0.0])
+        entries.push((zero.clone(), DocumentId::Int(1000)));
+        entries.push((neg_zero.clone(), DocumentId::Int(1000)));
+        for (key, doc_id) in &entries {
+            tree.insert(key.clone(), doc_id.clone()).unwrap();
+        }
+        assert!(tree.entries_pair_ordered());
+        assert_eq!(tree.size(), entries.len() as u64);
+        for (key, doc_id) in &entries {
+            tree.delete(key, doc_id).unwrap();
+        }
+        assert_eq!(tree.size(), 0);
+        assert!(tree.get_all_entries().is_empty());
+    }
+
+    /// An index file written before 0.3.429 keeps equal keys in insertion
+    /// order: loading it (eager or lazy) puts it in (key, doc_id) order, so
+    /// every entry stays deletable
+    #[test]
+    fn unordered_index_file_is_reordered_on_load() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("t.mlite");
+        let db_path = db_path.to_str().unwrap();
+
+        let mut tree = BPlusTree::new("t_k".to_string(), "k".to_string(), false, false);
+        for i in 0..3000i64 {
+            tree.insert(IndexKey::Int(i % 3), DocumentId::Int(i))
+                .unwrap();
+        }
+        tree.reverse_equal_keys_for_test();
+        assert!(!tree.entries_pair_ordered());
+        persist_index_to_disk(db_path, "t_k", |f| tree.save_to_file(f)).unwrap();
+        let meta = tree.metadata.clone();
+
+        let mut eager = try_load_index_from_file(db_path, &meta).unwrap();
+        assert!(eager.entries_pair_ordered());
+        assert_eq!(eager.size(), 3000);
+
+        let idx_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|e| e == "idx"))
+            .expect("index file written");
+        let mut lazy = BPlusTree::load_from_path_lazy(idx_path, meta).unwrap();
+        assert!(lazy.is_lazy_mode());
+        lazy.ensure_fully_loaded().unwrap();
+        assert!(lazy.entries_pair_ordered());
+
+        for tree in [&mut eager, &mut lazy] {
+            for i in 0..3000i64 {
+                tree.delete(&IndexKey::Int(i % 3), &DocumentId::Int(i))
+                    .unwrap();
+            }
+            assert_eq!(tree.size(), 0);
+            assert!((0..3).all(|key| count(tree, key) == 0));
+        }
+    }
+}
