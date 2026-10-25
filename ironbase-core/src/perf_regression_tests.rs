@@ -345,3 +345,46 @@ fn perf_btree_insert_vs_btreemap() {
         "BPlusTree::insert: {slowdown:.2}x slower than BTreeMap (expected <= {MAX_SLOWDOWN}x)"
     );
 }
+
+/// Building an index on a low-cardinality field (5 values, 20K documents
+/// each) costs at most `MAX_SLOWDOWN` times building it on a unique field.
+/// Measured ~1.3x; while finding an entry scanned every entry with its key,
+/// it was ~300x (100K entries; speed review 2026-10-25, A).
+#[test]
+fn perf_btree_build_low_cardinality() {
+    const MAX_SLOWDOWN: f64 = 3.0;
+    if !release_build() {
+        return;
+    }
+    use crate::index::{BPlusTree, IndexKey};
+    let build = |distinct: i64| {
+        let entries: Vec<(IndexKey, DocumentId)> = (0..100_000i64)
+            .map(|i| {
+                (
+                    IndexKey::String(format!("k{}", i % distinct)),
+                    DocumentId::Int(i),
+                )
+            })
+            .collect();
+        move || {
+            let mut tree = BPlusTree::new("i".into(), "f".into(), false, false);
+            tree.begin_build();
+            for (key, doc_id) in entries.iter().cloned() {
+                tree.build_insert(key, doc_id).unwrap();
+            }
+            tree.end_build();
+            assert_eq!(tree.size(), 100_000);
+            black_box(tree);
+        }
+    };
+    let low = best_time(5, build(5));
+    let unique = best_time(5, build(100_000));
+    let slowdown = low.as_secs_f64() / unique.as_secs_f64().max(1e-9);
+    eprintln!(
+        "build_insert, 5 keys: {slowdown:.2}x unique keys (5 keys {low:?}, unique {unique:?})"
+    );
+    assert!(
+        slowdown <= MAX_SLOWDOWN,
+        "build_insert on 5 keys: {slowdown:.2}x slower than on unique keys (expected <= {MAX_SLOWDOWN}x)"
+    );
+}

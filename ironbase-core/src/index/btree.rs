@@ -1057,8 +1057,9 @@ impl BPlusTree {
     ) -> Result<Option<(IndexKey, Box<BTreeNode>)>> {
         match &mut **node {
             BTreeNode::Leaf(leaf) => {
-                // Insert into leaf
-                let insert_pos = leaf.keys.binary_search(&key).unwrap_or_else(|pos| pos);
+                // Insert into leaf, in (key, doc_id) order
+                let insert_pos =
+                    Self::leaf_pair_position(leaf, &key, &doc_id).unwrap_or_else(|pos| pos);
                 leaf.keys.insert(insert_pos, key);
                 leaf.document_ids.insert(insert_pos, doc_id);
 
@@ -1073,12 +1074,9 @@ impl BPlusTree {
                 }
             }
             BTreeNode::Internal(internal) => {
-                // Find which child to descend into
-                // B+ tree convention: left child has keys < separator, right child has keys >= separator
-                let child_idx = match internal.keys.binary_search(&key) {
-                    Ok(pos) => pos + 1, // Key equals separator: go to right child
-                    Err(pos) => pos,    // Key less than separator: go to left child
-                };
+                // Find which child to descend into: the one that keeps the
+                // entries in (key, doc_id) order
+                let child_idx = Self::child_for_pair(internal, &key, &doc_id);
 
                 // Get the child (must exist for internal nodes)
                 if child_idx >= internal.children.len() {
@@ -1304,47 +1302,95 @@ impl BPlusTree {
 
     /// Recursively delete from a node, returns true if deletion occurred
     ///
-    /// BUG FIX: For non-unique indexes, multiple documents can have the same key.
-    /// binary_search only returns ONE position, so we must scan ALL entries with
-    /// the same key to find the correct doc_id.
+    /// Entries are in (key, doc_id) order, so the entry is found by binary
+    /// search in O(log n) however many documents share its key. (Scanning
+    /// every entry with the key made index builds and writes on a
+    /// low-cardinality field quadratic: speed review 2026-10-25, A.)
     fn delete_from_node(node: &mut Box<BTreeNode>, key: &IndexKey, doc_id: &DocumentId) -> bool {
         match **node {
-            BTreeNode::Leaf(ref mut leaf) => {
-                // For non-unique indexes, multiple entries can have the same key.
-                // binary_search returns ANY matching position, not necessarily the one
-                // with our doc_id. We must scan all entries with this key.
-
-                // Find the FIRST position where key could be (lower bound)
-                let start_pos = leaf.keys.partition_point(|k| k < key);
-
-                // Scan all entries with this key to find our doc_id
-                for pos in start_pos..leaf.keys.len() {
-                    if &leaf.keys[pos] != key {
-                        // Past the matching keys, not found
-                        break;
-                    }
-                    if &leaf.document_ids[pos] == doc_id {
-                        leaf.keys.remove(pos);
-                        leaf.document_ids.remove(pos);
-                        return true;
-                    }
+            BTreeNode::Leaf(ref mut leaf) => match Self::leaf_pair_position(leaf, key, doc_id) {
+                Ok(pos) => {
+                    leaf.keys.remove(pos);
+                    leaf.document_ids.remove(pos);
+                    true
                 }
-                false
-            }
+                Err(_) => false,
+            },
             BTreeNode::Internal(ref mut internal) => {
-                // A leaf split by position keeps equal keys on both sides of
-                // the separator, so in a non-unique index the entry may be in
-                // any child from the first separator >= key to the first one
-                // > key. Routing only to the right child missed entries left
-                // of it (audit 2026-10-06 #21).
-                let first = internal.keys.partition_point(|k| k < key);
-                let last = internal
-                    .keys
-                    .partition_point(|k| k <= key)
-                    .min(internal.children.len().saturating_sub(1));
-                (first..=last).any(|child_idx| {
-                    Self::delete_from_node(&mut internal.children[child_idx], key, doc_id)
-                })
+                let child_idx = Self::child_for_pair(internal, key, doc_id);
+                Self::delete_from_node(&mut internal.children[child_idx], key, doc_id)
+            }
+        }
+    }
+
+    /// Position of `(key, doc_id)` in a leaf: `Ok` if present, else `Err`
+    /// with the position that keeps the leaf in (key, doc_id) order
+    fn leaf_pair_position(
+        leaf: &LeafNode,
+        key: &IndexKey,
+        doc_id: &DocumentId,
+    ) -> std::result::Result<usize, usize> {
+        let start = leaf.keys.partition_point(|k| k < key);
+        let end = start + leaf.keys[start..].partition_point(|k| k == key);
+        let pos = start + leaf.document_ids[start..end].partition_point(|d| d < doc_id);
+        if pos < end && &leaf.document_ids[pos] == doc_id {
+            Ok(pos)
+        } else {
+            Err(pos)
+        }
+    }
+
+    /// The child of `internal` that holds `(key, doc_id)`, or must take it to
+    /// keep the entries in (key, doc_id) order.
+    ///
+    /// A leaf split by position leaves equal keys on both sides of a
+    /// separator (audit 2026-10-06 #21), so every child from the first
+    /// separator >= key to the first one > key may hold `key`. Among those
+    /// it is the last one whose first entry is <= (key, doc_id): a binary
+    /// search over the children's first entries.
+    fn child_for_pair(internal: &InternalNode, key: &IndexKey, doc_id: &DocumentId) -> usize {
+        let first = internal.keys.partition_point(|k| k < key);
+        let last = internal
+            .keys
+            .partition_point(|k| k <= key)
+            .min(internal.children.len().saturating_sub(1));
+        let pair = (key, doc_id);
+        // An empty child (entries deleted, no merge) takes the first entry
+        // of the nearest non-empty child left of it, which keeps the search
+        // monotone; with none, it sorts before every pair
+        let first_entry_at_or_left = |mut c: usize| loop {
+            if let Some(entry) = Self::first_entry(&internal.children[c]) {
+                return Some(entry);
+            }
+            if c == first + 1 {
+                return None;
+            }
+            c -= 1;
+        };
+        // Children first+1..=last whose first entry is <= pair form a prefix
+        let (mut lo, mut hi) = (first + 1, last + 1);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match first_entry_at_or_left(mid) {
+                Some(entry) if entry > pair => hi = mid,
+                _ => lo = mid + 1,
+            }
+        }
+        // An empty child is never the target: the entries left of it may
+        // sort after the pair
+        let mut child_idx = lo - 1;
+        while child_idx > first && Self::first_entry(&internal.children[child_idx]).is_none() {
+            child_idx -= 1;
+        }
+        child_idx
+    }
+
+    /// The smallest entry under `node`, `None` if it holds no entries
+    fn first_entry(node: &BTreeNode) -> Option<(&IndexKey, &DocumentId)> {
+        match node {
+            BTreeNode::Leaf(leaf) => leaf.keys.first().zip(leaf.document_ids.first()),
+            BTreeNode::Internal(internal) => {
+                internal.children.iter().find_map(|c| Self::first_entry(c))
             }
         }
     }
@@ -2582,6 +2628,100 @@ impl BPlusTree {
         self.metadata.num_keys = self.count_actual_keys();
     }
 
+    /// Put a fully loaded tree's entries in (key, doc_id) order, which
+    /// `insert` and `delete` route by. Index files written before 0.3.429
+    /// kept equal keys in insertion order: such a tree is rebuilt once in
+    /// memory (O(n log n)); an ordered one costs one O(n) pass.
+    fn ensure_pair_order(&mut self) -> Result<()> {
+        if self.entries_pair_ordered() {
+            return Ok(());
+        }
+        tracing::info!(
+            index = %self.metadata.name,
+            num_keys = self.metadata.num_keys,
+            "B+ tree entries not in (key, doc_id) order (pre-0.3.429 file): rebuilding in memory"
+        );
+        let mut entries = Vec::new();
+        entries
+            .try_reserve(self.metadata.num_keys as usize)
+            .map_err(|e| {
+                IronBaseError::OutOfMemory(format!(
+                    "index '{}': cannot reorder {} entries: {}",
+                    self.metadata.name, self.metadata.num_keys, e
+                ))
+            })?;
+        Self::drain_entries(&mut self.root, &mut entries);
+        entries.sort_unstable();
+        let stats = self.metadata.stats.clone();
+        self.clear();
+        for (key, doc_id) in entries {
+            self.insert_unchecked(key, doc_id)?;
+        }
+        // The same entries as loaded: not writes, same statistics
+        self.counters = StatisticsCounters::default();
+        self.metadata.stats = stats;
+        Ok(())
+    }
+
+    /// Whether the in-memory entries are in (key, doc_id) order
+    pub(crate) fn entries_pair_ordered(&self) -> bool {
+        fn ordered<'a>(
+            node: &'a BTreeNode,
+            prev: &mut Option<(&'a IndexKey, &'a DocumentId)>,
+        ) -> bool {
+            match node {
+                BTreeNode::Leaf(leaf) => leaf.keys.iter().zip(&leaf.document_ids).all(|entry| {
+                    let in_order = prev.is_none_or(|p| p <= entry);
+                    *prev = Some(entry);
+                    in_order
+                }),
+                BTreeNode::Internal(internal) => {
+                    internal.children.iter().all(|child| ordered(child, prev))
+                }
+            }
+        }
+        ordered(&self.root, &mut None)
+    }
+
+    /// Reverse the documents of each equal-key run within a leaf: the
+    /// insertion order a pre-0.3.429 index file may hold
+    #[cfg(test)]
+    pub(crate) fn reverse_equal_keys_for_test(&mut self) {
+        fn reverse(node: &mut BTreeNode) {
+            match node {
+                BTreeNode::Leaf(leaf) => {
+                    let mut start = 0;
+                    while start < leaf.keys.len() {
+                        let end =
+                            start + leaf.keys[start..].partition_point(|k| *k == leaf.keys[start]);
+                        leaf.document_ids[start..end].reverse();
+                        start = end;
+                    }
+                }
+                BTreeNode::Internal(internal) => {
+                    internal.children.iter_mut().for_each(|c| reverse(c))
+                }
+            }
+        }
+        reverse(&mut self.root);
+    }
+
+    /// Move every entry under `node` into `out`, in tree order
+    fn drain_entries(node: &mut BTreeNode, out: &mut Vec<(IndexKey, DocumentId)>) {
+        match node {
+            BTreeNode::Leaf(leaf) => out.extend(
+                std::mem::take(&mut leaf.keys)
+                    .into_iter()
+                    .zip(std::mem::take(&mut leaf.document_ids)),
+            ),
+            BTreeNode::Internal(internal) => {
+                for child in &mut internal.children {
+                    Self::drain_entries(child, out);
+                }
+            }
+        }
+    }
+
     /// Refresh index statistics by scanning all keys in leaf nodes.
     ///
     /// This method traverses all leaf nodes (which are already sorted in B+ tree order)
@@ -3035,6 +3175,7 @@ impl BPlusTree {
         // Sync num_keys with actual tree content
         // (metadata from CollectionData may be stale if not synced on every insert/delete)
         tree.sync_num_keys();
+        tree.ensure_pair_order()?;
 
         // Validate statistics against actual index size
         tree.metadata.stats.validate_and_fix(tree.metadata.num_keys);
@@ -3144,6 +3285,7 @@ impl BPlusTree {
 
             // Sync num_keys with actual tree content
             tree.sync_num_keys();
+            tree.ensure_pair_order()?;
 
             // Validate statistics against actual index size
             tree.metadata.stats.validate_and_fix(tree.metadata.num_keys);
@@ -3218,6 +3360,7 @@ impl BPlusTree {
 
         // Sync num_keys with actual tree content (catalog metadata may be stale)
         self.sync_num_keys();
+        self.ensure_pair_order()?;
 
         // Validate statistics against actual index size
         self.metadata.stats.validate_and_fix(self.metadata.num_keys);
