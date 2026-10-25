@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — An indexed find reads each document once (ironbase-core 0.3.430)
+
+Speed review 2026-10-25, C.
+
+- **Root cause:** an index plan's candidates are verified against the
+  query. `collect_doc_ids_from_plan` reads and parses every candidate,
+  keeps only its id, and `find` / `find_with_options` then read and parse
+  each matching document a second time.
+- **Fix:** the verification keeps the matched documents in result order
+  (`VerifiedDocs`, through `collect_doc_ids_from_plan_into` /
+  `collect_doc_ids_with_options_into`). The find uses them instead of
+  reading again.
+  - Memory guarantees are unchanged. The documents are kept only when the
+    find would hold them anyway: no sort (the top-k heap and the implicit
+    cap stream), and either no projection or a response cap.
+  - With a response cap set, the kept documents are bounded by it. Past
+    it they are dropped and the find reads by id as before, reporting the
+    cap exactly as before. Without a cap (`find`, uncapped
+    `find_with_options` without projection) they are the result the find
+    returns anyway.
+  - A cached or non-index result keeps nothing and reads once, as before.
+  - Scope: the single index plan of `find` / `find_with_options`. The
+    per-clause fallback of `$and` / `$or` and `find_with_hint` still read
+    twice.
+- **Measured:** the equality find on `category` (20K of 100K documents)
+  went from 257 ms to 228 ms. The gain is small because the verification
+  is dominated by converting each document for matching:
+  `Document::from_value_owned`, the serde `flatten` path, takes ~70 ms per
+  20K documents, against ~38 ms for parsing and ~2.5 ms for `matches`.
+  That conversion is a separate item.
+- **Guard:** `perf_indexed_find_reads_each_document_once` is a
+  deterministic count of document reads, via a test-only `DOC_READS`
+  counter. `find` and `find_with_options` on 1000 indexed matches each
+  make 1000 reads; the old code made 2000 and fails the test. The guard
+  also checks that indexed results agree with a scan, and that the
+  response cap error still fires.
+
 ### Fixed — B+ tree insert/delete quadratic on low-cardinality fields (ironbase-core 0.3.429)
 
 Speed review 2026-10-25, A.

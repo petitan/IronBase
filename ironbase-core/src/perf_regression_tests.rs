@@ -403,3 +403,72 @@ fn perf_btree_build_low_cardinality() {
         "build_insert on 5 keys: {slowdown:.2}x slower than on unique keys (expected <= {MAX_SLOWDOWN}x)"
     );
 }
+
+/// An indexed find reads each matching document once: the index plan's
+/// verification keeps the documents for the result (speed review
+/// 2026-10-25, C). It read every one twice before. Deterministic (any
+/// build).
+#[test]
+fn perf_indexed_find_reads_each_document_once() {
+    use crate::collection_core::DOC_READS;
+    use crate::find_options::FindOptions;
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use serde_json::json;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for i in 0..3000 {
+        let doc = std::collections::HashMap::from([
+            ("category".to_string(), json!(i % 3)),
+            ("n".to_string(), json!(i)),
+        ]);
+        db.insert_one("c", doc).unwrap();
+    }
+    let coll = db.get_collection("c").unwrap();
+    coll.create_index("category".to_string(), false, false)
+        .unwrap();
+    let reads = |work: &dyn Fn() -> usize| {
+        DOC_READS.with(|reads| reads.set(0));
+        let found = work();
+        (found, DOC_READS.with(|reads| reads.get()))
+    };
+
+    // Distinct queries: a cached result reads once anyway
+    let (found, n) = reads(&|| coll.find(&json!({"category": 1})).unwrap().len());
+    assert_eq!((found, n), (1000, 1000), "find: (documents, reads)");
+    let (found, n) = reads(&|| {
+        coll.find_with_options(&json!({"category": 2}), FindOptions::new())
+            .unwrap()
+            .len()
+    });
+    assert_eq!(
+        (found, n),
+        (1000, 1000),
+        "find_with_options: (documents, reads)"
+    );
+
+    // Results agree with a collection scan (`n` is not indexed), filtered here
+    let indexed = coll.find(&json!({"category": 0})).unwrap();
+    let scanned: Vec<serde_json::Value> = coll
+        .find(&json!({"n": {"$gte": 0}}))
+        .unwrap()
+        .into_iter()
+        .filter(|d| d["category"] == json!(0))
+        .collect();
+    assert_eq!(indexed.len(), 1000);
+    let key = |d: &serde_json::Value| d["n"].as_i64().unwrap();
+    let mut indexed_n: Vec<i64> = indexed.iter().map(key).collect();
+    let mut scanned_n: Vec<i64> = scanned.iter().map(key).collect();
+    indexed_n.sort();
+    scanned_n.sort();
+    assert_eq!(indexed_n, scanned_n);
+
+    // Over the response cap the kept documents are dropped and the find
+    // reports the cap exactly as before
+    let capped = coll.find_with_options(
+        &json!({"category": 1, "n": {"$gte": 0}}),
+        FindOptions::new().with_max_response_bytes(10_000),
+    );
+    let err = capped.unwrap_err().to_string();
+    assert!(err.contains("Response size limit exceeded"), "{err}");
+}
