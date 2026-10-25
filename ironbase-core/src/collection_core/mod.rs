@@ -2969,7 +2969,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 limit,
                 cancel_flag,
                 deadline,
-                verified.as_deref_mut(),
+                verified,
             )?
         } else if let Some(sf) = sort_field {
             // 🚀 FIX #22: Use index for sort-only queries (no filter)
@@ -3726,10 +3726,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 /// Fields a document read never skips: identity, collection and deletion state
 const UNSKIPPABLE_FIELDS: [&str; 3] = ["_id", "_collection", "_tombstone"];
 
-/// Parse a stored document, leaving out its top-level `skip` fields without
-/// building their values (hybrid review T2: a chunk's embedding is most of
-/// its bytes, and parsing it into a `Value` cost ~50 µs per document that
-/// nothing used). `_id`, `_collection` and `_tombstone` are always kept.
 #[cfg(test)]
 thread_local! {
     /// Documents read from storage by id on this thread (`read_document_by_id`
@@ -3790,6 +3786,10 @@ impl VerifiedDocs {
     }
 }
 
+/// Parse a stored document, leaving out its top-level `skip` fields without
+/// building their values (hybrid review T2: a chunk's embedding is most of
+/// its bytes, and parsing it into a `Value` cost ~50 µs per document that
+/// nothing used). `_id`, `_collection` and `_tombstone` are always kept.
 pub(crate) fn parse_document_skipping(bytes: &[u8], skip: &HashSet<String>) -> Result<Value> {
     use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
