@@ -1006,21 +1006,23 @@ impl BPlusTree {
     /// Bug fix (2026-01): Previous estimates were too low, causing "Node size exceeds
     /// page size" errors when many documents share the same long key (e.g., chunks
     /// from the same source file).
-    fn estimate_node_size(node: &BTreeNode) -> usize {
-        match node {
-            BTreeNode::Leaf(leaf) => {
-                let key_sizes: usize = leaf.keys.iter().map(Self::estimate_key_size).sum();
-                // doc_id JSON: {"String":"..."},  or {"Int":...}, - typically ~40 bytes
-                let doc_id_overhead = leaf.document_ids.len() * 40;
-                // Base overhead: {"keys":[],"document_ids":[],"next_leaf_offset":0}
-                80 + key_sizes + doc_id_overhead
-            }
-            BTreeNode::Internal(internal) => {
-                let key_sizes: usize = internal.keys.iter().map(Self::estimate_key_size).sum();
-                // children are skipped in serialization, but offsets are stored
-                80 + key_sizes + internal.children_offsets.len() * 12
-            }
-        }
+    ///
+    /// Takes the node by reference: wrapping a clone in `BTreeNode` cost a
+    /// leaf copy per insert and, for an internal node, a deep copy of its
+    /// whole subtree per child split.
+    fn estimate_leaf_size(leaf: &LeafNode) -> usize {
+        let key_sizes: usize = leaf.keys.iter().map(Self::estimate_key_size).sum();
+        // doc_id JSON: {"String":"..."},  or {"Int":...}, - typically ~40 bytes
+        let doc_id_overhead = leaf.document_ids.len() * 40;
+        // Base overhead: {"keys":[],"document_ids":[],"next_leaf_offset":0}
+        80 + key_sizes + doc_id_overhead
+    }
+
+    /// Estimate serialized size of an internal node (see `estimate_leaf_size`)
+    fn estimate_internal_size(internal: &InternalNode) -> usize {
+        let key_sizes: usize = internal.keys.iter().map(Self::estimate_key_size).sum();
+        // children are skipped in serialization, but offsets are stored
+        80 + key_sizes + internal.children_offsets.len() * 12
     }
 
     /// Estimate serialized size of a key in JSON format
@@ -1062,8 +1064,7 @@ impl BPlusTree {
 
                 // Check if split is needed (by count OR by size for long keys)
                 let needs_split = leaf.keys.len() > MAX_KEYS_PER_NODE
-                    || Self::estimate_node_size(&BTreeNode::Leaf(leaf.clone()))
-                        > NODE_PAGE_SIZE - 200;
+                    || Self::estimate_leaf_size(leaf) > NODE_PAGE_SIZE - 200;
 
                 if needs_split {
                     Ok(Some(Self::split_leaf(leaf)))
@@ -1098,8 +1099,7 @@ impl BPlusTree {
 
                     // Check if this internal node needs to split (by count OR by size)
                     let needs_split = internal.keys.len() > MAX_KEYS_PER_NODE
-                        || Self::estimate_node_size(&BTreeNode::Internal(internal.clone()))
-                            > NODE_PAGE_SIZE - 200;
+                        || Self::estimate_internal_size(internal) > NODE_PAGE_SIZE - 200;
 
                     if needs_split {
                         Ok(Some(Self::split_internal(internal)))
