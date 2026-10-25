@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — B+ tree insert copied nodes on every insert (ironbase-core 0.3.428)
+
+Speed review 2026-10-25, B.
+
+- **Root cause:** the split check (`insert_into_node`) estimated a node's
+  size from a clone wrapped in `BTreeNode`. That cloned the leaf (up to
+  128 keys and ids) on every insert. Worse, `InternalNode.children` holds
+  the child `Box`es, so on every child split it deep-copied the internal
+  node's whole subtree. At root level that copied the entire tree each
+  time a leaf split.
+- **Fix:** `estimate_leaf_size(&LeafNode)` and
+  `estimate_internal_size(&InternalNode)` work on references. The estimate
+  itself is unchanged.
+- **Measured:** 100K String-key inserts take 1.22 s before and 0.135 s
+  after (9x); 400K inserts take 7.7 s before and 0.92 s after. Every
+  index write path benefits: `create_index`, inserts and updates.
+- **Guard:** `perf_btree_insert_vs_btreemap` checks that inserting 100K
+  entries into the B+ tree is at most 6x slower than std `BTreeMap`.
+  Measured ~2.3x now; the old code measured 22.9x and fails the test.
+
 ### Added — Performance regression tests in CI (ironbase-core 0.3.427)
 
 - **New CI job `Performance regression`** (ubuntu, `--release`):

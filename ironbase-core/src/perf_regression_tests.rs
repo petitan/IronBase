@@ -294,3 +294,54 @@ fn perf_posting_list_v4_decode() {
         },
     );
 }
+
+/// The B+ tree inserts index entries at most `MAX_SLOWDOWN` times slower
+/// than std `BTreeMap` takes the same pairs. Measured ~2.5x; while the split
+/// check cloned the leaf on every insert and an internal node's whole subtree
+/// on every child split, it was 20–26x (100K entries).
+#[test]
+fn perf_btree_insert_vs_btreemap() {
+    const MAX_SLOWDOWN: f64 = 6.0;
+    if !release_build() {
+        return;
+    }
+    use crate::index::{BPlusTree, IndexKey};
+    let entries: Vec<(IndexKey, DocumentId)> = (0..100_000i64)
+        .map(|i| {
+            let key = IndexKey::String(format!("k{}", (i * 7919) % 1_000_003));
+            (key, DocumentId::Int(i))
+        })
+        .collect();
+    let mut tree = BPlusTree::new("i".into(), "f".into(), false, false);
+    for (key, doc_id) in entries.iter().cloned() {
+        tree.insert(key, doc_id).unwrap();
+    }
+    let mut stored = tree.get_all_entries();
+    stored.sort();
+    let mut expected = entries.clone();
+    expected.sort();
+    assert!(
+        stored == expected,
+        "the tree must hold exactly the inserted entries"
+    );
+    let btree = best_time(5, || {
+        let mut tree = BPlusTree::new("i".into(), "f".into(), false, false);
+        for (key, doc_id) in entries.iter().cloned() {
+            tree.insert(key, doc_id).unwrap();
+        }
+        black_box(tree);
+    });
+    let reference = best_time(5, || {
+        let mut map = std::collections::BTreeMap::new();
+        for entry in entries.iter().cloned() {
+            map.insert(entry, ());
+        }
+        black_box(map);
+    });
+    let slowdown = btree.as_secs_f64() / reference.as_secs_f64().max(1e-9);
+    eprintln!("BPlusTree::insert: {slowdown:.2}x BTreeMap (tree {btree:?}, map {reference:?})");
+    assert!(
+        slowdown <= MAX_SLOWDOWN,
+        "BPlusTree::insert: {slowdown:.2}x slower than BTreeMap (expected <= {MAX_SLOWDOWN}x)"
+    );
+}
