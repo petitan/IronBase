@@ -993,15 +993,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 /// index files all three under `Null`). Only such an index can stand in for
 /// a scan in an empty-filter sort, distinct or `$group` (audit 2026-10-07 Q1,
 /// Q13, A4). O(entries) leaf walk, no document loads.
+///
+/// The target is the live document count, not the catalog size: a runtime
+/// delete (`write_document_raw` with the tombstone, file or memory storage)
+/// keeps the document's id in the catalog, pointing at the tombstone; only a
+/// reload, compaction or WAL replay drops it. So after one delete the catalog size never
+/// matched and every empty-filter `$group`, distinct and index sort fell
+/// back to a scan (speed review 2026-10-25, F).
 pub(crate) fn index_covers_every_doc(
     index: &crate::index::BPlusTree,
-    catalog: &std::collections::HashMap<crate::document::DocumentId, u64>,
+    meta: &crate::storage::CollectionMeta,
 ) -> bool {
     !index.metadata.multikey
         && !index.metadata.case_insensitive
         && !index.metadata.is_compound()
-        && index.count_range_validated(&IndexKey::Null, &IndexKey::MaxKey, false, true, catalog)
-            == catalog.len()
+        && index.count_range_validated(
+            &IndexKey::Null,
+            &IndexKey::MaxKey,
+            false,
+            true,
+            &meta.document_catalog,
+        ) as u64
+            == meta.live_document_count
 }
 
 /// Whether every entry of the index lies in one key-type bucket in which the
@@ -1010,10 +1023,12 @@ pub(crate) fn index_covers_every_doc(
 /// orders every Int before every Float (audit 2026-10-07 Q1).
 pub(crate) fn index_keys_single_type(
     index: &crate::index::BPlusTree,
-    catalog: &std::collections::HashMap<crate::document::DocumentId, u64>,
+    meta: &crate::storage::CollectionMeta,
 ) -> bool {
     use crate::index::OrderedFloat;
-    let total = catalog.len();
+    // Live documents, as in `index_covers_every_doc`
+    let total = meta.live_document_count as usize;
+    let catalog = &meta.document_catalog;
     let buckets = [
         (IndexKey::Bool(false), IndexKey::Bool(true), true),
         (IndexKey::Int(i64::MIN), IndexKey::Int(i64::MAX), true),
@@ -1059,7 +1074,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .is_some_and(|index| {
                 self.query_cache
                     .fact(&self.name, &index_fact_key("covers", index), || {
-                        index_covers_every_doc(index, &meta.document_catalog)
+                        index_covers_every_doc(index, meta)
                     })
             })
     }
