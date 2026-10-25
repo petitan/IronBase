@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Speed benchmark measures the indexed path, not the query cache (ironbase-core 0.3.431)
+
+Speed review 2026-10-25, D.
+
+- **Root cause:** `speed_benchmark_full_suite` ran each query twice: once
+  as a collection scan, then again after creating an index. The scan
+  cached the result: the query cache holds up to
+  `QUERY_CACHE_MAX_RESULT_IDS = 10_000` ids, and an index build changes no
+  data, so nothing invalidated it. The "indexed" `score` and
+  `profile.level` timings (10,000 results each, 0.1 ms to collect ids,
+  "7.9x / 17x faster") therefore measured a cache hit. Only `category`
+  (20,000 results, too many to cache) measured the index.
+- **Fix:** before the indexed queries the benchmark sets a field on one
+  document and unsets it again, which invalidates the cache. It does not
+  insert and delete a document, because a deleted document turns off the
+  index-based `$group` count measured later (18 ms → 1 s; a separate item).
+- **Measured** (100K documents, release build): the indexed range and
+  nested queries take ~120 ms for 10K results (~6x a scan). The equality
+  query takes ~200–290 ms for 20K results (~2–4x).
+- **CLAUDE.md:** the MemoryStorage speed table now lists measured values
+  (~14K inserts/s, ~120 ms per 10K indexed results, ~0.3 s per `$group`
+  over 100K documents). The old figures (~200K inserts/s, ~500K indexed
+  finds/s) did not reproduce.
+
 ### Changed — An indexed find reads each document once (ironbase-core 0.3.430)
 
 Speed review 2026-10-25, C.

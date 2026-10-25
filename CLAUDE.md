@@ -916,10 +916,18 @@ Lock-free: append-only → `data_end_offset`-ig immutable
 | **Batch** | ✅ | 20-50K (insert) | Max N insert (update/delete: flush + Safe út) |
 | **Unsafe** | ❌ | 50-100K | All |
 
+Mért értékek (`speed_benchmark_full_suite`, 100K doc, release, MemoryStorage, 4 mag, 2026-10-25, v0.3.431):
+
 | Művelet | MemoryStorage |
 |---------|---------------|
-| INSERT batch | ~200K/sec |
-| FIND indexed | ~500K/sec |
-| AGGREGATION | ~100K docs/sec |
+| INSERT batch (`insert_many`, 1000/köteg) | ~14K doc/s |
+| FIND indexed, tartomány / nested (10K találat) | ~120 ms (~80K doc/s, a dokumentumok beolvasásával) |
+| FIND indexed, egyenlőség (20K találat, 5 különböző érték) | ~200–290 ms |
+| FIND collection scan (100K doc) | ~0,5–0,8 s |
+| `create_index` (100K doc) | ~0,7–0,8 s (bármely kardinalitás) |
+| AGGREGATION `$group` (100K doc) | ~0,3 s (~300K doc/s); index-alapú count ~20 ms |
+| `update_many` / `delete_many` (10K doc) | ~2,7 s |
+
+⚠️ A korábbi táblázat (INSERT ~200K/s, FIND indexed ~500K/s) nem volt reprodukálható; a benchmark indexes számait a query cache torzította (D, v0.3.431).
 
 Benchmark: `cargo test -p ironbase-core --release speed_benchmark_full_suite -- --nocapture --ignored`
