@@ -935,7 +935,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // ====================================================================
         // STREAMING: Collect IDs first (small), then load docs one by one
         // This avoids bulk-loading all documents into memory at once
-        let doc_ids = self.collect_doc_ids(query_json)?;
+        // The documents an index plan verifies are the result (C)
+        let mut verified = VerifiedDocs::new(None);
+        let (doc_ids, _) = self.collect_doc_ids_with_options_into(
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            None,
+            true,
+            0,
+            None,
+            None,
+            None,
+            Some(&mut verified),
+        )?;
+        if let Some(docs) = verified.into_docs(doc_ids.len()) {
+            return Ok(docs);
+        }
         let mut results = Vec::new();
         results.try_reserve(doc_ids.len()).map_err(|e| {
             IronBaseError::InvalidQuery(format!(
@@ -1009,7 +1027,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Phase 2: Collect document IDs (may use index for sorting)
         // Pass original skip/limit for index-based sort optimization (early termination)
-        let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
+        //
+        // The documents an index plan verifies are kept for Phase 3 instead
+        // of read again (C), when that holds no more than Phase 3 would: no
+        // sort (the top-k heap and the implicit cap stream), and full
+        // documents only up to the response cap, or with no projection
+        // (which Phase 3 applies while loading).
+        let mut verified = (ctx.sort_spec.is_none()
+            && (ctx.max_response_bytes.is_some() || ctx.projection.is_none()))
+        .then(|| VerifiedDocs::new(ctx.max_response_bytes));
+        let (doc_ids, index_sorted) = self.collect_doc_ids_with_options_into(
             query_json,
             None,
             ctx.sort_field_ref(),
@@ -1021,7 +1048,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.original_limit,       // For index-based sort: enables early termination
             ctx.cancel_flag.as_ref(), // For cooperative cancellation
             ctx.deadline,             // For cooperative timeout
+            verified.as_mut(),
         )?;
+        let verified_docs = verified.and_then(|verified| verified.into_docs(doc_ids.len()));
 
         // Phase 3: Document loading with OOM protection
         let doc_count = doc_ids.len();
@@ -1108,22 +1137,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // documents; parsing and the rest run without the lock.
         const LOAD_LOCK_CHUNK: usize = 1000;
         let mut loaded = 0;
-        for chunk in doc_ids.chunks(LOAD_LOCK_CHUNK) {
-            let raw_docs: Vec<Vec<u8>> = {
-                let storage = self.storage.read();
-                let meta = storage
-                    .get_collection_meta(&self.name)
-                    .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-                let mut raw = Vec::with_capacity(chunk.len());
-                for doc_id in chunk {
-                    if let Some(&offset) = meta.document_catalog.get(doc_id) {
-                        raw.push(storage.read_data_at(offset)?);
-                    }
-                }
-                raw
-            };
-
-            for doc_bytes in raw_docs {
+        {
+            // One document of the result, in result order
+            let mut take_doc = |doc: Value| -> Result<()> {
                 // Check for cancellation/timeout every 100 documents
                 if loaded % 100 == 0 {
                     if let Some(ref flag) = cancel_flag {
@@ -1146,41 +1162,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     }
                 }
 
-                let doc: Value = serde_json::from_slice(&doc_bytes)?;
-                // Check tombstone
-                let doc_opt = if doc
-                    .get("_tombstone")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    None
+                // Apply early projection if safe (reduces memory, enables accurate size check)
+                let doc = if early_project {
+                    ctx.apply_early_projection(doc)?
                 } else {
-                    Some(doc)
+                    doc
                 };
 
-                if let Some(doc) = doc_opt {
-                    // Apply early projection if safe (reduces memory, enables accurate size check)
-                    let doc = if early_project {
-                        ctx.apply_early_projection(doc)?
-                    } else {
-                        doc
-                    };
-
-                    if let Some(ref mut heap) = topk_heap {
-                        // Top-K path: the heap retains only k = skip + limit docs, so
-                        // memory stays bounded no matter how many match. The response-
-                        // size guard is applied to the final ≤limit result after the
-                        // scan (Phase 4); the heap's own size is checked here.
-                        heap.push(doc);
-                        check_topk_bytes(heap, topk_byte_limit)?;
-                    } else {
-                        // Track response size if limit is set
-                        // NOTE: With early projection, this checks the PROJECTED size (accurate)
-                        // Without early projection, this checks the FULL document size
-                        if let Some(max_bytes) = max_response_bytes {
-                            let doc_size = crate::find_options::estimate_json_size(&doc);
-                            if total_response_bytes.saturating_add(doc_size) > max_bytes {
-                                return Err(IronBaseError::InvalidQuery(format!(
+                if let Some(ref mut heap) = topk_heap {
+                    // Top-K path: the heap retains only k = skip + limit docs, so
+                    // memory stays bounded no matter how many match. The response-
+                    // size guard is applied to the final ≤limit result after the
+                    // scan (Phase 4); the heap's own size is checked here.
+                    heap.push(doc);
+                    check_topk_bytes(heap, topk_byte_limit)?;
+                } else {
+                    // Track response size if limit is set
+                    // NOTE: With early projection, this checks the PROJECTED size (accurate)
+                    // Without early projection, this checks the FULL document size
+                    if let Some(max_bytes) = max_response_bytes {
+                        let doc_size = crate::find_options::estimate_json_size(&doc);
+                        if total_response_bytes.saturating_add(doc_size) > max_bytes {
+                            return Err(IronBaseError::InvalidQuery(format!(
                                 "Response size limit exceeded: loaded {} documents ({} bytes), \
                                 next document would exceed {} byte limit. \
                                 Solutions: 1) Add 'limit' to reduce results, \
@@ -1188,22 +1191,63 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 3) Use find_streaming() for large results.",
                                 loaded, total_response_bytes, max_bytes
                             )));
-                            }
-                            total_response_bytes += doc_size;
                         }
-
-                        docs.push(doc);
+                        total_response_bytes += doc_size;
                     }
-                    loaded += 1;
-                    // Progress logging every 10,000 documents
-                    if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
-                        log_debug!(
-                            "find on '{}': loaded {}/{} documents ({} bytes)",
-                            self.name,
-                            loaded,
-                            doc_count,
-                            total_response_bytes
-                        );
+
+                    docs.push(doc);
+                }
+                loaded += 1;
+                // Progress logging every 10,000 documents
+                if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
+                    log_debug!(
+                        "find on '{}': loaded {}/{} documents ({} bytes)",
+                        self.name,
+                        loaded,
+                        doc_count,
+                        total_response_bytes
+                    );
+                }
+                Ok(())
+            };
+            if let Some(verified_docs) = verified_docs {
+                for doc in verified_docs {
+                    take_doc(doc)?;
+                }
+            } else {
+                for chunk in doc_ids.chunks(LOAD_LOCK_CHUNK) {
+                    let raw_docs: Vec<Vec<u8>> = {
+                        let storage = self.storage.read();
+                        let meta = storage
+                            .get_collection_meta(&self.name)
+                            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+                        let mut raw = Vec::with_capacity(chunk.len());
+                        for doc_id in chunk {
+                            if let Some(&offset) = meta.document_catalog.get(doc_id) {
+                                #[cfg(test)]
+                                DOC_READS.with(|reads| reads.set(reads.get() + 1));
+                                raw.push(storage.read_data_at(offset)?);
+                            }
+                        }
+                        raw
+                    };
+
+                    for doc_bytes in raw_docs {
+                        let doc: Value = serde_json::from_slice(&doc_bytes)?;
+                        // Check tombstone
+                        let doc_opt = if doc
+                            .get("_tombstone")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            None
+                        } else {
+                            Some(doc)
+                        };
+
+                        if let Some(doc) = doc_opt {
+                            take_doc(doc)?;
+                        }
                     }
                 }
             }
@@ -2383,6 +2427,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
         if let Some(&offset) = meta.document_catalog.get(doc_id) {
             log_trace!("Found doc_id {:?} at offset {}", doc_id, offset);
+            #[cfg(test)]
+            DOC_READS.with(|reads| reads.set(reads.get() + 1));
             // Use read_data_at() - positioned read without changing file position
             let doc_bytes = storage.read_data_at(offset)?;
             let doc = if skip.is_empty() {
@@ -2792,6 +2838,39 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         cancel_flag: Option<&Arc<AtomicBool>>, // For cooperative cancellation
         deadline: Option<std::time::Instant>, // For cooperative timeout
     ) -> Result<(Vec<DocumentId>, bool)> {
+        self.collect_doc_ids_with_options_into(
+            query_json,
+            hint,
+            sort_field,
+            sort_desc,
+            skip,
+            limit,
+            use_cache,
+            original_skip,
+            original_limit,
+            cancel_flag,
+            deadline,
+            None,
+        )
+    }
+
+    /// `collect_doc_ids_with_options` that also keeps the documents an index
+    /// plan verified in `verified` (see [`VerifiedDocs`])
+    fn collect_doc_ids_with_options_into(
+        &self,
+        query_json: &Value,
+        hint: Option<&str>,
+        sort_field: Option<&str>,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+        use_cache: bool,
+        original_skip: usize,
+        original_limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
+        mut verified: Option<&mut VerifiedDocs>,
+    ) -> Result<(Vec<DocumentId>, bool)> {
         // MongoDB compatibility: limit(0) means "no limit" — normalize once so
         // no downstream path (regex pushdown, $or union) reads it as "zero
         // results" (audit 2026-10-07 Q8, Q9).
@@ -2837,7 +2916,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some((_, plan)) =
                         QueryPlanner::analyze_query_with_fields(&merged_query, &index_fields)
                     {
-                        return self.collect_doc_ids_from_plan(
+                        return self.collect_doc_ids_from_plan_into(
                             &parsed_query,
                             plan,
                             sort_field,
@@ -2846,6 +2925,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             limit,
                             cancel_flag,
                             deadline,
+                            verified.as_deref_mut(),
                         );
                     }
                 }
@@ -2880,7 +2960,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
-            self.collect_doc_ids_from_plan(
+            self.collect_doc_ids_from_plan_into(
                 &parsed_query,
                 plan,
                 sort_field,
@@ -2889,6 +2969,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 limit,
                 cancel_flag,
                 deadline,
+                verified.as_deref_mut(),
             )?
         } else if let Some(sf) = sort_field {
             // 🚀 FIX #22: Use index for sort-only queries (no filter)
@@ -2969,6 +3050,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         limit: Option<usize>,
         cancel_flag: Option<&Arc<AtomicBool>>,
         deadline: Option<std::time::Instant>,
+    ) -> Result<(Vec<DocumentId>, bool)> {
+        self.collect_doc_ids_from_plan_into(
+            parsed_query,
+            plan,
+            sort_field,
+            sort_desc,
+            skip,
+            limit,
+            cancel_flag,
+            deadline,
+            None,
+        )
+    }
+
+    /// `collect_doc_ids_from_plan` that also keeps the matched documents in
+    /// `verified`
+    fn collect_doc_ids_from_plan_into(
+        &self,
+        parsed_query: &Query,
+        plan: QueryPlan,
+        sort_field: Option<&str>,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
+        mut verified: Option<&mut VerifiedDocs>,
     ) -> Result<(Vec<DocumentId>, bool)> {
         // Check deadline/cancellation at start
         if let Some(flag) = cancel_flag {
@@ -3101,7 +3209,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let document = Document::from_value_owned(doc)?;
+                // Kept documents are cloned for matching; the rest are moved
+                let (document, kept) = match verified {
+                    Some(_) => (Document::from_value(&doc)?, Some(doc)),
+                    None => (Document::from_value_owned(doc)?, None),
+                };
 
                 if parsed_query.matches(&document)? {
                     if skipped < match_skip {
@@ -3109,6 +3221,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         continue;
                     }
 
+                    if let (Some(verified), Some(doc)) = (verified.as_deref_mut(), kept) {
+                        verified.push(doc);
+                    }
                     results.push(doc_id.clone());
                     // MongoDB compatibility: limit(0) means "no limit"
                     if let Some(limit_count) = match_limit {
@@ -3615,6 +3730,66 @@ const UNSKIPPABLE_FIELDS: [&str; 3] = ["_id", "_collection", "_tombstone"];
 /// building their values (hybrid review T2: a chunk's embedding is most of
 /// its bytes, and parsing it into a `Value` cost ~50 µs per document that
 /// nothing used). `_id`, `_collection` and `_tombstone` are always kept.
+#[cfg(test)]
+thread_local! {
+    /// Documents read from storage by id on this thread (`read_document_by_id`
+    /// and the find load): the work count the performance regression tests
+    /// bound. Test builds only.
+    pub(crate) static DOC_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The documents an index plan's verification read and matched, in result
+/// order, kept so the find that asked for them does not read and parse each
+/// one again (speed review 2026-10-25, C). Bounded by `max_bytes` (the
+/// find's response cap): past it they are dropped and the find reads by id
+/// as before, so its memory guarantees are unchanged.
+struct VerifiedDocs {
+    docs: Vec<Value>,
+    bytes: usize,
+    max_bytes: Option<usize>,
+    dropped: bool,
+}
+
+impl VerifiedDocs {
+    fn new(max_bytes: Option<usize>) -> Self {
+        Self {
+            docs: Vec::new(),
+            bytes: 0,
+            max_bytes,
+            dropped: false,
+        }
+    }
+
+    fn push(&mut self, doc: Value) {
+        if self.dropped {
+            return;
+        }
+        if let Some(max_bytes) = self.max_bytes {
+            self.bytes = self
+                .bytes
+                .saturating_add(crate::find_options::estimate_json_size(&doc));
+            if self.bytes > max_bytes {
+                self.dropped = true;
+                self.docs = Vec::new();
+                return;
+            }
+        }
+        // Out of memory: drop them, and the caller's own reads report it
+        if self.docs.try_reserve(1).is_err() {
+            self.dropped = true;
+            self.docs = Vec::new();
+            return;
+        }
+        self.docs.push(doc);
+    }
+
+    /// The documents of a result of `count` ids, if every one was kept
+    /// (a cached or non-index result fills none)
+    fn into_docs(self, count: usize) -> Option<Vec<Value>> {
+        (!self.dropped && self.docs.len() == count).then_some(self.docs)
+    }
+}
+
 pub(crate) fn parse_document_skipping(bytes: &[u8], skip: &HashSet<String>) -> Result<Value> {
     use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
