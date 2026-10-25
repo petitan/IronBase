@@ -916,14 +916,14 @@ Lock-free: append-only → `data_end_offset`-ig immutable
 | **Batch** | ✅ | 20-50K (insert) | Max N insert (update/delete: flush + Safe út) |
 | **Unsafe** | ❌ | 50-100K | All |
 
-Mért értékek (`speed_benchmark_full_suite`, 100K doc, release, MemoryStorage, 4 mag, 2026-10-25, v0.3.431):
+Mért értékek (`speed_benchmark_full_suite`, 100K doc, release, MemoryStorage, 4 mag, 2026-10-25, v0.3.433):
 
 | Művelet | MemoryStorage |
 |---------|---------------|
 | INSERT batch (`insert_many`, 1000/köteg) | ~14K doc/s |
-| FIND indexed, tartomány / nested (10K találat) | ~120 ms (~80K doc/s, a dokumentumok beolvasásával) |
-| FIND indexed, egyenlőség (20K találat, 5 különböző érték) | ~200–290 ms |
-| FIND collection scan (100K doc) | ~0,5–0,8 s |
+| FIND indexed, tartomány / nested (10K találat) | ~80 ms (~120K doc/s, a dokumentumok beolvasásával) |
+| FIND indexed, egyenlőség (20K találat, 5 különböző érték) | ~160 ms |
+| FIND collection scan (100K doc) | ~0,35–0,45 s |
 | `create_index` (100K doc) | ~0,7–0,8 s (bármely kardinalitás) |
 | AGGREGATION `$group` (100K doc) | ~0,3 s (~300K doc/s); index-alapú count ~20 ms |
 | `update_many` / `delete_many` (10K doc) | ~2,7 s |

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Converting a document for query matching moves its fields (ironbase-core 0.3.433)
+
+Speed review 2026-10-25, E.
+
+- **Root cause:** every document a query checks goes through
+  `Document::from_value_owned`. That function used the derived
+  `Deserialize`, whose `#[serde(flatten)]` field buffers every value
+  through serde's intermediate representation: two deep copies per
+  document. Per 20K documents this took ~70 ms, against ~38 ms for parsing
+  the JSON and ~2.5 ms for `matches` itself.
+- **Fix:** an object with an `_id` moves its entries into `fields` and
+  deserializes only the id. Anything else (not an object, or no `_id`)
+  still takes the derived path and fails exactly as before.
+- **Equivalence:** `from_value_owned_matches_derived_path` compares the two
+  paths on integer, string, hex-string and edge-case ids, nested values,
+  unicode and empty keys, and every invalid input. They give the same
+  document or both fail.
+- **Measured** (100K documents, release): collection scans take
+  0.34–0.46 s instead of ~0.6–0.8 s; indexed range and nested finds
+  (10K results) ~82 ms instead of ~120 ms; the equality find (20K results)
+  ~160 ms instead of ~200–290 ms; `delete_one` ~0.3 s instead of ~0.6 s.
+- **Guard:** `perf_document_from_value_skips_flatten` checks that the
+  conversion is at least 2.5x faster than the derived path, with the
+  input clone timed and subtracted from both sides. Measured 3.7–4.5x.
+
 ### Fixed — Index-based `$group`, distinct and sort no longer turn off after a delete (ironbase-core 0.3.432)
 
 Speed review 2026-10-25, F.

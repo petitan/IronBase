@@ -100,7 +100,28 @@ impl Document {
     /// 🚀 ZERO-COPY: Create Document from owned serde_json::Value
     /// Takes ownership of the Value, avoiding clone when caller has an owned Value.
     /// This is the most efficient way to create a Document from JSON.
+    ///
+    /// An object with an `_id` moves its entries into `fields` and
+    /// deserializes only the id. The derived `#[serde(flatten)]` path buffered
+    /// every value through serde's intermediate representation (two deep
+    /// copies per document, ~3.5 µs of a ~5.5 µs verification; speed review
+    /// 2026-10-25, E). The result is the same; anything else (not an object,
+    /// no `_id`) still takes the derived path and fails as before.
     pub fn from_value_owned(value: Value) -> serde_json::Result<Self> {
+        let map = match value {
+            Value::Object(map) if map.contains_key("_id") => map,
+            other => return Self::from_value_derived(other),
+        };
+        let id = DocumentId::deserialize(&map["_id"])?;
+        let mut fields: HashMap<String, Value> = HashMap::with_capacity(map.len());
+        fields.extend(map);
+        // As the derived path: `_id` in fields too, for query matching
+        fields.insert("_id".to_string(), serde_json::to_value(&id)?);
+        Ok(Document { id, fields })
+    }
+
+    /// `from_value_owned` through the derived `Deserialize` (`flatten`)
+    fn from_value_derived(value: Value) -> serde_json::Result<Self> {
         let mut doc: Self = serde_json::from_value(value)?;
 
         // WORKAROUND: same as from_json - _id needs to be in fields for query matching
@@ -503,6 +524,41 @@ impl From<Document> for Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Speed review 2026-10-25, E: `from_value_owned` builds the same
+    /// document as the derived `flatten` path, and fails where it fails
+    #[test]
+    fn from_value_owned_matches_derived_path() {
+        let cases = vec![
+            json!({"_id": 1, "name": "a", "n": 2.5, "nested": {"x": [1, {"y": null}]}}),
+            json!({"_id": -7, "big": 18446744073709551615u64, "neg": -3, "f": 1e300}),
+            json!({"_id": "abc", "empty": {}, "list": [], "flag": true}),
+            json!({"_id": "507f1f77bcf86cd799439011", "ő": "ű", "": ""}),
+            json!({"_id": 0}),
+            json!({"name": "no id"}),
+            json!({"_id": 1.5, "x": 1}),
+            json!({"_id": null}),
+            json!({"_id": [1]}),
+            json!({"_id": true}),
+            json!({"_id": 9223372036854775808u64}),
+            json!({"_id": {"$oid": "x"}}),
+            json!([1, 2]),
+            json!("text"),
+            json!(null),
+        ];
+        for value in cases {
+            let derived = Document::from_value_derived(value.clone());
+            let owned = Document::from_value_owned(value.clone());
+            match (derived, owned) {
+                (Ok(d), Ok(o)) => {
+                    assert_eq!(d.id, o.id, "{value}");
+                    assert_eq!(d.fields, o.fields, "{value}");
+                }
+                (Err(_), Err(_)) => {}
+                (d, o) => panic!("{value}: derived {:?}, owned {:?}", d.is_ok(), o.is_ok()),
+            }
+        }
+    }
 
     #[test]
     fn test_document_id_int() {
