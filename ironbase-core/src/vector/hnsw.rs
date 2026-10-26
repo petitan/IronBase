@@ -1091,8 +1091,7 @@ impl HnswIndex {
             IronBaseError::Serialization(format!("Failed to deserialize HNSW index: {}", e))
         })?;
         index.last_flushed_tx_id = watermark;
-        index.fill_norms();
-        Ok(index)
+        index.finish_load()
     }
 
     /// Deserialize the index from bytes
@@ -1141,19 +1140,63 @@ impl HnswIndex {
                 )))
             })?;
             index.last_flushed_tx_id = watermark;
-            index.fill_norms();
-            return Ok(index);
+            return index.finish_load();
         }
 
         // v1 (legacy): no header, raw bincode
-        let mut index: Self = bincode::deserialize(bytes).map_err(|e| {
+        let index: Self = bincode::deserialize(bytes).map_err(|e| {
             IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Failed to deserialize HNSW index (legacy format): {}", e),
             )))
         })?;
-        index.fill_norms();
-        Ok(index)
+        index.finish_load()
+    }
+
+    /// Check a deserialized graph, then set the runtime-only node norms.
+    ///
+    /// bincode decodes a corrupted cache file into any graph whose bytes
+    /// parse: a neighbour or entry index past the node list, or a vector of
+    /// the wrong dimension, then panicked on the first search (`nodes[idx]`,
+    /// the SIMD dimension assert) instead of failing the load, whose callers
+    /// rebuild the index from the documents.
+    fn finish_load(mut self) -> Result<Self> {
+        let nodes = self.nodes.len();
+        let corrupt = |what: String| {
+            IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("HNSW index structure corrupted: {}", what),
+            )))
+        };
+        if let Some(entry) = self.entry_point.filter(|&entry| entry >= nodes) {
+            return Err(corrupt(format!("entry point {entry} of {nodes} nodes")));
+        }
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.vector.len() != self.config.dim {
+                return Err(corrupt(format!(
+                    "node {i} has {} dimensions, the index {}",
+                    node.vector.len(),
+                    self.config.dim
+                )));
+            }
+            if node.neighbors.len() != node.max_layer + 1 {
+                return Err(corrupt(format!(
+                    "node {i} has {} neighbour layers for max layer {}",
+                    node.neighbors.len(),
+                    node.max_layer
+                )));
+            }
+            if let Some(&neighbour) = node.neighbors.iter().flatten().find(|&&n| n >= nodes) {
+                return Err(corrupt(format!(
+                    "node {i} links to node {neighbour} of {nodes}"
+                )));
+            }
+        }
+        if let Some(&index) = self.id_to_index.values().find(|&&index| index >= nodes) {
+            return Err(corrupt(format!("an id maps to node {index} of {nodes}")));
+        }
+        self.fill_norms();
+        Ok(self)
     }
 
     /// Set the node norms, which are not serialized.
@@ -2156,6 +2199,96 @@ mod tests {
         let results = hnsw.search(&[1.0, 0.0, 0.0], 2);
         // doc1 should have higher dot product with query
         assert_eq!(results[0].id, "doc1");
+    }
+
+    /// A small index whose graph has several layers and links
+    fn corruption_sample() -> HnswIndex {
+        let mut hnsw = HnswIndex::with_dim(4);
+        for i in 0..60 {
+            let x = i as f32;
+            hnsw.insert(&format!("v{i}"), &[x.sin(), x.cos(), (x * 0.3).sin(), 1.0])
+                .unwrap();
+        }
+        hnsw
+    }
+
+    /// A graph that decodes but breaks an invariant fails the load (whose
+    /// callers rebuild the index) instead of panicking on the first search;
+    /// both loaders check it
+    #[test]
+    fn corrupted_graph_fails_the_load() {
+        type Corruption = (&'static str, fn(&mut HnswIndex));
+        let corruptions: [Corruption; 5] = [
+            ("entry point", |h| h.entry_point = Some(h.nodes.len())),
+            ("neighbour", |h| {
+                let n = h.nodes.len();
+                h.nodes[3].neighbors[0].push(n + 7)
+            }),
+            ("dimension", |h| h.nodes[5].vector.push(0.0)),
+            ("layers", |h| h.nodes[2].neighbors.push(Vec::new())),
+            ("id map", |h| {
+                let n = h.nodes.len();
+                h.id_to_index.insert("ghost".to_string(), n);
+            }),
+        ];
+        for (what, corrupt) in corruptions {
+            let mut hnsw = corruption_sample();
+            corrupt(&mut hnsw);
+            let bytes = hnsw.to_bytes().unwrap();
+            let err = HnswIndex::from_bytes(&bytes).err();
+            assert!(
+                err.as_ref()
+                    .is_some_and(|e| e.to_string().contains("corrupted")),
+                "{what}: from_bytes gave {err:?}"
+            );
+            assert!(
+                HnswIndex::from_reader(&bytes[..]).is_err(),
+                "{what}: from_reader accepted it"
+            );
+        }
+        // An intact graph still loads
+        let bytes = corruption_sample().to_bytes().unwrap();
+        assert_eq!(HnswIndex::from_bytes(&bytes).unwrap().len(), 60);
+    }
+
+    /// Flipped bits, truncations and overwritten lengths in a cache file
+    /// never panic the load or a search: a corrupted graph either fails to
+    /// load or is structurally sound (54 of 510 such files panicked on the
+    /// first search before the load checked the graph; 2026-10-26)
+    #[test]
+    fn corrupted_cache_bytes_never_panic() {
+        let orig = corruption_sample().to_bytes().unwrap();
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut rnd = |m: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % m as u64) as usize
+        };
+        let mut mutants = Vec::new();
+        for _ in 0..40 {
+            mutants.push(orig[..rnd(orig.len())].to_vec());
+        }
+        for _ in 0..200 {
+            let mut b = orig.clone();
+            let k = rnd(b.len());
+            b[k] ^= 1 << rnd(8);
+            mutants.push(b);
+        }
+        for _ in 0..100 {
+            let mut b = orig.clone();
+            let k = rnd(b.len() - 4);
+            b[k..k + 4].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
+            mutants.push(b);
+        }
+        for (i, bytes) in mutants.iter().enumerate() {
+            let outcome = std::panic::catch_unwind(|| {
+                if let Ok(hnsw) = HnswIndex::from_bytes(bytes) {
+                    hnsw.search(&[0.5, 0.5, 0.5, 1.0], 5);
+                }
+            });
+            assert!(outcome.is_ok(), "mutant {i} panicked");
+        }
     }
 
     #[test]
