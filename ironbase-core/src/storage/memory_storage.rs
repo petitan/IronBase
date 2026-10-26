@@ -139,8 +139,14 @@ impl Storage for MemoryStorage {
         self.next_offset += 1;
 
         // Store in catalog for compatibility
-        meta.document_catalog.insert(doc_id.clone(), offset);
-        meta.document_order.retain(|id| id != &doc_id);
+        // document_order holds the catalog's ids: only a rewrite is in it
+        if meta
+            .document_catalog
+            .insert(doc_id.clone(), offset)
+            .is_some()
+        {
+            meta.document_order.retain(|id| id != &doc_id);
+        }
         meta.document_order.push(doc_id);
 
         Ok(offset)
@@ -350,8 +356,14 @@ impl RawStorage for MemoryStorage {
 
         // Update catalog in metadata
         if let Some(meta) = self.metadata.get_mut(collection) {
-            meta.document_catalog.insert(doc_id.clone(), offset);
-            meta.document_order.retain(|id| id != doc_id);
+            // document_order holds the catalog's ids: only a rewrite is in it
+            if meta
+                .document_catalog
+                .insert(doc_id.clone(), offset)
+                .is_some()
+            {
+                meta.document_order.retain(|id| id != doc_id);
+            }
             meta.document_order.push(doc_id.clone());
             meta.document_count += 1;
         }

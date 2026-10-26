@@ -506,8 +506,14 @@ impl StorageEngine {
             .get_collection_meta_mut(collection)
             .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
-        meta.document_catalog.insert(doc_id.clone(), write_offset);
-        meta.document_order.retain(|id| id != doc_id);
+        // document_order holds the catalog's ids: only a rewrite is in it
+        if meta
+            .document_catalog
+            .insert(doc_id.clone(), write_offset)
+            .is_some()
+        {
+            meta.document_order.retain(|id| id != doc_id);
+        }
         meta.document_order.push(doc_id.clone());
         meta.document_count += 1;
 
@@ -594,7 +600,10 @@ impl StorageEngine {
 
         // Update catalog with new offset
         meta.document_catalog.insert(doc_id.clone(), write_offset);
-        meta.document_order.retain(|id| id != doc_id);
+        // document_order holds the catalog's ids: only a rewrite is in it
+        if is_update {
+            meta.document_order.retain(|id| id != doc_id);
+        }
         meta.document_order.push(doc_id.clone());
 
         // Update document_count (total writes)

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Inserting a document no longer scans the collection's write order (ironbase-core 0.3.434)
+
+Speed review 2026-10-26, insert_many.
+
+- **Root cause:** every document write ran
+  `document_order.retain(|id| id != doc_id)` before appending the id, a
+  scan of every id in the collection, even for a new id that cannot be in
+  it. Inserting n documents was O(n²): batches of 1000 into MemoryStorage
+  went from ~5 ms (empty) to ~90 ms (100K documents).
+- **Fix:** `document_order` holds exactly the catalog's ids (restored on
+  load, after compaction and catalog rebuild), so only a rewrite of a known
+  id is removed first; a new id is appended. Applied to both
+  `MemoryStorage` writes, `StorageEngine::write_document` /
+  `write_document_full` and `rebuild_catalog_from_file`.
+  WAL metadata recovery keeps the scan: its base snapshot may predate
+  `document_order`.
+- **Effect:** 1000 inserts into 100K documents cost ~2x an empty
+  collection instead of ~250x (`perf_insert_into_large_collection`), and
+  100 batches of 1000 take ~4.6 ms each instead of up to ~90 ms.
+- A rewrite (update) still scans the order once; `update_many` stays
+  O(matched × n) until that is addressed separately.
+
 ### Changed — Converting a document for query matching moves its fields (ironbase-core 0.3.433)
 
 Speed review 2026-10-25, E.
