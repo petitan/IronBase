@@ -374,6 +374,33 @@ impl RawStorage for MemoryStorage {
         Ok(offset)
     }
 
+    fn write_documents_raw(
+        &mut self,
+        collection: &str,
+        docs: &[(&DocumentId, &[u8])],
+    ) -> Result<()> {
+        let mut written = Vec::with_capacity(docs.len());
+        for (doc_id, data) in docs {
+            let offset = self.raw_data.len() as u64;
+            self.raw_data
+                .extend_from_slice(&(data.len() as u32).to_le_bytes());
+            self.raw_data.extend_from_slice(data);
+            if let Some(meta) = self.metadata.get_mut(collection) {
+                let rewrite = meta
+                    .document_catalog
+                    .insert((*doc_id).clone(), offset)
+                    .is_some();
+                meta.document_count += 1;
+                written.push(((*doc_id).clone(), rewrite));
+            }
+        }
+        if let Some(meta) = self.metadata.get_mut(collection) {
+            meta.append_to_document_order(&written);
+        }
+        self.next_offset = self.raw_data.len() as u64;
+        Ok(())
+    }
+
     /// Read document bytes at specific offset
     fn read_document_at(&mut self, _collection: &str, offset: u64) -> Result<Vec<u8>> {
         self.read_data_at(offset)

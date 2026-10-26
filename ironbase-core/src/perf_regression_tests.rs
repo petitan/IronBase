@@ -686,3 +686,90 @@ fn perf_insert_into_large_collection() {
         "1000 inserts into 100K documents: {slowdown:.2}x slower than into an empty collection (expected <= {MAX_SLOWDOWN}x)"
     );
 }
+
+/// `update_many` / `delete_many` write each chunk of documents in one
+/// storage batch: a rewritten id leaves `document_order` in one pass per
+/// chunk, not one per document. Measured ~1.6x; while every write scanned
+/// the whole order for its id, updating or deleting 1000 documents among
+/// 100K was ~10x slower than among none (speed review 2026-10-26).
+#[test]
+fn perf_update_and_delete_many_in_large_collection() {
+    const MAX_SLOWDOWN: f64 = 3.0;
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use serde_json::json;
+    let doc = |g: i64| std::collections::HashMap::from([("g".to_string(), json!(g))]);
+    let order = |db: &DatabaseCore<MemoryStorage>| {
+        let coll = db.get_collection("c").unwrap();
+        let storage = coll.storage.read();
+        let meta = storage.get_collection_meta("c").unwrap();
+        (meta.document_order.clone(), meta.live_document_count)
+    };
+
+    // A rewrite moves the id to the end, in write order; a deleted id
+    // stays in the order (its tombstone is catalogued)
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let ids = db
+        .insert_many("c", (0..10).map(|i| doc(i % 2)).collect())
+        .unwrap();
+    let pick =
+        |r: i64| -> Vec<DocumentId> { ids.iter().skip(r as usize).step_by(2).cloned().collect() };
+    let (even, odd) = (pick(0), pick(1));
+    db.update_many("c", &json!({"g": 0}), &json!({"$set": {"u": 1}}))
+        .unwrap();
+    assert_eq!(order(&db), ([odd.clone(), even.clone()].concat(), 10));
+    assert_eq!(db.delete_many("c", &json!({"g": 1})).unwrap(), 5);
+    assert_eq!(order(&db), ([even.clone(), odd.clone()].concat(), 5));
+    let coll = db.get_collection("c").unwrap();
+    assert_eq!(coll.count_documents(&json!({})).unwrap(), 5);
+
+    if !release_build() {
+        return;
+    }
+    // 1000 documents with g = -round per round among `n` others, found by
+    // an index: only the order pass grows with the collection
+    let filled = |n: i64| {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        db.insert_many("c", (0..n).map(doc).collect()).unwrap();
+        for round in 1..=5 {
+            db.insert_many("c", (0..1000).map(|_| doc(-round)).collect())
+                .unwrap();
+        }
+        db.get_collection("c")
+            .unwrap()
+            .create_index("g".to_string(), false, false)
+            .unwrap();
+        db
+    };
+    let time_update = |db: &DatabaseCore<MemoryStorage>| {
+        let mut i = 0;
+        best_time(5, || {
+            i += 1;
+            let (_, modified) = db
+                .update_many("c", &json!({"g": -1}), &json!({"$set": {"u": i}}))
+                .unwrap();
+            assert_eq!(modified, 1000);
+        })
+    };
+    let time_delete = |db: &DatabaseCore<MemoryStorage>| {
+        let mut round = 0;
+        best_time(5, || {
+            round += 1;
+            assert_eq!(db.delete_many("c", &json!({"g": -round})).unwrap(), 1000);
+        })
+    };
+    let (large, small) = (filled(100_000), filled(0));
+    for (op, large, small) in [
+        ("update_many", time_update(&large), time_update(&small)),
+        ("delete_many", time_delete(&large), time_delete(&small)),
+    ] {
+        let slowdown = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
+        eprintln!(
+            "{op} of 1000 documents among 100K: {slowdown:.2}x among none (large {large:?}, small {small:?})"
+        );
+        assert!(
+            slowdown <= MAX_SLOWDOWN,
+            "{op} of 1000 documents among 100K: {slowdown:.2}x slower than among none (expected <= {MAX_SLOWDOWN}x)"
+        );
+    }
+}

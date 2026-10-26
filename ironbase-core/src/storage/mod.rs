@@ -380,6 +380,31 @@ impl CollectionMeta {
         self.document_order = offsets.into_iter().map(|(id, _)| id).collect();
     }
 
+    /// Record a batch of catalogued writes in `document_order`, in write
+    /// order. `written` holds each id with whether the catalog already had it.
+    /// The order holds exactly the catalog's ids, so a rewritten id moves to
+    /// the end: one pass over the order for the whole batch, not one per
+    /// rewrite. An id written twice takes the place of its last write.
+    pub(crate) fn append_to_document_order(&mut self, written: &[(DocumentId, bool)]) {
+        let rewritten: std::collections::HashSet<&DocumentId> = written
+            .iter()
+            .filter(|(_, rewrite)| *rewrite)
+            .map(|(id, _)| id)
+            .collect();
+        if !rewritten.is_empty() {
+            self.document_order.retain(|id| !rewritten.contains(id));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(written.len());
+        let mut appended: Vec<&DocumentId> = written
+            .iter()
+            .rev()
+            .map(|(id, _)| id)
+            .filter(|id| seen.insert(*id))
+            .collect();
+        appended.reverse();
+        self.document_order.extend(appended.into_iter().cloned());
+    }
+
     /// Apply a collection rename to this metadata in place: set the new name
     /// and re-prefix every persisted index-metadata name. Index names follow
     /// the `{collection}_{suffix}` convention, so only the prefix changes.
@@ -2805,6 +2830,14 @@ impl RawStorage for StorageEngine {
         data: &[u8],
     ) -> Result<u64> {
         StorageEngine::write_document(self, collection, doc_id, data)
+    }
+
+    fn write_documents_raw(
+        &mut self,
+        collection: &str,
+        docs: &[(&DocumentId, &[u8])],
+    ) -> Result<()> {
+        StorageEngine::write_documents(self, collection, docs)
     }
 
     fn read_document_at(&mut self, collection: &str, offset: u64) -> Result<Vec<u8>> {
