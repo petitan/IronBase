@@ -26,6 +26,16 @@ Found while checking the update_many value round trip (2026-10-26).
   written before read back exactly from now on. Values that an update or a
   rewrite read and wrote again under the old parser may have been stored
   1 ULP off; those stay as stored.
+- **Existing B+ tree indexes:** an `.idx` file built from documents read
+  under the old parser can hold float keys 1 ULP off the stored values, so
+  an index equality lookup would miss a document a scan now finds. The
+  footer now carries `BTF2` (exact float keys; same 12-byte layout as
+  `BTFT`, whose watermark it keeps). A file with the `BTFT` footer or none
+  is not loaded but rebuilt from the documents once at the first open,
+  marked dirty and written back with `BTF2` (`_id` indexes excepted: their
+  keys are never floats). One-time cost: a catalog rebuild of each such
+  index (~0.7 s per 100K documents per index).
+  `test_index_files_from_before_exact_floats_are_rebuilt_once`.
 - **Test:** `test_floats_read_back_exactly_and_are_found_by_equality`
   (file storage: equality by scan and by index, bit-exact read after
   reopening). It fails without the feature.

@@ -1283,3 +1283,74 @@ fn test_floats_read_back_exactly_and_are_found_by_equality() {
     written.sort_unstable();
     assert_eq!(read, written);
 }
+
+/// An index file written before exact float parsing (footer `BTFT`, or no
+/// footer) may hold float keys 1 ULP off the stored values: on reopen it
+/// is rebuilt from the documents and written back with the `BTF2` footer,
+/// once. A `BTF2` file loads as before.
+#[test]
+fn test_index_files_from_before_exact_floats_are_rebuilt_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("legacy_idx.mlite");
+    let idx_file = || {
+        let files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                name.ends_with(".idx") && name.contains("_x")
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "one index file for field x: {files:?}");
+        files.into_iter().next().unwrap()
+    };
+    let footer = || {
+        let bytes = std::fs::read(idx_file()).unwrap();
+        bytes[bytes.len() - 4..].to_vec()
+    };
+    let reopen = || {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.get_collection("f").unwrap();
+        let found = coll
+            .find_with_hint(&json!({"x": 0.1}), "f_x")
+            .unwrap()
+            .len();
+        db.close().unwrap();
+        found
+    };
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.insert_many(
+            "f",
+            (0..50)
+                .map(|i| HashMap::from([("x".to_string(), json!(i as f64 / 10.0))]))
+                .collect(),
+        )
+        .unwrap();
+        let coll = db.get_collection("f").unwrap();
+        assert_eq!(
+            coll.create_index("x".to_string(), false, false).unwrap(),
+            "f_x"
+        );
+        db.close().unwrap();
+    }
+    assert_eq!(footer(), b"BTF2");
+
+    // Mark the file as written before exact floats
+    let path = idx_file();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let len = bytes.len();
+    bytes[len - 4..].copy_from_slice(b"BTFT");
+    std::fs::write(&path, bytes).unwrap();
+
+    assert_eq!(reopen(), 1);
+    assert_eq!(
+        footer(),
+        b"BTF2",
+        "rebuilt and written back with the new footer"
+    );
+    // Loaded from the file from now on: still found, footer unchanged
+    assert_eq!(reopen(), 1);
+    assert_eq!(footer(), b"BTF2");
+}
