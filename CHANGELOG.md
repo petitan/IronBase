@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — update_many converts each document once for all B+ tree indexes (ironbase-core 0.3.436)
+
+Speed review 2026-10-26, update_many breakdown.
+
+- **Root cause:** `batch_update_indexes` converted the old and the new
+  document to a JSON value (`serde_json::to_value`, ~3 µs each) inside the
+  per-index loop, and once more per compound index for its array check:
+  2 × (indexes) + compound conversions per update. With the benchmark's 4
+  indexes, 10K updates made ~90K conversions; the index pass took ~290 ms.
+- **Fix:** both values are converted once per update before the index loop
+  and shared by every B+ tree index and the compound preflight (only when
+  the collection has a non-`_id` B+ tree index). Behaviour is unchanged,
+  including the logged skip of a document that fails to convert and the
+  preflight's error.
+- **Effect:** the index pass of 10K updates with 4 indexes ~290 ms →
+  ~90 ms (A/B, best of 3). `speed_benchmark_full_suite` (A/B, 3 runs
+  each): `update_many` of 10K 1.15–1.25 s → 1.04–1.15 s, of 20K
+  (`$inc`) 1.79–2.06 s → 1.50–1.86 s. (The benchmark's absolute times
+  vary ~1.5x between runs on the same build; the earlier ~2.7 s / 1.23 s
+  figures are within that noise.) `perf_update_many_converts_once_for_all_indexes`
+  counts the conversions (`INDEX_DOC_CONVERSIONS`, test builds): 2 per
+  update with 8 indexes, 16 before.
+- **Breakdown of what remains** (10K updates, benchmark, ~70 µs each,
+  spread evenly): id lookup 5, read 4, `Document` conversion 4, batch
+  validator 3, constraint/schema checks 7, stored-form serialization 5,
+  persist conversions 8, indexes 9, storage write 11 µs. No single step
+  dominates; the remaining cost is the repeated Value ⇄ Document ⇄ JSON
+  round trips per document.
+
 ### Fixed — update_many / delete_many write in batches, one document_order pass per batch (ironbase-core 0.3.435)
 
 Speed review 2026-10-26, update_many / delete_many.

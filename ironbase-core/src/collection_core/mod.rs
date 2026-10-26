@@ -2051,6 +2051,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let id_index_name = format!("{}_id", self.name);
         let index_names: Vec<String> = indexes.list_indexes();
 
+        // The B+ tree indexes read keys from the documents as JSON values:
+        // convert each document once for all of them, not once per index
+        // (with 4 indexes, 10K updates converted 90K documents, ~280 ms).
+        let has_btree_index = index_names
+            .iter()
+            .any(|name| name != &id_index_name && indexes.get_btree_index(name).is_some());
+        let doc_values: Vec<(serde_json::Result<Value>, serde_json::Result<Value>)> =
+            if has_btree_index {
+                updates
+                    .iter()
+                    .map(|(original_doc, updated_doc)| {
+                        #[cfg(test)]
+                        INDEX_DOC_CONVERSIONS.with(|n| n.set(n.get() + 2));
+                        (
+                            serde_json::to_value(original_doc),
+                            serde_json::to_value(updated_doc),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
         // Preflight: reject compound indexes with multiple array fields (MongoDB restriction)
         for index_name in &index_names {
             if index_name == &id_index_name {
@@ -2058,10 +2081,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
             if let Some(index) = indexes.get_btree_index(index_name) {
                 if index.metadata.is_compound() {
-                    for (_, updated_doc) in updates {
-                        let updated_value = serde_json::to_value(updated_doc)?;
+                    for ((_, updated_doc), (_, updated_value)) in updates.iter().zip(&doc_values) {
+                        let updated_value = match updated_value {
+                            Ok(value) => value,
+                            // serde_json::Error is not Clone: convert again for the error
+                            Err(_) => &serde_json::to_value(updated_doc)?,
+                        };
                         if IndexManager::count_compound_array_fields(
-                            &updated_value,
+                            updated_value,
                             &index.metadata.fields,
                         ) > 1
                         {
@@ -2123,8 +2150,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             let mut changed = false;
             if let Some(index) = indexes.get_btree_index_mut(index_name) {
-                for (original_doc, updated_doc) in updates {
-                    let old_doc_value = match serde_json::to_value(original_doc) {
+                for ((original_doc, updated_doc), (old_doc_value, new_doc_value)) in
+                    updates.iter().zip(&doc_values)
+                {
+                    let old_doc_value = match old_doc_value {
                         Ok(v) => v,
                         Err(e) => {
                             log_warn!(
@@ -2136,7 +2165,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             continue;
                         }
                     };
-                    let new_doc_value = match serde_json::to_value(updated_doc) {
+                    let new_doc_value = match new_doc_value {
                         Ok(v) => v,
                         Err(e) => {
                             log_warn!(
@@ -2150,9 +2179,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     };
 
                     let old_keys: HashSet<IndexKey> =
-                        index.extract_keys(&old_doc_value).into_iter().collect();
+                        index.extract_keys(old_doc_value).into_iter().collect();
                     let new_keys: HashSet<IndexKey> =
-                        index.extract_keys(&new_doc_value).into_iter().collect();
+                        index.extract_keys(new_doc_value).into_iter().collect();
 
                     let doc_id = &original_doc.id;
                     changed |= old_keys != new_keys;
@@ -3801,6 +3830,10 @@ thread_local! {
     /// the find load and the streaming cursor's scan): the work count the
     /// performance regression tests bound. Test builds only.
     pub(crate) static DOC_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Documents `batch_update_indexes` converted to JSON values for its
+    /// B+ tree indexes on this thread. Test builds only.
+    pub(crate) static INDEX_DOC_CONVERSIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The documents an index plan's verification read and matched, in result
