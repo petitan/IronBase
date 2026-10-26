@@ -620,3 +620,69 @@ fn perf_document_from_value_skips_flatten() {
         "Document::from_value_owned: only {speedup:.2}x faster than the derived path (expected >= 2.5x)"
     );
 }
+
+/// Writing a new document costs the same in a large collection as in an
+/// empty one: only a rewrite of a known id removes it from
+/// `document_order`. Measured ~2x (the larger catalog misses the cache);
+/// while every write scanned the whole order for the id, 1000 inserts into
+/// 100K documents were ~250x slower (speed review 2026-10-26, insert_many).
+#[test]
+fn perf_insert_into_large_collection() {
+    const MAX_SLOWDOWN: f64 = 5.0;
+    use crate::storage::{MemoryStorage, RawStorage};
+    let order = |storage: &MemoryStorage| {
+        storage
+            .get_collection_meta("c")
+            .unwrap()
+            .document_order
+            .clone()
+    };
+    // A rewrite moves the id to the end; a new id is appended once
+    let mut storage = MemoryStorage::new();
+    storage.create_collection("c").unwrap();
+    for id in [1, 2, 3, 2, 4] {
+        storage
+            .write_document_raw("c", &DocumentId::Int(id), b"{}")
+            .unwrap();
+    }
+    let ids = |v: &[i64]| v.iter().map(|&i| DocumentId::Int(i)).collect::<Vec<_>>();
+    assert_eq!(order(&storage), ids(&[1, 3, 2, 4]));
+
+    if !release_build() {
+        return;
+    }
+    let filled = |n: i64| {
+        let mut storage = MemoryStorage::new();
+        storage.create_collection("c").unwrap();
+        for id in 0..n {
+            storage
+                .write_document_raw("c", &DocumentId::Int(id), b"{}")
+                .unwrap();
+        }
+        storage
+    };
+    let mut next_id = 1_000_000i64;
+    let mut insert_1000 = |storage: &mut MemoryStorage| {
+        for _ in 0..1000 {
+            next_id += 1;
+            storage
+                .write_document_raw("c", &DocumentId::Int(next_id), b"{}")
+                .unwrap();
+        }
+    };
+    let mut large = filled(100_000);
+    let into_large = best_time(5, || insert_1000(&mut large));
+    let into_empty = best_time(5, || insert_1000(&mut filled(0)));
+    assert_eq!(
+        large.get_collection_meta("c").unwrap().document_order.len(),
+        105_000
+    );
+    let slowdown = into_large.as_secs_f64() / into_empty.as_secs_f64().max(1e-9);
+    eprintln!(
+        "1000 inserts into 100K documents: {slowdown:.2}x an empty collection (large {into_large:?}, empty {into_empty:?})"
+    );
+    assert!(
+        slowdown <= MAX_SLOWDOWN,
+        "1000 inserts into 100K documents: {slowdown:.2}x slower than into an empty collection (expected <= {MAX_SLOWDOWN}x)"
+    );
+}

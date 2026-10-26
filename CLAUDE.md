@@ -920,7 +920,7 @@ Mért értékek (`speed_benchmark_full_suite`, 100K doc, release, MemoryStorage,
 
 | Művelet | MemoryStorage |
 |---------|---------------|
-| INSERT batch (`insert_many`, 1000/köteg) | ~14K doc/s |
+| INSERT batch (`insert_many`, 1000/köteg) | ~70K doc/s (v0.3.434; előtte ~14K, kvadratikus `document_order` scan) |
 | FIND indexed, tartomány / nested (10K találat) | ~80 ms (~120K doc/s, a dokumentumok beolvasásával) |
 | FIND indexed, egyenlőség (20K találat, 5 különböző érték) | ~160 ms |
 | FIND collection scan (100K doc) | ~0,35–0,45 s |
