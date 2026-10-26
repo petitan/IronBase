@@ -786,6 +786,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     fn validate_document(&self, document: &Document) -> Result<()> {
+        // Without a schema there is nothing to validate: skip the conversion
+        // (~3 µs per document on every write path)
+        if self.schema.read().is_none() {
+            return Ok(());
+        }
+        #[cfg(test)]
+        VALIDATION_DOC_CONVERSIONS.with(|n| n.set(n.get() + 1));
         let value = serde_json::to_value(document)
             .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         self.validate_value_against_schema(&value)
@@ -2480,15 +2487,37 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         doc: &Document,
         exclude_id: Option<&DocumentId>,
     ) -> Result<()> {
+        let id_index_name = format!("{}_id", self.name);
+        // Without a unique index besides _id there is nothing to check: skip
+        // the conversion (~3 µs per document on every write path)
+        if !self
+            .indexes
+            .read()
+            .has_unique_index_except(Some(&id_index_name))
+        {
+            return Ok(());
+        }
+
+        // Convert Document to Value for IndexManager
+        #[cfg(test)]
+        VALIDATION_DOC_CONVERSIONS.with(|n| n.set(n.get() + 1));
+        let doc_value =
+            serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+        self.check_index_constraints_value(&doc_value, exclude_id)
+    }
+
+    /// `check_index_constraints` for a document already converted to a JSON
+    /// value
+    fn check_index_constraints_value(
+        &self,
+        doc_value: &Value,
+        exclude_id: Option<&DocumentId>,
+    ) -> Result<()> {
         let indexes = self.indexes.read();
         let id_index_name = format!("{}_id", self.name);
 
-        // Convert Document to Value for IndexManager
-        let doc_value =
-            serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-
         // Delegate to IndexManager - handles compound indexes correctly
-        indexes.check_unique_constraints(&doc_value, exclude_id, Some(&id_index_name))
+        indexes.check_unique_constraints(doc_value, exclude_id, Some(&id_index_name))
     }
 
     // ========== PRIVATE HELPER METHODS ==========
@@ -3834,6 +3863,10 @@ thread_local! {
     /// Documents `batch_update_indexes` converted to JSON values for its
     /// B+ tree indexes on this thread. Test builds only.
     pub(crate) static INDEX_DOC_CONVERSIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Documents `validate_document` / `check_index_constraints` converted to
+    /// JSON values on this thread. Test builds only.
+    pub(crate) static VALIDATION_DOC_CONVERSIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The documents an index plan's verification read and matched, in result

@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 ironbase-core = { path = "../ironbase-core" }
 clap = { workspace = true }
-zstd = "0.13"
+zstd = "0.14"
 sha2 = "0.10"
 chrono = { workspace = true }
 thiserror = { workspace = true }

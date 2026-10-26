@@ -693,6 +693,14 @@ impl IndexManager {
         self.btree_indexes.values().any(|idx| idx.metadata.unique)
     }
 
+    /// Whether `check_unique_constraints` with this `exclude_index` has an
+    /// index to check: a unique B+ tree index other than `exclude_index`
+    pub(crate) fn has_unique_index_except(&self, exclude_index: Option<&str>) -> bool {
+        self.btree_indexes
+            .iter()
+            .any(|(name, idx)| idx.metadata.unique && Some(name.as_str()) != exclude_index)
+    }
+
     /// Add a pre-loaded FulltextIndex
     pub fn add_loaded_fulltext_index(&mut self, index: FulltextIndex) {
         let name = index.name.clone();

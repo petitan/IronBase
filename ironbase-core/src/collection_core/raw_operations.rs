@@ -540,17 +540,18 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // Create document
             let doc = Document::new(doc_id.clone(), fields);
-            self.validate_document(&doc)?;
-
-            // 🔒 FIX #17: Check for duplicates WITHIN the current batch
+            // Converted once for the schema, the batch and the unique checks
             let doc_value = serde_json::to_value(&doc)
                 .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+            self.validate_value_against_schema(&doc_value)?;
+
+            // 🔒 FIX #17: Check for duplicates WITHIN the current batch
             batch_validator.check_and_track(&doc_value)?;
 
             // 🔒 FIX #18: Check against EXISTING documents in index BEFORE any writes
             // This ensures atomicity: all constraint checks happen first, then all writes.
             // Previously, batch_add_to_indexes would fail mid-way leaving partial inserts.
-            self.check_index_constraints(&doc, None)?;
+            self.check_index_constraints_value(&doc_value, None)?;
 
             prepared_docs.push((doc_id.clone(), doc));
             inserted_ids.push(doc_id);
@@ -998,17 +999,20 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 // NOTE: _collection is NOT added here - it's WAL-only metadata
                 // Storage documents should NOT contain _collection
 
-                // Check for duplicates WITHIN the current batch
-                let doc_value = serde_json::to_value(&document)
+                // The new document as a JSON value, converted once: the batch
+                // check, the unique check, the schema and the stored form (as
+                // written by persist) all read it. Equal to parsing
+                // `document.to_json()`, which this took before
+                // (`update_many_new_value_matches_stored_json`).
+                let new_doc_value = serde_json::to_value(&document)
                     .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-                batch_validator.check_and_track(&doc_value)?;
+
+                // Check for duplicates WITHIN the current batch
+                batch_validator.check_and_track(&new_doc_value)?;
 
                 // Check unique constraints against existing index
-                self.check_index_constraints(&document, Some(&document.id))?;
-                self.validate_document(&document)?;
-
-                // The stored form of the new document (as written by persist)
-                let new_doc_value: Value = serde_json::from_str(&document.to_json()?)?;
+                self.check_index_constraints_value(&new_doc_value, Some(&document.id))?;
+                self.validate_value_against_schema(&new_doc_value)?;
 
                 // Keep only old + new; everything else is derived in persist
                 wal_entries.push((doc_id, Arc::new(doc), Arc::new(new_doc_value)));
@@ -1363,15 +1367,16 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         for (doc_id, fields) in docs_with_ids {
             // Create document (NO _collection in storage doc)
             let doc = Document::new(doc_id.clone(), fields);
-            self.validate_document(&doc)?;
-
-            // Check for duplicates WITHIN the current batch
+            // Converted once for the schema, the batch and the unique checks
             let mut doc_value = serde_json::to_value(&doc)
                 .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+            self.validate_value_against_schema(&doc_value)?;
+
+            // Check for duplicates WITHIN the current batch
             batch_validator.check_and_track(&doc_value)?;
 
             // Check against EXISTING documents in index
-            self.check_index_constraints(&doc, None)?;
+            self.check_index_constraints_value(&doc_value, None)?;
 
             // Inject `_collection` here so commit can pass the Arc through
             // without deep-cloning the Value tree per insert.
@@ -1765,6 +1770,104 @@ mod tests {
     /// Helper: Create a test database with a collection
     fn create_test_db() -> DatabaseCore<MemoryStorage> {
         DatabaseCore::<MemoryStorage>::open_memory().unwrap()
+    }
+
+    /// `update_many_prepare` keeps `to_value(&document)` as the new
+    /// document's stored form; it parsed `document.to_json()` before. Both
+    /// give the same value and the same stored bytes (`preserve_order` key
+    /// order, the duplicated `_id`, float round trips, nesting, unicode).
+    #[test]
+    fn update_many_new_value_matches_stored_json() {
+        let docs = [
+            json!({"_id": 1, "a": 1.5, "b": 0.1, "c": -0.0, "d": 1e300, "e": u64::MAX}),
+            json!({"_id": "x", "nested": {"z": [1, {"y": null}], "a": true}, "ü": "ő✓"}),
+            json!({"_id": "507f1f77bcf86cd799439011", "": "", "list": [], "obj": {}}),
+            json!({"_id": -7, "f": 123456789.12345679, "g": i64::MIN, "s": "a\"b\n"}),
+        ];
+        for stored in docs {
+            let mut document = Document::from_value(&stored).unwrap();
+            super::super::update_operators::apply_update_operators(
+                &mut document,
+                &json!({"$set": {"new.field": [1.25, "t"]}, "$inc": {"a": 2}}),
+            )
+            .unwrap();
+            let parsed: Value = serde_json::from_str(&document.to_json().unwrap()).unwrap();
+            let converted = serde_json::to_value(&document).unwrap();
+            assert_eq!(converted, parsed);
+            assert_eq!(
+                serde_json::to_string(&converted).unwrap(),
+                serde_json::to_string(&parsed).unwrap(),
+                "stored bytes for {stored}"
+            );
+        }
+    }
+
+    /// Without a schema and a unique index (besides `_id`) the write paths
+    /// convert no document for validation; with them, a schema violation
+    /// and a duplicate are still rejected by `update_many` and `insert_many`
+    #[test]
+    fn validation_converts_only_when_there_is_something_to_check() {
+        use crate::collection_core::VALIDATION_DOC_CONVERSIONS;
+        let conversions = |work: &dyn Fn()| {
+            VALIDATION_DOC_CONVERSIONS.with(|n| n.set(0));
+            work();
+            VALIDATION_DOC_CONVERSIONS.with(|n| n.get())
+        };
+        let db = create_test_db();
+        let coll = db.collection("v").unwrap();
+        let n = conversions(&|| {
+            for i in 0..5 {
+                db.insert_one("v", HashMap::from([("n".to_string(), json!(i))]))
+                    .unwrap();
+            }
+            db.insert_many(
+                "v",
+                (5..10)
+                    .map(|i| HashMap::from([("n".to_string(), json!(i))]))
+                    .collect(),
+            )
+            .unwrap();
+            db.update_many("v", &json!({}), &json!({"$inc": {"n": 100}}))
+                .unwrap();
+            db.update_one("v", &json!({"n": 100}), &json!({"$set": {"m": 1}}))
+                .unwrap();
+        });
+        assert_eq!(n, 0, "no schema, no unique index: nothing to convert");
+
+        // A schema is still checked by every path
+        coll.set_schema(Some(json!({
+            "type": "object",
+            "properties": {"n": {"type": "number"}}
+        })))
+        .unwrap();
+        assert!(db
+            .update_many("v", &json!({}), &json!({"$set": {"n": "text"}}))
+            .is_err());
+        assert!(db
+            .insert_many("v", vec![HashMap::from([("n".to_string(), json!("t"))])])
+            .is_err());
+        assert!(db
+            .insert_one("v", HashMap::from([("n".to_string(), json!("t"))]))
+            .is_err());
+        assert_eq!(
+            coll.count_documents(&json!({"n": {"$type": "string"}}))
+                .unwrap(),
+            0
+        );
+        coll.set_schema(None).unwrap();
+
+        // A unique index is still checked by every path
+        coll.create_index("n".to_string(), true, false).unwrap();
+        assert!(db
+            .update_many("v", &json!({"n": 100}), &json!({"$set": {"n": 101}}))
+            .is_err());
+        assert!(db
+            .insert_many("v", vec![HashMap::from([("n".to_string(), json!(101))])])
+            .is_err());
+        assert!(db
+            .insert_one("v", HashMap::from([("n".to_string(), json!(102))]))
+            .is_err());
+        assert_eq!(coll.count_documents(&json!({"n": 101})).unwrap(), 1);
     }
 
     // ========== INSERT_ONE_PREPARE/PERSIST TESTS ==========
