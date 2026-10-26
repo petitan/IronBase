@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — ironbase-backup: zstd 0.14 (zstd-safe 8.2.0)
+
+- RUSTSEC-2026-0396 / -0399 / -0400 (zstd-safe < 8.2.0: out-of-bounds seek
+  table read, use-after-free through dictionaries and one-shot decompression)
+  failed `cargo audit`. `ironbase-backup`, the only user, now depends on
+  `zstd = "0.14"` (zstd-safe 8.2.0). No code change; the zstd frame format is
+  unchanged, so existing backups restore as before (backup tests pass).
+
 ### Changed — Write paths convert a document for validation only when there is something to check (ironbase-core 0.3.438)
 
 Speed review 2026-10-26, Value ⇄ Document ⇄ JSON round trips (step A).
