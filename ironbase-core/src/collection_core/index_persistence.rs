@@ -113,6 +113,18 @@ pub fn try_load_index_from_file(
         return None;
     }
 
+    // A file from before exact float parsing (0.3.437) may hold float keys
+    // 1 ULP off the stored values: rebuild it from the documents once (the
+    // rebuilt index is marked dirty and written back with the new footer).
+    // `_id` keys are never floats.
+    if index_meta.field != "_id" && !BPlusTree::has_exact_float_keys(&idx_path) {
+        crate::log_info!(
+            "Index '{}' predates exact float keys: rebuilding from documents",
+            index_meta.name
+        );
+        return None;
+    }
+
     // Use lazy loading - only loads root node, children loaded on-demand
     BPlusTree::load_from_path(idx_path, index_meta.clone()).ok()
 }

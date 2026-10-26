@@ -1211,3 +1211,146 @@ fn test_schema_change_after_drop_collection() {
         result.err()
     );
 }
+
+/// A stored float reads back bit for bit, so an equality query finds it.
+/// serde_json without `float_roundtrip` parsed floats up to 1 ULP off: ~11%
+/// of random floats read back as a neighbour of the written value and were
+/// not found by equality, by a scan or an index (found 2026-10-26).
+#[test]
+fn test_floats_read_back_exactly_and_are_found_by_equality() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("floats.mlite");
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let floats: Vec<f64> = (0..500)
+        .map(|i| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
+            // Spread over magnitudes, both signs
+            let x = unit * 10f64.powi((i % 24) - 12);
+            if i % 2 == 0 {
+                x
+            } else {
+                -x
+            }
+        })
+        .collect();
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.insert_many(
+            "f",
+            floats
+                .iter()
+                .map(|x| HashMap::from([("x".to_string(), json!(x))]))
+                .collect(),
+        )
+        .unwrap();
+        let coll = db.get_collection("f").unwrap();
+        let missing = |label: &str, find: &dyn Fn(&Value) -> usize| {
+            let missing: Vec<f64> = floats
+                .iter()
+                .copied()
+                .filter(|x| find(&json!({"x": x})) != 1)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{label}: not found by equality: {missing:?}"
+            );
+        };
+        missing("scan", &|q| coll.find(q).unwrap().len());
+        // Through the index itself: a plain find of the same queries could
+        // answer from the query cache the scan filled
+        let index = coll.create_index("x".to_string(), false, false).unwrap();
+        missing("indexed", &|q| {
+            coll.find_with_hint(q, &index).unwrap().len()
+        });
+        db.flush().unwrap();
+    }
+
+    // After reopening, every value reads back bit for bit
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db.get_collection("f").unwrap();
+    let mut read: Vec<u64> = coll
+        .find(&json!({}))
+        .unwrap()
+        .iter()
+        .map(|doc| doc["x"].as_f64().unwrap().to_bits())
+        .collect();
+    let mut written: Vec<u64> = floats.iter().map(|x| x.to_bits()).collect();
+    read.sort_unstable();
+    written.sort_unstable();
+    assert_eq!(read, written);
+}
+
+/// An index file written before exact float parsing (footer `BTFT`, or no
+/// footer) may hold float keys 1 ULP off the stored values: on reopen it
+/// is rebuilt from the documents and written back with the `BTF2` footer,
+/// once. A `BTF2` file loads as before.
+#[test]
+fn test_index_files_from_before_exact_floats_are_rebuilt_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("legacy_idx.mlite");
+    let idx_file = || {
+        let files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                name.ends_with(".idx") && name.contains("_x")
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "one index file for field x: {files:?}");
+        files.into_iter().next().unwrap()
+    };
+    let footer = || {
+        let bytes = std::fs::read(idx_file()).unwrap();
+        bytes[bytes.len() - 4..].to_vec()
+    };
+    let reopen = || {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.get_collection("f").unwrap();
+        let found = coll
+            .find_with_hint(&json!({"x": 0.1}), "f_x")
+            .unwrap()
+            .len();
+        db.close().unwrap();
+        found
+    };
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.insert_many(
+            "f",
+            (0..50)
+                .map(|i| HashMap::from([("x".to_string(), json!(i as f64 / 10.0))]))
+                .collect(),
+        )
+        .unwrap();
+        let coll = db.get_collection("f").unwrap();
+        assert_eq!(
+            coll.create_index("x".to_string(), false, false).unwrap(),
+            "f_x"
+        );
+        db.close().unwrap();
+    }
+    assert_eq!(footer(), b"BTF2");
+
+    // Mark the file as written before exact floats
+    let path = idx_file();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let len = bytes.len();
+    bytes[len - 4..].copy_from_slice(b"BTFT");
+    std::fs::write(&path, bytes).unwrap();
+
+    assert_eq!(reopen(), 1);
+    assert_eq!(
+        footer(),
+        b"BTF2",
+        "rebuilt and written back with the new footer"
+    );
+    // Loaded from the file from now on: still found, footer unchanged
+    assert_eq!(reopen(), 1);
+    assert_eq!(footer(), b"BTF2");
+}

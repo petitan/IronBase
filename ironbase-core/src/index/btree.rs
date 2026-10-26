@@ -152,6 +152,12 @@ const NODE_TYPE_LEAF: u8 = 1;
 /// in which case the caller's `IndexMetadata.last_flushed_tx_id` (0
 /// from `CollectionMeta` or wherever) is used.
 const BTREE_FOOTER_MAGIC: &[u8; 4] = b"BTFT";
+/// The BTFT footer of a file whose keys were built with exact float
+/// parsing (`serde_json` `float_roundtrip`, 0.3.437). Same layout; a file
+/// with the older magic (or none) may hold float keys parsed up to 1 ULP
+/// off and is rebuilt from the documents instead of loaded
+/// (`has_exact_float_keys`).
+const BTREE_FOOTER_MAGIC_EXACT_FLOATS: &[u8; 4] = b"BTF2";
 /// Total size of the BTFT footer: 8-byte little-endian `u64` watermark
 /// followed by `BTREE_FOOTER_MAGIC`.
 const BTREE_FOOTER_LEN: u64 = 12;
@@ -3105,7 +3111,7 @@ impl BPlusTree {
         // metadata, watermark = 0).
         file.seek(SeekFrom::End(0))?;
         file.write_all(&self.metadata.last_flushed_tx_id.to_le_bytes())?;
-        file.write_all(BTREE_FOOTER_MAGIC)?;
+        file.write_all(BTREE_FOOTER_MAGIC_EXACT_FLOATS)?;
 
         Ok(root_offset)
     }
@@ -3202,6 +3208,26 @@ impl BPlusTree {
     /// # Arguments
     /// * `path` - Path to the .idx file
     /// * `metadata` - Index metadata from collection catalog
+    /// Whether the `.idx` file at `path` was written with exact float keys
+    /// (its footer carries `BTF2`). Files from before 0.3.437 were built
+    /// from documents parsed without `float_roundtrip`: a float key there
+    /// can be 1 ULP off the stored value, so an equality lookup misses the
+    /// document a scan now finds.
+    pub(crate) fn has_exact_float_keys(path: &std::path::Path) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        let read_magic = || -> std::io::Result<[u8; 4]> {
+            let mut file = File::open(path)?;
+            if file.seek(SeekFrom::End(0))? < BTREE_FOOTER_LEN {
+                return Ok([0; 4]);
+            }
+            file.seek(SeekFrom::End(-4))?;
+            let mut magic = [0u8; 4];
+            file.read_exact(&mut magic)?;
+            Ok(magic)
+        };
+        matches!(read_magic(), Ok(magic) if &magic == BTREE_FOOTER_MAGIC_EXACT_FLOATS)
+    }
+
     pub fn load_from_path(path: PathBuf, metadata: IndexMetadata) -> Result<Self> {
         Self::load_from_path_with(path, metadata, false)
     }
@@ -3238,7 +3264,7 @@ impl BPlusTree {
             file.seek(SeekFrom::End(-4))?;
             let mut magic = [0u8; 4];
             file.read_exact(&mut magic)?;
-            if &magic == BTREE_FOOTER_MAGIC {
+            if &magic == BTREE_FOOTER_MAGIC || &magic == BTREE_FOOTER_MAGIC_EXACT_FLOATS {
                 file.seek(SeekFrom::End(-(BTREE_FOOTER_LEN as i64)))?;
                 let mut tx_id_bytes = [0u8; 8];
                 file.read_exact(&mut tx_id_bytes)?;

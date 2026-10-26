@@ -594,27 +594,31 @@ fn perf_document_from_value_skips_flatten() {
     let owned = Document::from_value_owned(doc.clone()).unwrap();
     assert_eq!(owned.id, crate::document::DocumentId::Int(12345));
     assert_eq!(owned.fields.len(), 11);
-    // Each round clones the input (both paths take it owned): the clone
-    // alone is timed too and left out of both sides
-    let rounds = |convert: fn(serde_json::Value)| {
-        best_time(15, || {
-            for _ in 0..200 {
-                convert(black_box(&doc).clone());
-            }
-        })
+    // Both paths take the value owned: each round clones its inputs before
+    // the timer starts and drops the documents after it stops, so only the
+    // conversions are timed. (Subtracting a separately timed clone made the
+    // ratio of two small differences, which swung from below the bound to
+    // 300000x under load.)
+    let rounds = |convert: fn(serde_json::Value) -> Document| {
+        (0..15)
+            .map(|_| {
+                let inputs: Vec<serde_json::Value> = (0..1000).map(|_| doc.clone()).collect();
+                let mut outputs = Vec::with_capacity(inputs.len());
+                let start = Instant::now();
+                for value in inputs {
+                    outputs.push(convert(black_box(value)));
+                }
+                let elapsed = start.elapsed();
+                black_box(outputs);
+                elapsed
+            })
+            .min()
+            .unwrap()
     };
-    let clone = rounds(|value| drop(black_box(value)));
-    let derived = rounds(|value| {
-        drop(black_box(
-            serde_json::from_value::<Document>(value).unwrap(),
-        ))
-    });
-    let owned = rounds(|value| drop(black_box(Document::from_value_owned(value).unwrap())));
-    let speedup = derived.saturating_sub(clone).as_secs_f64()
-        / owned.saturating_sub(clone).as_secs_f64().max(1e-9);
-    eprintln!(
-        "Document::from_value_owned: {speedup:.2}x (derived {derived:?}, owned {owned:?}, clone {clone:?})"
-    );
+    let derived = rounds(|value| serde_json::from_value::<Document>(value).unwrap());
+    let owned = rounds(|value| Document::from_value_owned(value).unwrap());
+    let speedup = derived.as_secs_f64() / owned.as_secs_f64().max(1e-9);
+    eprintln!("Document::from_value_owned: {speedup:.2}x (derived {derived:?}, owned {owned:?})");
     assert!(
         speedup >= 2.5,
         "Document::from_value_owned: only {speedup:.2}x faster than the derived path (expected >= 2.5x)"
