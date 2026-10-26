@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — A corrupted HNSW cache file fails its load instead of panicking the first search (ironbase-core 0.3.439)
+
+Found reviewing the panicking paths (`unwrap` / `expect` / indexing) of the
+production code (2026-10-26).
+
+- **Review:** clippy `unwrap_used` / `expect_used` / `panic` on the
+  non-test code: ironbase-core 31 `unwrap`, 6 `expect`, 2 `panic!`; all are
+  guarded by a check right before them (`len() == 1`, `contains_key`,
+  non-empty batch) or test-only; mcp-server, the bindings and backup add a
+  dozen more, all guarded. The ~3000 of a plain grep counted test modules.
+  The risk lay in indexing on bytes read from disk: every index file, the
+  database file and the WAL were corrupted 510 ways each (truncation, bit
+  flips, overwritten lengths) and loaded and used under `catch_unwind`.
+  B+ tree, fulltext, fuzzy, `.mlite` and WAL: no panic (a corrupted WAL
+  middle refuses to open with `WAL corruption detected`; a truncated one
+  recovers). **HNSW: 54 of 510 panicked.**
+- **Root cause:** `HnswIndex::from_bytes` / `from_reader` accepted any graph
+  bincode could decode: a neighbour or entry index past the node list, or a
+  vector of another dimension, panicked the first search (`nodes[idx]`, the
+  SIMD dimension assert).
+- **Fix:** the three deserialization paths end in `finish_load`, which
+  checks the entry point, every neighbour index, each node's layer count
+  and dimension and the id map before setting the norms; a broken graph
+  fails the load, and both callers rebuild the index from the documents.
+- **Tests:** `corrupted_graph_fails_the_load` (each invariant, both
+  loaders), `corrupted_cache_bytes_never_panic` (340 mutated cache files);
+  both fail without the check.
+
 ### Security — ironbase-backup: zstd 0.14 (zstd-safe 8.2.0)
 
 - RUSTSEC-2026-0396 / -0399 / -0400 (zstd-safe < 8.2.0: out-of-bounds seek
