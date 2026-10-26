@@ -19,8 +19,11 @@ Speed review 2026-10-26, insert_many.
 - **Fix:** `document_order` holds exactly the catalog's ids (restored on
   load, after compaction and catalog rebuild), so only a rewrite of a known
   id is removed first; a new id is appended. Applied to both
-  `MemoryStorage` writes, `StorageEngine::write_document` /
-  `write_document_full` and `rebuild_catalog_from_file`.
+  `MemoryStorage` writes and `StorageEngine::write_document` /
+  `write_document_full`. `rebuild_catalog_from_file` no longer maintains
+  the order per record: it sorts the rebuilt catalog by offset once
+  (`CollectionMeta::rebuild_document_order`, shared with the load-time
+  migration), O(n log n) also for a file full of rewrites.
   WAL metadata recovery keeps the scan: its base snapshot may predate
   `document_order`.
 - **Effect:** 1000 inserts into 100K documents cost ~2x an empty

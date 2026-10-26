@@ -368,6 +368,18 @@ pub struct CollectionMeta {
 }
 
 impl CollectionMeta {
+    /// Rebuild `document_order` from the catalog: every write appends its
+    /// id at the highest offset, so the order is the catalog by offset.
+    pub(crate) fn rebuild_document_order(&mut self) {
+        let mut offsets: Vec<(DocumentId, u64)> = self
+            .document_catalog
+            .iter()
+            .map(|(id, &offset)| (id.clone(), offset))
+            .collect();
+        offsets.sort_by_key(|(_, offset)| *offset);
+        self.document_order = offsets.into_iter().map(|(id, _)| id).collect();
+    }
+
     /// Apply a collection rename to this metadata in place: set the new name
     /// and re-prefix every persisted index-metadata name. Index names follow
     /// the `{collection}_{suffix}` convention, so only the prefix changes.
@@ -854,13 +866,7 @@ impl StorageEngine {
                     .iter()
                     .any(|id| !meta.document_catalog.contains_key(id));
             if needs_rebuild {
-                let mut offsets: Vec<(DocumentId, u64)> = meta
-                    .document_catalog
-                    .iter()
-                    .map(|(id, &offset)| (id.clone(), offset))
-                    .collect();
-                offsets.sort_by_key(|(_, offset)| *offset);
-                meta.document_order = offsets.into_iter().map(|(id, _)| id).collect();
+                meta.rebuild_document_order();
                 migrated = true;
             }
         }
@@ -2491,19 +2497,11 @@ impl StorageEngine {
                             if is_tombstone {
                                 // Remove from catalog if exists (tombstone = deletion)
                                 meta.document_catalog.remove(&doc_id);
-                                meta.document_order.retain(|id| id != &doc_id);
                                 // Don't increment counts for tombstones
                             } else {
                                 // Add/update catalog entry (newer version overwrites older)
-                                // document_order holds the catalog's ids: only a rewrite is in it
-                                if meta
-                                    .document_catalog
-                                    .insert(doc_id.clone(), offset)
-                                    .is_some()
-                                {
-                                    meta.document_order.retain(|id| id != &doc_id);
-                                }
-                                meta.document_order.push(doc_id.clone());
+                                // document_order is rebuilt from the catalog once at the end
+                                meta.document_catalog.insert(doc_id.clone(), offset);
                                 meta.document_count += 1;
                                 meta.live_document_count += 1;
 
@@ -2544,6 +2542,7 @@ impl StorageEngine {
         for meta in self.collections_mut().values_mut() {
             meta.live_document_count = meta.document_catalog.len() as u64;
             meta.document_count = meta.document_catalog.len() as u64;
+            meta.rebuild_document_order();
         }
 
         // Mark metadata as dirty so it gets flushed
@@ -3907,6 +3906,38 @@ mod tests {
         assert_eq!(recovered.data_end_offset, 12345);
         assert!(recovered.collections.contains_key("test_collection"));
         assert_eq!(recovered.collections["test_collection"].document_count, 42);
+    }
+
+    /// Rebuilding the catalog from the file orders the documents by their
+    /// last write, as the writes did, sorting once instead of scanning the
+    /// order per rewritten record
+    #[test]
+    fn rebuild_catalog_from_file_orders_by_last_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut storage = StorageEngine::open(temp_dir.path().join("order.mlite")).unwrap();
+        storage.create_collection("c").unwrap();
+        for (id, doc) in [
+            (1, r#"{"_id":1}"#),
+            (2, r#"{"_id":2}"#),
+            (3, r#"{"_id":3}"#),
+            (2, r#"{"_id":2,"v":2}"#),
+            (1, r#"{"_id":1,"v":2}"#),
+            (3, r#"{"_id":3,"_tombstone":true}"#),
+        ] {
+            storage
+                .write_document("c", &DocumentId::Int(id), doc.as_bytes())
+                .unwrap();
+        }
+        let ids = |v: &[i64]| v.iter().map(|&i| DocumentId::Int(i)).collect::<Vec<_>>();
+        let order = |s: &StorageEngine| s.get_collection_meta("c").unwrap().document_order.clone();
+        assert_eq!(order(&storage), ids(&[2, 1, 3]));
+
+        storage.rebuild_catalog_from_file().unwrap();
+        // The tombstoned document leaves the catalog and the order
+        assert_eq!(order(&storage), ids(&[2, 1]));
+        let meta = storage.get_collection_meta("c").unwrap();
+        assert_eq!(meta.document_catalog.len(), 2);
+        assert_eq!(meta.live_document_count, 2);
     }
 
     /// A commit whose collection was dropped fails before anything reaches the
