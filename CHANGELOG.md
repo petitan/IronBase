@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Stored floats read back bit for bit: equality queries found ~11% of them not (ironbase-core 0.3.437)
+
+Found while checking the update_many value round trip (2026-10-26).
+
+- **Symptom:** an equality query on a float field missed ~11% of random
+  float values (222 of 2000 in a test), by a collection scan and by an
+  index alike; a document read back could hold a neighbouring float
+  instead of the written one.
+- **Root cause:** documents are stored as JSON with the shortest exact
+  representation, but `serde_json` without its `float_roundtrip` feature
+  parses floats with a fast algorithm that can be off by 1 ULP. ~9% of
+  random floats did not survive print → parse.
+- **Fix:** the workspace `serde_json` dependency enables `float_roundtrip`
+  (every crate inherits it). Parsing 100K benchmark documents took the same
+  time with and without it (207 ms vs 223 ms, within noise).
+- **Existing data:** stored bytes were always the exact value, so documents
+  written before read back exactly from now on. Values that an update or a
+  rewrite read and wrote again under the old parser may have been stored
+  1 ULP off; those stay as stored.
+- **Test:** `test_floats_read_back_exactly_and_are_found_by_equality`
+  (file storage: equality by scan and by index, bit-exact read after
+  reopening). It fails without the feature.
+
 ### Fixed — update_many converts each document once for all B+ tree indexes (ironbase-core 0.3.436)
 
 Speed review 2026-10-26, update_many breakdown.

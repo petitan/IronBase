@@ -1211,3 +1211,71 @@ fn test_schema_change_after_drop_collection() {
         result.err()
     );
 }
+
+/// A stored float reads back bit for bit, so an equality query finds it.
+/// serde_json without `float_roundtrip` parsed floats up to 1 ULP off: ~11%
+/// of random floats read back as a neighbour of the written value and were
+/// not found by equality, by a scan or an index (found 2026-10-26).
+#[test]
+fn test_floats_read_back_exactly_and_are_found_by_equality() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("floats.mlite");
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let floats: Vec<f64> = (0..500)
+        .map(|i| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
+            // Spread over magnitudes, both signs
+            let x = unit * 10f64.powi((i % 24) - 12);
+            if i % 2 == 0 {
+                x
+            } else {
+                -x
+            }
+        })
+        .collect();
+
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        db.insert_many(
+            "f",
+            floats
+                .iter()
+                .map(|x| HashMap::from([("x".to_string(), json!(x))]))
+                .collect(),
+        )
+        .unwrap();
+        let coll = db.get_collection("f").unwrap();
+        let missing = |label: &str| {
+            let missing: Vec<f64> = floats
+                .iter()
+                .copied()
+                .filter(|x| coll.find(&json!({"x": x})).unwrap().len() != 1)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{label}: not found by equality: {missing:?}"
+            );
+        };
+        missing("scan");
+        coll.create_index("x".to_string(), false, false).unwrap();
+        missing("indexed");
+        db.flush().unwrap();
+    }
+
+    // After reopening, every value reads back bit for bit
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db.get_collection("f").unwrap();
+    let mut read: Vec<u64> = coll
+        .find(&json!({}))
+        .unwrap()
+        .iter()
+        .map(|doc| doc["x"].as_f64().unwrap().to_bits())
+        .collect();
+    let mut written: Vec<u64> = floats.iter().map(|x| x.to_bits()).collect();
+    read.sort_unstable();
+    written.sort_unstable();
+    assert_eq!(read, written);
+}
