@@ -773,3 +773,52 @@ fn perf_update_and_delete_many_in_large_collection() {
         );
     }
 }
+
+/// `update_many` converts each old and new document to JSON once for all
+/// B+ tree indexes, not once per index: 2 conversions per update with 8
+/// indexes. Each index converted both again before, 16 per update; with 4
+/// indexes and 10K updates the index pass took ~290 ms, ~90 ms after (speed
+/// review 2026-10-26). Deterministic (any build).
+#[test]
+fn perf_update_many_converts_once_for_all_indexes() {
+    use crate::collection_core::INDEX_DOC_CONVERSIONS;
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use serde_json::json;
+    let fields = ["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7"];
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let docs = (0..300i64)
+        .map(|i| {
+            fields
+                .iter()
+                .map(|f| (f.to_string(), json!(format!("{f}_{}", i % 10))))
+                .collect()
+        })
+        .collect();
+    db.insert_many("c", docs).unwrap();
+    let coll = db.get_collection("c").unwrap();
+    for f in fields {
+        coll.create_index(f.to_string(), false, false).unwrap();
+    }
+    coll.create_compound_index(vec!["f0".into(), "f1".into()], false, false)
+        .unwrap();
+
+    INDEX_DOC_CONVERSIONS.with(|n| n.set(0));
+    let (_, modified) = db
+        .update_many("c", &json!({}), &json!({"$set": {"u": 1, "f2": "moved"}}))
+        .unwrap();
+    assert_eq!(modified, 300);
+    assert_eq!(INDEX_DOC_CONVERSIONS.with(|n| n.get()), 2 * 300);
+
+    // The indexes still follow the update: the changed key moved, the
+    // others stayed
+    assert_eq!(coll.find(&json!({"f2": "moved"})).unwrap().len(), 300);
+    assert!(coll.find(&json!({"f2": "f2_3"})).unwrap().is_empty());
+    assert_eq!(coll.find(&json!({"f5": "f5_3"})).unwrap().len(), 30);
+    assert_eq!(
+        coll.find(&json!({"f0": "f0_4", "f1": "f1_4"}))
+            .unwrap()
+            .len(),
+        30
+    );
+}

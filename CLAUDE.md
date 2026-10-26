@@ -926,7 +926,7 @@ Mért értékek (`speed_benchmark_full_suite`, 100K doc, release, MemoryStorage,
 | FIND collection scan (100K doc) | ~0,35–0,45 s |
 | `create_index` (100K doc) | ~0,7–0,8 s (bármely kardinalitás) |
 | AGGREGATION `$group` (100K doc) | ~0,3 s (~300K doc/s); index-alapú count ~20 ms |
-| `update_many` / `delete_many` (10K doc) | ~1,2 s / ~0,45 s (v0.3.435; előtte ~2,2 s, rewrite-onkénti `document_order` scan) |
+| `update_many` / `delete_many` (10K doc) | ~1,05 s / ~0,4 s (v0.3.436; előtte ~2,2 s: rewrite-onkénti `document_order` scan, indexenkénti dokumentum-konverzió; futásonként ~1,5x szórás) |
 
 ⚠️ A korábbi táblázat (INSERT ~200K/s, FIND indexed ~500K/s) nem volt reprodukálható; a benchmark indexes számait a query cache torzította (D, v0.3.431).
 
