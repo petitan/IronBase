@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Write paths convert a document for validation only when there is something to check (ironbase-core 0.3.438)
+
+Speed review 2026-10-26, Value ⇄ Document ⇄ JSON round trips (step A).
+
+- **Root cause:** every write converted the document to a JSON value
+  (`serde_json::to_value`, ~3 µs) separately for the schema check
+  (`validate_document`, also without a schema), the unique-index check
+  (`check_index_constraints`, also without a unique index) and, in
+  `insert_many` / `update_many`, the in-batch duplicate check;
+  `update_many` then built the stored form again by printing and parsing
+  `document.to_json()`.
+- **Fix:**
+  - `validate_document` returns at once without a schema;
+    `check_index_constraints` returns at once without a unique index other
+    than `_id` (`IndexManager::has_unique_index_except`). Every write path
+    benefits.
+  - `insert_many` (both prepare paths) and `update_many_prepare` convert the
+    document once and pass the value to the schema, the batch and the
+    unique checks (`check_index_constraints_value`). `update_many` keeps
+    that value as the stored form: equal to the parsed `to_json()` it
+    replaces, now that floats parse exactly (0.3.437;
+    `update_many_new_value_matches_stored_json`).
+  - The checks run in the same order as before.
+- **Effect** (A/B, best of 3, benchmark documents, MemoryStorage):
+  `insert_many` of 20K 263–266 ms → 165–204 ms; `update_many` of 10K
+  471–498 ms → 377–411 ms.
+- **Test:** `validation_converts_only_when_there_is_something_to_check`
+  counts the conversions (`VALIDATION_DOC_CONVERSIONS`, test builds: 0
+  without a schema and a unique index across insert_one / insert_many /
+  update_many / update_one) and checks that a schema violation and a
+  duplicate are still rejected by every path.
+
 ### Fixed — Stored floats read back bit for bit: equality queries found ~11% of them not (ironbase-core 0.3.437)
 
 Found while checking the update_many value round trip (2026-10-26).
