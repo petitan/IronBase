@@ -457,6 +457,52 @@ impl StorageEngine {
         doc_id: &crate::document::DocumentId,
         data: &[u8],
     ) -> Result<u64> {
+        let (write_offset, rewrite) = self.write_catalogued(collection, doc_id, data)?;
+        let meta = self.get_collection_meta_mut(collection).ok_or_else(|| {
+            crate::error::IronBaseError::CollectionNotFound(collection.to_string())
+        })?;
+        // document_order holds the catalog's ids: only a rewrite is in it
+        if rewrite {
+            meta.document_order.retain(|id| id != doc_id);
+        }
+        meta.document_order.push(doc_id.clone());
+        Ok(write_offset)
+    }
+
+    /// `write_document` for several documents of one collection, in order:
+    /// `document_order` is updated once for the whole batch (see
+    /// `CollectionMeta::append_to_document_order`), also when a write fails.
+    pub(crate) fn write_documents(
+        &mut self,
+        collection: &str,
+        docs: &[(&crate::document::DocumentId, &[u8])],
+    ) -> Result<()> {
+        let mut written = Vec::with_capacity(docs.len());
+        let mut result = Ok(());
+        for (doc_id, data) in docs {
+            match self.write_catalogued(collection, doc_id, data) {
+                Ok((_, rewrite)) => written.push(((*doc_id).clone(), rewrite)),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        if let Some(meta) = self.get_collection_meta_mut(collection) {
+            meta.append_to_document_order(&written);
+        }
+        result
+    }
+
+    /// Write a document and catalog it, without `document_order`: returns
+    /// the offset and whether the catalog already had the id. Callers must
+    /// put the id in the order.
+    fn write_catalogued(
+        &mut self,
+        collection: &str,
+        doc_id: &crate::document::DocumentId,
+        data: &[u8],
+    ) -> Result<(u64, bool)> {
         use crate::error::IronBaseError;
 
         // Name the collection in the record itself (metadata rebuild).
@@ -506,18 +552,13 @@ impl StorageEngine {
             .get_collection_meta_mut(collection)
             .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
-        // document_order holds the catalog's ids: only a rewrite is in it
-        if meta
+        let rewrite = meta
             .document_catalog
             .insert(doc_id.clone(), write_offset)
-            .is_some()
-        {
-            meta.document_order.retain(|id| id != doc_id);
-        }
-        meta.document_order.push(doc_id.clone());
+            .is_some();
         meta.document_count += 1;
 
-        Ok(write_offset)
+        Ok((write_offset, rewrite))
     }
 
     /// Read document by offset (catalog-based retrieval)

@@ -280,6 +280,16 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
         data: &[u8],
     ) -> Result<u64>;
 
+    /// `write_document_raw` for several documents of one collection, in
+    /// order. A rewritten id leaves `document_order` in one pass for the
+    /// whole batch instead of one pass per document. On an error the
+    /// documents before the failing one stay written and ordered.
+    fn write_documents_raw(
+        &mut self,
+        collection: &str,
+        docs: &[(&DocumentId, &[u8])],
+    ) -> Result<()>;
+
     /// Read document at specific offset
     ///
     /// # Arguments

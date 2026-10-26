@@ -914,16 +914,16 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // BUG #2 FIX: Track actual deleted documents for WAL
         let mut deleted_docs: Vec<(DocumentId, Value)> = Vec::new();
 
-        // Each candidate is tombstoned atomically under one storage write lock via
-        // the shared chokepoint (re-read + re-match), so concurrent deletes can't
-        // double-decrement the live count and the lock order stays storage→indexes
-        // (#75; audit P2-3). A candidate concurrently modified/deleted returns None
-        // and is skipped — only genuinely-deleted docs are counted and WAL-logged.
-        for doc_id in doc_ids {
-            if let Some(old_doc) = self.tombstone_doc_atomic(&doc_id, Some(&parsed_query))? {
-                deleted_docs.push((doc_id, old_doc));
-                deleted += 1;
-            }
+        // Each chunk of candidates is tombstoned atomically under one storage write
+        // lock via the shared chokepoint (re-read + re-match), so concurrent deletes
+        // can't double-decrement the live count and the lock order stays
+        // storage→indexes (#75; audit P2-3). A candidate concurrently
+        // modified/deleted is skipped — only genuinely-deleted docs are counted and
+        // WAL-logged.
+        for chunk in doc_ids.chunks(super::WRITE_CHUNK) {
+            let chunk_deleted = self.tombstone_docs_atomic(chunk, Some(&parsed_query))?;
+            deleted += chunk_deleted.len() as u64;
+            deleted_docs.extend(chunk_deleted);
         }
 
         // Invalidate query cache if any document was deleted
@@ -1125,18 +1125,17 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// PERSIST phase for delete_many: write tombstones AFTER WAL commit.
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
-    /// This method tombstones each prepared document atomically through the shared
-    /// chokepoint [`Self::tombstone_doc_atomic`]: for every doc_id it acquires the
-    /// storage write lock, RE-READS the doc under it, then writes the tombstone and
-    /// removes the doc from indexes in one critical section (lock order
-    /// storage→indexes, #75). A doc a concurrent writer already deleted returns None
-    /// and is skipped, so the live count is never double-decremented (audit P2-3).
+    /// This method tombstones the prepared documents atomically through the shared
+    /// chokepoint [`Self::tombstone_docs_atomic`]: for every chunk it acquires the
+    /// storage write lock, RE-READS each doc under it, then writes the tombstones and
+    /// removes the docs from indexes in one critical section (lock order
+    /// storage→indexes, #75). A doc a concurrent writer already deleted is skipped,
+    /// so the live count is never double-decremented (audit P2-3).
     fn delete_many_persist(&self, prepared: DeleteManyPrepared) -> Result<u64> {
         let mut deleted = 0u64;
-        for (doc_id, _old_doc) in &prepared.wal_entries {
-            if self.tombstone_doc_atomic(doc_id, None)?.is_some() {
-                deleted += 1;
-            }
+        for chunk in prepared.wal_entries.chunks(super::WRITE_CHUNK) {
+            let doc_ids: Vec<DocumentId> = chunk.iter().map(|(doc_id, _)| doc_id.clone()).collect();
+            deleted += self.tombstone_docs_atomic(&doc_ids, None)?.len() as u64;
         }
 
         // Invalidate query cache if any document was deleted

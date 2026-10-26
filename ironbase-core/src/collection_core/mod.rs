@@ -266,6 +266,10 @@ use crate::limits::QUERY_CACHE_CAPACITY;
 /// Threshold for logging a warning about large document loads
 use crate::limits::LARGE_QUERY_WARNING_THRESHOLD;
 
+/// Documents an `update_many` / `delete_many` writes to storage per batch:
+/// a rewritten id leaves `document_order` in one pass per batch
+const WRITE_CHUNK: usize = 1024;
+
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
 pub struct InsertManyResult {
@@ -1697,19 +1701,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         if !prepared.wal_entries.is_empty() {
+            // Each chunk's documents go to storage in one batch: a rewrite
+            // moves its id to the end of `document_order`, one pass over the
+            // order per chunk instead of one per document.
             let mut storage = self.storage.write();
-            for (doc_id, old, new) in &prepared.wal_entries {
-                let mut tombstone = (**old).clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+            for chunk in prepared.wal_entries.chunks(WRITE_CHUNK) {
+                let mut new_docs = Vec::with_capacity(chunk.len());
+                for (doc_id, old, new) in chunk {
+                    let mut tombstone = (**old).clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    storage.write_data(serde_json::to_string(&tombstone)?.as_bytes())?;
+                    new_docs.push((doc_id, serde_json::to_string(&**new)?));
                 }
-                storage.write_data(serde_json::to_string(&tombstone)?.as_bytes())?;
-                storage.write_document_raw(
-                    &self.name,
-                    doc_id,
-                    serde_json::to_string(&**new)?.as_bytes(),
-                )?;
+                let docs: Vec<(&DocumentId, &[u8])> = new_docs
+                    .iter()
+                    .map(|(doc_id, json)| (*doc_id, json.as_bytes()))
+                    .collect();
+                storage.write_documents_raw(&self.name, &docs)?;
             }
         }
 
@@ -1877,13 +1888,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(None)
     }
 
-    /// Atomically tombstone a single document under ONE storage write lock.
-    ///
-    /// This is the single chokepoint every `delete_*` path funnels through. It
-    /// acquires the storage write lock, RE-READS `target_id` under it, writes the
-    /// tombstone, then removes the document from indexes — all in one critical
-    /// section. Lock order is storage→indexes (#75), matching `update_one_prepare`.
-    ///
     /// Remove one document by its stored id (tombstone + de-index), without
     /// WAL. Used to roll back the documents a failed Batch-mode flush had
     /// already persisted, after which the flush's WAL transaction is aborted.
@@ -1894,68 +1898,134 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(())
     }
 
+    /// Atomically tombstone a single document under ONE storage write lock:
+    /// [`Self::tombstone_docs_atomic`] for one id.
+    ///
     /// Returns the pre-delete document value, or `None` if the id was missing, was
     /// already tombstoned, or (when `query` is given) no longer matches — e.g. a
-    /// concurrent writer won the race. Returning `None` instead of blindly writing
-    /// a second tombstone is what prevents the double `adjust_live_count(-1)` that
-    /// silently corrupted the live count (audit P2-3): the old delete paths
-    /// de-indexed BEFORE taking the storage lock and read the document lock-free,
-    /// so two concurrent deletes of the same doc could each tombstone + decrement.
+    /// concurrent writer won the race.
     fn tombstone_doc_atomic(
         &self,
         target_id: &DocumentId,
         query: Option<&Query>,
     ) -> Result<Option<Value>> {
+        Ok(self
+            .tombstone_docs_atomic(std::slice::from_ref(target_id), query)?
+            .pop()
+            .map(|(_, doc)| doc))
+    }
+
+    /// Atomically tombstone documents under ONE storage write lock.
+    ///
+    /// This is the single chokepoint every `delete_*` path funnels through. It
+    /// acquires the storage write lock, RE-READS each target under it, writes the
+    /// tombstones, then removes the documents from indexes — all in one critical
+    /// section. Lock order is storage→indexes (#75), matching `update_one_prepare`.
+    /// The tombstones go to storage in one batch, so the deleted ids leave
+    /// `document_order` in one pass instead of one per document.
+    ///
+    /// Returns the deleted ids with their pre-delete values. A target that is
+    /// missing, already tombstoned, listed twice, or (when `query` is given) no
+    /// longer matches is skipped — e.g. a concurrent writer won the race.
+    /// Skipping instead of blindly writing a second tombstone is what prevents
+    /// the double `adjust_live_count(-1)` that silently corrupted the live count
+    /// (audit P2-3): the old delete paths de-indexed BEFORE taking the storage
+    /// lock and read the document lock-free, so two concurrent deletes of the
+    /// same doc could each tombstone + decrement.
+    fn tombstone_docs_atomic(
+        &self,
+        target_ids: &[DocumentId],
+        query: Option<&Query>,
+    ) -> Result<Vec<(DocumentId, Value)>> {
         let mut storage = self.storage.write();
 
-        // Re-read under the lock via the catalog offset.
-        let offset = match storage
-            .get_collection_meta(&self.name)
-            .and_then(|m| m.document_catalog.get(target_id).copied())
-        {
-            Some(off) => off,
-            None => return Ok(None), // gone between resolution and the lock
-        };
-        let doc_bytes = storage.read_data(offset)?;
-        let doc: Value = serde_json::from_slice(&doc_bytes)
-            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-
-        // Already deleted by a concurrent writer.
-        if doc
-            .get("_tombstone")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            return Ok(None);
-        }
-
-        // PERF: Direct Value→Document (no serialization roundtrip).
-        let document = Document::from_value(&doc)?;
-
-        // Re-match under the lock: the candidate may have been modified between
-        // candidate collection and the lock, or the planner may have
-        // over-approximated.
-        if let Some(q) = query {
-            if !q.matches(&document)? {
-                return Ok(None);
+        // (id, catalog offset, pre-delete value, document, tombstone JSON)
+        let mut targets: Vec<(&DocumentId, u64, Value, Document, String)> =
+            Vec::with_capacity(target_ids.len());
+        let mut seen = std::collections::HashSet::with_capacity(target_ids.len());
+        for target_id in target_ids {
+            if !seen.insert(target_id) {
+                continue; // its tombstone is not written yet: it would read live
             }
+            // Re-read under the lock via the catalog offset.
+            let offset = match storage
+                .get_collection_meta(&self.name)
+                .and_then(|m| m.document_catalog.get(target_id).copied())
+            {
+                Some(off) => off,
+                None => continue, // gone between resolution and the lock
+            };
+            let doc_bytes = storage.read_data(offset)?;
+            let doc: Value = serde_json::from_slice(&doc_bytes)
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+            // Already deleted by a concurrent writer.
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            // PERF: Direct Value→Document (no serialization roundtrip).
+            let document = Document::from_value(&doc)?;
+
+            // Re-match under the lock: the candidate may have been modified between
+            // candidate collection and the lock, or the planner may have
+            // over-approximated.
+            if let Some(q) = query {
+                if !q.matches(&document)? {
+                    continue;
+                }
+            }
+
+            let mut tombstone = doc.clone();
+            if let Value::Object(ref mut map) = tombstone {
+                map.insert("_tombstone".to_string(), Value::Bool(true));
+                map.insert("_collection".to_string(), Value::String(self.name.clone()));
+            }
+            let tombstone_json = serde_json::to_string(&tombstone)?;
+            targets.push((target_id, offset, doc, document, tombstone_json));
         }
 
-        // Write the tombstone to storage (source of truth) BEFORE touching indexes,
-        // so a storage-write failure leaves indexes rebuildable from storage.
-        let mut tombstone = doc.clone();
-        if let Value::Object(ref mut map) = tombstone {
-            map.insert("_tombstone".to_string(), Value::Bool(true));
-            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+        if targets.is_empty() {
+            return Ok(Vec::new());
         }
-        let tombstone_json = serde_json::to_string(&tombstone)?;
-        storage.write_document_raw(&self.name, target_id, tombstone_json.as_bytes())?;
-        storage.adjust_live_count(&self.name, -1);
+
+        // Write the tombstones to storage (source of truth) BEFORE touching indexes,
+        // so a storage-write failure leaves indexes rebuildable from storage.
+        let batch: Vec<(&DocumentId, &[u8])> = targets
+            .iter()
+            .map(|(id, _, _, _, json)| (*id, json.as_bytes()))
+            .collect();
+        let written = storage.write_documents_raw(&self.name, &batch);
+        if written.is_err() {
+            // The tombstones before the failing one are written (their catalog
+            // offset moved): finish deleting those, then report the error.
+            let catalog = storage
+                .get_collection_meta(&self.name)
+                .map(|m| &m.document_catalog);
+            let done = targets
+                .iter()
+                .take_while(|(id, offset, ..)| {
+                    catalog
+                        .and_then(|c| c.get(*id))
+                        .is_some_and(|o| o != offset)
+                })
+                .count();
+            targets.truncate(done);
+        }
+        storage.adjust_live_count(&self.name, -(targets.len() as i64));
 
         // De-index AFTER the successful storage write, still under the storage lock.
-        self.remove_from_indexes(&document)?;
-
-        Ok(Some(doc))
+        let mut deleted = Vec::with_capacity(targets.len());
+        for (id, _, doc, document, _) in targets {
+            self.remove_from_indexes(&document)?;
+            deleted.push((id.clone(), doc));
+        }
+        written?;
+        Ok(deleted)
     }
 
     /// 🚀 OPTIMIZED: Batch update indexes using HashMap + rebuild
@@ -3830,4 +3900,46 @@ pub(crate) fn parse_document_skipping(bytes: &[u8], skip: &HashSet<String>) -> R
     let doc = Skipping(skip).deserialize(&mut de)?;
     de.end()?;
     Ok(doc)
+}
+
+#[cfg(test)]
+mod tombstone_batch_tests {
+    use crate::storage::{MemoryStorage, Storage};
+    use crate::DatabaseCore;
+    use serde_json::json;
+
+    /// An id listed twice is tombstoned once: its first tombstone is not
+    /// written yet when the second is read, so it would still read live
+    #[test]
+    fn tombstone_docs_atomic_skips_a_repeated_id() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        for i in 0..3 {
+            db.insert_one(
+                "c",
+                std::collections::HashMap::from([("n".to_string(), json!(i))]),
+            )
+            .unwrap();
+        }
+        let coll = db.get_collection("c").unwrap();
+        let ids: Vec<_> = {
+            let storage = coll.storage.read();
+            storage
+                .get_collection_meta("c")
+                .unwrap()
+                .document_order
+                .clone()
+        };
+        let targets = [ids[0].clone(), ids[1].clone(), ids[0].clone()];
+        let deleted = coll.tombstone_docs_atomic(&targets, None).unwrap();
+        let deleted_ids: Vec<_> = deleted.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(deleted_ids, vec![ids[0].clone(), ids[1].clone()]);
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 1);
+        let storage = coll.storage.read();
+        let meta = storage.get_collection_meta("c").unwrap();
+        assert_eq!(meta.live_document_count, 1);
+        assert_eq!(
+            meta.document_order,
+            vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
+        );
+    }
 }

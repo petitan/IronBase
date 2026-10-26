@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — update_many / delete_many write in batches, one document_order pass per batch (ironbase-core 0.3.435)
+
+Speed review 2026-10-26, update_many / delete_many.
+
+- **Root cause:** an update or a runtime delete rewrites a known id (the
+  new version, or its catalogued tombstone), and every rewrite removed the
+  id from `document_order` with a scan of the whole order: O(matched × n).
+  `update_many` of 10K documents among 100K took ~1.7 s, `delete_many`
+  ~1.7 s, ~90% of it in that scan.
+- **Fix:** `RawStorage::write_documents_raw` writes several documents of one
+  collection and updates `document_order` once for the batch
+  (`CollectionMeta::append_to_document_order`, one pass for all rewrites,
+  also after a failed write). `update_many` writes its documents in chunks
+  of 1024; `delete_many` tombstones each chunk under one storage write lock
+  through `tombstone_docs_atomic` (same re-read + re-match per document;
+  `tombstone_doc_atomic` is its one-id case). A repeated id in a chunk is
+  tombstoned once. The resulting order is the same as before.
+- **Effect:** 10K of 100K documents: `update_many` ~1.7 s → ~0.17 s,
+  `delete_many` ~1.7 s → ~0.15 s. 1000 documents among 100K cost ~1.6x
+  those among none instead of ~10x
+  (`perf_update_and_delete_many_in_large_collection`). In
+  `speed_benchmark_full_suite` (10K of 100K documents, unindexed filter):
+  `update_many` 2.15 s → 1.23 s, `delete_many` 2.29 s → 0.44 s; the rest of
+  `update_many` is outside the order maintenance.
+- **Lock hold:** `delete_many` now holds the storage write lock per chunk
+  (~30 ms for 1024 documents) instead of per document.
+
 ### Fixed — Inserting a document no longer scans the collection's write order (ironbase-core 0.3.434)
 
 Speed review 2026-10-26, insert_many.
@@ -29,8 +56,8 @@ Speed review 2026-10-26, insert_many.
 - **Effect:** 1000 inserts into 100K documents cost ~2x an empty
   collection instead of ~250x (`perf_insert_into_large_collection`), and
   100 batches of 1000 take ~4.6 ms each instead of up to ~90 ms.
-- A rewrite (update) still scans the order once; `update_many` stays
-  O(matched × n) until that is addressed separately.
+- A rewrite (update) still scans the order once; for `update_many` /
+  `delete_many` see 0.3.435.
 
 ### Changed — Converting a document for query matching moves its fields (ironbase-core 0.3.433)
 
