@@ -1248,20 +1248,24 @@ fn test_floats_read_back_exactly_and_are_found_by_equality() {
         )
         .unwrap();
         let coll = db.get_collection("f").unwrap();
-        let missing = |label: &str| {
+        let missing = |label: &str, find: &dyn Fn(&Value) -> usize| {
             let missing: Vec<f64> = floats
                 .iter()
                 .copied()
-                .filter(|x| coll.find(&json!({"x": x})).unwrap().len() != 1)
+                .filter(|x| find(&json!({"x": x})) != 1)
                 .collect();
             assert!(
                 missing.is_empty(),
                 "{label}: not found by equality: {missing:?}"
             );
         };
-        missing("scan");
-        coll.create_index("x".to_string(), false, false).unwrap();
-        missing("indexed");
+        missing("scan", &|q| coll.find(q).unwrap().len());
+        // Through the index itself: a plain find of the same queries could
+        // answer from the query cache the scan filled
+        let index = coll.create_index("x".to_string(), false, false).unwrap();
+        missing("indexed", &|q| {
+            coll.find_with_hint(q, &index).unwrap().len()
+        });
         db.flush().unwrap();
     }
 
