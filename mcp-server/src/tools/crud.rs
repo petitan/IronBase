@@ -516,8 +516,11 @@ fn handle_update_one(
         response["auto_embedded"] = json!(true);
     }
 
+    // Matched, not modified: an update that leaves the document as it was
+    // still refreshes a vector stored without a source hash (the hash
+    // check skips documents whose vector matches their text)
     if let (Some(config), Some(id), Some(manager)) = (&reembed, target_id, embedding_manager) {
-        if result.modified_count > 0 {
+        if result.matched_count > 0 {
             report_refresh(
                 &mut response,
                 adapter,
@@ -571,7 +574,7 @@ fn handle_update_many(
         "modified_count": result.modified_count
     });
     if let (Some(config), Some(manager)) = (&reembed, embedding_manager) {
-        if result.modified_count > 0 {
+        if result.matched_count > 0 {
             report_refresh(&mut response, adapter, &p.collection, config, manager, &ids);
         }
     }

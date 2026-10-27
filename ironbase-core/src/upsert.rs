@@ -22,37 +22,12 @@
 //! // If no match, creates: {"email": "user@example.com", "status": "active", "name": "John"}
 //! ```
 
+use crate::collection_core::apply_update_operators;
+use crate::document::{Document, DocumentId};
+use crate::error::{IronBaseError, Result};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-
-/// Deep equality comparison for JSON values, ignoring key order in objects
-///
-/// This is important for $addToSet where `{"a":1,"b":2}` should equal `{"b":2,"a":1}`.
-fn json_deep_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Object(map_a), Value::Object(map_b)) => {
-            if map_a.len() != map_b.len() {
-                return false;
-            }
-            map_a.iter().all(|(key, val_a)| {
-                map_b
-                    .get(key)
-                    .is_some_and(|val_b| json_deep_equal(val_a, val_b))
-            })
-        }
-        (Value::Array(arr_a), Value::Array(arr_b)) => {
-            if arr_a.len() != arr_b.len() {
-                return false;
-            }
-            arr_a
-                .iter()
-                .zip(arr_b.iter())
-                .all(|(a, b)| json_deep_equal(a, b))
-        }
-        // For primitives, use standard equality
-        _ => a == b,
-    }
-}
 
 /// Convert a MongoDB filter to a base document for upsert
 ///
@@ -166,8 +141,15 @@ fn set_nested_value(doc: &mut HashMap<String, Value>, path: &str, value: Value) 
 
 /// Apply update operators to a base document
 ///
-/// Takes the base document (from filter) and applies the update operators.
-/// Supports: $set, $inc, $unset, $push, $addToSet, $pop, $pull
+/// Takes the base document (from filter) and applies the update operators
+/// with the same code, and so the same semantics and errors, as an update of
+/// an existing document (`apply_update_operators`). This module used to have
+/// its own copy of every operator, which had drifted: `$inc` to infinity
+/// stored 0, `$inc` on a string overwrote it, `$push` on a scalar and unknown
+/// operators were ignored (property-based testing plan, P4).
+///
+/// An upsert may set the `_id` of the document it inserts (`$set: {_id: v}`),
+/// unless the filter fixes a different one.
 ///
 /// # Arguments
 /// * `base_doc` - Base document from filter conversion
@@ -175,259 +157,33 @@ fn set_nested_value(doc: &mut HashMap<String, Value>, path: &str, value: Value) 
 ///
 /// # Returns
 /// Final document ready for insertion
-pub fn apply_update_to_base(base_doc: HashMap<String, Value>, update: &Value) -> Value {
-    let mut result: Map<String, Value> = base_doc.into_iter().collect();
-
-    if let Value::Object(update_map) = update {
-        for (operator, fields) in update_map {
-            match operator.as_str() {
-                "$set" => {
-                    if let Value::Object(set_fields) = fields {
-                        for (field, value) in set_fields {
-                            apply_set(&mut result, field, value.clone());
-                        }
-                    }
-                }
-                "$inc" => {
-                    if let Value::Object(inc_fields) = fields {
-                        for (field, amount) in inc_fields {
-                            apply_inc(&mut result, field, amount);
-                        }
-                    }
-                }
-                "$unset" => {
-                    if let Value::Object(unset_fields) = fields {
-                        for (field, _) in unset_fields {
-                            apply_unset(&mut result, field);
-                        }
-                    }
-                }
-                "$push" => {
-                    if let Value::Object(push_fields) = fields {
-                        for (field, value) in push_fields {
-                            apply_push(&mut result, field, value.clone());
-                        }
-                    }
-                }
-                "$addToSet" => {
-                    if let Value::Object(add_fields) = fields {
-                        for (field, value) in add_fields {
-                            apply_add_to_set(&mut result, field, value.clone());
-                        }
-                    }
-                }
-                "$pop" => {
-                    if let Value::Object(pop_fields) = fields {
-                        for (field, direction) in pop_fields {
-                            apply_pop(&mut result, field, direction);
-                        }
-                    }
-                }
-                "$pull" => {
-                    if let Value::Object(pull_fields) = fields {
-                        for (field, value) in pull_fields {
-                            apply_pull(&mut result, field, value);
-                        }
-                    }
-                }
-                _ => {
-                    // Unknown operator - ignore for upsert document creation
-                }
-            }
+///
+/// # Errors
+/// What the update of an existing document rejects (`InvalidQuery`), and an
+/// `_id` that is not a valid document id.
+pub fn apply_update_to_base(mut base_doc: HashMap<String, Value>, update: &Value) -> Result<Value> {
+    if let Some(id) = update.get("$set").and_then(|set| set.get("_id")) {
+        if base_doc.get("_id").is_some_and(|existing| existing != id) {
+            return Err(IronBaseError::InvalidQuery(
+                "Performing an update on the path '_id' would modify the immutable field '_id'"
+                    .to_string(),
+            ));
         }
+        base_doc.insert("_id".to_string(), id.clone());
     }
-
-    Value::Object(result)
-}
-
-/// Apply $set operation (handles dot notation)
-fn apply_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        doc.insert(path.to_string(), value);
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        let nested = doc
-            .entry(first.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-
-        if let Value::Object(nested_map) = nested {
-            apply_set(nested_map, &rest, value);
-        }
+    let has_id = base_doc.contains_key("_id");
+    let id = match base_doc.get("_id") {
+        Some(id) => DocumentId::deserialize(id)
+            .map_err(|e| IronBaseError::InvalidQuery(format!("Invalid upsert _id: {}", e)))?,
+        // Not stored: the insert assigns the id; `_id` stays out of the fields
+        None => DocumentId::Int(0),
+    };
+    let mut document = Document::new(id, base_doc);
+    apply_update_operators(&mut document, update)?;
+    if !has_id {
+        document.fields.remove("_id");
     }
-}
-
-/// Apply $inc operation with overflow protection
-fn apply_inc(doc: &mut Map<String, Value>, path: &str, amount: &Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        let current = doc.get(path).cloned().unwrap_or(Value::Number(0.into()));
-        let new_value = match (current, amount) {
-            (Value::Number(c), Value::Number(a)) => {
-                if let (Some(ci), Some(ai)) = (c.as_i64(), a.as_i64()) {
-                    // FIX: Use checked_add to prevent overflow panic
-                    match ci.checked_add(ai) {
-                        Some(result) => Value::Number(result.into()),
-                        None => {
-                            // Overflow: saturate at i64::MAX or i64::MIN
-                            if ai > 0 {
-                                Value::Number(i64::MAX.into())
-                            } else {
-                                Value::Number(i64::MIN.into())
-                            }
-                        }
-                    }
-                } else if let (Some(cf), Some(af)) = (c.as_f64(), a.as_f64()) {
-                    serde_json::Number::from_f64(cf + af)
-                        .map(Value::Number)
-                        .unwrap_or(Value::Number(0.into()))
-                } else {
-                    Value::Number(0.into())
-                }
-            }
-            _ => amount.clone(),
-        };
-        doc.insert(path.to_string(), new_value);
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        let nested = doc
-            .entry(first.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-
-        if let Value::Object(nested_map) = nested {
-            apply_inc(nested_map, &rest, amount);
-        }
-    }
-}
-
-/// Apply $unset operation
-fn apply_unset(doc: &mut Map<String, Value>, path: &str) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        doc.shift_remove(path);
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        if let Some(Value::Object(nested_map)) = doc.get_mut(first) {
-            apply_unset(nested_map, &rest);
-        }
-    }
-}
-
-/// Apply $push operation
-fn apply_push(doc: &mut Map<String, Value>, path: &str, value: Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        let arr = doc
-            .entry(path.to_string())
-            .or_insert_with(|| Value::Array(vec![]));
-        if let Value::Array(arr) = arr {
-            // Same modifier handling ($each, $position, $slice) as an update
-            // of an existing document (audit 2026-10-06 #36).
-            crate::collection_core::push_with_modifiers(arr, &value);
-        }
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        let nested = doc
-            .entry(first.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-
-        if let Value::Object(nested_map) = nested {
-            apply_push(nested_map, &rest, value);
-        }
-    }
-}
-
-/// Apply $addToSet operation
-fn apply_add_to_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        let arr = doc
-            .entry(path.to_string())
-            .or_insert_with(|| Value::Array(vec![]));
-        if let Value::Array(arr) = arr {
-            // `$each` adds every item, like an update of an existing
-            // document (audit 2026-10-06 #36).
-            for item in crate::collection_core::parse_each_modifier(&value) {
-                // Use json_deep_equal to compare objects ignoring key order
-                let already_exists = arr.iter().any(|existing| json_deep_equal(existing, &item));
-                if !already_exists {
-                    arr.push(item);
-                }
-            }
-        }
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        let nested = doc
-            .entry(first.to_string())
-            .or_insert_with(|| Value::Object(Map::new()));
-
-        if let Value::Object(nested_map) = nested {
-            apply_add_to_set(nested_map, &rest, value);
-        }
-    }
-}
-
-/// Apply $pop operation - removes first or last element from array
-/// direction: 1 = last element, -1 = first element
-fn apply_pop(doc: &mut Map<String, Value>, path: &str, direction: &Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        if let Some(Value::Array(arr)) = doc.get_mut(path) {
-            if !arr.is_empty() {
-                let dir = direction.as_i64().unwrap_or(1);
-                if dir < 0 {
-                    arr.remove(0); // Remove first
-                } else {
-                    arr.pop(); // Remove last
-                }
-            }
-        }
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        if let Some(Value::Object(nested_map)) = doc.get_mut(first) {
-            apply_pop(nested_map, &rest, direction);
-        }
-    }
-}
-
-/// Apply $pull operation - removes all matching values from array
-fn apply_pull(doc: &mut Map<String, Value>, path: &str, value: &Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-
-    if parts.len() == 1 {
-        if let Some(Value::Array(arr)) = doc.get_mut(path) {
-            // Same condition semantics as the update path; an invalid
-            // condition removes nothing here (the update path reports it)
-            arr.retain(|item| {
-                !crate::collection_core::value_matches_condition(item, value).unwrap_or(false)
-            });
-        }
-    } else {
-        let first = parts[0];
-        let rest = parts[1..].join(".");
-
-        if let Some(Value::Object(nested_map)) = doc.get_mut(first) {
-            apply_pull(nested_map, &rest, value);
-        }
-    }
+    Ok(Value::Object(document.fields.into_iter().collect()))
 }
 
 /// Create the final upsert document from filter and update
@@ -440,7 +196,10 @@ fn apply_pull(doc: &mut Map<String, Value>, path: &str, value: &Value) {
 ///
 /// # Returns
 /// A complete document ready for insertion
-pub fn create_upsert_document(filter: &Value, update: &Value) -> Value {
+///
+/// # Errors
+/// See [`apply_update_to_base`].
+pub fn create_upsert_document(filter: &Value, update: &Value) -> Result<Value> {
     let base_doc = filter_to_document(filter);
     apply_update_to_base(base_doc, update)
 }
@@ -536,7 +295,7 @@ mod tests {
         let filter = json!({"email": "new@example.com"});
         let update = json!({"$set": {"name": "New User", "status": "pending"}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("email"), Some(&json!("new@example.com")));
         assert_eq!(doc.get("name"), Some(&json!("New User")));
@@ -551,7 +310,7 @@ mod tests {
             "$inc": {"count": 1}
         });
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("userId"), Some(&json!(1)));
         assert_eq!(doc.get("name"), Some(&json!("Counter")));
@@ -563,7 +322,7 @@ mod tests {
         let filter = json!({"name": "Alice"});
         let update = json!({"$push": {"tags": "new"}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("name"), Some(&json!("Alice")));
         assert_eq!(doc.get("tags"), Some(&json!(["new"])));
@@ -574,7 +333,7 @@ mod tests {
         let filter = json!({"userId": 1});
         let update = json!({"$set": {"profile.name": "John", "profile.age": 30}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("userId"), Some(&json!(1)));
         let profile = doc
@@ -596,7 +355,7 @@ mod tests {
             "$inc": {"loginCount": 1}
         });
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("email"), Some(&json!("user@example.com")));
         assert_eq!(doc.get("status"), Some(&json!("active")));
@@ -613,7 +372,7 @@ mod tests {
             "$pop": {"tags": 1}  // Remove last
         });
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("name"), Some(&json!("Alice")));
         assert_eq!(doc.get("tags"), Some(&json!(["a", "b"])));
@@ -627,7 +386,7 @@ mod tests {
             "$pop": {"tags": -1}  // Remove first
         });
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("tags"), Some(&json!(["b", "c"])));
     }
@@ -640,37 +399,31 @@ mod tests {
             "$pull": {"tags": "b"}  // Remove all "b"
         });
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("tags"), Some(&json!(["a", "c"])));
     }
 
     #[test]
-    fn test_inc_overflow_saturates() {
-        // Test that $inc saturates at i64::MAX instead of panicking
+    fn test_inc_overflow_is_rejected() {
+        // An int64 overflow is an error (MongoDB), not a panic or a
+        // silently saturated value
         let filter = json!({"id": 1, "counter": i64::MAX - 5});
         let update = json!({
             "$inc": {"counter": 10}  // Would overflow
         });
 
-        let doc = create_upsert_document(&filter, &update);
-
-        // Should saturate at i64::MAX instead of panicking
-        assert_eq!(doc.get("counter"), Some(&json!(i64::MAX)));
+        assert!(create_upsert_document(&filter, &update).is_err());
     }
 
     #[test]
-    fn test_inc_underflow_saturates() {
-        // Test that $inc saturates at i64::MIN instead of panicking
+    fn test_inc_underflow_is_rejected() {
         let filter = json!({"id": 1, "counter": i64::MIN + 5});
         let update = json!({
             "$inc": {"counter": -10}  // Would underflow
         });
 
-        let doc = create_upsert_document(&filter, &update);
-
-        // Should saturate at i64::MIN instead of panicking
-        assert_eq!(doc.get("counter"), Some(&json!(i64::MIN)));
+        assert!(create_upsert_document(&filter, &update).is_err());
     }
 
     #[test]
@@ -679,7 +432,7 @@ mod tests {
         let filter = json!({"tags": []});
         let update = json!({"$pop": {"tags": 1}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("tags"), Some(&json!([])));
     }
@@ -690,61 +443,10 @@ mod tests {
         let filter = json!({"tags": ["a", "b", "c"]});
         let update = json!({"$pull": {"tags": "x"}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         assert_eq!(doc.get("tags"), Some(&json!(["a", "b", "c"])));
     }
-
-    // ========== json_deep_equal tests ==========
-
-    #[test]
-    fn test_json_deep_equal_primitives() {
-        assert!(json_deep_equal(&json!(1), &json!(1)));
-        assert!(json_deep_equal(&json!("hello"), &json!("hello")));
-        assert!(json_deep_equal(&json!(true), &json!(true)));
-        assert!(json_deep_equal(&json!(null), &json!(null)));
-
-        assert!(!json_deep_equal(&json!(1), &json!(2)));
-        assert!(!json_deep_equal(&json!("a"), &json!("b")));
-    }
-
-    #[test]
-    fn test_json_deep_equal_objects_same_order() {
-        let a = json!({"name": "Alice", "age": 30});
-        let b = json!({"name": "Alice", "age": 30});
-        assert!(json_deep_equal(&a, &b));
-    }
-
-    #[test]
-    fn test_json_deep_equal_objects_different_order() {
-        // Key order should NOT matter
-        let a = json!({"name": "Alice", "age": 30});
-        let b = json!({"age": 30, "name": "Alice"});
-        assert!(json_deep_equal(&a, &b));
-    }
-
-    #[test]
-    fn test_json_deep_equal_nested_objects() {
-        let a = json!({"user": {"name": "Alice", "role": "admin"}});
-        let b = json!({"user": {"role": "admin", "name": "Alice"}});
-        assert!(json_deep_equal(&a, &b));
-    }
-
-    #[test]
-    fn test_json_deep_equal_arrays() {
-        // Arrays order DOES matter
-        assert!(json_deep_equal(&json!([1, 2, 3]), &json!([1, 2, 3])));
-        assert!(!json_deep_equal(&json!([1, 2, 3]), &json!([3, 2, 1])));
-    }
-
-    #[test]
-    fn test_json_deep_equal_mixed() {
-        let a = json!({"items": [{"a": 1, "b": 2}, {"c": 3}]});
-        let b = json!({"items": [{"b": 2, "a": 1}, {"c": 3}]});
-        assert!(json_deep_equal(&a, &b));
-    }
-
-    // ========== $addToSet key order independent tests ==========
 
     #[test]
     fn test_addtoset_object_key_order_independent() {
@@ -752,7 +454,7 @@ mod tests {
         let filter = json!({"items": [{"a": 1, "b": 2}]});
         let update = json!({"$addToSet": {"items": {"b": 2, "a": 1}}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         // Should still have only one item (no duplicate added)
         let items = doc
@@ -769,7 +471,7 @@ mod tests {
         let filter = json!({"items": [{"a": 1, "b": 2}]});
         let update = json!({"$addToSet": {"items": {"a": 1, "b": 3}}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         let items = doc
             .get("items")
@@ -785,7 +487,7 @@ mod tests {
         let filter = json!({"items": [{"user": {"name": "Alice", "age": 30}}]});
         let update = json!({"$addToSet": {"items": {"user": {"age": 30, "name": "Alice"}}}});
 
-        let doc = create_upsert_document(&filter, &update);
+        let doc = create_upsert_document(&filter, &update).unwrap();
 
         let items = doc
             .get("items")

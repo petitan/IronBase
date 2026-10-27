@@ -657,7 +657,7 @@ impl DatabaseCore<StorageEngine> {
                 }
 
                 // Perform upsert: create new document from filter + update
-                let upsert_doc = create_upsert_document(query, update);
+                let upsert_doc = create_upsert_document(query, update)?;
 
                 // FIX: Validate upsert document - don't silently insert empty documents
                 let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
@@ -690,7 +690,7 @@ impl DatabaseCore<StorageEngine> {
             }
             Err(IronBaseError::CollectionNotFound(_)) if options.upsert => {
                 // Collection doesn't exist but upsert is enabled - create it via insert
-                let upsert_doc = create_upsert_document(query, update);
+                let upsert_doc = create_upsert_document(query, update)?;
 
                 // FIX: Validate upsert document - don't silently insert empty documents
                 let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
@@ -1278,7 +1278,7 @@ impl DatabaseCore<MemoryStorage> {
                 }
 
                 // Perform upsert: create new document from filter + update
-                let upsert_doc = create_upsert_document(query, update);
+                let upsert_doc = create_upsert_document(query, update)?;
 
                 // FIX: Validate upsert document - don't silently insert empty documents
                 // Must match StorageEngine behavior (durability.rs:740-748)
@@ -1299,7 +1299,7 @@ impl DatabaseCore<MemoryStorage> {
             }
             Err(IronBaseError::CollectionNotFound(_)) if options.upsert => {
                 // Collection doesn't exist but upsert is enabled - create it via insert
-                let upsert_doc = create_upsert_document(query, update);
+                let upsert_doc = create_upsert_document(query, update)?;
 
                 // FIX: Validate upsert document - don't silently insert empty documents
                 // Must match StorageEngine behavior (durability.rs:773-780)

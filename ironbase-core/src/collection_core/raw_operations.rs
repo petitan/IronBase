@@ -2449,7 +2449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_one_prepare_same_value_still_modified() {
+    fn test_update_one_prepare_same_value_is_not_modified() {
         let db = create_test_db();
         let coll = db.collection("test").unwrap();
 
@@ -2460,17 +2460,15 @@ mod tests {
         ]))
         .unwrap();
 
-        // Update with same value - IronBase reports as modified
-        // (MongoDB behavior: modified=1 if write occurred, regardless of value change)
+        // Update with the same value: matched, not modified, nothing to
+        // write (MongoDB nModified = 0)
         let prepared = coll
             .update_one_prepare(&json!({"name": "Alice"}), &json!({"$set": {"age": 25}}))
             .unwrap();
 
         assert_eq!(prepared.matched, 1);
-        assert_eq!(prepared.modified, 1); // Modified because $set was applied
-        assert!(prepared.doc_id.is_some());
-        assert!(prepared.old_doc.is_some());
-        assert!(prepared.new_doc.is_some());
+        assert_eq!(prepared.modified, 0);
+        assert_eq!(prepared.new_doc, prepared.old_doc);
     }
 
     #[test]

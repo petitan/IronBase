@@ -312,12 +312,23 @@ impl Default for ChunkingConfig {
     }
 }
 
+/// `live_document_count` of metadata written before the field existed (a
+/// stored 0 is a real count: a collection whose documents were all deleted)
+pub(crate) const LIVE_DOCUMENT_COUNT_MISSING: u64 = u64::MAX;
+
+fn live_document_count_missing() -> u64 {
+    LIVE_DOCUMENT_COUNT_MISSING
+}
+
 /// Collection metadata
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CollectionMeta {
     pub name: String,
     pub document_count: u64,
-    #[serde(default)]
+    /// Documents not deleted. Metadata from before this field reads as
+    /// [`LIVE_DOCUMENT_COUNT_MISSING`], which loading replaces with the
+    /// catalog size; a loaded `CollectionMeta` never holds it.
+    #[serde(default = "live_document_count_missing")]
     pub live_document_count: u64,
     #[serde(default)]
     pub data_offset: u64, // Legacy: always HEADER_SIZE (256). Kept for file format compat.

@@ -112,49 +112,7 @@ impl StorageEngine {
             header.data_end_offset = super::HEADER_SIZE;
         }
 
-        // MIGRATION: Fix live_document_count for databases before this field existed
-        // When live_document_count is 0 but catalog has documents, set it from catalog.len()
-        // This is critical for the fast path in scan_documents_with_early_termination
-        // A collection whose documents were all deleted also reads 0 with a
-        // non-empty catalog (a delete keeps the id, pointing at its
-        // tombstone): only a live document in the catalog marks the old format.
-        let mut collections = collections;
-        for meta in collections.values_mut() {
-            if meta.live_document_count == 0
-                && !meta.document_catalog.is_empty()
-                && Self::catalog_has_live_document(file, meta)
-            {
-                meta.live_document_count = meta.document_catalog.len() as u64;
-            }
-        }
-
         Ok((header, collections))
-    }
-
-    /// Whether any catalog entry of `meta` is a live document (not a
-    /// tombstone). Stops at the first live one; reads every entry only when
-    /// all are tombstones. A record that cannot be read counts as live, the
-    /// assumption the live-count migration made before it looked.
-    fn catalog_has_live_document(file: &mut File, meta: &CollectionMeta) -> bool {
-        let mut is_live = |offset: u64| -> Result<bool> {
-            file.seek(SeekFrom::Start(offset))?;
-            let mut len_bytes = [0u8; 4];
-            file.read_exact(&mut len_bytes)?;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-            if len > super::MAX_DOCUMENT_SIZE_BYTES {
-                return Ok(true);
-            }
-            let mut data = vec![0u8; len];
-            file.read_exact(&mut data)?;
-            let doc: serde_json::Value = serde_json::from_slice(&data)?;
-            Ok(!doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false))
-        };
-        meta.document_catalog
-            .values()
-            .any(|&offset| is_live(offset).unwrap_or(true))
     }
 
     /// Calculate data end offset from the last document in catalog
@@ -246,13 +204,21 @@ impl StorageEngine {
             // otherwise allocate (and touch) gigabytes before the JSON is
             // rejected. Memory is bounded by the parsed `CollectionMeta`.
             let start = file.stream_position()?;
-            let meta = {
+            let mut meta = {
                 let mut reader = BufReader::new(&*file).take(len as u64);
                 let mut de = serde_json::Deserializer::from_reader(&mut reader);
                 CollectionMeta::deserialize(&mut de)
                     .and_then(|meta| de.end().map(|()| meta))
                     .map_err(Self::metadata_json_error)?
             };
+            // MIGRATION: metadata written before `live_document_count`
+            // existed has no such field; count the catalog. Checked on the
+            // missing field itself: a stored 0 with a non-empty catalog is a
+            // collection whose documents were all deleted (a delete keeps
+            // the id, pointing at its tombstone), not the old format.
+            if meta.live_document_count == super::LIVE_DOCUMENT_COUNT_MISSING {
+                meta.live_document_count = meta.document_catalog.len() as u64;
+            }
             file.seek(SeekFrom::Start(start + len as u64))?;
             collections.insert(meta.name.clone(), meta);
         }
@@ -910,6 +876,31 @@ mod tests {
         let mut read_file = temp_file.reopen().unwrap();
         let result = StorageEngine::load_metadata(&mut read_file);
         assert!(result.is_err());
+    }
+
+    /// The live count read back from one collection's metadata JSON
+    fn live_count_after_load(meta: &serde_json::Value) -> u64 {
+        use std::io::{Seek, Write};
+        let json = serde_json::to_vec(meta).unwrap();
+        let mut file = NamedTempFile::new().unwrap().into_file();
+        file.write_all(&(json.len() as u32).to_le_bytes()).unwrap();
+        file.write_all(&json).unwrap();
+        file.rewind().unwrap();
+        let collections = StorageEngine::read_collection_metas(&mut file, 1).unwrap();
+        collections["test"].live_document_count
+    }
+
+    /// Metadata from before `live_document_count` existed counts its
+    /// catalog; a stored 0 with a catalog of tombstones (every document
+    /// deleted) stays 0. Both read 0 before, and reopening an emptied
+    /// collection brought its deleted documents back into the count.
+    #[test]
+    fn test_live_count_migration_only_for_a_missing_field() {
+        let mut meta = serde_json::to_value(create_test_collection("test")).unwrap();
+        assert_eq!(live_count_after_load(&meta), 0);
+
+        meta.as_object_mut().unwrap().remove("live_document_count");
+        assert_eq!(live_count_after_load(&meta), 2);
     }
 
     #[test]

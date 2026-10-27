@@ -170,7 +170,8 @@ fn test_push_slice_positive() {
         .unwrap();
 
     assert_eq!(matched, 1);
-    assert_eq!(modified, 1);
+    // The pushed items fall outside the slice: the array is unchanged
+    assert_eq!(modified, 0);
 
     // Verify
     let docs = coll.find(&json!({"_id": 1})).unwrap();
