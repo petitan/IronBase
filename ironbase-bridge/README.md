@@ -55,6 +55,12 @@ ironbase-bridge --debug
 | `--insecure` | `MCP_INSECURE` | false | Accept self-signed certs |
 | `-d, --debug` | `MCP_DEBUG` | false | Enable debug logging |
 | `--health-retries` | - | 3 | Health check retry count (0=skip) |
+| `--timeout-secs` | `MCP_TIMEOUT_SECS` | 3600 | Seconds to wait for one response (0=no limit; the server builds indexes without a time limit) |
+| `--admin-key` | `IRONBASE_ADMIN_KEY` | - | Admin key, injected only into `admin_*` tool calls (unless the call carries its own) |
+
+Connecting to the server times out after 10 seconds. SIGINT/SIGTERM stop the
+bridge at once, also while a request is waiting on the server. Responses are
+read up to 10 MB, also when the server sends no `Content-Length`.
 
 ## Client Configuration
 

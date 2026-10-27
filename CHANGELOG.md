@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — ironbase-bridge: hung requests, shutdown, oversized bodies, admin key scope (ironbase-bridge 0.3.440)
+
+Bridge review 2026-10-27; each fault reproduced against a mock server.
+
+- **No timeout, no shutdown in flight:** the HTTP client had no time limit,
+  and SIGINT/SIGTERM were only watched while reading stdin. A server that
+  never answered held the bridge forever: two SIGTERMs were ignored for
+  220 s, only SIGKILL stopped it. Now: 10 s connect timeout, a request
+  timeout (`--timeout-secs` / `MCP_TIMEOUT_SECS`, default 3600, 0 = none;
+  the server builds indexes without a limit), and the shutdown signal also
+  ends a request in flight (exits at once).
+- **Panic on a non-ASCII error body:** an HTTP error body over 10 MB was
+  cut at byte 1000 (`&t[..1000]`), which panicked inside a multi-byte
+  character (`'é'`, exit 101). It is now cut at a character boundary.
+- **Size limit read the whole body first:** without `Content-Length`
+  (chunked, behind a proxy) `response.text()` read the entire body before
+  checking the 10 MB limit. Bodies are now read in chunks and dropped past
+  the limit.
+- **Admin key in every tool call:** `--admin-key` was injected into every
+  `tools/call`, handing every tool call (and so a prompt-injected agent) the
+  admin key. It now goes only into `admin_*` tools, the only ones that take
+  it; an explicit `admin_key` argument still wins.
+- **JSON-RPC conformance:** error responses without a known id carry
+  `"id": null` (the field was omitted); a request without `params` is
+  forwarded without them (it was forwarded as `"params": null`).
+- **Tests:** the crate had none; 6 tests against a local mock server cover
+  each fix (run by the workspace `cargo test` in CI).
+
 ### Fixed — A corrupted HNSW cache file fails its load instead of panicking the first search (ironbase-core 0.3.439)
 
 Found reviewing the panicking paths (`unwrap` / `expect` / indexing) of the
