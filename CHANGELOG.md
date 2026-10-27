@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — fulltext: a tokenless text did not replace an indexed one (0.3.445)
+
+`FulltextIndex::insert` on an indexed id replaces it (an idempotent re-insert,
+e.g. on replay), but a new text without tokens (empty, only stop words)
+returned before the old postings were removed: the old document stayed
+searchable and counted. The replacement now happens first. (Sourcery review
+on #236; the P9 add/remove property now also replaces with `insert` and with
+tokenless text, and fails without the fix.)
+
 ### Added — P9 search properties and a nightly property/fuzz run (0.3.445)
 
 - **P9** (`ironbase-core/tests/pbt_search.rs`), fulltext: the top-k equals a
@@ -19,10 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after an orphan rebuild); results distinct, ordered, as many as the live
   vectors allow. No fault found. A text without tokens (empty, only stop
   words) is not indexed and counts neither in N nor in the average length.
-- **Nightly CI** (`.github/workflows/nightly.yml`, 02:17 UTC and on demand):
-  every property with `PROPTEST_CASES=2000` (P1–P9, core, MCP server,
-  bridge), new `.proptest-regressions` files uploaded on failure, and each
-  fuzz target for 60 s with its crash artifacts uploaded.
+- **Nightly CI** (`.github/workflows/nightly.yml`, 02:17 UTC and on demand,
+  numeric `cases` input): every property with `PROPTEST_CASES=2000` (P1–P9,
+  the earlier `property_tests`, `property_index_query_planner_tests` and
+  transaction properties, which now honour `PROPTEST_CASES`; core, MCP
+  server, bridge), new `.proptest-regressions` files uploaded on failure, and
+  each fuzz target for 60 s with its crash artifacts uploaded. Read-only
+  token, no credentials persisted by checkout.
 
 ### Security — MCP authorization and request handling (1.0.642, ironbase-bridge 0.3.444)
 

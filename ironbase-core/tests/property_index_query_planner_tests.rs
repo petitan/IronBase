@@ -24,6 +24,14 @@ use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use tempfile::TempDir;
 
+/// `PROPTEST_CASES` when set (the nightly run raises it), else `default`
+fn cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Insert a list of `(id, value)` pairs into a fresh collection on a
 /// fresh DB. Returns the open DB so the caller can run queries.
 fn fresh_db_with_v_docs(values: &[i64], db_label: &str) -> (TempDir, DatabaseCore<StorageEngine>) {
@@ -56,7 +64,7 @@ fn ids_of(docs: &[Value]) -> BTreeSet<i64> {
 // (no index exists yet), then create a btree index on `v` and count again.
 // Both must equal the ground-truth count computed in Rust.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(40))]
+    #![proptest_config(ProptestConfig::with_cases(cases(40)))]
     #[test]
     fn prop_count_index_vs_scan_equality(
         values in prop::collection::vec(0i64..50, 5..40),
@@ -87,7 +95,7 @@ proptest! {
 // `find` returns the right docs, or vice versa. This property pins the
 // stronger invariant: the SET of returned _ids matches.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(40))]
+    #![proptest_config(ProptestConfig::with_cases(cases(40)))]
     #[test]
     fn prop_find_doc_id_set_index_vs_scan(
         values in prop::collection::vec(0i64..30, 5..40),
@@ -124,7 +132,7 @@ proptest! {
 // invariant: `{$gte, $lte}` count via index equals collection scan count
 // equals the inclusive Rust-side count.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(40))]
+    #![proptest_config(ProptestConfig::with_cases(cases(40)))]
     #[test]
     fn prop_range_query_index_vs_scan(
         values in prop::collection::vec(0i64..1000, 10..50),
@@ -157,7 +165,7 @@ proptest! {
 // index. The result must be identical to the default `find(filter)` —
 // hints can only steer execution, not change semantics.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(30))]
+    #![proptest_config(ProptestConfig::with_cases(cases(30)))]
     #[test]
     fn prop_find_with_hint_matches_default(
         values in prop::collection::vec(0i64..40, 5..30),
@@ -185,7 +193,7 @@ proptest! {
 // collection-scan ground truth, even though the planner now picks a
 // different IndexScan plan (compound vs. none).
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(30))]
+    #![proptest_config(ProptestConfig::with_cases(cases(30)))]
     #[test]
     fn prop_compound_index_prefix_query(
         a_vals in prop::collection::vec(0i64..10, 8..30),
@@ -232,7 +240,7 @@ proptest! {
 // that the aggregation pipeline's `$match` filter semantics agree with
 // the find/count operator semantics.
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(30))]
+    #![proptest_config(ProptestConfig::with_cases(cases(30)))]
     #[test]
     fn prop_aggregate_match_count_matches_count_documents(
         values in prop::collection::vec(0i64..50, 5..30),

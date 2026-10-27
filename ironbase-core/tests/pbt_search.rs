@@ -187,13 +187,17 @@ proptest! {
     }
 
     /// Removing documents answers as never having indexed them; an update
-    /// answers as the new text alone
+    /// (or an `insert` on an indexed id) answers as the new text alone, also
+    /// a text without tokens
     #[test]
     fn fulltext_add_remove_is_symmetric(
         language in arb_language(),
         kept in prop::collection::vec(arb_text(), 0..15),
         removed in prop::collection::vec(arb_text(), 1..10),
-        updated in prop::collection::vec((any::<prop::sample::Index>(), arb_text()), 0..5),
+        updated in prop::collection::vec(
+            (any::<prop::sample::Index>(), prop_oneof![3 => arb_text(), 1 => Just(String::from("a az the"))]),
+            0..6,
+        ),
         queries in prop::collection::vec(arb_text(), 1..5),
     ) {
         let options = FtsOptions::new(language);
@@ -211,9 +215,14 @@ proptest! {
             index.remove(&DocumentId::Int(base + i as i64)).unwrap();
         }
         if !kept.is_empty() {
-            for (pick, text) in &updated {
+            for (n, (pick, text)) in updated.iter().enumerate() {
                 let id = pick.index(kept.len()) as i64;
-                index.update(&DocumentId::Int(id), text).unwrap();
+                // `insert` on an indexed id replaces it too
+                if n % 2 == 0 {
+                    index.update(&DocumentId::Int(id), text).unwrap();
+                } else {
+                    index.insert(&DocumentId::Int(id), text).unwrap();
+                }
                 index_model(&mut docs, id, tokenize(text, &options));
             }
         }

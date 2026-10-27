@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc e16bfaceae5d7ad7b96edc9a451d817eb4856ec0eb6a519ce1fcdbbca15773af # shrinks to language = Hungarian, kept = ["", ""], removed = [""], updated = [], queries = [""]
 cc 6413fd0aa504eb9182f05798fbbc673b891eabebe2907d6455d38e4a97beb75f # shrinks to language = Hungarian, texts = ["", "őrök"], queries = ["őrök"], limit = 1
+cc e618cdc96688640ab2bf2f8462e2a4cf8875a3910d0e335b76a7221061a4cce9 # shrinks to language = Hungarian, kept = [""], removed = [""], updated = [(Index(0), ""), (Index(0), ""), (Index(0), "király"), (Index(0), "")], queries = [""]

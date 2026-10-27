@@ -13,7 +13,13 @@ on:
     inputs:
       cases:
         description: "PROPTEST_CASES for the property tests"
-        default: "2000"
+        type: number
+        default: 2000
+
+# Build, test and fuzz code (and every dependency it compiles) runs here:
+# the token may only read, and checkout does not leave it in .git/config
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,6 +33,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -34,15 +42,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Core properties (P1-P7, P9)
+      - name: Core properties (P1-P7, P9 and the earlier suites)
         run: >
           cargo test --release -p ironbase-core
           --test pbt_query_differential --test pbt_crud_state_machine
           --test pbt_crash_recovery --test pbt_update_operators
           --test pbt_btree --test pbt_aggregation --test pbt_search
+          --test property_tests --test property_index_query_planner_tests
 
-      - name: Roundtrip properties (P5)
-        run: cargo test --release -p ironbase-core --lib roundtrip_properties
+      - name: Library properties (P5 roundtrips, transactions)
+        run: >
+          cargo test --release -p ironbase-core --lib --
+          roundtrip_properties transaction_property_tests
 
       - name: MCP properties (P8)
         working-directory: mcp-server
@@ -79,6 +90,8 @@ jobs:
           - fuzz_fulltext
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@nightly

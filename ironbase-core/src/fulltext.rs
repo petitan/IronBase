@@ -2269,17 +2269,19 @@ impl FulltextIndex {
         parent_doc_id: Option<&str>,
     ) -> Result<()> {
         let tokens = tokenize(text, &self.options);
-        if tokens.is_empty() {
-            return Ok(());
-        }
 
         // Idempotency guard: if the doc is already registered, drop the old
         // posting-list entries first. Without this, a second insert() on the
         // same doc_id (e.g., after a partial caller-side failure, or a retry
         // that skipped remove) produces duplicate (doc_id, tf) pairs in the
-        // posting lists and inflates BM25 scores.
+        // posting lists and inflates BM25 scores. Before the empty-text
+        // return: a text without tokens replacing an indexed one left the old
+        // document searchable and counted.
         if self.doc_tokens_offsets.contains_key(doc_id) {
             self.remove(doc_id)?;
+        }
+        if tokens.is_empty() {
+            return Ok(());
         }
         // The deletion marker (if any) stays: it hides this doc's stale
         // frozen/disk postings, while the fresh postings below are in memory
