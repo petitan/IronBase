@@ -10,6 +10,14 @@ mod property_tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    /// `PROPTEST_CASES` when set (the nightly run raises it), else `default`
+    fn cases(default: u32) -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
     // Strategy for generating random operations
     fn operation_strategy() -> impl Strategy<Value = Operation> {
         prop_oneof![
@@ -195,7 +203,7 @@ mod property_tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(50))]
+        #![proptest_config(ProptestConfig::with_cases(cases(50)))]
 
         /// Property: Database survives crash and recovery (simulated)
         #[test]

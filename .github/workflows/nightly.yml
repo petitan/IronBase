@@ -1,0 +1,111 @@
+name: Nightly property and fuzz tests
+
+# The property-based tests run in every PR's CI with few cases (seconds per
+# property); here they run with many cases, and the fuzz targets run for a
+# minute each. A failing property prints its minimal input; the
+# `.proptest-regressions` files it wrote are uploaded so the case can be
+# committed and replayed by every later run.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "PROPTEST_CASES for the property tests"
+        type: number
+        default: 2000
+
+# Build, test and fuzz code (and every dependency it compiles) runs here:
+# the token may only read, and checkout does not leave it in .git/config
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  PROPTEST_CASES: ${{ github.event.inputs.cases || '2000' }}
+
+jobs:
+  properties:
+    name: Property tests (many cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Core properties (P1-P7, P9 and the earlier suites)
+        run: >
+          cargo test --release -p ironbase-core
+          --test pbt_query_differential --test pbt_crud_state_machine
+          --test pbt_crash_recovery --test pbt_update_operators
+          --test pbt_btree --test pbt_aggregation --test pbt_search
+          --test property_tests --test property_index_query_planner_tests
+
+      - name: Library properties (P5 roundtrips, transactions)
+        run: >
+          cargo test --release -p ironbase-core --lib --
+          roundtrip_properties transaction_property_tests
+
+      - name: MCP properties (P8)
+        working-directory: mcp-server
+        run: >
+          cargo test --release --lib --
+          test_any_request_gets_a_jsonrpc_answer_with_its_id
+          test_every_tool_denies_what_the_caller_may_not_do
+
+      - name: Bridge properties (P8)
+        working-directory: ironbase-bridge
+        run: cargo test --release -- every_request_gets_one_answer_with_its_id
+
+      - name: Upload new proptest regressions
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: proptest-regressions
+          path: "**/*.proptest-regressions"
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_query_parser
+          - fuzz_document_parse
+          - fuzz_wal_bytes
+          - fuzz_json_ops
+          - fuzz_aggregation
+          - fuzz_storage_format
+          - fuzz_fulltext
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run ${{ matrix.target }} for 60 s
+        working-directory: ironbase-core/fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: ironbase-core/fuzz/artifacts
