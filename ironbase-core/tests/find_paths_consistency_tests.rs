@@ -197,3 +197,50 @@ fn find_with_hint_matches_unhinted_find() {
         .find_with_hint(&json!({"a": {"$ne": 1}}), &a_idx)
         .is_err());
 }
+
+/// File storage: an empty collection next to one with documents. Its scan
+/// covered the region before the metadata, which also holds older metadata
+/// blocks, and aggregate / find_streaming failed with Corruption parsing one
+/// as a document (found by the query differential property, P1).
+#[test]
+fn empty_collection_scans_nothing_on_file_storage() {
+    use ironbase_core::StorageEngine;
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = DatabaseCore::<StorageEngine>::open(dir.path().join("e.mlite")).unwrap();
+    for i in 0..3 {
+        db.insert_one("full", HashMap::from([("n".to_string(), json!(i))]))
+            .unwrap();
+    }
+    db.collection("empty").unwrap();
+    for i in 3..6 {
+        db.insert_one("full", HashMap::from([("n".to_string(), json!(i))]))
+            .unwrap();
+    }
+    let coll = db.get_collection("empty").unwrap();
+    assert!(coll
+        .aggregate(&json!([{ "$match": {} }]))
+        .unwrap()
+        .is_empty());
+    let mut cursor = coll.find_streaming(&json!({})).unwrap();
+    assert!(cursor.next().unwrap().is_none());
+    db.close().unwrap();
+}
+
+/// File storage: an indexed range whose lower bound is above its upper bound
+/// (`$gt: 2^53, $lt: 0`) is empty; the validated index count sliced a leaf
+/// with start past end and panicked (found by the query differential
+/// property, P1).
+#[test]
+fn inverted_index_range_counts_zero_on_file_storage() {
+    use ironbase_core::StorageEngine;
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = DatabaseCore::<StorageEngine>::open(dir.path().join("r.mlite")).unwrap();
+    db.insert_one("c", HashMap::from([("v".to_string(), json!(0.5))]))
+        .unwrap();
+    let coll = db.get_collection("c").unwrap();
+    coll.create_index("v".to_string(), false, false).unwrap();
+    let query = json!({ "v": { "$gt": 9007199254740992i64, "$lt": 0 } });
+    assert_eq!(coll.count_documents(&query).unwrap(), 0);
+    assert!(coll.find(&query).unwrap().is_empty());
+    db.close().unwrap();
+}

@@ -1940,6 +1940,11 @@ impl BPlusTree {
                     } else {
                         leaf.keys.partition_point(|k| k < end)
                     };
+                    // An empty range (`start` above `end`, e.g. `$gt: 5, $lt: 0`)
+                    // puts start_idx past end_idx: slicing it panicked
+                    if start_idx >= end_idx {
+                        return 0;
+                    }
                     leaf.document_ids[start_idx..end_idx]
                         .iter()
                         .filter(|doc_id| catalog.contains_key(doc_id))
