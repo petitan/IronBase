@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — P9 search properties and a nightly property/fuzz run (0.3.445)
+
+- **P9** (`ironbase-core/tests/pbt_search.rs`), fulltext: the top-k equals a
+  raw BM25 oracle (Hungarian, English, no language); removing documents
+  answers as never having indexed them and an update as the new text alone;
+  flushed, reloaded lazily (posting cache) and changed again, the index still
+  answers as the oracle; a document is found by each word it keeps, asked in
+  upper case or with decomposed (NFD) accents. HNSW: recall@k against
+  brute-force cosine at least 0.9; removed vectors never returned (before and
+  after an orphan rebuild); results distinct, ordered, as many as the live
+  vectors allow. No fault found. A text without tokens (empty, only stop
+  words) is not indexed and counts neither in N nor in the average length.
+- **Nightly CI** (`.github/workflows/nightly.yml`, 02:17 UTC and on demand):
+  every property with `PROPTEST_CASES=2000` (P1–P9, core, MCP server,
+  bridge), new `.proptest-regressions` files uploaded on failure, and each
+  fuzz target for 60 s with its crash artifacts uploaded.
+
 ### Security — MCP authorization and request handling (1.0.642, ironbase-bridge 0.3.444)
 
 Found by the MCP properties (P8): every shipped tool × caller × argument

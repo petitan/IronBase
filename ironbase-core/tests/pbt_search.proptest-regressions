@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e16bfaceae5d7ad7b96edc9a451d817eb4856ec0eb6a519ce1fcdbbca15773af # shrinks to language = Hungarian, kept = ["", ""], removed = [""], updated = [], queries = [""]
+cc 6413fd0aa504eb9182f05798fbbc673b891eabebe2907d6455d38e4a97beb75f # shrinks to language = Hungarian, texts = ["", "őrök"], queries = ["őrök"], limit = 1
