@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — property-based tests: query paths and a CRUD state machine (0.3.441)
+
+Phase 1 of the property-based testing plan (`ironbase-core/tests/pbt_*`,
+shared generators and reference oracle in `tests/pbt_support/`).
+
+- **P1 query differential** (`pbt_query_differential.rs`): random documents
+  (integers, floats that need 17 digits, a subnormal, `-0.0`, accented
+  strings, booleans, nulls, arrays, a nested object, missing fields) and
+  random queries (`$eq/$ne/$gt/$gte/$lt/$lte/$in/$nin/$exists/$not`, ranges,
+  `$and/$or/$nor`). `find`, `count_documents`, `find_one`, `find_streaming`
+  and `aggregate([$match])` must answer what the oracle answers: without an
+  index, indexed before and after the inserts, with a compound index, in
+  memory and on file storage before and after reopening.
+- **P2 CRUD state machine** (`pbt_crud_state_machine.rs`): random sequences of
+  inserts, updates and deletes (by `_id` and by filter, `$set/$unset/$inc`),
+  index creation and removal, and on file storage checkpoint, compact and
+  reopen, against a `BTreeMap` model. After every step: `find({})` equals the
+  model, count and live document count equal its size, `document_order` is
+  exactly the catalog's ids, matched counts equal the oracle's, and probe
+  queries agree with it.
+- Case counts are sized for PR CI; `PROPTEST_CASES` raises them. Failing
+  cases found so far are kept in the `.proptest-regressions` files.
+
+### Fixed — three faults found by the properties (0.3.441)
+
+Each has a focused regression test that fails without the fix.
+
+- **Empty collection scan read a metadata block:** on file storage, a full
+  scan (`aggregate`, `find_streaming`) of a collection with no documents
+  covered the region before the latest metadata, which also holds earlier
+  metadata blocks and other collections' documents, and failed with
+  `Corruption("Failed to parse document at offset 256")`. An empty catalog
+  now scans nothing (`collection_core/cursor.rs`).
+- **Deleted documents came back in the count after reopening:** a delete
+  keeps the id in the catalog, pointing at its tombstone. When every document
+  of a collection was deleted, the live count was 0 with a non-empty catalog,
+  which the load-time migration for databases from before the live count
+  took for the old format: it set the count to the catalog size, so
+  `count_documents({})` returned the deleted documents' number for an empty
+  collection. The migration now applies only when the catalog holds a live
+  document (`storage/metadata.rs`).
+- **Panic on an empty indexed range:** a range whose lower bound is above its
+  upper bound (`{"v": {"$gt": 9007199254740992, "$lt": 0}}`) made the
+  validated index count slice a leaf with start past end and panic
+  (file storage, `count_documents`/`find`). It now counts 0
+  (`index/btree.rs`).
+
 ### Fixed — ironbase-bridge: hung requests, shutdown, oversized bodies, admin key scope (ironbase-bridge 0.3.440)
 
 Bridge review 2026-10-27; each fault reproduced against a mock server.

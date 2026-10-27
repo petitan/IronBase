@@ -115,14 +115,46 @@ impl StorageEngine {
         // MIGRATION: Fix live_document_count for databases before this field existed
         // When live_document_count is 0 but catalog has documents, set it from catalog.len()
         // This is critical for the fast path in scan_documents_with_early_termination
+        // A collection whose documents were all deleted also reads 0 with a
+        // non-empty catalog (a delete keeps the id, pointing at its
+        // tombstone): only a live document in the catalog marks the old format.
         let mut collections = collections;
         for meta in collections.values_mut() {
-            if meta.live_document_count == 0 && !meta.document_catalog.is_empty() {
+            if meta.live_document_count == 0
+                && !meta.document_catalog.is_empty()
+                && Self::catalog_has_live_document(file, meta)
+            {
                 meta.live_document_count = meta.document_catalog.len() as u64;
             }
         }
 
         Ok((header, collections))
+    }
+
+    /// Whether any catalog entry of `meta` is a live document (not a
+    /// tombstone). Stops at the first live one; reads every entry only when
+    /// all are tombstones. A record that cannot be read counts as live, the
+    /// assumption the live-count migration made before it looked.
+    fn catalog_has_live_document(file: &mut File, meta: &CollectionMeta) -> bool {
+        let mut is_live = |offset: u64| -> Result<bool> {
+            file.seek(SeekFrom::Start(offset))?;
+            let mut len_bytes = [0u8; 4];
+            file.read_exact(&mut len_bytes)?;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            if len > super::MAX_DOCUMENT_SIZE_BYTES {
+                return Ok(true);
+            }
+            let mut data = vec![0u8; len];
+            file.read_exact(&mut data)?;
+            let doc: serde_json::Value = serde_json::from_slice(&data)?;
+            Ok(!doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+        };
+        meta.document_catalog
+            .values()
+            .any(|&offset| is_live(offset).unwrap_or(true))
     }
 
     /// Calculate data end offset from the last document in catalog

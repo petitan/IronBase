@@ -252,3 +252,26 @@ fn test_index_count_with_tombstones_in_catalog() {
     );
     assert_eq!(count_a, 20);
 }
+
+/// File storage: a collection whose documents were all deleted keeps the
+/// ids in its catalog (pointing at their tombstones) with live count 0.
+/// Reopening took that for a database from before the live count existed and
+/// set the count to the catalog size: count_documents({}) returned 1 for an
+/// empty collection (found by the CRUD state machine property, P2).
+#[test]
+fn test_count_after_delete_all_and_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("count.mlite");
+    {
+        let db = ironbase_core::DatabaseCore::<ironbase_core::StorageEngine>::open(&path).unwrap();
+        db.insert_one("test", HashMap::from([("n".to_string(), json!(1))]))
+            .unwrap();
+        assert_eq!(db.delete_one("test", &json!({})).unwrap(), 1);
+        db.close().unwrap();
+    }
+    let db = ironbase_core::DatabaseCore::<ironbase_core::StorageEngine>::open(&path).unwrap();
+    let coll = db.get_collection("test").unwrap();
+    assert_eq!(coll.count_documents(&json!({})).unwrap(), 0);
+    assert!(coll.find(&json!({})).unwrap().is_empty());
+    db.close().unwrap();
+}

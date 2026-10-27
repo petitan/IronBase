@@ -203,6 +203,12 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 if let Ok(bytes) = storage.read_data_at(max_offset) {
                     data_end = max_offset + 4 + bytes.len() as u64;
                 }
+            } else {
+                // No document in the catalog: nothing to scan. The region
+                // before the metadata also holds earlier metadata blocks
+                // (and other collections' documents); scanning it parsed a
+                // metadata block as a document and failed with Corruption.
+                data_end = start_offset;
             }
         }
         drop(storage);

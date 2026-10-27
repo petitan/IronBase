@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ea12fe7cbd9f97e8982420122789823bd492aae59c898e05b939a086ad00536c # shrinks to docs = [{"a": Array [], "b": Array [], "o": Object {}}], queries = [Object {"a": Number(0)}], (paths, compound) = (["o.y"], true)
+cc 8c72698df2b22840a3fb14544b4dfbdaf40a989903a1a16e59e8c9c7a4c8d647 # shrinks to docs = [], queries = [Object {"$and": Array [Object {"a": Number(0)}]}], (paths, compound) = (["o.y"], false)
+cc ff3de8e3c6f9129270c5d48bb00183e628cbb19a553ca7a92f91ffa927d65e6d # shrinks to docs = [{"o": Object {"y": Number(0.5)}}], queries = [Object {"o.y": Object {"$gt": Number(9007199254740992), "$lt": Number(0)}}], (paths, compound) = (["o.y"], false)
