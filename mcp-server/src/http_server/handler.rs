@@ -46,6 +46,17 @@ pub(crate) fn handle_request(
         ));
     }
 
+    if request.is_notification_method_with_id() {
+        return Some(create_error_response(
+            -32600,
+            &format!(
+                "Invalid request: '{}' is a notification, send it without an id",
+                request.method
+            ),
+            request.id.clone(),
+        ));
+    }
+
     // MCP lifecycle enforcement: only allow initialize and ping before initialization
     // Per spec: "The initialization phase MUST be the first interaction"
     if !is_initialized
@@ -290,5 +301,64 @@ pub(crate) fn handle_request(
             &format!("Method not found: {}", request.method),
             request.id.clone(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::pbt::{assert_answers, random_request, tool_names, Gen};
+
+    /// P8: the HTTP handler answers any request with its id, like the stdio
+    /// one, for an initialized localhost client and an external one (which
+    /// the ACL denies most tools)
+    #[test]
+    fn test_any_request_gets_a_jsonrpc_answer_with_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = Arc::new(crate::IronBaseAdapter::new(dir.path().join("h.mlite")).unwrap());
+        adapter
+            .insert_one("users", serde_json::json!({"name": "a", "n": 1}))
+            .unwrap();
+        let service = crate::IronBaseService::new(
+            adapter.clone(),
+            crate::AclManager::new(adapter),
+            crate::ApiKeyCache::new(60, false),
+            crate::ServerInfo {
+                protocol: "http".into(),
+                host: "localhost".into(),
+                port: 0,
+                require_api_key: false,
+            },
+            false,
+            crate::scripting::LimitsManager::new(),
+            None,
+            None,
+        );
+        let local: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let external: SocketAddr = "8.8.8.8:5000".parse().unwrap();
+        let initialized = Mutex::new(HashSet::new());
+        for addr in [local, external] {
+            super::super::mark_client_initialized(
+                &initialized,
+                &super::super::client_identity(None, Some(addr)),
+            );
+        }
+        let tools = tool_names();
+        let mut gen = Gen(0x2545_f491_4f6c_dd1d);
+        for case in 0..crate::transport::pbt::cases() {
+            let request = random_request(&mut gen, &tools);
+            let addr = if case % 2 == 0 { local } else { external };
+            assert_answers(case, &request, |r| {
+                handle_request(
+                    r,
+                    &service,
+                    &initialized,
+                    None,
+                    Some(addr),
+                    Duration::from_secs(30),
+                    None,
+                )
+            });
+        }
     }
 }

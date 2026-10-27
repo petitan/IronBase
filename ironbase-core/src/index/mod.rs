@@ -1751,6 +1751,52 @@ mod audit_index_tests {
         assert_eq!(count, 5000);
     }
 
+    /// P6: a descending scan with `limit: Some(0)` returns nothing, as the
+    /// ascending one (it checked the limit after collecting and returned one)
+    #[test]
+    fn scan_limit_zero_returns_nothing_in_both_orders() {
+        let mut tree = BPlusTree::new("i".to_string(), "k".to_string(), false, false);
+        for i in 0..10 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        for order in [ScanOrder::Asc, ScanOrder::Desc] {
+            let mode = RangeQueryMode::Scan {
+                skip: 0,
+                limit: Some(0),
+                order,
+            };
+            let docs = tree
+                .range_query(&IndexKey::Null, &IndexKey::MaxKey, true, true, mode)
+                .unwrap_docs();
+            assert!(docs.is_empty(), "{order:?}: {docs:?}");
+            let pairs = tree.range_query_pairs(
+                &IndexKey::Null,
+                &IndexKey::MaxKey,
+                true,
+                true,
+                0,
+                Some(0),
+                order,
+            );
+            assert!(pairs.is_empty(), "{order:?} pairs: {pairs:?}");
+        }
+    }
+
+    /// P6: `-0.0` and `0.0` are one key: equal, one hash, ordered Equal
+    /// (equality compared bits while the order compared values)
+    #[test]
+    fn negative_zero_and_zero_are_one_key() {
+        use std::hash::{BuildHasher, RandomState};
+        let (neg, pos) = (
+            IndexKey::Float(OrderedFloat(-0.0)),
+            IndexKey::Float(OrderedFloat(0.0)),
+        );
+        assert_eq!(neg.cmp(&pos), std::cmp::Ordering::Equal);
+        assert_eq!(neg, pos);
+        let hasher = RandomState::new();
+        assert_eq!(hasher.hash_one(&neg), hasher.hash_one(&pos));
+    }
+
     /// Review follow-up on #21: keys beyond every separator live in the
     /// rightmost child and must still be deletable.
     #[test]

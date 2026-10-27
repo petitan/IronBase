@@ -336,9 +336,21 @@ impl IronBaseService {
         // listener_*) is always checked on that scope: a `collection` argument
         // the caller adds must not replace it. Any other tool is checked on
         // every collection its arguments name (MCP audit 2026-10-14 M2).
+        // A tool that names no collection (transaction_begin/commit/rollback,
+        // embed_job_cancel, ...) is checked against the catch-all `*` rule:
+        // checking an empty list passed vacuously, so a read-only external
+        // caller could start, commit or roll back transactions and cancel
+        // embedding jobs (P8 authorization property).
         let collections_to_check = match get_system_collection_for_tool(&request.name) {
             Some(scope) => vec![scope.to_string()],
-            None => collections_from_args(&request.arguments),
+            None => {
+                let named = collections_from_args(&request.arguments);
+                if named.is_empty() {
+                    vec![ANY_COLLECTION.to_string()]
+                } else {
+                    named
+                }
+            }
         };
 
         let required = get_required_permission(&request.name);
@@ -354,6 +366,7 @@ impl IronBaseService {
             // 2. Accidental collection creation due to typos (e.g., "userss" instead of "users")
             // 3. Transaction rollback inconsistency (collection remains after rollback)
             if is_collection_creating_insert(&request.name)
+                && collection != ANY_COLLECTION
                 && !self.adapter.collection_exists(&collection)
             {
                 return Err(format!(
@@ -370,6 +383,10 @@ impl IronBaseService {
 // ============================================================================
 // Helper functions
 // ============================================================================
+
+/// The ACL target of a tool call that names no collection: the catch-all
+/// `*` rule's permissions apply
+const ANY_COLLECTION: &str = "*";
 
 /// Check if a tool is an insert operation that can implicitly create collections
 fn is_collection_creating_insert(tool_name: &str) -> bool {
@@ -525,6 +542,68 @@ mod tests {
         assert!(service
             .authorize_resource(&ServiceContext::localhost(), "ironbase://stats")
             .is_ok());
+    }
+
+    fn internal() -> ServiceContext {
+        let addr: std::net::SocketAddr = "192.168.1.20:4000".parse().unwrap();
+        ServiceContext::new(CallerContext::new(Some(addr), None), true, None)
+    }
+
+    /// P8 (property-based testing plan), every shipped tool × caller ×
+    /// argument shape against the authorization spec: with the default ACL an
+    /// external caller may only read and an internal one may not administer;
+    /// a call needing more than the caller holds on every collection it can
+    /// act on (the catch-all `*` rule for a tool that names none) is denied
+    /// before it runs, whatever arguments it carries.
+    #[test]
+    fn test_every_tool_denies_what_the_caller_may_not_do() {
+        use crate::acl::{tool_policy, RequiredPermission};
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let names: Vec<String> = crate::tools::get_tools_list()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+        let shapes = [
+            serde_json::json!({}),
+            serde_json::json!({"collection": "users"}),
+            serde_json::json!({"collection": "_system.api_keys"}),
+            serde_json::json!({"collection": 5}),
+            serde_json::json!({"collection": ["users"]}),
+            serde_json::json!({"old_collection": "users", "new_collection": "x"}),
+        ];
+        let mut violations = Vec::new();
+        for name in &names {
+            let policy = tool_policy(name);
+            for (caller, label, granted) in [
+                (external(), "external", RequiredPermission::Read),
+                (internal(), "internal", RequiredPermission::Write),
+            ] {
+                let exceeds = matches!(
+                    (policy.permission, granted),
+                    (RequiredPermission::Admin, _)
+                        | (RequiredPermission::Write, RequiredPermission::Read)
+                );
+                if !exceeds && !policy.localhost && policy.system_collection.is_none() {
+                    continue;
+                }
+                for args in &shapes {
+                    let result =
+                        service.execute_tool(&caller, &ToolRequest::new(name, args.clone()));
+                    if !matches!(result, ToolResult::AccessDenied(_)) {
+                        violations.push(format!("{name} {args} as {label}: {result:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "{} calls ran beyond the caller's rights:\n{}",
+            violations.len(),
+            violations.join("\n")
+        );
     }
 
     /// M1: with `require_api_key`, a resource read without a key is denied.

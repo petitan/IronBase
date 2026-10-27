@@ -100,11 +100,29 @@ struct Args {
 // JSON-RPC 2.0 Types
 // ============================================================================
 
+/// A field that is present, `null` included (`#[serde(default)]` gives
+/// `None` when it is missing)
+fn present_value<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct JsonRpcRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     jsonrpc: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `"id": null` is `Some(Null)` (an invalid request), a missing id
+    /// `None` (a notification): plain `Option` read both as `None`, so a
+    /// null-id request was forwarded as a notification and never answered
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     id: Option<serde_json::Value>,
     method: String,
     /// Absent params stay absent when forwarded: JSON-RPC 2.0 allows
@@ -525,7 +543,7 @@ async fn forward_single(
 
     // 204 No Content = notification acknowledged
     if response.status() == reqwest::StatusCode::NO_CONTENT {
-        return Ok(None);
+        return Ok(no_answer(request));
     }
 
     // BUG #6 fix: Check Content-Length before reading body
@@ -583,13 +601,25 @@ async fn forward_single(
 
     // Empty body = notification acknowledged
     if bytes.is_empty() {
-        return Ok(None);
+        return Ok(no_answer(request));
     }
 
     // Parse response
     let resp: JsonRpcResponse =
         serde_json::from_slice(&bytes).context("Failed to parse JSON-RPC response")?;
     Ok(Some(resp))
+}
+
+/// The server sent no response: right for a notification; a request with an
+/// id still gets one, else the client waits for it forever
+fn no_answer(request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    (!is_notification(request)).then(|| {
+        make_error_response(
+            request.id.clone(),
+            -32603,
+            "Server sent no response to the request",
+        )
+    })
 }
 
 /// A response body read up to a size limit
@@ -733,7 +763,18 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
         return false;
     }
 
-    let output = match parse_input(line) {
+    if let Some(json) = answer_line(client, args, line).await {
+        // BUG #4 fix: Check write_response return value
+        if !write_response(&json) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The stdout line answering an input line: None for notifications
+async fn answer_line(client: &reqwest::Client, args: &Args, line: &str) -> Option<String> {
+    match parse_input(line) {
         Ok(JsonRpcInput::Single(request)) => {
             tracing::debug!(
                 "Processing request: {} (id: {:?})",
@@ -746,12 +787,12 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
                 if let Err(e) = forward_single(client, args, &request).await {
                     tracing::warn!("Notification '{}' forward failed: {}", request.method, e);
                 }
-                return true;
+                return None;
             }
 
             match forward_single(client, args, &request).await {
                 Ok(Some(resp)) => serialize_response(&resp),
-                Ok(None) => return true, // notification response
+                Ok(None) => None, // notification response
                 Err(e) => {
                     tracing::error!("Request failed: {}", e);
                     serialize_response(&make_error_response(request.id, -32603, &e.to_string()))
@@ -767,7 +808,7 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
             let mut responses = process_batch(client, args, requests).await;
             responses.append(&mut errors);
             if responses.is_empty() {
-                return true; // all were notifications
+                return None; // all were notifications
             }
             serialize_response(&responses)
         }
@@ -775,15 +816,7 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
             tracing::error!("Parse error: {}", e.message());
             serialize_response(&make_error_response(e.id(), e.code(), &e.message()))
         }
-    };
-
-    if let Some(json) = output {
-        // BUG #4 fix: Check write_response return value
-        if !write_response(&json) {
-            return false;
-        }
     }
-    true
 }
 
 /// Main loop: forward stdin lines until EOF, a broken stdout or `shutdown`.
@@ -899,6 +932,10 @@ mod tests {
         HugeBody(usize),
         /// Never answer
         Hang,
+        /// HTTP 204, no body (what the server answers a notification)
+        NoContent,
+        /// HTTP 200 with an empty body
+        Empty,
     }
 
     /// Serve `reply` on a local port; returns the /mcp URL and the request
@@ -975,6 +1012,21 @@ mod tests {
                         Reply::Hang => {
                             std::future::pending::<()>().await;
                             Ok(())
+                        }
+                        Reply::NoContent => {
+                            socket
+                                .write_all(
+                                    format!("HTTP/1.1 204 No Content\r\n{close}\r\n").as_bytes(),
+                                )
+                                .await
+                        }
+                        Reply::Empty => {
+                            socket
+                                .write_all(
+                                    format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n{close}\r\n")
+                                        .as_bytes(),
+                                )
+                                .await
                         }
                     };
                 });
@@ -1149,5 +1201,113 @@ mod tests {
         .unwrap();
         let forwarded = received.lock().unwrap()[0].clone();
         assert!(forwarded.get("params").is_none(), "{forwarded}");
+    }
+
+    /// Deterministic generator (xorshift): reproducible random input lines
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// One request object: with an id (number or string), a notification,
+    /// a null id, or a wrong `jsonrpc` version
+    fn random_request(gen: &mut Gen) -> serde_json::Value {
+        let mut request = serde_json::json!({"jsonrpc": "2.0", "method": "tools/call", "params": {"n": gen.below(9)}});
+        match gen.below(6) {
+            0 | 1 => request["id"] = serde_json::json!(gen.below(1000)),
+            2 => request["id"] = serde_json::json!(format!("s{}", gen.below(1000))),
+            3 => {} // notification
+            4 => request["id"] = serde_json::Value::Null,
+            _ => {
+                request["id"] = serde_json::json!(gen.below(1000));
+                request["jsonrpc"] = serde_json::json!("1.0");
+            }
+        }
+        request
+    }
+
+    /// A line: a request, a batch of 0..4 requests, or not a request
+    fn random_line(gen: &mut Gen) -> String {
+        match gen.below(8) {
+            0..=3 => random_request(gen).to_string(),
+            4 | 5 => {
+                let n = gen.below(5);
+                serde_json::Value::Array((0..n).map(|_| random_request(gen)).collect()).to_string()
+            }
+            6 => "{not json".to_string(),
+            _ => "[1, \"x\"]".to_string(),
+        }
+    }
+
+    /// The ids a line's answer must carry, in some order (`null` for an
+    /// invalid request or a parse error), or None when no answer is due
+    fn expected_ids(line: &str) -> Option<Vec<serde_json::Value>> {
+        let answer = |r: &serde_json::Value| -> Option<serde_json::Value> {
+            if !r.is_object() {
+                return Some(serde_json::Value::Null);
+            }
+            match r.get("id") {
+                None => None, // notification
+                Some(serde_json::Value::Null) => Some(serde_json::Value::Null),
+                Some(id) => Some(id.clone()),
+            }
+        };
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Err(_) => Some(vec![serde_json::Value::Null]),
+            Ok(serde_json::Value::Array(items)) if items.is_empty() => {
+                Some(vec![serde_json::Value::Null])
+            }
+            Ok(serde_json::Value::Array(items)) => {
+                let ids: Vec<_> = items.iter().filter_map(answer).collect();
+                (!ids.is_empty()).then_some(ids)
+            }
+            Ok(value) => answer(&value).map(|id| vec![id]),
+        }
+    }
+
+    /// P8: every request with an id gets one answer carrying that id (also
+    /// when the server sends none, a 204 or an empty body), a notification
+    /// none, an invalid request an error; for single requests and batches
+    #[tokio::test]
+    async fn every_request_gets_one_answer_with_its_id() {
+        let cases: usize = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        let mut gen = Gen(0x9e37_79b9_7f4a_7c15);
+        for reply in [Reply::Echo, Reply::NoContent, Reply::Empty] {
+            let (url, _) = mock_server(reply).await;
+            let args = args(&url);
+            let client = build_client(&args).unwrap();
+            for case in 0..cases {
+                let line = random_line(&mut gen);
+                let output = answer_line(&client, &args, &line).await;
+                let expected = expected_ids(&line);
+                let got: Option<Vec<serde_json::Value>> = output.map(|text| {
+                    match serde_json::from_str::<serde_json::Value>(&text).unwrap() {
+                        serde_json::Value::Array(items) => {
+                            items.iter().map(|r| r["id"].clone()).collect()
+                        }
+                        single => vec![single["id"].clone()],
+                    }
+                });
+                let sorted = |ids: Option<Vec<serde_json::Value>>| {
+                    ids.map(|mut ids| {
+                        ids.sort_by_key(|id| id.to_string());
+                        ids
+                    })
+                };
+                assert_eq!(sorted(got), sorted(expected), "case {case}, line {line}");
+            }
+        }
     }
 }

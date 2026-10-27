@@ -324,9 +324,10 @@ impl CollectionAcl {
         if self.collection == "*" {
             return true;
         }
-        if self.collection.ends_with(".*") {
-            let prefix = &self.collection[..self.collection.len() - 2];
-            return collection.starts_with(prefix);
+        if let Some(prefix) = self.collection.strip_suffix('*') {
+            // `prefix.*` covers the collections under `prefix.`, not every
+            // name that starts with `prefix` (`team.*` matched `teammates`)
+            return prefix.ends_with('.') && collection.starts_with(prefix);
         }
         self.collection == collection
     }
@@ -355,6 +356,11 @@ pub struct AclConfig {
     /// Indices of wildcard rules (*, prefix.*) in priority order
     /// These are checked only if exact match fails
     wildcard_rules: Vec<usize>,
+    /// The first `builtin_count` rules are the built-in ones, checked before
+    /// any other: an exact rule for a `_system.*` collection (e.g.
+    /// `_system.api_keys`, which `acl_set` accepts) took precedence over the
+    /// built-in localhost-only rule that "cannot be overridden"
+    builtin_count: usize,
 }
 
 impl AclConfig {
@@ -383,6 +389,7 @@ impl AclConfig {
             rules,
             exact_match_index: std::collections::HashMap::new(),
             wildcard_rules: Vec::new(),
+            builtin_count: Self::builtin_rules().len(),
         };
         config.rebuild_indexes();
         config
@@ -492,6 +499,14 @@ impl AclConfig {
                 "'{}' can only be modified from localhost (current: {})",
                 collection, caller.interface
             )));
+        }
+
+        // 0. Built-in rules first: they cannot be overridden
+        if let Some(acl) = self.rules[..self.builtin_count]
+            .iter()
+            .find(|acl| acl.matches_collection(collection))
+        {
+            return self.check_rule(acl, collection, caller, required);
         }
 
         // 1. Try exact match first - O(1)
@@ -991,6 +1006,45 @@ mod tests {
             rules: vec![],
         };
         assert!(acl_all.matches_collection("anything"));
+    }
+
+    /// `prefix.*` covers `prefix.x`, not other names starting with `prefix`
+    #[test]
+    fn test_prefix_pattern_needs_the_dot() {
+        let acl = CollectionAcl {
+            collection: "team.*".to_string(),
+            rules: vec![],
+        };
+        assert!(acl.matches_collection("team.alpha"));
+        assert!(!acl.matches_collection("teammates"));
+        assert!(!acl.matches_collection("team"));
+    }
+
+    /// A rule for a `_system.*` collection does not override the built-in
+    /// localhost-only rule (`acl_set` accepts any existing collection)
+    #[test]
+    fn test_builtin_system_rules_cannot_be_overridden() {
+        let mut rules = AclConfig::builtin_rules();
+        rules.push(CollectionAcl {
+            collection: "_system.api_keys".to_string(),
+            rules: vec![AclRule {
+                principal: Principal::Anyone,
+                permissions: Permissions::all(),
+            }],
+        });
+        rules.extend(AclConfig::default_rules());
+        let config = AclConfig::new_with_rules(rules);
+        let external = CallerContext::new(Some("8.8.8.8:1".parse().unwrap()), None);
+        assert!(config
+            .check("_system.api_keys", &external, RequiredPermission::Read)
+            .is_err());
+        assert!(config
+            .check(
+                "_system.api_keys",
+                &CallerContext::localhost(),
+                RequiredPermission::Read
+            )
+            .is_ok());
     }
 
     // ------------------------------------------------------------------

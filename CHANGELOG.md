@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — MCP authorization and request handling (1.0.642, ironbase-bridge 0.3.444)
+
+Found by the MCP properties (P8): every shipped tool × caller × argument
+shape against the authorization spec, and random JSON-RPC requests into the
+stdio and HTTP handlers and the bridge.
+
+- **Write tools without a collection argument passed the ACL vacuously:**
+  the check ran over an empty list of collections, so a read-only external
+  caller could `transaction_begin`, commit or roll back transactions by id,
+  and `embed_job_cancel` jobs. A call that names no collection is now checked
+  against the catch-all `*` rule.
+- **Built-in `_system.*` rules could be overridden:** an exact ACL for a
+  `_system` collection (which `acl_set` accepts, e.g. `_system.api_keys`)
+  took precedence over the built-in localhost-only rule. Built-in rules are
+  now checked first.
+- **`prefix.*` ACL patterns matched without the dot:** `team.*` covered
+  `teammates`. It now covers `team.<name>` only.
+- **Request cancellation across clients (HTTP):** in-flight requests were
+  tracked by JSON-RPC id alone, so a client could cancel another client's
+  request by guessing its (often sequential) id, and two clients using the
+  same id replaced each other's cancellation flag. Requests are now tracked
+  per client (API key or IP).
+- **Requests left unanswered:** a notification-only method
+  (`initialized`, `notifications/*`) sent with an id got no response from
+  either transport; the bridge forwarded a `"id": null` request as a
+  notification (serde read `null` as a missing id) and answered nothing when
+  the server sent a 204 or an empty body to a request. Each now gets a
+  JSON-RPC error with its id.
+
+### Fixed — B+ tree (0.3.444)
+
+Found by the B+ tree property (P6, `tests/pbt_btree.rs`): random insert/delete
+sequences with repeated and mixed keys against a sorted multiset.
+
+- **Descending scan with `limit: Some(0)`** returned one document (the
+  ascending scan none): the limit was checked after collecting.
+- **`-0.0` and `0.0`:** `OrderedFloat` compared bits for equality but values
+  for order, so the two were "different" keys ordered Equal (Rust's
+  `Ord`/`Eq` contract broken; a unique index rejected one next to the other by
+  its order while equality kept both). They are now one key: equal, one hash.
+
+### Added — P6, P7 and P8 properties
+
+- **P6** `tests/pbt_btree.rs`: size, point search, count and scan (bounds
+  inclusive or not, skip, limit, both orders) and the full scan agree with
+  the model; a unique tree rejects exactly the repeated keys; `IndexKey`'s
+  order is total and consistent with its equality.
+- **P7** `tests/pbt_aggregation.rs`: `$match` equals `find`; `$group` (by a
+  scalar field, and by a field holding arrays) with `$sum`/count/`$avg`/
+  `$min`/`$max` equals the oracle; `$count`; `$unwind` row count;
+  `$sort`+`$limit` (top-K) and `$sort`/`$skip`/`$limit` equal a full sort's
+  slice; with and without indexes. No fault found.
+- **P8** (mcp-server, ironbase-bridge; no new dependency, a seeded
+  generator): every tool denies what the caller may not do; any request to
+  the stdio and HTTP handlers gets one answer with its id (a notification
+  none); the bridge answers every request with its id for any server reply.
+
 ### Fixed — crash recovery: lost index entries, double-counted deletes, a compound index rebuilt wrong (0.3.443)
 
 Found by the crash recovery property (P3, `ironbase-core/tests/pbt_crash_recovery.rs`).

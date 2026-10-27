@@ -22,9 +22,14 @@ pub enum IndexKey {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OrderedFloat(pub f64);
 
+/// Equal exactly when `Ord` says Equal: `-0.0 == 0.0` (they are one index
+/// key, as for the query engine and MongoDB) and every NaN equals every
+/// NaN. It compared bits, so `-0.0 != 0.0` while their order was Equal: a
+/// unique index rejected `-0.0` next to `0.0` by its order while anything
+/// keyed by equality (statistics, distinct values) kept both (P6 property).
 impl PartialEq for OrderedFloat {
     fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
@@ -32,8 +37,15 @@ impl Eq for OrderedFloat {}
 
 impl Hash for OrderedFloat {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Hash the bits of the float to ensure consistency with Eq
-        self.0.to_bits().hash(state);
+        // Consistent with Eq: one hash for both zeros and for every NaN
+        let canonical = if self.0 == 0.0 {
+            0.0f64
+        } else if self.0.is_nan() {
+            f64::NAN
+        } else {
+            self.0
+        };
+        canonical.to_bits().hash(state);
     }
 }
 

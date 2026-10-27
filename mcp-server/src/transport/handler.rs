@@ -86,6 +86,17 @@ impl HandlerContext {
 
         let is_notification = request.is_notification();
 
+        if request.is_notification_method_with_id() {
+            return Some(McpResponse::error(
+                error_codes::INVALID_REQUEST,
+                &format!(
+                    "Invalid request: '{}' is a notification, send it without an id",
+                    request.method
+                ),
+                request.id.clone(),
+            ));
+        }
+
         // MCP lifecycle enforcement: only allow initialize and ping before initialization
         if !self.initialized
             && request.method != "initialize"
@@ -405,6 +416,26 @@ mod tests {
             assert_eq!(error.code, error_codes::SERVER_NOT_INITIALIZED);
         } else {
             panic!("Expected error response");
+        }
+    }
+
+    use crate::transport::pbt::{assert_answers, random_request, tool_names, Gen};
+
+    /// No request panics; a request with an id gets one response carrying
+    /// that id (a null id an error with a null id), a notification none
+    #[test]
+    fn test_any_request_gets_a_jsonrpc_answer_with_its_id() {
+        let tools = tool_names();
+        let adapter = create_test_adapter();
+        adapter
+            .insert_one("users", json!({"name": "a", "n": 1}))
+            .unwrap();
+        let mut ctx = HandlerContext::new(adapter, true);
+        ctx.initialized = true;
+        let mut gen = Gen(0x9e37_79b9_7f4a_7c15);
+        for case in 0..crate::transport::pbt::cases() {
+            let request = random_request(&mut gen, &tools);
+            assert_answers(case, &request, |r| ctx.handle_request(r));
         }
     }
 }
