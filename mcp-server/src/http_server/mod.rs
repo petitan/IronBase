@@ -567,9 +567,15 @@ async fn run_http_server_internal(
             }
         };
 
+        // Extract API key from Authorization header or JSON params
+        let api_key = extract_api_key(&headers, &request.params);
+        // In-flight requests are tracked per client (`tracked_request_id`)
+        let client = client::client_identity(api_key.as_deref(), Some(remote_addr));
+        let tracked = |id: &str| client::tracked_request_id(&client, id);
+
         // Handle notifications/cancelled immediately (before spawn_blocking)
         // This ensures cancellation is processed without waiting for tool execution
-        if request.method == "notifications/cancelled" {
+        if request.method == "notifications/cancelled" && request.is_notification() {
             let request_id = request
                 .params
                 .get("requestId")
@@ -578,14 +584,11 @@ async fn run_http_server_internal(
             let reason = request.params.get("reason").and_then(|v| v.as_str());
 
             if let Some(id) = request_id {
-                state.request_tracker.cancel(id, reason);
+                state.request_tracker.cancel(&tracked(id), reason);
             }
             // Notifications don't get responses
             return StatusCode::NO_CONTENT.into_response();
         }
-
-        // Extract API key from Authorization header or JSON params
-        let api_key = extract_api_key(&headers, &request.params);
 
         // Extract JSON-RPC request ID for cancellation tracking
         let json_rpc_id = request
@@ -616,7 +619,7 @@ async fn run_http_server_internal(
             crate::timeout::effective_timeout_option(global_timeout_ms, tool_name);
 
         // Register request for cancellation support
-        let cancel_flag = state.request_tracker.start(&json_rpc_id);
+        let cancel_flag = state.request_tracker.start(&tracked(&json_rpc_id));
 
         // Clone state for spawn_blocking closure
         let state_clone = state.clone();
@@ -625,7 +628,7 @@ async fn run_http_server_internal(
         let tool_name_owned = tool_name.to_string();
         let trace_id_clone = trace_id.clone();
         let cancel_flag_clone = cancel_flag.clone();
-        let json_rpc_id_for_cleanup = json_rpc_id.clone();
+        let json_rpc_id_for_cleanup = tracked(&json_rpc_id);
         let request_tracker_clone = state.request_tracker.clone();
 
         // Log incoming request with method and tool name

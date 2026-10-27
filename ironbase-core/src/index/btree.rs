@@ -2441,14 +2441,16 @@ impl BPlusTree {
                         continue;
                     }
 
+                    // Check limit before collecting, as the ascending scan
+                    // does: checked after, `limit: Some(0)` returned one
+                    // document (early termination!)
+                    if results.len() >= limit_count {
+                        return false; // Stop walking
+                    }
+
                     // Collect result
                     if idx < leaf.document_ids.len() {
                         results.push(leaf.document_ids[idx].clone());
-                    }
-
-                    // Check limit (early termination!)
-                    if results.len() >= limit_count {
-                        return false; // Stop walking
                     }
                 }
                 true // Continue to next leaf
@@ -2506,11 +2508,12 @@ impl BPlusTree {
                         skipped += 1;
                         continue;
                     }
-                    if idx < leaf.document_ids.len() {
-                        results.push((key.clone(), leaf.document_ids[idx].clone()));
-                    }
+                    // Limit checked before collecting (see `scan_desc_internal`)
                     if results.len() >= limit_count {
                         return false; // Stop walking
+                    }
+                    if idx < leaf.document_ids.len() {
+                        results.push((key.clone(), leaf.document_ids[idx].clone()));
                     }
                 }
                 true // Continue to next leaf

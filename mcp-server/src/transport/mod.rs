@@ -3,6 +3,8 @@
 //! Provides common types and traits for different transport mechanisms (stdio, HTTP).
 
 pub mod handler;
+#[cfg(test)]
+pub(crate) mod pbt;
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,15 @@ impl McpRequest {
     #[inline]
     pub fn has_null_id(&self) -> bool {
         matches!(&self.id, Some(v) if v.is_null())
+    }
+
+    /// A notification-only method (`initialized`, `notifications/*`) sent
+    /// with an id: a JSON-RPC request, which must be answered. Both
+    /// transports returned nothing, and a client waiting for the answer
+    /// hung (P8 JSON-RPC property).
+    pub fn is_notification_method_with_id(&self) -> bool {
+        !self.is_notification()
+            && (self.method == "initialized" || self.method.starts_with("notifications/"))
     }
 }
 

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9d724b88215c3bdcc3317b73e809baf3c7737885cfee63a09d9c4af4617adaf4 # shrinks to keys = [Float(OrderedFloat(0.0)), Float(OrderedFloat(-0.0))]
+cc bda298bbfc13e22d4eaa9b83c6fea87ae99bdc70e7d7f917bd86865b75d36c84 # shrinks to ops = [Insert(Null), Insert(Int(378078402)), Insert(String("ab")), Insert(Int(-2)), Insert(String("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")), Insert(String("é"))], ranges = [Range { start: Null, end: Compound([Float(OrderedFloat(1e-310)), String("a")]), start_incl: false, end_incl: true, skip: 0, limit: Some(0), desc: true }, Range { start: String("ő"), end: String("a"), start_incl: true, end_incl: false, skip: 2, limit: None, desc: false }]
