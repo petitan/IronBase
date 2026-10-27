@@ -14,6 +14,8 @@
 //! - `$ne`, `$nin` and `$not` are the negations, so they match a missing field.
 #![allow(dead_code)]
 
+pub mod crud;
+
 use proptest::prelude::*;
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;

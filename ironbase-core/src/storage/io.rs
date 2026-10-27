@@ -631,13 +631,21 @@ impl StorageEngine {
 
         self.metadata_dirty = true;
 
+        // Check if this is an update (doc already exists in catalog), and
+        // whether the replaced entry was a live document
+        let previous = self
+            .get_collection_meta(collection)
+            .and_then(|meta| meta.document_catalog.get(doc_id).copied());
+        let is_update = previous.is_some();
+        let was_live = match previous {
+            Some(offset) => self.record_is_live(offset)?,
+            None => false,
+        };
+
         // Update ALL metadata fields in collection
         let meta = self
             .get_collection_meta_mut(collection)
             .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
-
-        // Check if this is an update (doc already exists in catalog)
-        let is_update = meta.document_catalog.contains_key(doc_id);
 
         // Update catalog with new offset
         meta.document_catalog.insert(doc_id.clone(), write_offset);
@@ -650,8 +658,9 @@ impl StorageEngine {
         // Update document_count (total writes)
         meta.document_count += 1;
 
-        // Update live_document_count (only increment for new inserts, not updates)
-        if !is_update {
+        // Update live_document_count: a new live document, not a rewrite of
+        // one (a replayed insert over its tombstone is a new one)
+        if !was_live {
             meta.live_document_count += 1;
         }
 
@@ -733,6 +742,15 @@ impl StorageEngine {
 
         self.metadata_dirty = true;
 
+        // Whether the entry being removed was a live document
+        let was_live = match self
+            .get_collection_meta(collection)
+            .and_then(|meta| meta.document_catalog.get(doc_id).copied())
+        {
+            Some(offset) => self.record_is_live(offset)?,
+            None => false,
+        };
+
         // Update metadata
         let meta = self
             .get_collection_meta_mut(collection)
@@ -741,13 +759,29 @@ impl StorageEngine {
         // Remove from catalog
         if meta.document_catalog.remove(doc_id).is_some() {
             meta.document_order.retain(|id| id != doc_id);
-            // Decrement live count only if document existed
-            if meta.live_document_count > 0 {
+            // Decrement live count only if a live document was deleted
+            if was_live && meta.live_document_count > 0 {
                 meta.live_document_count -= 1;
             }
         }
 
         Ok(())
+    }
+
+    /// Whether the record at catalog `offset` is a live document, not a
+    /// tombstone. A runtime delete keeps the id in the catalog, pointing at
+    /// its tombstone, so WAL replay over flushed metadata that already holds
+    /// an operation must not take that entry for a live document: replaying
+    /// a delete decremented the live count a second time, and replaying an
+    /// insert over its tombstone did not count it (P3 crash recovery
+    /// property).
+    fn record_is_live(&mut self, offset: u64) -> Result<bool> {
+        let data = self.read_data_raw(offset)?;
+        let record: serde_json::Value = serde_json::from_slice(&data)?;
+        Ok(!record
+            .get("_tombstone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
     }
 
     /// Calculate data end position from the last document's offset

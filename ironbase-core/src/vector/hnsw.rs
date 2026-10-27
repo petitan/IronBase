@@ -1195,6 +1195,16 @@ impl HnswIndex {
         if let Some(&index) = self.id_to_index.values().find(|&&index| index >= nodes) {
             return Err(corrupt(format!("an id maps to node {index} of {nodes}")));
         }
+        // Searches descend from `max_level`, which a node's level set: a
+        // corrupted one (e.g. 2^57) made every search loop for good (P5
+        // roundtrip property)
+        let top_layer = self.nodes.iter().map(|node| node.max_layer).max();
+        if self.max_level > top_layer.unwrap_or(0) {
+            return Err(corrupt(format!(
+                "max level {} above every node's ({:?})",
+                self.max_level, top_layer
+            )));
+        }
         self.fill_norms();
         Ok(self)
     }
@@ -2218,8 +2228,10 @@ mod tests {
     #[test]
     fn corrupted_graph_fails_the_load() {
         type Corruption = (&'static str, fn(&mut HnswIndex));
-        let corruptions: [Corruption; 5] = [
+        let corruptions: [Corruption; 6] = [
             ("entry point", |h| h.entry_point = Some(h.nodes.len())),
+            // Every search descended from it: an endless loop (P5)
+            ("max level", |h| h.max_level = 1 << 57),
             ("neighbour", |h| {
                 let n = h.nodes.len();
                 h.nodes[3].neighbors[0].push(n + 7)

@@ -58,6 +58,7 @@ use serde_json::Value;
 use crate::collection_core::{schema::CompiledSchema, CollectionCore};
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::index::BPlusTree;
 use crate::index::{IndexKey, IndexManager};
 use crate::storage::{RawStorage, Storage};
 use crate::transaction::{Operation, TransactionId};
@@ -303,14 +304,27 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 index_meta.name,
                 index_meta.field
             );
-            index_manager.create_btree_index(
-                index_meta.name.clone(),
-                index_meta.field.clone(),
-                index_meta.unique,
-                index_meta.sparse,
-            )?;
+            Self::add_empty_btree_index(index_manager, index_meta);
         }
         Ok(loaded_from_file)
+    }
+
+    /// Register an empty B+ tree with `meta`'s definition, to be rebuilt from
+    /// documents. Built from the whole definition: `create_btree_index` took
+    /// one field and no case folding, so a compound or case-insensitive
+    /// index rebuilt after a crash indexed the wrong keys.
+    fn add_empty_btree_index(index_manager: &mut IndexManager, meta: &crate::index::IndexMetadata) {
+        let name = meta.name.clone();
+        let mut tree = if meta.is_compound() {
+            BPlusTree::new_compound(name, meta.fields.clone(), meta.unique, meta.sparse)
+        } else if meta.case_insensitive {
+            BPlusTree::new_ci(name, meta.field.clone(), meta.unique)
+        } else {
+            BPlusTree::new(name, meta.field.clone(), meta.unique, meta.sparse)
+        };
+        // Building until the rebuild marks it ready
+        tree.set_building(true);
+        index_manager.add_loaded_index(tree);
     }
 
     /// Rebuild all indexes from document catalog
@@ -979,7 +993,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Try to load _id index from .idx file via the unified decision
         // helper. Empty catalog → nothing to load (the index would always
         // be empty); rebuild path is a no-op in that case.
-        let id_index_loaded = if !catalog.is_empty()
+        let mut id_index_loaded = if !catalog.is_empty()
             && decide_index_load_strategy(was_clean, can_try_replay)
                 == IndexLoadStrategy::LoadFromFile
         {
@@ -1029,7 +1043,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Load persisted custom indexes (delegated to helper).
         // Strategy unified across all four index families via
         // unified helper `decide_index_load_strategy(was_clean, can_try_replay)`.
-        let btree_indexes_loaded_from_file = Self::load_persisted_indexes(
+        let mut btree_indexes_loaded_from_file = Self::load_persisted_indexes(
             &mut index_manager,
             &persisted_indexes,
             &id_index_name,
@@ -1233,6 +1247,35 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         };
         let wal_replay_succeeded = btree_replay_succeeded && non_btree_replay_succeeded;
 
+        // A failed btree replay leaves the loaded `.idx` indexes untrusted
+        // (a watermark-0 file, or ops half applied before the guardrail),
+        // but the slow path rebuilds only empty btrees: an index created by
+        // `create_index` (watermark 0) kept missing every document inserted
+        // after it before the crash, and the next flush persisted it so (P3
+        // crash recovery property). Replace them with empty ones so the
+        // rebuild below covers them, as the non-btree indexes just below.
+        if can_try_replay && !btree_replay_succeeded {
+            log_warn!(
+                "Collection '{}': rebuilding the B+ tree indexes from documents",
+                name
+            );
+            for meta in &persisted_indexes {
+                if btree_indexes_loaded_from_file.remove(&meta.name) {
+                    Self::add_empty_btree_index(&mut index_manager, meta);
+                }
+            }
+            if id_index_loaded {
+                let _ = index_manager.drop_index(&id_index_name);
+                index_manager.create_btree_index(
+                    id_index_name.clone(),
+                    "_id".to_string(),
+                    true,
+                    false,
+                )?;
+                id_index_loaded = false;
+            }
+        }
+
         // A failed replay leaves the loaded fuzzy/fulltext/vector indexes
         // untrusted (a watermark-0 file, or ops half applied before an
         // error), but the slow path rebuilds only empty indexes: the stale
@@ -1269,21 +1312,25 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Per-type "this kind of index is empty in memory and was not loaded
         // from disk" flags. Drives the FAST PATH decision and the SLOW PATH
         // reason logging below.
-        let has_btree_without_file = persisted_indexes.iter().any(|meta| {
-            // Skip indexes loaded from .idx files
-            if btree_indexes_loaded_from_file.contains(&meta.name) {
-                return false;
-            }
-            // Skip _id index if it was loaded
-            if meta.name == id_index_name && id_index_loaded {
-                return false;
-            }
-            // Check if index is empty (needs rebuild)
-            index_manager
-                .get_btree_index(&meta.name)
-                .map(|idx| idx.size() == 0)
-                .unwrap_or(true)
-        });
+        // The _id index is not in `meta.indexes`: an _id index created
+        // empty (no .idx file, e.g. a crash before its first flush) over a
+        // non-empty catalog was trusted by the fast path, so it never got the
+        // catalog's documents; the next checkpoint persisted it that way and
+        // `_id` lookups (update/delete by `_id`) missed them for good (P3
+        // crash recovery property).
+        let id_index_without_file = !id_index_loaded && !catalog.is_empty();
+        let has_btree_without_file = id_index_without_file
+            || persisted_indexes.iter().any(|meta| {
+                // Skip indexes loaded from .idx files
+                if btree_indexes_loaded_from_file.contains(&meta.name) {
+                    return false;
+                }
+                // Check if index is empty (needs rebuild)
+                index_manager
+                    .get_btree_index(&meta.name)
+                    .map(|idx| idx.size() == 0)
+                    .unwrap_or(true)
+            });
 
         let fuzzy_indexes = index_manager.list_fuzzy_indexes();
         let has_fuzzy_without_file = fuzzy_indexes.iter().any(|idx| idx.entry_count() == 0);
