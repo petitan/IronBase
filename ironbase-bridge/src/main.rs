@@ -28,6 +28,15 @@ const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 // BUG #10 fix: Maximum backoff time for health check retries
 const MAX_HEALTH_BACKOFF_MS: u64 = 5000;
 
+/// Time to establish the TCP/TLS connection to the server
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Characters of an oversized HTTP error body kept in the error message
+const ERROR_BODY_PREVIEW_CHARS: usize = 1000;
+
+/// Tools the admin key is injected into (the server requires it only there)
+const ADMIN_TOOL_PREFIX: &str = "admin_";
+
 // BUG #4 fix: Track stdout health for graceful exit
 static STDOUT_BROKEN: AtomicBool = AtomicBool::new(false);
 
@@ -79,6 +88,12 @@ struct Args {
     /// Health check retries before giving up (0 = skip health check)
     #[arg(long, default_value = "3")]
     health_retries: u32,
+
+    /// Seconds to wait for the server's answer to one request (0 = no
+    /// limit). Generous by default: the server builds indexes without a
+    /// time limit.
+    #[arg(long, env = "MCP_TIMEOUT_SECS", default_value = "3600")]
+    timeout_secs: u64,
 }
 
 // ============================================================================
@@ -92,14 +107,17 @@ struct JsonRpcRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<serde_json::Value>,
     method: String,
-    #[serde(default)]
+    /// Absent params stay absent when forwarded: JSON-RPC 2.0 allows
+    /// omitting them, not `null`
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     params: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct JsonRpcResponse {
     jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always present: JSON-RPC 2.0 requires `"id": null` when the request's
+    /// id could not be determined (parse error, invalid request)
     id: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<serde_json::Value>,
@@ -351,7 +369,14 @@ fn build_client(args: &Args) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(60))
+        .connect_timeout(CONNECT_TIMEOUT)
         .use_rustls_tls();
+
+    // Without a limit a server that never answers held the bridge (and the
+    // MCP client waiting on it) forever
+    if args.timeout_secs > 0 {
+        builder = builder.timeout(Duration::from_secs(args.timeout_secs));
+    }
 
     // BUG #8 fix: Enhanced warning for insecure mode
     // Self-signed cert support - USE WITH CAUTION
@@ -438,8 +463,20 @@ async fn wait_for_server(client: &reqwest::Client, url: &str, retries: u32) -> R
     Ok(())
 }
 
-/// Inject admin_key into tools/call arguments if configured.
-/// Only call this for tools/call requests — caller must check method first.
+/// Whether a request calls an admin tool (`tools/call` of an `admin_*` tool):
+/// the only calls the admin key is injected into
+fn is_admin_tool_call(request: &JsonRpcRequest) -> bool {
+    request.method == "tools/call"
+        && request
+            .params
+            .get("name")
+            .and_then(|name| name.as_str())
+            .is_some_and(|name| name.starts_with(ADMIN_TOOL_PREFIX))
+}
+
+/// Inject admin_key into the arguments of an admin tool call.
+/// Only call this when `is_admin_tool_call` holds: injecting it everywhere
+/// handed every tool call the admin key.
 fn inject_admin_key(request: &JsonRpcRequest, admin_key: &str) -> JsonRpcRequest {
     let mut request = request.clone();
     if let serde_json::Value::Object(ref mut params) = request.params {
@@ -464,17 +501,14 @@ async fn forward_single(
     args: &Args,
     request: &JsonRpcRequest,
 ) -> Result<Option<JsonRpcResponse>> {
-    // Inject admin_key into tools/call arguments if configured
+    // Inject admin_key into admin tool calls if configured
     let owned_request;
-    let request_ref = if let Some(ref admin_key) = args.admin_key {
-        if request.method == "tools/call" {
+    let request_ref = match &args.admin_key {
+        Some(admin_key) if is_admin_tool_call(request) => {
             owned_request = inject_admin_key(request, admin_key);
             &owned_request
-        } else {
-            request
         }
-    } else {
-        request
+        _ => request,
     };
 
     let mut req = client
@@ -512,15 +546,13 @@ async fn forward_single(
     // BUG #2 fix: Handle error response body read failures properly
     if !response.status().is_success() {
         let status = response.status();
-        let text = match response.text().await {
-            Ok(t) => {
-                // BUG #6 fix: Truncate error body if too large
-                if t.len() > MAX_RESPONSE_SIZE {
-                    format!("{}...<truncated>", &t[..1000])
-                } else {
-                    t
-                }
-            }
+        let text = match read_body_limited(response, MAX_RESPONSE_SIZE).await {
+            Ok(Body::Complete(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+            // BUG #6 fix: Truncate error body if too large
+            Ok(Body::TooLarge(bytes)) => format!(
+                "{}...<truncated>",
+                preview(&String::from_utf8_lossy(&bytes), ERROR_BODY_PREVIEW_CHARS)
+            ),
             Err(e) => {
                 tracing::warn!("Failed to read error response body: {}", e);
                 format!("<body read error: {}>", e)
@@ -533,33 +565,61 @@ async fn forward_single(
         )));
     }
 
-    // Empty body = notification acknowledged
-    let text = response
-        .text()
+    // BUG #6 fix: Stop reading at the size limit (a body without
+    // Content-Length was read whole before its size was checked)
+    let bytes = match read_body_limited(response, MAX_RESPONSE_SIZE)
         .await
-        .context("Failed to read response body")?;
+        .context("Failed to read response body")?
+    {
+        Body::Complete(bytes) => bytes,
+        Body::TooLarge(_) => {
+            return Ok(Some(make_error_response(
+                request.id.clone(),
+                -32603,
+                &format!("Response body too large (max: {} bytes)", MAX_RESPONSE_SIZE),
+            )));
+        }
+    };
 
-    // BUG #6 fix: Check actual body size
-    if text.len() > MAX_RESPONSE_SIZE {
-        return Ok(Some(make_error_response(
-            request.id.clone(),
-            -32603,
-            &format!(
-                "Response body too large: {} bytes (max: {} bytes)",
-                text.len(),
-                MAX_RESPONSE_SIZE
-            ),
-        )));
-    }
-
-    if text.is_empty() {
+    // Empty body = notification acknowledged
+    if bytes.is_empty() {
         return Ok(None);
     }
 
     // Parse response
     let resp: JsonRpcResponse =
-        serde_json::from_str(&text).context("Failed to parse JSON-RPC response")?;
+        serde_json::from_slice(&bytes).context("Failed to parse JSON-RPC response")?;
     Ok(Some(resp))
+}
+
+/// A response body read up to a size limit
+#[derive(Debug, PartialEq)]
+enum Body {
+    /// The whole body, at most the limit
+    Complete(Vec<u8>),
+    /// The body exceeded the limit: the bytes read before stopping
+    TooLarge(Vec<u8>),
+}
+
+/// Read a response body, stopping once it exceeds `limit` bytes
+async fn read_body_limited(mut response: reqwest::Response, limit: usize) -> Result<Body> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() > limit {
+            return Ok(Body::TooLarge(body));
+        }
+    }
+    Ok(Body::Complete(body))
+}
+
+/// At most the first `max_chars` characters of `text` (never splits one:
+/// slicing at a byte index panicked inside a multi-byte character)
+fn preview(text: &str, max_chars: usize) -> &str {
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
 }
 
 /// Process a batch of requests
@@ -726,6 +786,66 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
     true
 }
 
+/// Main loop: forward stdin lines until EOF, a broken stdout or `shutdown`.
+/// The shutdown signal also ends a request still waiting on the server: it
+/// was only watched while reading stdin, so SIGTERM during a hung request
+/// was ignored.
+async fn run<R, S>(
+    client: &reqwest::Client,
+    args: &Args,
+    mut lines: tokio::io::Lines<R>,
+    shutdown: S,
+) where
+    R: tokio::io::AsyncBufRead + Unpin,
+    S: std::future::Future<Output = ()>,
+{
+    tracing::debug!("Entering main loop...");
+    tokio::pin!(shutdown);
+
+    // BUG #4 fix: Exit on stdout broken
+    loop {
+        // BUG #4 fix: Check stdout before each iteration
+        if STDOUT_BROKEN.load(Ordering::SeqCst) {
+            tracing::info!("stdout broken, exiting...");
+            break;
+        }
+
+        let line = tokio::select! {
+            line_result = lines.next_line() => line_result,
+            _ = &mut shutdown => {
+                tracing::info!("Shutting down gracefully...");
+                break;
+            }
+        };
+        match line {
+            Ok(Some(line)) if !line.trim().is_empty() => {
+                tokio::select! {
+                    // BUG #4 fix: Check process_line return value
+                    keep_going = process_line(client, args, &line) => {
+                        if !keep_going {
+                            tracing::info!("stdout broken during processing, exiting...");
+                            break;
+                        }
+                    }
+                    _ = &mut shutdown => {
+                        tracing::info!("Shutting down gracefully (request in flight)...");
+                        break;
+                    }
+                }
+            }
+            Ok(Some(_)) => continue, // empty line
+            Ok(None) => {
+                tracing::info!("EOF - exiting");
+                break;
+            }
+            Err(e) => {
+                tracing::error!("Read error: {}", e);
+                break;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // FIRST: Setup panic handler before anything else
@@ -743,7 +863,7 @@ async fn main() -> Result<()> {
         tracing::info!("API key: configured");
     }
     if args.admin_key.is_some() {
-        tracing::info!("Admin key: configured (will inject into tools/call)");
+        tracing::info!("Admin key: configured (injected into admin_* tool calls)");
     }
 
     // Build HTTP client with connection pooling
@@ -754,50 +874,280 @@ async fn main() -> Result<()> {
 
     // Setup stdin reader
     let stdin = tokio::io::stdin();
-    let reader = BufReader::new(stdin);
-    let mut lines = reader.lines();
+    let lines = BufReader::new(stdin).lines();
 
-    tracing::debug!("Entering main loop...");
-
-    // Main loop with graceful shutdown
-    // BUG #4 fix: Exit on stdout broken
-    loop {
-        // BUG #4 fix: Check stdout before each iteration
-        if STDOUT_BROKEN.load(Ordering::SeqCst) {
-            tracing::info!("stdout broken, exiting...");
-            break;
-        }
-
-        tokio::select! {
-            // Read next line from stdin
-            line_result = lines.next_line() => {
-                match line_result {
-                    Ok(Some(line)) if !line.trim().is_empty() => {
-                        // BUG #4 fix: Check process_line return value
-                        if !process_line(&client, &args, &line).await {
-                            tracing::info!("stdout broken during processing, exiting...");
-                            break;
-                        }
-                    }
-                    Ok(Some(_)) => continue, // empty line
-                    Ok(None) => {
-                        tracing::info!("EOF - exiting");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("Read error: {}", e);
-                        break;
-                    }
-                }
-            }
-            // Shutdown signal
-            _ = shutdown_signal() => {
-                tracing::info!("Shutting down gracefully...");
-                break;
-            }
-        }
-    }
+    run(&client, &args, lines, shutdown_signal()).await;
 
     tracing::info!("Bridge stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// What the mock server answers to each POST
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Echo the request back as the result
+        Echo,
+        /// HTTP 500 with a body of `n` 'é' characters, no Content-Length
+        HugeError(usize),
+        /// HTTP 200 streaming `n` bytes, no Content-Length
+        HugeBody(usize),
+        /// Never answer
+        Hang,
+    }
+
+    /// Serve `reply` on a local port; returns the /mcp URL and the request
+    /// bodies received
+    async fn mock_server(reply: Reply) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let seen = received.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let (head_end, length) = loop {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        data.extend_from_slice(&buf[..n]);
+                        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&data[..pos]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                            break (pos + 4, length);
+                        }
+                    };
+                    while data.len() < head_end + length {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        data.extend_from_slice(&buf[..n]);
+                    }
+                    let request: serde_json::Value =
+                        serde_json::from_slice(&data[head_end..]).unwrap();
+                    seen.lock().unwrap().push(request.clone());
+                    let close = "Connection: close\r\n";
+                    let _ = match reply {
+                        Reply::Echo => {
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0", "id": request["id"], "result": {"echo": request}
+                            })
+                            .to_string();
+                            socket
+                                .write_all(
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{close}\r\n{body}",
+                                        body.len()
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await
+                        }
+                        Reply::HugeError(n) => {
+                            let head = format!("HTTP/1.1 500 Internal Server Error\r\n{close}\r\n");
+                            let body = format!("a{}", "\u{e9}".repeat(n));
+                            socket.write_all(format!("{head}{body}").as_bytes()).await
+                        }
+                        Reply::HugeBody(n) => {
+                            let head = format!("HTTP/1.1 200 OK\r\n{close}\r\n");
+                            socket.write_all(head.as_bytes()).await.unwrap();
+                            let chunk = vec![b' '; 64 * 1024];
+                            let mut sent = 0;
+                            while sent < n {
+                                if socket.write_all(&chunk).await.is_err() {
+                                    break;
+                                }
+                                sent += chunk.len();
+                            }
+                            Ok(())
+                        }
+                        Reply::Hang => {
+                            std::future::pending::<()>().await;
+                            Ok(())
+                        }
+                    };
+                });
+            }
+        });
+        (url, received)
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    fn args(server: &str) -> Args {
+        Args::parse_from(["ironbase-bridge", "--server", server])
+    }
+
+    fn request(json: &str) -> JsonRpcRequest {
+        match parse_input(json).unwrap() {
+            JsonRpcInput::Single(request) => request,
+            other => panic!("not a single request: {other:?}"),
+        }
+    }
+
+    /// An oversized error body is cut at a character boundary: slicing at
+    /// byte 1000 panicked inside a two-byte 'é'
+    #[tokio::test]
+    async fn oversized_error_body_with_multibyte_text_does_not_panic() {
+        let (url, _) = mock_server(Reply::HugeError(MAX_RESPONSE_SIZE)).await;
+        let args = args(&url);
+        let client = build_client(&args).unwrap();
+        let resp = forward_single(
+            &client,
+            &args,
+            &request(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let message = resp.error.unwrap().message;
+        assert!(message.starts_with("HTTP 500"), "{message}");
+        assert!(
+            message.ends_with("...<truncated>"),
+            "{}",
+            &message[message.len() - 40..]
+        );
+        assert_eq!(preview("aé", 1), "a");
+        assert_eq!(preview("aé", 5), "aé");
+    }
+
+    /// A body without Content-Length stops being read past the limit
+    #[tokio::test]
+    async fn body_without_content_length_is_read_only_to_the_limit() {
+        let (url, _) = mock_server(Reply::HugeBody(64 * 1024 * 1024)).await;
+        let client = reqwest::Client::new();
+        let response = client.post(&url).body("{}").send().await.unwrap();
+        assert!(response.content_length().is_none());
+        match read_body_limited(response, 1024 * 1024).await.unwrap() {
+            Body::TooLarge(bytes) => assert!(bytes.len() < 2 * 1024 * 1024, "{}", bytes.len()),
+            Body::Complete(bytes) => panic!("read all {} bytes", bytes.len()),
+        }
+    }
+
+    /// A server that never answers fails the request after the timeout
+    #[tokio::test]
+    async fn hung_server_times_out() {
+        let (url, _) = mock_server(Reply::Hang).await;
+        let args = Args::parse_from(["ironbase-bridge", "--server", &url, "--timeout-secs", "1"]);
+        let client = build_client(&args).unwrap();
+        let started = std::time::Instant::now();
+        let result = forward_single(
+            &client,
+            &args,
+            &request(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The shutdown signal ends the loop while a request waits on a server
+    /// that never answers (it was only watched while reading stdin)
+    #[tokio::test]
+    async fn shutdown_ends_a_request_in_flight() {
+        let (url, received) = mock_server(Reply::Hang).await;
+        let args = args(&url);
+        let client = build_client(&args).unwrap();
+        let input: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\"}\n";
+        let lines = BufReader::new(input).lines();
+        let shutdown = {
+            let received = received.clone();
+            async move {
+                while received.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run(&client, &args, lines, shutdown),
+        )
+        .await
+        .expect("the loop ended on the shutdown signal");
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "the request was in flight"
+        );
+    }
+
+    /// The admin key goes only into admin_* tool calls
+    #[tokio::test]
+    async fn admin_key_is_injected_only_into_admin_tools() {
+        let (url, received) = mock_server(Reply::Echo).await;
+        let args = Args::parse_from(["ironbase-bridge", "--server", &url, "--admin-key", "secret"]);
+        let client = build_client(&args).unwrap();
+        for (id, tool) in [
+            (1, "admin_apikey_list"),
+            (2, "find"),
+            (3, "rag_collection_stats"),
+        ] {
+            let call = format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{tool}","arguments":{{}}}}}}"#
+            );
+            forward_single(&client, &args, &request(&call))
+                .await
+                .unwrap();
+        }
+        forward_single(
+            &client,
+            &args,
+            &request(r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#),
+        )
+        .await
+        .unwrap();
+        let received = received.lock().unwrap();
+        let keys: Vec<_> = received
+            .iter()
+            .map(|r| {
+                r["params"]["arguments"]["admin_key"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(keys, vec![Some("secret".to_string()), None, None, None]);
+        // An explicit key in the arguments wins
+        let mut explicit = request(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"admin_x","arguments":{"admin_key":"mine"}}}"#,
+        );
+        explicit = inject_admin_key(&explicit, "secret");
+        assert_eq!(explicit.params["arguments"]["admin_key"], "mine");
+    }
+
+    /// Errors without a known id carry `"id": null`; absent params stay
+    /// absent when forwarded
+    #[tokio::test]
+    async fn json_rpc_ids_and_params() {
+        let parse_error = parse_input("not json").unwrap_err();
+        let resp =
+            make_error_response(parse_error.id(), parse_error.code(), &parse_error.message());
+        let json: serde_json::Value =
+            serde_json::from_str(&serialize_response(&resp).unwrap()).unwrap();
+        assert!(json.as_object().unwrap().contains_key("id"), "{json}");
+        assert!(json["id"].is_null());
+
+        let (url, received) = mock_server(Reply::Echo).await;
+        let args = args(&url);
+        let client = build_client(&args).unwrap();
+        forward_single(
+            &client,
+            &args,
+            &request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+        )
+        .await
+        .unwrap();
+        let forwarded = received.lock().unwrap()[0].clone();
+        assert!(forwarded.get("params").is_none(), "{forwarded}");
+    }
 }
