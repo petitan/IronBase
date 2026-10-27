@@ -96,6 +96,10 @@ fn copy_dir(from: &Path, to: &Path) {
         let target = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy_dir(&entry.path(), &target);
+        } else if entry.path().extension().is_some_and(|e| e == "lock") {
+            // The live process's lock file: a killed process's lock is gone
+            // with it, and the next open rewrites the file. Windows refuses to
+            // read a file another handle holds a byte-range lock on.
         } else {
             std::fs::copy(entry.path(), target).unwrap();
         }
