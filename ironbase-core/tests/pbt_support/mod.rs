@@ -307,9 +307,11 @@ pub fn matches(doc: &Map<String, Value>, query: &Value) -> bool {
 // ============================================================================
 
 /// Apply `$set` / `$unset` / `$inc` on top-level fields as the engine does:
-/// `$inc` adds integers with saturation, otherwise as floats, starts a
-/// missing field at 0 and leaves a non-numeric field unchanged
-pub fn apply_update(doc: &mut Map<String, Value>, update: &Value) {
+/// `$inc` adds integers as integers, otherwise as floats, and starts a
+/// missing field at 0. `Err` when the engine rejects the update: `$inc` on a
+/// non-numeric field, an int64 overflow, or a float that is not finite (JSON
+/// has no infinity)
+pub fn apply_update(doc: &mut Map<String, Value>, update: &Value) -> Result<(), String> {
     for (op, fields) in update.as_object().unwrap() {
         for (field, value) in fields.as_object().unwrap() {
             match op.as_str() {
@@ -322,20 +324,22 @@ pub fn apply_update(doc: &mut Map<String, Value>, update: &Value) {
                 "$inc" => {
                     let current = doc.get(field).cloned().unwrap_or(json!(0));
                     let next = match (current.as_i64(), value.as_i64()) {
-                        (Some(c), Some(i)) => Some(json!(c.saturating_add(i))),
+                        (Some(c), Some(i)) => json!(c
+                            .checked_add(i)
+                            .ok_or_else(|| format!("$inc {c} + {i} overflows"))?),
                         _ => match (current.as_f64(), value.as_f64()) {
-                            (Some(c), Some(i)) => Some(json!(c + i)),
-                            _ => None,
+                            (Some(c), Some(i)) if (c + i).is_finite() => json!(c + i),
+                            (Some(c), Some(i)) => return Err(format!("$inc {c} + {i} overflows")),
+                            _ => return Err(format!("$inc on non-number {current}")),
                         },
                     };
-                    if let Some(next) = next {
-                        doc.insert(field.clone(), next);
-                    }
+                    doc.insert(field.clone(), next);
                 }
                 other => panic!("oracle: unsupported update operator {other}"),
             }
         }
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -345,6 +349,12 @@ pub fn apply_update(doc: &mut Map<String, Value>, update: &Value) {
 /// The `_id`s of documents, as their JSON text (ids may be of any type)
 pub fn ids(docs: &[Value]) -> BTreeSet<String> {
     docs.iter().map(|d| d["_id"].to_string()).collect()
+}
+
+/// Whether two documents are stored differently (`1` vs `1.0` and `0.0` vs
+/// `-0.0` differ): what an update's modified count reports
+pub fn stored_differently(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
+    serde_json::to_string(a).unwrap() != serde_json::to_string(b).unwrap()
 }
 
 /// A document as the insert APIs take it
@@ -359,8 +369,8 @@ pub fn fields(doc: &Map<String, Value>) -> HashMap<String, Value> {
 /// The operations the properties drive, on collection `c` of a database
 pub trait Db {
     fn insert_docs(&self, c: &str, docs: &[Map<String, Value>]) -> Vec<Map<String, Value>>;
-    fn update_first(&self, c: &str, filter: &Value, update: &Value) -> (u64, u64);
-    fn update_all(&self, c: &str, filter: &Value, update: &Value) -> (u64, u64);
+    fn update_first(&self, c: &str, filter: &Value, update: &Value) -> Result<(u64, u64), String>;
+    fn update_all(&self, c: &str, filter: &Value, update: &Value) -> Result<(u64, u64), String>;
     fn delete_first(&self, c: &str, filter: &Value) -> u64;
     fn delete_all(&self, c: &str, filter: &Value) -> u64;
     fn create_index(&self, c: &str, path: &str) -> String;
@@ -399,13 +409,23 @@ macro_rules! impl_db {
                     })
                     .collect()
             }
-            fn update_first(&self, c: &str, filter: &Value, update: &Value) -> (u64, u64) {
+            fn update_first(
+                &self,
+                c: &str,
+                filter: &Value,
+                update: &Value,
+            ) -> Result<(u64, u64), String> {
                 ironbase_core::DatabaseCore::<$storage>::update_one(self, c, filter, update)
-                    .unwrap()
+                    .map_err(|e| e.to_string())
             }
-            fn update_all(&self, c: &str, filter: &Value, update: &Value) -> (u64, u64) {
+            fn update_all(
+                &self,
+                c: &str,
+                filter: &Value,
+                update: &Value,
+            ) -> Result<(u64, u64), String> {
                 ironbase_core::DatabaseCore::<$storage>::update_many(self, c, filter, update)
-                    .unwrap()
+                    .map_err(|e| e.to_string())
             }
             fn delete_first(&self, c: &str, filter: &Value) -> u64 {
                 ironbase_core::DatabaseCore::<$storage>::delete_one(self, c, filter).unwrap()

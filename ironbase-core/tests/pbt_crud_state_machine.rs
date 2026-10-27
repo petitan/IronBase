@@ -91,6 +91,14 @@ fn pick_id(model: &Model, i: usize) -> (Value, Option<String>) {
     }
 }
 
+/// `doc` after `update`, and whether it changed (`1` → `1.0` is a change)
+fn updated(doc: &Map<String, Value>, update: &Value) -> Result<(Map<String, Value>, bool), String> {
+    let mut next = doc.clone();
+    apply_update(&mut next, update)?;
+    let changed = stored_differently(&next, doc);
+    Ok((next, changed))
+}
+
 /// Apply one CRUD operation to the engine and the model; `indexes` holds
 /// the (path, name) of the live indexes
 fn apply(
@@ -107,11 +115,20 @@ fn apply(
         }
         Op::UpdateById(i, update) => {
             let (filter, key) = pick_id(model, *i);
-            let (matched, modified) = db.update_first("s", &filter, update);
-            prop_assert_eq!(matched, key.is_some() as u64, "update_one matched");
-            prop_assert!(modified <= matched);
-            if let Some(key) = key {
-                apply_update(model.get_mut(&key).unwrap(), update);
+            let updated = key.as_ref().map(|key| updated(&model[key], update));
+            match (db.update_first("s", &filter, update), updated) {
+                (Ok((matched, modified)), None) => {
+                    prop_assert_eq!((matched, modified), (0, 0), "update_one of no document");
+                }
+                (Ok((matched, modified)), Some(Ok((next, changed)))) => {
+                    prop_assert_eq!(matched, 1, "update_one matched");
+                    prop_assert_eq!(modified, changed as u64, "update_one modified, {}", update);
+                    model.insert(key.unwrap(), next);
+                }
+                (Err(_), Some(Err(_))) => {}
+                (result, expected) => {
+                    prop_assert!(false, "update_one {:?}, model {:?}", result, expected)
+                }
             }
         }
         Op::UpdateMany(filter, update) => {
@@ -120,16 +137,34 @@ fn apply(
                 .filter(|(_, d)| matches(d, filter))
                 .map(|(k, _)| k.clone())
                 .collect();
-            let (matched, modified) = db.update_all("s", filter, update);
-            prop_assert_eq!(
-                matched as usize,
-                hits.len(),
-                "update_many matched, filter {}",
-                filter
-            );
-            prop_assert!(modified <= matched);
-            for key in hits {
-                apply_update(model.get_mut(&key).unwrap(), update);
+            let updates: Result<Vec<_>, String> = hits
+                .iter()
+                .map(|key| updated(&model[key], update).map(|u| (key.clone(), u)))
+                .collect();
+            match (db.update_all("s", filter, update), updates) {
+                (Ok((matched, modified)), Ok(updates)) => {
+                    prop_assert_eq!(
+                        matched as usize,
+                        hits.len(),
+                        "update_many matched, filter {}",
+                        filter
+                    );
+                    let changed = updates.iter().filter(|(_, (_, changed))| *changed).count();
+                    prop_assert_eq!(
+                        modified as usize,
+                        changed,
+                        "update_many modified, {}",
+                        update
+                    );
+                    for (key, (next, _)) in updates {
+                        model.insert(key, next);
+                    }
+                }
+                // A rejected update_many writes nothing
+                (Err(_), Err(_)) => {}
+                (result, expected) => {
+                    prop_assert!(false, "update_many {:?}, model {:?}", result, expected)
+                }
             }
         }
         Op::DeleteById(i) => {

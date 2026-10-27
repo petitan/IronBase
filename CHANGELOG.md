@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — update operators follow MongoDB where they lost data or miscounted (0.3.442)
+
+Found by the update operator property (P4, `ironbase-core/tests/pbt_update_operators.rs`):
+random documents and updates against an oracle of the MongoDB semantics,
+20 000 cases classified before the fixes.
+
+- **A path through a scalar overwrote it:** `{"o": 5}` + `$set {"o.x": 1}`
+  stored `{"o": {"x": 1}}` and lost the 5 (also `$inc`, `$push`,
+  `$addToSet`). The update is now rejected (`InvalidQuery`), as in MongoDB.
+- **`$inc` stored what it could not:** a float result that is not finite
+  (`1e308 + 1e308`) was stored as `null`; `$inc` on a non-number was
+  silently ignored; an int64 overflow saturated at `i64::MAX`/`MIN`. All three
+  are now rejected and nothing is written.
+- **Modified count and no-op writes:** an update that leaves the document as
+  it was (`$set` to the current value, `$unset` of a missing field, `$push`
+  of an empty `$each`, ...) reported `modified = 1` and wrote a new version
+  (tombstone, document, index update). It now reports 0 and writes nothing
+  (MongoDB `nModified`). A type change (`1` → `1.0`) is still a modification.
+- **`$addToSet`:** numbers compare by value as in `$pull` and queries (`2` is
+  already in `[2.0]`); `$each: []` on a missing field creates `[]`.
+- **Upsert used its own copy of every operator**, drifted from the update
+  path (`$inc` to infinity stored 0, `$inc` on a string overwrote it, `$push`
+  on a scalar and unknown operators were ignored). `create_upsert_document`
+  and `upsert::apply_update_to_base` now apply the shared operators and
+  return `Result<Value>`; an upsert may still set the new document's `_id`.
+- **MCP `update_one`/`update_many`:** the auto-embed refresh after an update
+  is gated on matched documents (the source-hash check decides), so an update
+  that changes nothing still backfills a vector stored without a hash.
+- **`live_document_count` migration (follow-up to 0.3.441):** decided by the
+  field missing from the stored metadata instead of reading the catalog's
+  records at open; a stored 0 is kept.
+
+### Added — P4 update operator properties (0.3.442)
+
+- `update_one` against the oracle: rejected exactly when MongoDB rejects;
+  otherwise the stored document and the modified count are the oracle's.
+- `update_many` over an indexed collection: documents and index answers
+  agree with the oracle afterwards; a rejected `update_many` writes nothing.
+- P2 (CRUD state machine) now checks modified counts exactly.
+
 ### Added — property-based tests: query paths and a CRUD state machine (0.3.441)
 
 Phase 1 of the property-based testing plan (`ironbase-core/tests/pbt_*`,

@@ -464,6 +464,29 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Whether two values store the same: unlike [`values_equal`], numbers must
+/// also keep their type and sign (`1` vs `1.0`, `0.0` vs `-0.0` differ).
+/// Object key order is ignored. Used to tell whether an update changed a
+/// document (MongoDB `nModified`).
+pub fn values_identical(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            x == y
+                && (x.is_f64() == y.is_f64())
+                && x.as_f64().map(f64::is_sign_negative) == y.as_f64().map(f64::is_sign_negative)
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| values_identical(p, q))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| values_identical(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
 /// Compare two optional JSON values with None handling
 ///
 /// Used for sorting where missing values need consistent ordering.

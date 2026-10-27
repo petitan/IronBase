@@ -474,7 +474,7 @@ fn test_update_one_no_change() {
     let doc = HashMap::from([("value".to_string(), json!(10))]);
     let id = db.insert_one(&coll_name, doc).unwrap();
 
-    // Update with same value - implementation counts modification even if value unchanged
+    // Update with the same value: matched, not modified (MongoDB nModified)
     let (matched, modified) = db
         .update_one(
             &coll_name,
@@ -484,7 +484,7 @@ fn test_update_one_no_change() {
         .unwrap();
 
     assert_eq!(matched, 1);
-    assert_eq!(modified, 1); // Implementation doesn't track actual change detection
+    assert_eq!(modified, 0);
 }
 
 #[test]

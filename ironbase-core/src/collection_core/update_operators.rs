@@ -3,7 +3,7 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::values_equal;
+use crate::value_utils::{values_equal, values_identical};
 use serde_json::Value;
 
 /// Apply MongoDB-style update operators to a document
@@ -17,7 +17,9 @@ use serde_json::Value;
 /// - `$addToSet`: Add unique values to array
 /// - `$pop`: Remove first (-1) or last (1) array element
 ///
-/// Returns whether the document was modified.
+/// Returns whether the document was modified: an update that leaves it as it
+/// was (`$set` to the current value, `$unset` of a missing field, ...) is not
+/// a modification and is not written (MongoDB `nModified`).
 pub fn apply_update_operators(document: &mut Document, update_json: &Value) -> Result<bool> {
     let mut was_modified = false;
 
@@ -93,6 +95,38 @@ fn reject_id_modification(
     Ok(())
 }
 
+/// A dotted path through a value that cannot hold a field (a scalar, or an
+/// array stepped into by a name) cannot be created: MongoDB rejects the
+/// update. `set_nested` replaced such a value with an object, silently
+/// losing it (`{"o": 5}` + `$set {"o.x": 1}` gave `{"o": {"x": 1}}`).
+fn reject_uncreatable_path(document: &Document, op: &str, field: &str) -> Result<()> {
+    let mut parts = field.split('.');
+    let Some(mut current) = parts.next().and_then(|first| document.get(first)) else {
+        return Ok(());
+    };
+    for part in parts {
+        current = match current {
+            Value::Object(map) => match map.get(part) {
+                Some(next) => next,
+                None => return Ok(()),
+            },
+            Value::Array(arr) if part.parse::<usize>().is_ok() => {
+                match arr.get(part.parse::<usize>().unwrap_or_default()) {
+                    Some(next) => next,
+                    None => return Ok(()),
+                }
+            }
+            other => {
+                return Err(IronBaseError::InvalidQuery(format!(
+                    "{}: cannot create field '{}' of '{}' in {}",
+                    op, part, field, other
+                )))
+            }
+        };
+    }
+    Ok(())
+}
+
 // ============================================================================
 // OPERATOR IMPLEMENTATIONS
 // ============================================================================
@@ -105,6 +139,13 @@ fn apply_set(document: &mut Document, fields: &Value) -> Result<bool> {
 
     let mut modified = false;
     for (field, value) in field_values {
+        reject_uncreatable_path(document, "$set", field)?;
+        if document
+            .get(field)
+            .is_some_and(|current| values_identical(current, value))
+        {
+            continue;
+        }
         document.set_nested(field, value.clone());
         modified = true;
     }
@@ -119,24 +160,53 @@ fn apply_inc(document: &mut Document, fields: &Value) -> Result<bool> {
 
     let mut modified = false;
     for (field, inc_value) in field_values {
-        // MongoDB: if field doesn't exist, treat it as 0
-        let current = document.get(field).cloned().unwrap_or(Value::from(0));
-
-        // Try int first to preserve integer types
-        if let (Some(curr_int), Some(inc_int)) = (current.as_i64(), inc_value.as_i64()) {
-            // Use saturating_add to prevent overflow (BUG #2 fix)
-            document.set_nested(field, Value::from(curr_int.saturating_add(inc_int)));
-            modified = true;
-        } else if let (Some(curr_num), Some(inc_num)) = (current.as_f64(), inc_value.as_f64()) {
-            document.set_nested(field, Value::from(curr_num + inc_num));
-            modified = true;
-        } else if !inc_value.is_number() {
+        if !inc_value.is_number() {
             // BUG #4 fix: Return error for non-numeric increment value
             return Err(IronBaseError::InvalidQuery(format!(
                 "$inc value must be numeric, got: {}",
                 inc_value
             )));
         }
+        reject_uncreatable_path(document, "$inc", field)?;
+
+        // MongoDB: if field doesn't exist, treat it as 0
+        let existing = document.get(field);
+        let current = existing.cloned().unwrap_or(Value::from(0));
+
+        // Try int first to preserve integer types
+        let next = if let (Some(curr_int), Some(inc_int)) = (current.as_i64(), inc_value.as_i64()) {
+            // An int64 overflow is rejected (MongoDB); it used to
+            // saturate silently at i64::MAX / i64::MIN (BUG #2 fix)
+            Value::from(curr_int.checked_add(inc_int).ok_or_else(|| {
+                IronBaseError::InvalidQuery(format!(
+                    "$inc on '{}' overflows: {} + {} does not fit in a 64-bit integer",
+                    field, curr_int, inc_int
+                ))
+            })?)
+        } else if let (Some(curr_num), Some(inc_num)) = (current.as_f64(), inc_value.as_f64()) {
+            // JSON has no infinity: `Value::from(inf)` stored null
+            let sum = curr_num + inc_num;
+            if !sum.is_finite() {
+                return Err(IronBaseError::InvalidQuery(format!(
+                    "$inc on '{}' overflows: {} + {} is not a finite number",
+                    field,
+                    Value::from(curr_num),
+                    Value::from(inc_num)
+                )));
+            }
+            Value::from(sum)
+        } else {
+            // A non-numeric field: MongoDB rejects it (it was silently kept)
+            return Err(IronBaseError::InvalidQuery(format!(
+                "Cannot apply $inc to a value of non-numeric type: '{}' is {}",
+                field, current
+            )));
+        };
+        if existing.is_some_and(|current| values_identical(current, &next)) {
+            continue;
+        }
+        document.set_nested(field, next);
+        modified = true;
     }
     Ok(modified)
 }
@@ -149,8 +219,7 @@ fn apply_unset(document: &mut Document, fields: &Value) -> Result<bool> {
 
     let mut modified = false;
     for (field, _) in field_values {
-        document.remove_nested(field);
-        modified = true;
+        modified |= document.remove_nested(field).is_some();
     }
     Ok(modified)
 }
@@ -163,12 +232,18 @@ fn apply_push(document: &mut Document, fields: &Value) -> Result<bool> {
 
     let mut modified = false;
     for (field, value) in field_values {
+        reject_uncreatable_path(document, "$push", field)?;
         // Get or create array
         let mut array = get_array_field(document, field, "$push")?;
+        let before = document.get(field).cloned();
 
         push_with_modifiers(&mut array, value);
 
-        document.set_nested(field, Value::Array(array));
+        let array = Value::Array(array);
+        if before.is_some_and(|before| values_identical(&before, &array)) {
+            continue;
+        }
+        document.set_nested(field, array);
         modified = true;
     }
     Ok(modified)
@@ -218,13 +293,16 @@ fn apply_add_to_set(document: &mut Document, fields: &Value) -> Result<bool> {
         // Handle $each modifier
         let items = parse_each_modifier(value);
 
-        // Get or create array
+        reject_uncreatable_path(document, "$addToSet", field)?;
+        // Get or create array (a missing field becomes an array even when
+        // nothing is added, as in MongoDB)
         let mut array = get_array_field(document, field, "$addToSet")?;
+        let mut field_modified = document.get(field).is_none();
 
-        // Add items if not already present
-        let mut field_modified = false;
+        // Add items if not already present; numbers compare by value, as in
+        // `$pull` and queries (`2` is already in `[2.0]`)
         for item in items {
-            if !array.contains(&item) {
+            if !array.iter().any(|existing| values_equal(existing, &item)) {
                 array.push(item);
                 field_modified = true;
             }
@@ -287,12 +365,9 @@ fn apply_pop(document: &mut Document, fields: &Value) -> Result<bool> {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Parse $push modifiers: $each, $position, $slice
 /// Apply one `$push` value to `array`: `$each` items, `$position` and
-/// `$slice` modifiers, or a plain single value. Shared with the upsert
-/// document builder (`upsert.rs`), which stored the literal modifier object
-/// before (audit 2026-10-06 #36).
-pub(crate) fn push_with_modifiers(array: &mut Vec<Value>, value: &Value) {
+/// `$slice` modifiers, or a plain single value.
+fn push_with_modifiers(array: &mut Vec<Value>, value: &Value) {
     // Parse modifiers: $each, $position, $slice
     let (items, position, slice) = parse_push_modifiers(value);
 
@@ -341,7 +416,7 @@ fn parse_push_modifiers(value: &Value) -> (Vec<Value>, Option<usize>, Option<i64
 }
 
 /// Parse $each modifier for $addToSet
-pub(crate) fn parse_each_modifier(value: &Value) -> Vec<Value> {
+fn parse_each_modifier(value: &Value) -> Vec<Value> {
     if let Value::Object(ref modifiers) = value {
         if let Some(each_val) = modifiers.get("$each") {
             if let Value::Array(ref arr) = each_val {
@@ -586,5 +661,81 @@ mod tests {
 
         // Document should be unchanged
         assert_eq!(doc.get("scores"), Some(&json!([1, 5, 10, 15])));
+    }
+
+    // Faults found by the update operator property (P4)
+
+    #[test]
+    fn test_path_through_a_scalar_is_rejected_not_overwritten() {
+        for update in [
+            json!({"$set": {"o.x": 1}}),
+            json!({"$inc": {"o.x": 1}}),
+            json!({"$push": {"o.x": 1}}),
+            json!({"$addToSet": {"o.x": 1}}),
+        ] {
+            let mut doc = make_doc(json!({"o": 5}));
+            assert!(
+                apply_update_operators(&mut doc, &update).is_err(),
+                "{update}"
+            );
+            assert_eq!(doc.get("o"), Some(&json!(5)), "{update}");
+        }
+        // Through an object, or a missing field, the path is created
+        let mut doc = make_doc(json!({"o": {"y": 2}}));
+        assert!(apply_update_operators(&mut doc, &json!({"$set": {"o.x": 1, "n.m": 3}})).unwrap());
+        assert_eq!(doc.get("o"), Some(&json!({"y": 2, "x": 1})));
+        assert_eq!(doc.get("n"), Some(&json!({"m": 3})));
+    }
+
+    #[test]
+    fn test_inc_rejects_what_it_cannot_store() {
+        for (doc, update) in [
+            (json!({"a": 1e308}), json!({"$inc": {"a": 1e308}})), // stored null
+            (json!({"a": "s"}), json!({"$inc": {"a": 1}})),       // silently kept
+            (json!({"a": i64::MAX}), json!({"$inc": {"a": 1}})),  // saturated
+            (json!({"a": i64::MIN}), json!({"$inc": {"a": -1}})),
+        ] {
+            let mut document = make_doc(doc.clone());
+            assert!(
+                apply_update_operators(&mut document, &update).is_err(),
+                "{doc} {update}"
+            );
+            assert_eq!(document.get("a"), doc.get("a"));
+        }
+    }
+
+    #[test]
+    fn test_add_to_set_compares_numbers_by_value() {
+        let mut doc = make_doc(json!({"a": [2.0]}));
+        assert!(!apply_update_operators(&mut doc, &json!({"$addToSet": {"a": 2}})).unwrap());
+        assert_eq!(doc.get("a"), Some(&json!([2.0])));
+    }
+
+    #[test]
+    fn test_add_to_set_empty_each_creates_the_array() {
+        let mut doc = make_doc(json!({}));
+        let update = json!({"$addToSet": {"a": {"$each": []}}});
+        assert!(apply_update_operators(&mut doc, &update).unwrap());
+        assert_eq!(doc.get("a"), Some(&json!([])));
+    }
+
+    #[test]
+    fn test_update_that_changes_nothing_is_not_a_modification() {
+        let mut doc = make_doc(json!({"a": 1, "b": [1]}));
+        for update in [
+            json!({"$set": {"a": 1}}),
+            json!({"$unset": {"missing": ""}}),
+            json!({"$inc": {"a": 0}}),
+            json!({"$push": {"b": {"$each": []}}}),
+            json!({"$pull": {"b": 5}}),
+            json!({"$pop": {"missing": 1}}),
+        ] {
+            assert!(
+                !apply_update_operators(&mut doc, &update).unwrap(),
+                "{update}"
+            );
+        }
+        // A type change is a modification (stored differently)
+        assert!(apply_update_operators(&mut doc, &json!({"$set": {"a": 1.0}})).unwrap());
     }
 }
