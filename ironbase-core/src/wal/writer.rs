@@ -42,6 +42,10 @@ pub struct WriteAheadLog {
     /// may be appended (it would follow a partial record, or be overwritten
     /// by the retained entries at the next open)
     pending_repair: Option<Repair>,
+    /// The highest transaction id appended by this handle (recovery
+    /// re-appends the committed entries it keeps): the storage persists it
+    /// as the tx-id watermark before the WAL drops entries
+    max_tx_id: TransactionId,
     /// Test hook: the next append writes only this many bytes, then fails
     #[cfg(test)]
     fail_next_append_after: Option<usize>,
@@ -106,6 +110,7 @@ impl WriteAheadLog {
             file,
             path,
             pending_repair: None,
+            max_tx_id: 0,
             #[cfg(test)]
             fail_next_append_after: None,
             #[cfg(test)]
@@ -170,7 +175,13 @@ impl WriteAheadLog {
             }
             return Err(e.into());
         }
+        self.max_tx_id = self.max_tx_id.max(entry.transaction_id);
         Ok(offset)
+    }
+
+    /// The highest transaction id appended by this handle
+    pub fn max_tx_id(&self) -> TransactionId {
+        self.max_tx_id
     }
 
     /// Do the work a failed operation left pending, if any.

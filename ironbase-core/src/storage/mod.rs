@@ -1099,6 +1099,7 @@ impl StorageEngine {
     /// WAL is cleared unconditionally to prevent stale entries from
     /// causing unnecessary replay on next startup (e.g., after Drop).
     pub fn flush(&mut self) -> Result<()> {
+        self.cover_wal_tx_ids();
         self.persist_metadata()?;
 
         // Clear WAL unconditionally after successful metadata flush
@@ -1201,6 +1202,7 @@ impl StorageEngine {
         // (2026-02-01 perf fix). WAL size is the meaningful metric now.
         let wal_ops_cleared = self.wal_ops_since_clear;
 
+        self.cover_wal_tx_ids();
         // Flush metadata to ensure document_catalog is persisted
         // NOTE: ensure_metadata_snapshot() intentionally NOT called here.
         // See PERF FIX comment above for rationale.
@@ -1226,7 +1228,10 @@ impl StorageEngine {
     /// the last flush): the catalog is already durable, so calling `flush_metadata`
     /// would only append the full catalog again and grow the file on every idle
     /// checkpoint (audit P1-3). In that state the WAL holds no un-checkpointed
-    /// ops, so clearing it is a cheap no-op.
+    /// ops, so clearing it is a cheap no-op. Should the metadata be dirty after
+    /// all (or the WAL hold transactions the header's tx-id watermark does not
+    /// cover), it is written first: a WAL cleared under dirty metadata lost
+    /// the committed writes it held on the next crash.
     ///
     /// `keep_after`: see [`checkpoint_keeping_wal_after`](Self::checkpoint_keeping_wal_after).
     pub fn checkpoint_wal_clear_only(
@@ -1234,6 +1239,11 @@ impl StorageEngine {
         keep_after: Option<TransactionId>,
     ) -> Result<compaction::CheckpointStats> {
         let wal_size_before = self.wal.file_size().unwrap_or(0);
+        // The WAL is the only durable record of what dirty metadata holds:
+        // it is never dropped before that metadata is written
+        if self.cover_wal_tx_ids() || self.metadata_dirty {
+            self.flush_metadata()?;
+        }
         self.clear_wal_for_checkpoint(keep_after)?;
         let wal_size_after = self.wal.file_size().unwrap_or(0);
         Ok(compaction::CheckpointStats {
@@ -1268,6 +1278,7 @@ impl StorageEngine {
         // via guard check, ensuring v2 databases use the fallback path instead.
         let metadata_offset = self.header.data_end_offset;
 
+        self.cover_wal_tx_ids();
         HeaderWriter::new(&mut self.header, &mut self.file)
             .set_after_metadata(metadata_offset, metadata_bytes.len() as u64);
 
@@ -1291,6 +1302,28 @@ impl StorageEngine {
             wal_ops_cleared: wal_ops_cleared as u64,
             indexes_flushed: 0,
         })
+    }
+
+    /// Raise the header's tx-id watermark to every transaction the WAL logged,
+    /// for the metadata write that precedes dropping WAL entries. The
+    /// watermark seeds the next session's transaction ids, and index files
+    /// are stamped with the ids they contain: it was persisted only by a
+    /// clean close, so after a checkpoint and a crash the next session reused
+    /// ids at or below the index files' watermark, and the WAL replay after
+    /// a second crash skipped those transactions as already indexed (an
+    /// `_id` lookup then missed the documents; P3 crash recovery property).
+    /// Returns whether it changed the header (the metadata is then dirty).
+    fn cover_wal_tx_ids(&mut self) -> bool {
+        let logged = self.wal.max_tx_id();
+        if logged <= self.header.last_committed_tx_id {
+            return false;
+        }
+        if self.header.version < 5 {
+            self.header.version = 5;
+        }
+        self.header.last_committed_tx_id = logged;
+        self.metadata_dirty = true;
+        true
     }
 
     /// The WAL-clearing step shared by the checkpoint variants: clear the WAL,
@@ -2407,6 +2440,16 @@ impl StorageEngine {
         self.metadata_snapshot_pending = false;
         self.wal_ops_since_clear = 0;
 
+        // A clean close checkpoints and empties the WAL, so committed
+        // transactions here mean the last session did not close cleanly,
+        // whatever the header says: `open` clears the flag only in memory,
+        // and it reaches the file at the first metadata flush, after the
+        // first WAL commit. A crash in between read as a clean shutdown, the
+        // index files were trusted as they were and the replayed operations
+        // never reached them (an `_id` lookup missed the replayed documents;
+        // P3 crash recovery property).
+        self.was_clean_shutdown = false;
+
         Ok((recovered_count, all_index_changes, applied_ops))
     }
 
@@ -3006,7 +3049,9 @@ mod tests {
     /// lock and `mem::forget`-ing the engine so its Drop (which would flush +
     /// checkpoint) never runs, leaving exactly the on-disk state a power loss
     /// would. NOTE: this pins the durability CONTRACT the None arm chooses
-    /// between (`checkpoint` vs `checkpoint_wal_clear_only`); the None-arm wiring
+    /// between (`checkpoint` vs `checkpoint_wal_clear_only`, which since the
+    /// P3 crash recovery property also writes dirty metadata before clearing
+    /// the WAL); the None-arm wiring
     /// itself is only reachable via the Phase-A→B race and is covered by review,
     /// not driven here (a deterministic wiring test would need a test-only seam
     /// in the checkpoint hot path).
@@ -3061,15 +3106,16 @@ mod tests {
             "a committed insert must be recovered from the WAL on crash when the WAL is intact"
         );
 
-        // Buggy choice: clear the WAL without flushing → the committed insert has
-        // no durable record left (empty WAL + stale catalog) → lost on crash.
-        let lost = run("clear_only", |s| {
+        // clear_only on dirty metadata: it used to clear the WAL without
+        // flushing, leaving no durable record (empty WAL + stale catalog) and
+        // losing the insert on crash. It now writes dirty metadata before
+        // dropping the WAL, so the None arm's choice is safe either way.
+        let kept_clear_only = run("clear_only", |s| {
             s.checkpoint_wal_clear_only(None).unwrap();
         });
         assert_eq!(
-            lost, 0,
-            "checkpoint_wal_clear_only on dirty metadata strands the committed insert on crash — \
-             this is exactly why the None arm must not use it while metadata is dirty"
+            kept_clear_only, 1,
+            "checkpoint_wal_clear_only must not drop the WAL under dirty metadata"
         );
 
         // Fixed choice: checkpoint() flushes the catalog first → the write survives.

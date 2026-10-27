@@ -850,3 +850,204 @@ fn test_wal_recovery_mixed_operations_metadata() {
             .contains_key(&ironbase_core::document::DocumentId::Int(3)));
     }
 }
+
+// =============================================================================
+// FAULTS FOUND BY THE CRASH RECOVERY PROPERTY (P3, pbt_crash_recovery.rs)
+// =============================================================================
+
+use ironbase_core::DatabaseCore;
+use serde_json::Value;
+
+/// A killed process: no `Drop` (no flush, no clean-shutdown mark); the file
+/// lock is released so this process can open the database again
+fn kill(db: DatabaseCore<StorageEngine>, collection: &str) {
+    db.get_collection(collection)
+        .unwrap()
+        .storage
+        .read()
+        .release_lock()
+        .unwrap();
+    std::mem::forget(db);
+}
+
+fn insert_docs(db: &DatabaseCore<StorageEngine>, n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| {
+            let id = db
+                .insert_one("s", HashMap::from([("n".to_string(), json!(i))]))
+                .unwrap();
+            serde_json::to_value(id).unwrap()
+        })
+        .collect()
+}
+
+/// Every id is found through the `_id` index (update by `_id` matches it)
+fn assert_ids_indexed(db: &DatabaseCore<StorageEngine>, ids: &[Value]) {
+    for id in ids {
+        let (matched, _) = db
+            .update_one("s", &json!({"_id": id}), &json!({"$set": {"seen": true}}))
+            .unwrap();
+        assert_eq!(matched, 1, "_id {id} missing from the _id index");
+    }
+}
+
+/// A committed WAL transaction behind a header that still says "clean": the
+/// session's first write crashed after its WAL commit, before the dirty flag
+/// reached the file. Its insert must reach the `_id` index too.
+#[test]
+fn committed_wal_behind_a_clean_header_reaches_the_indexes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        db.collection("s").unwrap();
+        db.close().unwrap();
+    }
+    kill(DatabaseCore::<StorageEngine>::open(&path).unwrap(), "s");
+    {
+        let mut wal = WriteAheadLog::open(path.with_extension("wal")).unwrap();
+        let op = ironbase_core::transaction::Operation::Insert {
+            collection: "s".into(),
+            doc_id: ironbase_core::document::DocumentId::Int(77),
+            doc: std::sync::Arc::new(json!({"_id": 77, "_collection": "s"})),
+        };
+        wal.append(&WALEntry::new(9, WALEntryType::Begin, vec![]))
+            .unwrap();
+        wal.append(&WALEntry::new(
+            9,
+            WALEntryType::Operation,
+            serde_json::to_vec(&op).unwrap(),
+        ))
+        .unwrap();
+        wal.append(&WALEntry::new(9, WALEntryType::Commit, vec![]))
+            .unwrap();
+        wal.flush().unwrap();
+    }
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    assert_ids_indexed(&db, &[json!(77)]);
+}
+
+/// A crash before the `_id` index was ever flushed: the index created
+/// empty at the next open is rebuilt from the catalog, also when the WAL
+/// replay succeeds, and survives the next clean reopen.
+#[test]
+fn id_index_without_a_file_is_rebuilt_after_a_crash() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let mut ids = insert_docs(&db, 2);
+    kill(db, "s");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    ids.extend(insert_docs(&db, 1));
+    db.close().unwrap();
+    drop(db);
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    assert_ids_indexed(&db, &ids);
+}
+
+/// The WAL replay of a delete over metadata that already holds it (flushed
+/// by `create_index`) must not count the deletion twice.
+#[test]
+fn replayed_delete_is_not_counted_twice() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let ids = insert_docs(&db, 2);
+    db.delete_one("s", &json!({"_id": ids[1]})).unwrap();
+    db.get_collection("s")
+        .unwrap()
+        .create_index("n".into(), false, false)
+        .unwrap();
+    kill(db, "s");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    assert_eq!(db.count_documents("s", &json!({})).unwrap(), 1);
+}
+
+/// An index file written by `create_index` (watermark 0) fails the WAL
+/// replay guardrail after a crash; the loaded index must then be rebuilt,
+/// not kept without the documents inserted after it.
+#[test]
+fn index_failing_the_replay_guardrail_is_rebuilt() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    insert_docs(&db, 1);
+    db.get_collection("s")
+        .unwrap()
+        .create_index("n".into(), false, false)
+        .unwrap();
+    db.insert_one("s", HashMap::from([("n".to_string(), json!(-5))]))
+        .unwrap();
+    kill(db, "s");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let found = db
+        .get_collection("s")
+        .unwrap()
+        .find(&json!({"n": {"$lt": 0}}))
+        .unwrap();
+    assert_eq!(found.len(), 1);
+}
+
+/// A checkpoint drops WAL entries the index files hold: the transaction ids
+/// of the next session must start above them, else the replay after a
+/// second crash skips that session's writes as already indexed.
+#[test]
+fn transaction_ids_after_a_checkpoint_and_a_crash_stay_above_the_index_files() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let mut ids = insert_docs(&db, 2);
+    db.close().unwrap();
+    drop(db);
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    ids.extend(insert_docs(&db, 5));
+    db.checkpoint().unwrap();
+    kill(db, "s");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    ids.extend(insert_docs(&db, 3));
+    kill(db, "s");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    assert_ids_indexed(&db, &ids);
+}
+
+/// An index rebuilt from documents after a crash keeps its definition: a
+/// compound index came back as a single-field one.
+#[test]
+fn compound_index_rebuilt_after_a_crash_stays_compound() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    db.insert_one(
+        "s",
+        HashMap::from([("a".to_string(), json!(1)), ("b".to_string(), json!(2))]),
+    )
+    .unwrap();
+    let coll = db.get_collection("s").unwrap();
+    let name = coll
+        .create_compound_index(vec!["a".into(), "b".into()], true, false)
+        .unwrap();
+    db.checkpoint().unwrap();
+    drop(coll);
+    kill(db, "s");
+    // The index file is gone: the next open rebuilds it from the documents
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let file = entry.unwrap().path();
+        let file_name = file.file_name().unwrap().to_string_lossy().to_string();
+        if file_name.contains(&name) && file_name.ends_with(".idx") {
+            std::fs::remove_file(file).unwrap();
+        }
+    }
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    // Unique on (a, b): another b is allowed, the same pair is not
+    db.insert_one(
+        "s",
+        HashMap::from([("a".to_string(), json!(1)), ("b".to_string(), json!(3))]),
+    )
+    .expect("(1, 3) is a new pair: the rebuilt index is unique on `a` alone");
+    assert!(db
+        .insert_one(
+            "s",
+            HashMap::from([("a".to_string(), json!(1)), ("b".to_string(), json!(2))]),
+        )
+        .is_err());
+}

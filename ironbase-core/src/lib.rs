@@ -65,6 +65,8 @@ pub mod value_utils;
 pub(crate) mod wal;
 
 #[cfg(test)]
+mod pbt_roundtrip_tests;
+#[cfg(test)]
 mod perf_regression_tests;
 #[cfg(test)]
 mod test_auto_commit;

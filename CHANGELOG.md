@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — crash recovery: lost index entries, double-counted deletes, a compound index rebuilt wrong (0.3.443)
+
+Found by the crash recovery property (P3, `ironbase-core/tests/pbt_crash_recovery.rs`).
+Each fix has a focused test in `tests/chaos_crash_tests.rs` that fails without it.
+
+- **Transaction ids reused after a checkpoint and a crash (most severe):**
+  index files are stamped with the highest transaction id they contain, but
+  the header's tx-id watermark was persisted only by a clean close. After a
+  checkpoint (every 60 s in the MCP server) and a crash, the next session
+  restarted its transaction ids below the index files' watermark, and the
+  WAL replay after a second crash skipped those transactions as already
+  indexed. Their documents were missing from the `_id` index: update and
+  delete by `_id` matched nothing, and a duplicate `_id` could get in. The
+  WAL now tracks the highest transaction id it logged, and the storage
+  writes it into the header in the metadata write that precedes every WAL
+  clear.
+- **A committed WAL transaction behind a "clean" header:** `open` clears the
+  clean-shutdown flag only in memory; it reaches the file at the first
+  metadata flush, after the first WAL commit. A crash in between read as a
+  clean shutdown, so the replayed operations never reached the index files.
+  Recovered committed transactions now mark the session as not clean.
+- **`_id` index without a file:** an `_id` index created empty (no `.idx`, e.g.
+  a crash before its first flush) over a non-empty catalog was trusted by the
+  fast path and never rebuilt; the next checkpoint persisted it empty.
+- **Stale index after a failed replay:** an index file written by
+  `create_index` (watermark 0) fails the WAL replay guardrail after a crash,
+  but the rebuild only covered empty indexes, so the loaded index kept missing
+  every document inserted after it. Failed-replay B+ trees are now rebuilt
+  from the documents, as the fuzzy/fulltext/vector indexes already were.
+- **Compound and case-insensitive indexes rebuilt as single-field ones:** the
+  empty index created for a rebuild after a crash took one field and no case
+  folding; a unique compound index on (a, b) came back unique on `a` alone and
+  rejected valid inserts. It is now built from the whole definition.
+- **Replayed deletes counted twice:** a runtime delete keeps the id in the
+  catalog, pointing at its tombstone. Replaying a delete (or an insert) over
+  metadata that already held it took that entry for a live document, and the
+  live count went wrong (`count_documents` returned 0 for 1 document). Replay
+  now reads whether the entry is a tombstone.
+- **WAL cleared under dirty metadata:** `checkpoint_wal_clear_only` now writes
+  dirty metadata before dropping the WAL, so the invariant holds on every
+  checkpoint path.
+
+### Fixed — a corrupted HNSW cache file made every search loop (0.3.443)
+
+Found by the roundtrip property (P5): a damaged `max_level` (e.g. 2^57) loaded
+fine, and every search then descended from that level for good. Loading now
+rejects a `max_level` above every node's level, and the index is rebuilt from
+the documents.
+
+### Added — P3 crash recovery and P5 roundtrip properties (0.3.443)
+
+- **P3** (`tests/pbt_crash_recovery.rs`): the P2 CRUD state machine on file
+  storage with crashes mixed in (the files as the running process left them,
+  reopened), plus a transaction cut anywhere before its WAL commit (must leave
+  no trace) and one committed to the WAL but not to the data file (must be
+  applied entirely, indexes included). Every P2 invariant is checked after
+  every step. The P2 machine moved to `tests/pbt_support/crud.rs` and gained
+  a compound index operation.
+- **P5** (`src/pbt_roundtrip_tests.rs`): stored documents (any JSON, reopened),
+  WAL entries, B+ tree index files (eager and lazy load), HNSW index bytes and
+  V4 fulltext posting lists read back exactly; each has a damaged-bytes pair
+  (a damaged WAL entry is always rejected; the others never panic or hang).
+
 ### Changed — update operators follow MongoDB where they lost data or miscounted (0.3.442)
 
 Found by the update operator property (P4, `ironbase-core/tests/pbt_update_operators.rs`):
