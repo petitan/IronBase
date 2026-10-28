@@ -266,15 +266,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         // Get database file path for cache file
-        let cache_file_name = crate::index::IndexManager::vector_cache_file_name(&index_name);
         let db_file_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
         };
+        let cache_path =
+            crate::index::IndexManager::build_vector_cache_path(&db_file_path, &index_name);
+        let cache_file_name = cache_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
         // Save HNSW cache file if we have a file-based storage
         if !db_file_path.is_empty() {
-            let cache_path = Self::build_hnsw_cache_path(&db_file_path, &cache_file_name);
             std::fs::write(&cache_path, &bytes)
                 .map_err(|e| {
                     IronBaseError::Io(std::io::Error::other(format!(
@@ -353,7 +357,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
-        // Delete cache file if it exists
+        // Delete cache file if it exists: the current name, and the name
+        // stored when the index was created (`{index}.hnsw` before P10, which
+        // is this database's only when no other database shares the directory)
         if let Some(cache_file_name) = cache_file {
             let db_file_path = {
                 let storage = self.storage.read();
@@ -361,8 +367,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             };
 
             if !db_file_path.is_empty() {
-                let cache_path = Self::build_hnsw_cache_path(&db_file_path, &cache_file_name);
-                if cache_path.exists() {
+                let current =
+                    crate::index::IndexManager::build_vector_cache_path(&db_file_path, index_name);
+                let stored = Self::build_hnsw_cache_path(&db_file_path, &cache_file_name);
+                let mut cache_paths = vec![current.clone()];
+                if stored != current
+                    && super::is_only_database_in_dir(std::path::Path::new(&db_file_path))
+                {
+                    cache_paths.push(stored);
+                }
+                for cache_path in cache_paths.into_iter().filter(|p| p.exists()) {
                     if let Err(e) = std::fs::remove_file(&cache_path) {
                         tracing::warn!(
                             cache_path = %cache_path.display(),

@@ -45,9 +45,13 @@ const IRONBASE_METADATA_OFFSET_POS: u64 = 36; // Position of metadata_offset in 
 const IRONBASE_DATA_END_OFFSET_POS: u64 = 52; // Position of data_end_offset in IronBase header
 /// Position of `last_compact_size` in the IronBase header (bincode layout:
 /// ... data_end_offset u64 @52, clean_shutdown bool @60,
-/// last_committed_tx_id u64 @61, last_compact_size u64 @69). It changes only
-/// when the file is compacted into a new layout.
+/// last_committed_tx_id u64 @61, last_compact_size u64 @69). The layout
+/// check of headers before version 7 (see `DbSnapshot::same_layout`).
 const IRONBASE_LAST_COMPACT_SIZE_POS: usize = 69;
+/// Position of the header version (u32 after the 8-byte magic)
+const IRONBASE_VERSION_POS: usize = 8;
+/// Position of `compaction_count` (version 7+, after `last_compact_size`)
+const IRONBASE_COMPACTION_COUNT_POS: usize = 77;
 
 /// A consistent view of the database file for one backup: the header and
 /// the end of the immutable data it describes, read through one file handle.
@@ -92,12 +96,35 @@ impl DbSnapshot {
         })
     }
 
-    fn last_compact_size(header: &[u8]) -> u64 {
-        u64::from_le_bytes(
-            header[IRONBASE_LAST_COMPACT_SIZE_POS..IRONBASE_LAST_COMPACT_SIZE_POS + 8]
-                .try_into()
-                .unwrap(),
-        )
+    fn u64_at(header: &[u8], pos: usize) -> u64 {
+        u64::from_le_bytes(header[pos..pos + 8].try_into().unwrap())
+    }
+
+    /// True if two IronBase headers describe the same file layout: no
+    /// compaction in between. Version 7 headers carry `compaction_count`,
+    /// written with the compacted file itself. Older ones only have
+    /// `last_compact_size`, which reached the header after the next
+    /// checkpoint and can repeat across compactions (P10, 2026-10-28); a
+    /// file becomes version 7 by a compaction, so a mix means one happened.
+    fn same_layout(a: &[u8], b: &[u8]) -> bool {
+        let version = |h: &[u8]| {
+            u32::from_le_bytes(
+                h[IRONBASE_VERSION_POS..IRONBASE_VERSION_POS + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        match (version(a) >= 7, version(b) >= 7) {
+            (true, true) => {
+                Self::u64_at(a, IRONBASE_COMPACTION_COUNT_POS)
+                    == Self::u64_at(b, IRONBASE_COMPACTION_COUNT_POS)
+            }
+            (false, false) => {
+                Self::u64_at(a, IRONBASE_LAST_COMPACT_SIZE_POS)
+                    == Self::u64_at(b, IRONBASE_LAST_COMPACT_SIZE_POS)
+            }
+            _ => false,
+        }
     }
 
     /// Reader over `[header snapshot][file bytes from `start` to data_end]`
@@ -161,9 +188,8 @@ fn encode_wal_section(wal: File) -> Result<Vec<u8>> {
 /// The IronBase header stored at the start of a backup's payload (a full
 /// backup starts with the DB header; an incremental payload starts with it).
 fn read_backup_db_header(path: &Path) -> Result<Vec<u8>> {
-    let mut file = BufReader::new(File::open(path)?);
-    file.seek(SeekFrom::Start(crate::format::HEADER_SIZE as u64))?;
-    let mut decoder = zstd::stream::read::Decoder::new(file)?;
+    // All parts of a split backup: the header's zstd block may span them
+    let mut decoder = zstd::stream::read::Decoder::new(crate::restore::payload_reader(path)?)?;
     let mut header = vec![0u8; DB_HEADER_SIZE];
     decoder.read_exact(&mut header)?;
     Ok(header)
@@ -342,22 +368,23 @@ pub fn create_backup(
             last.header.original_db_size
         };
 
-        // Verify database hasn't shrunk (would indicate compaction or corruption)
+        // A compaction rewrites the file into a new layout; it can grow past
+        // the previous size again, so a size check alone attached the new
+        // layout's tail to the old prefix (audit 2026-10-06 #31). Checked
+        // before the size: a compacted file is usually smaller, and the
+        // error should name the compaction (P10, 2026-10-28).
+        let last_header = read_backup_db_header(&last.path)?;
+        if !DbSnapshot::same_layout(&last_header, &snapshot.header) {
+            return Err(BackupError::LayoutChanged);
+        }
+
+        // Verify database hasn't shrunk (would indicate corruption or a
+        // replaced file)
         if db_size < incremental_start {
             return Err(BackupError::DatabaseShrunk {
                 expected: incremental_start,
                 actual: db_size,
             });
-        }
-
-        // A compaction rewrites the file into a new layout; it can grow past
-        // the previous size again, so a size check alone attached the new
-        // layout's tail to the old prefix (audit 2026-10-06 #31).
-        let last_header = read_backup_db_header(&last.path)?;
-        if DbSnapshot::last_compact_size(&last_header)
-            != DbSnapshot::last_compact_size(&snapshot.header)
-        {
-            return Err(BackupError::LayoutChanged);
         }
 
         (BackupType::Incremental, incremental_start, last.hash)
@@ -438,6 +465,15 @@ pub fn create_backup(
     };
 
     header.includes_wal = !wal_section.is_empty();
+
+    // The newest full backup starts the chain, and backups are told apart by
+    // their whole-second timestamps: one taken in the same second as an
+    // earlier one (or after the clock went back) must still be newer, or the
+    // chain keeps the older full backup and restores an older state
+    // (P10, 2026-10-28).
+    header.timestamp = header
+        .timestamp
+        .max(crate::chain::latest_timestamp(output_dir, &db_name)? + 1);
 
     // Generate base filename
     let base_filename = generate_filename(&header, &chain);

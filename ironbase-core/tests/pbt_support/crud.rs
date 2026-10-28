@@ -33,7 +33,7 @@ pub enum Op {
 
 /// An update on top-level fields: `$set`, `$unset` or `$inc`, one operator
 /// per update so no field is named twice
-pub fn arb_update() -> impl Strategy<Value = Value> {
+pub fn arb_update() -> BoxedStrategy<Value> {
     let field = || prop::sample::select(FIELDS.to_vec());
     let increment = prop_oneof![
         3 => (-3i64..4).prop_map(Value::from),
@@ -49,6 +49,7 @@ pub fn arb_update() -> impl Strategy<Value = Value> {
         2 => prop::collection::btree_map(field(), increment, 1..3)
             .prop_map(|m| json!({ "$inc": m })),
     ]
+    .boxed()
 }
 
 pub fn arb_crud_op() -> BoxedStrategy<Op> {

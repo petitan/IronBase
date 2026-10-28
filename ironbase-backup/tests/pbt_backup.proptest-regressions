@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 848a2874be235237c9ed3744748a18d1a84035f37779bc6971244d0925b56a29 # shrinks to ops = [Insert(0, 0), Insert(0, 0), Insert(0, 0), Insert(0, 0), Backup { full: false, split: false }, Insert(0, 0), Insert(0, 0), Insert(0, 0)]
+cc ea2c4852b728d2e426d574215706ecff571e3c7752a73a007f72e3a36f5be239 # shrinks to ops = [Insert(0, 0), Insert(0, 0), Insert(0, 0), Update(730779941420, 3, 0), Backup { full: false, split: false }, Backup { full: false, split: true }, Backup { full: true, split: true }]
+cc 4c83f5ae66478a89a57495171152f7586d2dc0380960640439c2a4a34f5bf08e # shrinks to ops = [Insert(0, 0), Compact, Backup { full: false, split: false }, Reopen, Backup { full: false, split: false }]
+cc bdee7cd26a2cdd575d37c507a956ac54af2485fd2aa737b8efdc482d288acca0 # shrinks to ops = [Insert(0, 0), Reopen, Update(0, 0, 1), Update(0, 0, 2), Copy], put_back = 0

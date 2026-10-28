@@ -634,3 +634,205 @@ fn test_index_query_performance_after_reopen() {
         db.close().unwrap();
     }
 }
+
+// ============================================================================
+// INDEX CACHES BELONG TO ONE DATABASE AND ONE STATE OF IT (P10, 2026-10-28)
+// ============================================================================
+
+use ironbase_core::storage::StorageEngine;
+use ironbase_core::vector::VectorIndexConfig;
+use ironbase_core::FuzzyAlgorithm;
+use std::path::Path;
+
+fn vector_doc(id: i64) -> HashMap<String, serde_json::Value> {
+    let angle = id as f32 * 0.7;
+    HashMap::from([
+        ("_id".to_string(), json!(id)),
+        ("v".to_string(), json!([angle.cos(), angle.sin()])),
+    ])
+}
+
+fn vector_hits(db: &DatabaseCore<StorageEngine>, limit: usize) -> Vec<i64> {
+    let mut ids: Vec<i64> = db
+        .collection("c")
+        .unwrap()
+        .vector_search("v", &[1.0, 0.0], limit)
+        .unwrap()
+        .into_iter()
+        .map(|(d, _)| d["_id"].as_i64().unwrap())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Two databases in one directory with the same collection and vector
+/// field shared `c_vec_v.hnsw`: the first one searched the second one's
+/// vectors (and found none of its own documents)
+#[test]
+fn test_databases_in_one_directory_keep_their_own_vector_caches() {
+    let dir = TempDir::new().unwrap();
+    for (name, ids) in [("a.mlite", 0..5), ("b.mlite", 100..103)] {
+        let db = DatabaseCore::<StorageEngine>::open(dir.path().join(name)).unwrap();
+        db.collection("c")
+            .unwrap()
+            .create_vector_index("v", VectorIndexConfig::new(2))
+            .unwrap();
+        for i in ids {
+            db.insert_one("c", vector_doc(i)).unwrap();
+        }
+        db.close().unwrap();
+    }
+    for (name, want) in [
+        ("a.mlite", vec![0, 1, 2, 3, 4]),
+        ("b.mlite", vec![100, 101, 102]),
+    ] {
+        let db = DatabaseCore::<StorageEngine>::open(dir.path().join(name)).unwrap();
+        assert_eq!(vector_hits(&db, 10), want, "{name}");
+        db.close().unwrap();
+    }
+}
+
+/// A vector cache of an earlier version (`{index}.hnsw`) is renamed and
+/// used when the database is alone in its directory, and ignored (the
+/// index rebuilt) when another database could have written it
+#[test]
+fn test_legacy_vector_cache_is_claimed_only_by_a_lone_database() {
+    for alone in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        db.collection("c")
+            .unwrap()
+            .create_vector_index("v", VectorIndexConfig::new(2))
+            .unwrap();
+        for i in 0..5 {
+            db.insert_one("c", vector_doc(i)).unwrap();
+        }
+        db.close().unwrap();
+        drop(db);
+
+        let current = ironbase_core::index_cache_files(&path)
+            .into_iter()
+            .find(|p| p.extension().is_some_and(|e| e == "hnsw"))
+            .expect("vector cache named after the database");
+        let legacy = dir.path().join("c_vec_v.hnsw");
+        std::fs::rename(&current, &legacy).unwrap();
+        if !alone {
+            let other = DatabaseCore::<StorageEngine>::open(dir.path().join("b.mlite")).unwrap();
+            other.close().unwrap();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        assert_eq!(vector_hits(&db, 10), vec![0, 1, 2, 3, 4], "alone = {alone}");
+        db.close().unwrap();
+        assert!(current.exists(), "alone = {alone}: current cache");
+        assert_eq!(legacy.exists(), !alone, "alone = {alone}: legacy cache");
+    }
+}
+
+/// A database file put back by hand next to the caches its later state
+/// wrote must not load them: every index answers from its own documents
+#[test]
+fn test_caches_of_a_later_state_are_not_loaded() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let copy = TempDir::new().unwrap();
+    let doc = |id: i64, word: &str| {
+        let mut d = vector_doc(id);
+        d.insert("g".to_string(), json!(id % 2));
+        d.insert("t".to_string(), json!(word));
+        d
+    };
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let c = db.collection("c").unwrap();
+    c.create_index("g".to_string(), false, false).unwrap();
+    c.create_fulltext_index("t".to_string(), "english", None, None)
+        .unwrap();
+    c.create_fuzzy_index("t".to_string(), FuzzyAlgorithm::JaroWinkler, 0.8)
+        .unwrap();
+    c.create_vector_index("v", VectorIndexConfig::new(2))
+        .unwrap();
+    drop(c);
+    for i in 0..4 {
+        db.insert_one("c", doc(i, "apple")).unwrap();
+    }
+    db.close().unwrap();
+    drop(db);
+    let copy_files = |from: &Path, to: &Path| {
+        std::fs::copy(from, to).unwrap();
+        let _ = std::fs::copy(from.with_extension("wal"), to.with_extension("wal"));
+    };
+    copy_files(&path, &copy.path().join("s.mlite"));
+
+    // The database goes on: other documents, other words
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    db.delete_one("c", &json!({"_id": 0})).unwrap();
+    db.update_one(
+        "c",
+        &json!({"_id": 1}),
+        &json!({"$set": {"t": "river", "g": 0}}),
+    )
+    .unwrap();
+    for i in 4..8 {
+        db.insert_one("c", doc(i, "stone")).unwrap();
+    }
+    db.close().unwrap();
+    drop(db);
+
+    // The copy is put back; the caches stay
+    copy_files(&copy.path().join("s.mlite"), &path);
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    let c = db.collection("c").unwrap();
+    let ids = |docs: Vec<serde_json::Value>| {
+        let mut ids: Vec<i64> = docs.iter().map(|d| d["_id"].as_i64().unwrap()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(db.find("c", &json!({"g": 0})).unwrap()), vec![0, 2]);
+    assert_eq!(ids(db.find("c", &json!({"g": 1})).unwrap()), vec![1, 3]);
+    for (word, want) in [
+        ("apple", vec![0, 1, 2, 3]),
+        ("river", vec![]),
+        ("stone", vec![]),
+    ] {
+        let fulltext = c
+            .fulltext_search("t", word, None, None, None, None)
+            .unwrap();
+        let found = ids(fulltext.into_iter().map(|(d, _, _)| d).collect());
+        assert_eq!(found, want, "fulltext {word}");
+        let fuzzy = c.fuzzy_search("t", word, Some(1.0), None).unwrap();
+        let found = ids(fuzzy.into_iter().map(|(d, _)| d).collect());
+        assert_eq!(found, want, "fuzzy {word}");
+    }
+    assert_eq!(vector_hits(&db, 4), vec![0, 1, 2, 3]);
+    drop(c);
+    db.close().unwrap();
+}
+
+/// Every compaction counts itself in the header of the file it writes, so
+/// the count changes exactly with the layout (incremental backups compare it)
+#[test]
+fn test_compaction_count_is_written_with_the_compacted_file() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.mlite");
+    let count_on_disk = || {
+        let header = std::fs::read(&path).unwrap()[..256].to_vec();
+        let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        let count = u64::from_le_bytes(header[77..85].try_into().unwrap());
+        (version, count)
+    };
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    db.insert_one("users", user_doc(1, "a", 1, "x")).unwrap();
+    db.checkpoint().unwrap();
+    assert_eq!(count_on_disk().1, 0);
+    for n in 1..=2 {
+        db.compact().unwrap();
+        // On disk at once, without a checkpoint
+        assert_eq!(count_on_disk(), (7, n));
+    }
+    db.close().unwrap();
+    drop(db);
+    let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+    db.close().unwrap();
+    assert_eq!(count_on_disk(), (7, 2));
+}

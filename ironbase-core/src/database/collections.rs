@@ -113,6 +113,28 @@ pub(crate) fn decide_index_load_strategy(
     }
 }
 
+/// True if an index cache is stamped with a transaction this database never
+/// committed: a later state of the database wrote it, and the `.mlite` was
+/// put back from a backup or a copy next to it (P10, 2026-10-28). Its
+/// content is not this database's, so the index is rebuilt from the
+/// documents instead of loaded.
+pub(crate) fn cache_is_from_a_later_state(
+    index_name: &str,
+    flushed_tx_id: u64,
+    db_watermark: u64,
+) -> bool {
+    let later = flushed_tx_id > db_watermark;
+    if later {
+        crate::log_warn!(
+            "Index '{}': cache written at transaction {}, the database has committed up to {}; rebuilding it",
+            index_name,
+            flushed_tx_id,
+            db_watermark
+        );
+    }
+    later
+}
+
 // ============================================================================
 // COLLECTION AND INDEX MANAGEMENT (Generic Implementation)
 // ============================================================================
@@ -270,6 +292,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         db_path: &str,
         was_clean: bool,
         can_try_replay: bool,
+        db_watermark: u64,
     ) -> Result<std::collections::HashSet<String>> {
         use crate::log_debug;
         let mut loaded_from_file = std::collections::HashSet::new();
@@ -288,9 +311,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
 
             if strategy == IndexLoadStrategy::LoadFromFile {
-                if let Some(loaded_tree) =
-                    crate::collection_core::try_load_index_from_file(db_path, index_meta)
-                {
+                if let Some(loaded_tree) = crate::collection_core::try_load_index_from_file(
+                    db_path, index_meta,
+                )
+                .filter(|t| {
+                    !cache_is_from_a_later_state(
+                        &index_meta.name,
+                        t.last_flushed_tx_id(),
+                        db_watermark,
+                    )
+                }) {
                     log_debug!("Loaded index '{}' from .idx file", index_meta.name);
                     loaded_from_file.insert(index_meta.name.clone());
                     index_manager.add_loaded_index(loaded_tree);
@@ -939,6 +969,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Get db_path for .idx file loading
         let db_path = storage_guard.get_file_path().to_string();
         let was_clean = storage_guard.was_clean_shutdown();
+        // The highest transaction this database has committed: an index cache
+        // stamped later belongs to another state of it
+        let db_watermark = self
+            .max_committed_tx_id
+            .load(std::sync::atomic::Ordering::SeqCst);
 
         drop(storage_guard); // Release write lock before rebuilding
 
@@ -1014,7 +1049,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 last_flushed_tx_id: 0,
             };
             if let Some(loaded_tree) =
-                crate::collection_core::try_load_index_from_file(&db_path, &id_meta)
+                crate::collection_core::try_load_index_from_file(&db_path, &id_meta).filter(|t| {
+                    !cache_is_from_a_later_state(
+                        &id_index_name,
+                        t.last_flushed_tx_id(),
+                        db_watermark,
+                    )
+                })
             {
                 log_debug!(
                     "Loaded _id index '{}' from .idx file ({} keys)",
@@ -1050,6 +1091,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             &db_path,
             was_clean,
             can_try_replay,
+            db_watermark,
         )?;
 
         // Load or create fuzzy indexes from persisted metadata.
@@ -1072,6 +1114,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
+                        .filter(|i| {
+                            !cache_is_from_a_later_state(
+                                &fuzzy_meta.name,
+                                i.last_flushed_tx_id(),
+                                db_watermark,
+                            )
+                        })
                 {
                     log_debug!(
                         "Loaded fuzzy index '{}' from .fzidx file ({} entries)",
@@ -1099,6 +1148,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
+                        .filter(|i| {
+                            !cache_is_from_a_later_state(
+                                &fts_meta.name,
+                                i.last_flushed_tx_id(),
+                                db_watermark,
+                            )
+                        })
                 {
                     log_debug!(
                         "Loaded fulltext index '{}' from .ftidx file ({} docs, {} tokens)",
@@ -1126,6 +1182,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             {
                 if let Some(loaded_index) =
                     crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
+                        .filter(|i| {
+                            !cache_is_from_a_later_state(
+                                &vec_meta.name,
+                                i.last_flushed_tx_id(),
+                                db_watermark,
+                            )
+                        })
                 {
                     log_debug!(
                         "Loaded vector index '{}' from .hnsw file ({} vectors)",
@@ -2011,6 +2074,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let index_names = mgr.list_indexes();
         drop(mgr);
 
+        // The `{index}.hnsw` caches of earlier versions are this database's
+        // only when no other database shares the directory
+        let legacy_vector_caches =
+            crate::collection_core::is_only_database_in_dir(std::path::Path::new(&db_path));
+
         // Build and delete file paths for each index type
         for name in &index_names {
             // B+ tree (.idx)
@@ -2029,9 +2097,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             {
                 Self::try_remove_file(&path, name, "fzidx");
             }
-            // HNSW vector (.hnsw)
+            // HNSW vector (.hnsw), and the `{index}.hnsw` of earlier versions
             let hnsw_path = IndexManager::build_vector_cache_path(&db_path, name);
             Self::try_remove_file(&hnsw_path, name, "hnsw");
+            if legacy_vector_caches {
+                let legacy = IndexManager::legacy_vector_cache_path(&db_path, name);
+                Self::try_remove_file(&legacy, name, "hnsw");
+            }
         }
     }
 

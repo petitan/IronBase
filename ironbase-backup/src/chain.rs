@@ -200,6 +200,24 @@ impl Chain {
     }
 }
 
+/// The newest timestamp of any valid backup of `db_name` in `dir`, older
+/// chains included (0 if there is none)
+pub fn latest_timestamp(dir: &Path, db_name: &str) -> Result<i64> {
+    let mut latest = 0;
+    for entry in fs::read_dir(dir)?.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if filename.ends_with(".ibak") || filename.ends_with(".ibak.001") {
+            if let Ok(info) = read_backup_info(&path) {
+                if info.header.db_name_str() == db_name {
+                    latest = latest.max(info.header.timestamp);
+                }
+            }
+        }
+    }
+    Ok(latest)
+}
+
 /// Read backup info (header + hash) from a file
 pub fn read_backup_info(path: &Path) -> Result<BackupInfo> {
     let file = File::open(path)?;
