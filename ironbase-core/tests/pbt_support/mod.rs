@@ -44,7 +44,7 @@ pub fn arb_float() -> impl Strategy<Value = f64> {
 }
 
 /// A scalar from a small pool, so equality queries often hit stored values
-pub fn arb_scalar() -> impl Strategy<Value = Value> {
+pub fn arb_scalar() -> BoxedStrategy<Value> {
     prop_oneof![
         4 => (-3i64..4).prop_map(Value::from),
         1 => prop::sample::select(vec![i64::MIN, i64::MAX, 1 << 53]).prop_map(Value::from),
@@ -53,19 +53,21 @@ pub fn arb_scalar() -> impl Strategy<Value = Value> {
         1 => any::<bool>().prop_map(Value::from),
         1 => Just(Value::Null),
     ]
+    .boxed()
 }
 
 /// A field value: mostly a scalar, sometimes a short array of scalars
-pub fn arb_field_value() -> impl Strategy<Value = Value> {
+pub fn arb_field_value() -> BoxedStrategy<Value> {
     prop_oneof![
         5 => arb_scalar(),
         1 => prop::collection::vec(arb_scalar(), 0..4).prop_map(Value::Array),
     ]
+    .boxed()
 }
 
 /// A document without `_id`: each field present or missing; `o` an object
 /// with `x`/`y`, a scalar, or missing
-pub fn arb_doc() -> impl Strategy<Value = Map<String, Value>> {
+pub fn arb_doc() -> BoxedStrategy<Map<String, Value>> {
     let o = prop_oneof![
         3 => (
             prop::option::of(arb_field_value()),
@@ -100,6 +102,7 @@ pub fn arb_doc() -> impl Strategy<Value = Map<String, Value>> {
             }
             doc
         })
+        .boxed()
 }
 
 /// One field condition: `{path: value}` or `{path: {$op: ...}}`
@@ -139,7 +142,7 @@ fn arb_condition() -> impl Strategy<Value = Value> {
 
 /// A query: a field condition, two conditions in one object (implicit
 /// `$and`), or `$and`/`$or`/`$nor` over sub-queries
-pub fn arb_query() -> impl Strategy<Value = Value> {
+pub fn arb_query() -> BoxedStrategy<Value> {
     let leaf = prop_oneof![
         4 => arb_condition(),
         1 => (arb_condition(), arb_condition()).prop_map(|(a, b)| {
@@ -158,6 +161,7 @@ pub fn arb_query() -> impl Strategy<Value = Value> {
         )
             .prop_map(|(op, qs)| json!({ op: qs }))
     })
+    .boxed()
 }
 
 /// The cases a property runs: `PROPTEST_CASES` when set (the nightly run

@@ -74,6 +74,17 @@ B+ tree, fulltext, fuzzy and vector indexes the same way.
   happened). A refused incremental after a compaction now reports
   `LayoutChanged` rather than `DatabaseShrunk`.
 
+### Fixed — property tests overflowed the test thread's stack (Windows CI)
+
+`pbt_crash_recovery` died with `STATUS_STACK_OVERFLOW` on the Windows debug
+build: the shared generators (`arb_scalar`, `arb_field_value`, `arb_doc`,
+`arb_query`, `arb_update`) nested their strategy types inline, so each
+`new_tree` frame of a generated step held the whole value-tree type (about
+28 KB per frame in a debug build, over 1.5 MB for one step on Linux, more on
+Windows, against the 2 MB test-thread stack; random inputs decided whether a
+run crossed it). They are boxed now, as `arb_crud_op` already was: every
+property runs within 768 KB.
+
 ### Added — P10 backup property
 
 `ironbase-backup/tests/pbt_backup.rs` (see above; `proptest` dev-dependency
