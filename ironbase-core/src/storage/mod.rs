@@ -192,13 +192,24 @@ pub struct Header {
     // (first compaction recalibrates), mirroring `last_committed_tx_id` (R1).
     #[serde(default)]
     pub last_compact_size: u64,
+
+    // Persisted compaction count (version 7+)
+    // Incremented by every compaction, in the header of the compacted file
+    // itself (`write_compaction_header`), so it changes exactly when the file
+    // layout does. Incremental backups compare it to tell whether the file
+    // still extends the previous backup: `last_compact_size` reached the
+    // header only at the next checkpoint, is seeded from the file size on
+    // open, and two compactions can produce the same size (P10, 2026-10-28).
+    // `#[serde(default)]` → files before v7 read 0.
+    #[serde(default)]
+    pub compaction_count: u64,
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 6, // Version 6: last_compact_size persistence (P1-7)
+            version: 7, // Version 7: compaction_count (P10)
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -209,6 +220,7 @@ impl Default for Header {
             clean_shutdown: false,        // Will be set to true on graceful shutdown
             last_committed_tx_id: 0,      // Persisted at clean shutdown, replaces 0-init on reopen
             last_compact_size: 0,         // Persisted after compaction; 0 = never compacted
+            compaction_count: 0,          // Incremented by each compaction
         }
     }
 }
@@ -589,6 +601,9 @@ pub fn write_compaction_header(
     updated_header.data_end_offset = metadata_offset + metadata_size;
     updated_header.metadata_offset = metadata_offset;
     updated_header.metadata_size = metadata_size;
+    // A new layout: written with it, so a reader of this header knows
+    updated_header.compaction_count = base_header.compaction_count + 1;
+    updated_header.version = updated_header.version.max(7);
 
     file.seek(SeekFrom::Start(0))?;
     let header_bytes = bincode::serialize(&updated_header)
@@ -3133,7 +3148,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 6); // Version 6: last_compact_size persistence (P1-7)
+        assert_eq!(storage.header.version, 7); // Version 7: compaction_count (P10)
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -3477,7 +3492,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 6); // Version 6: last_compact_size persistence (P1-7)
+        assert_eq!(header.version, 7); // Version 7: compaction_count (P10)
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);

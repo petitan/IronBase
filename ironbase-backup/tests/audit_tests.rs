@@ -1,8 +1,9 @@
-//! Regression tests for audit 2026-10-06 #31, #38, #39, #40 against real
-//! IronBase databases (library API).
+//! Regression tests for audit 2026-10-06 #31, #38, #39, #40 and the P10
+//! backup property against real IronBase databases (library API).
 
-use ironbase_backup::{create_backup, restore, verify_backup, BackupError};
+use ironbase_backup::{create_backup, restore, verify_backup, BackupError, BackupType};
 use ironbase_core::storage::StorageEngine;
+use ironbase_core::vector::VectorIndexConfig;
 use ironbase_core::DatabaseCore;
 use serde_json::json;
 use std::collections::HashMap;
@@ -50,9 +51,8 @@ fn incremental_after_compaction_is_rejected() {
         Err(BackupError::LayoutChanged) => {}
         other => panic!("expected LayoutChanged, got {:?}", other.map(|r| r.path)),
     }
-    // A forced full backup still works and restores correctly. Chains pick
-    // the newest full backup by its (whole-second) timestamp.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // A forced full backup still works and restores correctly; in the same
+    // second as the previous backup too (P10)
     create_backup(&db_path, &backups, true, None).unwrap();
     drop(db);
     let restored = dir.path().join("restored.mlite");
@@ -336,4 +336,126 @@ fn substituted_part_from_other_backup_fails_verification() {
         !verify_backup(&b.all_paths[0]).unwrap().valid,
         "part 2 of another backup passed verification"
     );
+}
+
+/// P10: a full backup taken in the same second as the previous one starts
+/// the chain; the older chain must not be restored instead
+#[test]
+fn full_backups_in_one_second_newest_wins() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert(&db, 0..10);
+    create_backup(&db_path, &backups, true, None).unwrap();
+    insert(&db, 10..20);
+    create_backup(&db_path, &backups, false, None).unwrap();
+    insert(&db, 20..30);
+    let newest = create_backup(&db_path, &backups, true, None).unwrap();
+    db.close().unwrap();
+    drop(db);
+
+    let restored = dir.path().join("restored.mlite");
+    let name = newest.path.file_name().unwrap().to_str().unwrap();
+    restore(&backups, &restored, Some(name), Some("db")).unwrap();
+    assert_eq!(count_in(&restored), 30);
+    std::fs::remove_file(&restored).unwrap();
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(count_in(&restored), 30);
+}
+
+/// P10: an incremental backup after a split backup decoded the previous
+/// backup's database header from its first part alone (a zstd block can
+/// span parts) and failed with "incomplete frame"
+#[test]
+fn incremental_after_split_backup() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert_incompressible(&db, 300);
+    db.checkpoint().unwrap();
+    let full = create_backup(&db_path, &backups, true, Some(16 * 1024)).unwrap();
+    assert!(full.part_count >= 2);
+    db.insert_one("c", doc(1000)).unwrap();
+    let incr = create_backup(&db_path, &backups, false, None).unwrap();
+    assert_eq!(incr.backup_type, BackupType::Incremental);
+    db.close().unwrap();
+    drop(db);
+
+    let restored = dir.path().join("restored.mlite");
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(count_in(&restored), 301);
+}
+
+/// P10: a backup taken right after a compaction (before any checkpoint)
+/// stored the old `last_compact_size`; the next checkpoint wrote the new
+/// one and every later incremental was refused as `LayoutChanged`. The
+/// compaction count is written with the compacted file.
+#[test]
+fn incremental_after_backup_of_freshly_compacted_file() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert(&db, 0..50);
+    db.delete_many("c", &json!({"_id": {"$lt": 20}})).unwrap();
+    db.compact().unwrap();
+    create_backup(&db_path, &backups, false, None).unwrap();
+    db.close().unwrap();
+    drop(db);
+
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    insert(&db, 50..60);
+    db.checkpoint().unwrap();
+    let incr = create_backup(&db_path, &backups, false, None).unwrap();
+    assert_eq!(incr.backup_type, BackupType::Incremental);
+    db.close().unwrap();
+    drop(db);
+
+    let restored = dir.path().join("restored.mlite");
+    restore(&backups, &restored, None, Some("db")).unwrap();
+    assert_eq!(count_in(&restored), 40);
+}
+
+/// P10: restoring over a database left its vector caches (`.hnsw`) in
+/// place, and the restored database searched the vectors of its later state
+#[test]
+fn restore_removes_every_index_cache_at_target() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("db.mlite");
+    let backups = dir.path().join("backups");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let c = db.collection("c").unwrap();
+    c.create_index("pad".to_string(), false, false).unwrap();
+    c.create_vector_index("v", VectorIndexConfig::new(2))
+        .unwrap();
+    drop(c);
+    let vector_doc = |i: i64| {
+        HashMap::from([
+            ("_id".to_string(), json!(i)),
+            ("v".to_string(), json!([1.0, i as f32 * 0.1])),
+        ])
+    };
+    for i in 0..4 {
+        db.insert_one("c", vector_doc(i)).unwrap();
+    }
+    create_backup(&db_path, &backups, false, None).unwrap();
+    for i in 4..8 {
+        db.insert_one("c", vector_doc(i)).unwrap();
+    }
+    db.close().unwrap();
+    drop(db);
+    assert!(!ironbase_core::index_cache_files(&db_path).is_empty());
+
+    let result = restore(&backups, &db_path, None, Some("db")).unwrap();
+    assert!(ironbase_core::index_cache_files(&db_path).is_empty());
+    assert!(result.index_files_cleaned >= 2);
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let hits = db
+        .collection("c")
+        .unwrap()
+        .vector_search("v", &[1.0, 0.0], 4)
+        .unwrap();
+    assert_eq!(hits.len(), 4);
 }

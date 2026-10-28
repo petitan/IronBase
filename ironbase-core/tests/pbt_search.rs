@@ -241,6 +241,7 @@ proptest! {
         texts in prop::collection::vec(arb_text(), 0..20),
         later in prop::collection::vec(arb_text(), 0..6),
         removed in prop::collection::btree_set(0usize..20, 0..6),
+        rewritten in prop::collection::vec((0usize..26, arb_text()), 0..8),
         queries in prop::collection::vec(arb_text(), 1..5),
     ) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -272,6 +273,15 @@ proptest! {
         for (i, text) in later.iter().enumerate() {
             index.insert(&DocumentId::Int(base + i as i64), text).unwrap();
             index_model(&mut docs, base + i as i64, tokenize(text, &options));
+        }
+        // Documents rewritten, some more than once: the tokens of a document
+        // written after the load are kept in memory, not in the file (P10)
+        let ids = base + later.len() as i64;
+        for (i, text) in rewritten.iter().filter(|_| ids > 0) {
+            let id = *i as i64 % ids;
+            index.update(&DocumentId::Int(id), text).unwrap();
+            docs.remove(&id);
+            index_model(&mut docs, id, tokenize(text, &options));
         }
         prop_assert_eq!(index.doc_count(), docs.len());
         for query in &queries {

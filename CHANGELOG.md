@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — backup/restore and index caches: found by the backup property (0.3.446, mcp-server 1.0.644)
+
+Found by the backup property (P10, `ironbase-backup/tests/pbt_backup.rs`):
+random CRUD on file storage with checkpoints, compactions, reopens, file
+copies and backups (full or incremental, single file or split, taken while
+the database is open); every backup of the chain restored into an empty
+directory and the latest over the database itself, a file copy put back by
+hand; each must hold exactly the documents of its moment and answer the
+B+ tree, fulltext, fuzzy and vector indexes the same way.
+
+- **Two databases in one directory shared their vector caches.** The HNSW
+  cache was `{index}.hnsw` (`c_vec_v.hnsw`), without the database name every
+  other index file has: a second database with the same collection and
+  vector field overwrote the first one's, whose vector search then returned
+  the other database's vectors (none of its own documents). The cache is now
+  `{db}_{index}_{hash}.hnsw` like the `.idx`/`.ftidx`/`.fzidx` files. An
+  existing `{index}.hnsw` is renamed and used on first open only when no
+  other database (a file with the `.mlite` magic) shares the directory;
+  otherwise the vector index is rebuilt once from the documents.
+- **A restore over a database left its vector caches in place** (restore
+  removed `{db}_*.idx/.ftidx/.fzidx` only): the restored database searched
+  the vectors of its later state, missing documents of the backup and
+  returning deleted ones. Restore now removes every cache the core lists
+  (`ironbase_core::index_cache_files`, also used for the old `.hnsw` names),
+  and fails if one cannot be removed.
+- **Caches of a later state were loaded** when a database file was put back
+  by hand (a file copy, a filesystem snapshot) next to the caches the
+  database had written since: B+ tree, fulltext, fuzzy and vector indexes
+  answered from the later state. A cache stamped with a transaction the
+  database never committed (`last_flushed_tx_id` above the highest
+  committed transaction at open) is now rebuilt instead of loaded.
+  Limit: caches written by a *different* history with a lower transaction
+  stamp (putting back copy A, using it, then putting back an older copy B)
+  cannot be told apart; delete the caches (`index_cache_files`) or use the
+  backup tool, which does.
+- **Fulltext: updating a document twice after a reopen left its previous
+  words searchable.** An index loaded from its file has no open handle, so a
+  document written after the load keeps its tokens in memory with offset 0
+  (the documented "in memory" mark); `remove` decided by the storage path
+  alone and read the record at the start of the file instead, so the second
+  update did not retract the first one's words (and a standalone index
+  failed with `Corrupt .ftidx`). `remove` and the BM25 length rebuild now
+  read a document's tokens where its offset says. The P9 on-disk property
+  now rewrites documents (some more than once) after the reload, and fails
+  without the fix.
+- **An incremental backup after a split backup failed** (`incomplete frame`
+  / `Data corruption detected`): the previous backup's database header was
+  decoded from its first part alone, and a zstd block can span parts. It is
+  now read through all parts (the reader restore uses).
+- **Two full backups in the same second:** the chain starts at the newest
+  full backup by whole-second timestamp; with a tie (or a clock that went
+  back) it could keep the older one, so the newest backup was not found by
+  name and a restore of the latest one silently restored the older chain.
+  Every backup's timestamp is now later than every existing backup of the
+  database in the directory.
+- **Compaction detection of incremental backups was unreliable**: it
+  compared `last_compact_size`, which reached the on-disk header only at the
+  next checkpoint (a backup right after a compaction stored the old value;
+  every later incremental was refused), is seeded from the file size on open,
+  and can repeat when two compactions produce the same size (an incremental
+  would then be stitched onto another layout). **New header field
+  `compaction_count` (header version 7)**, incremented by every compaction
+  and written in the header of the compacted file itself; incremental backups
+  compare it (older headers keep the old check; a mix means a compaction
+  happened). A refused incremental after a compaction now reports
+  `LayoutChanged` rather than `DatabaseShrunk`.
+
+### Added — P10 backup property
+
+`ironbase-backup/tests/pbt_backup.rs` (see above; `proptest` dev-dependency
+of the backup crate, already in the workspace), in the nightly run. Regression
+tests: `index_persistence_tests.rs` (vector caches per database, legacy cache
+claim, caches of a later state, compaction count), `audit_tests.rs` (same
+second full backups, incremental after a split backup and after a backup of
+a freshly compacted file, restore removes every cache).
+
 ### Fixed — fulltext: a tokenless text did not replace an indexed one (0.3.445)
 
 `FulltextIndex::insert` on an indexed id replaces it (an idempotent re-insert,

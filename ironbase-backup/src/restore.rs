@@ -1,8 +1,9 @@
 //! Restore operations for backup chains
 //!
 //! Note: IronBase automatically rebuilds indexes from documents when the
-//! database is first opened after restore. The .idx cache files are not
-//! included in backups and will be regenerated on first use.
+//! database is first opened after restore. The index cache files (`.idx`,
+//! `.ftidx`, `.fzidx`, `.hnsw`) are not included in backups; the ones at the
+//! target are removed and regenerated on first use.
 
 use crate::chain::{detect_db_name, BackupInfo, Chain};
 use crate::color::{green, red};
@@ -26,7 +27,7 @@ pub struct RestoreResult {
     pub size: u64,
     /// Number of backups applied
     pub backups_applied: usize,
-    /// Number of stale index cache files cleaned up (.idx, .ftidx, .fzidx)
+    /// Number of stale index cache files cleaned up (.idx, .ftidx, .fzidx, .hnsw)
     pub index_files_cleaned: usize,
     /// Time taken in seconds
     pub duration_secs: f64,
@@ -51,46 +52,24 @@ impl RestoreResult {
     }
 }
 
-/// Clean up stale index cache files that might exist from a previous database
+/// Remove the index cache files next to `db_path` (`.idx`, `.ftidx`,
+/// `.fzidx`, `.hnsw`): they describe another state of the database, and the
+/// restored file must not be opened with them. IronBase rebuilds the indexes
+/// from the documents on the first open.
 ///
-/// IronBase stores index caches in separate files:
-/// - `.idx` - B+ tree index caches
-/// - `.ftidx` - Fulltext index caches
-/// - `.fzidx` - Fuzzy index caches
-///
-/// After restoring, any existing cache files would be stale and inconsistent
-/// with the restored data. IronBase will automatically rebuild all indexes
-/// from documents on first open.
-fn cleanup_stale_index_files(db_path: &Path) -> usize {
-    let mut cleaned = 0;
-
-    // Get the directory and stem of the database file
-    let Some(parent) = db_path.parent() else {
-        return 0;
-    };
-    let Some(stem) = db_path.file_stem().and_then(|s| s.to_str()) else {
-        return 0;
-    };
-
-    // Pattern: {stem}_*.{idx,ftidx,fzidx}
-    let prefix = format!("{}_", stem);
-    let extensions = [".idx", ".ftidx", ".fzidx"];
-
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                if name.starts_with(&prefix)
-                    && extensions.iter().any(|ext| name.ends_with(ext))
-                    && fs::remove_file(&path).is_ok()
-                {
-                    cleaned += 1;
-                }
-            }
+/// The list comes from `ironbase_core::index_cache_files`, which knows how
+/// every index cache is named; a pattern kept here missed the vector caches
+/// (P10, 2026-10-28).
+fn cleanup_stale_index_files(db_path: &Path) -> Result<usize> {
+    let files = ironbase_core::index_cache_files(db_path);
+    for path in &files {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
     }
-
-    cleaned
+    Ok(files.len())
 }
 
 /// Restore database from backup chain
@@ -137,7 +116,7 @@ pub fn restore(
     );
 
     // Clean up any stale index cache files from previous database
-    let idx_cleaned = cleanup_stale_index_files(output_path);
+    let idx_cleaned = cleanup_stale_index_files(output_path)?;
     if idx_cleaned > 0 {
         println!("Cleaned up {} stale index cache file(s)", idx_cleaned);
     }
@@ -547,6 +526,31 @@ fn apply_multipart_streaming<W: Write + Seek>(
     let _ = fs::remove_file(&temp_path);
 
     Ok(())
+}
+
+/// Reader over the compressed payload of a backup: the payload of a single
+/// file, or the payloads of all parts of a multi-part backup in order. A
+/// zstd block can span parts, so the payload must never be decoded from one
+/// part alone, nor read past it into a WAL section (P10, 2026-10-28).
+pub(crate) fn payload_reader(path: &Path) -> Result<Box<dyn Read>> {
+    let file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let header = BackupHeader::read_from(&mut reader)?;
+    if !header.is_multipart() {
+        let payload_size = payload_len(&header, file_size)?;
+        return Ok(Box::new(reader.take(payload_size)));
+    }
+    let path_str = path.to_string_lossy();
+    let base_path = if path_str.ends_with(".001") {
+        path_str.trim_end_matches(".001").to_string()
+    } else {
+        path_str.trim_end_matches(".ibak").to_string()
+    };
+    Ok(Box::new(create_multipart_reader(
+        &base_path,
+        header.total_parts,
+    )?))
 }
 
 /// Create a chained reader from multiple backup parts

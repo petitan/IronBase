@@ -56,7 +56,7 @@ use crate::log_error;
 use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_array};
 use crate::vector::{HnswIndex, VectorIndexConfig};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::btree::BPlusTree;
 use super::fuzzy::{FuzzyAlgorithm, FuzzyIndex};
@@ -1334,11 +1334,49 @@ impl IndexManager {
                 .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     }
 
-    /// Build the path for HNSW cache file
+    /// Build the path for HNSW cache file: `{db_stem}_{index}_{hash}.hnsw`,
+    /// named like every other index file. The `{index}.hnsw` of earlier
+    /// versions left the database out: two databases in one directory with
+    /// the same collection and vector field shared the file and searched
+    /// each other's vectors (P10, 2026-10-28).
     pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
+        crate::collection_core::build_vector_index_file_path(db_path, index_name)
+            .unwrap_or_else(|| Self::legacy_vector_cache_path(db_path, index_name))
+    }
+
+    /// The `{index}.hnsw` cache path of earlier versions (see
+    /// `build_vector_cache_path`)
+    pub(crate) fn legacy_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
         let db_path_buf = PathBuf::from(db_path);
         let parent = db_path_buf.parent().unwrap_or(&db_path_buf);
         parent.join(Self::vector_cache_file_name(index_name))
+    }
+
+    /// Move an earlier version's `{index}.hnsw` cache to its current name.
+    /// Only when no other database shares the directory: otherwise the file
+    /// may hold another database's vectors, and the index is rebuilt.
+    fn migrate_legacy_vector_cache(db_path: &str, index_name: &str, cache_path: &Path) {
+        let legacy = Self::legacy_vector_cache_path(db_path, index_name);
+        if legacy == cache_path
+            || !legacy.is_file()
+            || !crate::collection_core::is_only_database_in_dir(Path::new(db_path))
+        {
+            return;
+        }
+        match std::fs::rename(&legacy, cache_path) {
+            Ok(()) => crate::log_info!(
+                "Vector index '{}': cache {} renamed to {}",
+                index_name,
+                legacy.display(),
+                cache_path.display()
+            ),
+            Err(e) => crate::log_warn!(
+                "Vector index '{}': could not rename cache {}: {} (index will be rebuilt)",
+                index_name,
+                legacy.display(),
+                e
+            ),
+        }
     }
 
     /// Try to load vector index from .hnsw cache file
@@ -1346,6 +1384,9 @@ impl IndexManager {
     /// Returns Some(HnswIndex) if loaded successfully, None if file doesn't exist or is corrupt.
     pub fn try_load_vector_index(db_path: &str, index_name: &str) -> Option<HnswIndex> {
         let cache_path = Self::build_vector_cache_path(db_path, index_name);
+        if !cache_path.exists() {
+            Self::migrate_legacy_vector_cache(db_path, index_name, &cache_path);
+        }
         if !cache_path.exists() {
             return None;
         }

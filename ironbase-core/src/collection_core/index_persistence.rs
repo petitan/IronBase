@@ -68,6 +68,90 @@ pub fn build_btree_index_file_path(db_file_path: &str, index_name: &str) -> Opti
     build_index_file_path_with_ext(db_file_path, index_name, "idx")
 }
 
+/// Build the .hnsw cache file path for a vector index
+pub fn build_vector_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
+    build_index_file_path_with_ext(db_file_path, index_name, "hnsw")
+}
+
+/// Extensions of the index cache files (each also with a `.tmp` suffix
+/// while it is being written)
+const INDEX_CACHE_EXTENSIONS: [&str; 4] = ["idx", "ftidx", "fzidx", "hnsw"];
+
+/// True if no other IronBase database (a file starting with the `.mlite`
+/// magic) shares the directory of `db_path`. Vector caches written before
+/// they carried the database name (`{index}.hnsw`) belong to the database
+/// only then: two databases in one directory shared them.
+pub(crate) fn is_only_database_in_dir(db_path: &Path) -> bool {
+    use std::io::Read;
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.file_name() == db_path.file_name() || !path.is_file() {
+            continue;
+        }
+        let mut magic = [0u8; 8];
+        let is_database = File::open(&path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok()
+            && &magic == b"MONGOLTE";
+        if is_database {
+            return false;
+        }
+    }
+    true
+}
+
+/// Every index cache file of the database at `db_path` that exists:
+/// `{db_stem}_*.{idx,ftidx,fzidx,hnsw}` (and their `.tmp` files), plus the
+/// `{index}.hnsw` vector caches of earlier versions when no other database
+/// shares the directory.
+///
+/// The caches describe one state of the database. A database file put back
+/// from a backup or a copy must not be opened next to the caches of another
+/// state (P10, 2026-10-28); deleting them makes the next open rebuild the
+/// indexes from the documents. A prefix also matches a database whose name
+/// extends this one's (`db` and `db_old`): its caches are rebuilt too.
+pub fn index_cache_files(db_path: &Path) -> Vec<PathBuf> {
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let stem = db_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("database");
+    let prefix = format!("{}_", stem);
+    let legacy_vector_caches = is_only_database_in_dir(db_path);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let name = name.strip_suffix(".tmp").unwrap_or(name);
+        let Some((_, ext)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let ours = (name.starts_with(&prefix) && INDEX_CACHE_EXTENSIONS.contains(&ext))
+            || (legacy_vector_caches && ext == "hnsw");
+        if ours && path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files
+}
+
 pub fn persist_index_to_disk<F, T>(db_file_path: &str, index_name: &str, save_fn: F) -> Result<()>
 where
     F: FnOnce(&mut File) -> Result<T>,

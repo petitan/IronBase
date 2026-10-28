@@ -1971,6 +1971,16 @@ impl FulltextIndex {
         Ok(offset)
     }
 
+    /// True if a document's token counts are on disk. Offset 0 means they
+    /// are in `doc_tokens_memory`: an index without an open file (memory
+    /// only, loaded from disk, or in a two-phase flush) keeps them there.
+    /// Deciding by `storage_path` alone read the record at the start of the
+    /// file instead, so updating a document twice after a reopen left its
+    /// previous words searchable (P10, 2026-10-28).
+    fn doc_tokens_on_disk(&self, doc_id: &DocumentId) -> bool {
+        self.storage_path.is_some() && self.doc_tokens_offsets.get(doc_id).is_some_and(|&o| o != 0)
+    }
+
     /// Read doc_tokens from disk for a specific document
     fn read_doc_tokens_from_disk(&self, doc_id: &DocumentId) -> Result<HashMap<String, u32>> {
         let offset = self.doc_tokens_offsets.get(doc_id).ok_or_else(|| {
@@ -2352,18 +2362,13 @@ impl FulltextIndex {
         }
 
         // Get tokens to update inverted_index
-        let token_counts = if self.storage_path.is_some() {
+        let token_counts = if self.doc_tokens_on_disk(doc_id) {
             // Disk-based: propagate real IO errors so update() fails loudly
             // instead of leaving stale posting-list entries that cause
             // duplicate (doc_id, tf) pairs after the subsequent insert().
-            // Missing doc_id (not in doc_tokens_offsets) stays a no-op.
-            if self.doc_tokens_offsets.contains_key(doc_id) {
-                Some(self.read_doc_tokens_from_disk(doc_id)?)
-            } else {
-                None
-            }
+            Some(self.read_doc_tokens_from_disk(doc_id)?)
         } else {
-            // Memory-based: get from memory
+            // In memory (a missing doc_id stays a no-op)
             self.doc_tokens_memory.remove(doc_id)
         };
 
@@ -3855,8 +3860,7 @@ impl FulltextIndex {
         let mut total: u64 = 0;
 
         for doc_id in &doc_ids {
-            // Try disk first, then memory
-            let doc_len = if self.storage_path.is_some() {
+            let doc_len = if self.doc_tokens_on_disk(doc_id) {
                 self.read_doc_tokens_from_disk(doc_id)
                     .map_err(|e| {
                         tracing::warn!(

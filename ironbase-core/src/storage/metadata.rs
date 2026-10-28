@@ -530,6 +530,7 @@ mod tests {
             clean_shutdown: false,
             last_committed_tx_id: 0,
             last_compact_size: 0,
+            compaction_count: 0,
         }
     }
 

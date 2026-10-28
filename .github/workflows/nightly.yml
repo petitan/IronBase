@@ -62,6 +62,9 @@ jobs:
           test_any_request_gets_a_jsonrpc_answer_with_its_id
           test_every_tool_denies_what_the_caller_may_not_do
 
+      - name: Backup properties (P10)
+        run: cargo test --release -p ironbase-backup --test pbt_backup
+
       - name: Bridge properties (P8)
         working-directory: ironbase-bridge
         run: cargo test --release -- every_request_gets_one_answer_with_its_id
