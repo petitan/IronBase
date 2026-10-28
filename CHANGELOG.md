@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — fair lane comparison for `search` (`mcp-server/eval/measure_lanes.py`, 1.0.645)
+
+A comparison of `search` with a BM25-only and a vector-only lane over the June
+label set measured the vector lane against labels biased away from it: the
+judging pool held the hybrid and BM25 lanes only, and the label file keeps the
+relevant ids alone, so a document only the vector lane returns had never been
+judged and counted as non-relevant. A vector lane built on the `embed_text`
+tool also embeds the query as a document (`passage: ` prefix with the Ollama
+preset), not as `search` does (`embed_query`, `query: `).
+
+The new script runs every configuration through `search`'s own pipeline
+(`db_hybrid_search`: same query embedding, fusion, rerank and document
+grouping; `search`'s defaults passed explicitly, and a `mirror` configuration
+checked to return exactly `search`'s documents, else the run stops), varying
+only weights and fusion options (BM25-only, vector-only, no rerank, keyword
+preset, `rrf_k` 60). Every configuration's top-10 and the June relevant ids
+form each query's pool, judged again by the June judge and prompt at
+temperature 0 over the whole document text (cached in `judgments.jsonl`).
+Per-query nDCG@5/@10 and Recall@5/@10, paired bootstrap 95% CIs, paired
+sign-flip randomization tests with Holm correction, wins/ties/losses, per
+bucket (fixed from the June labels: specific = at most 4 relevant). `--selftest`
+checks the statistics offline; the whole run was checked against a real server
+with a mock embedder and judge. Runs on the server host (`script_exec` is
+loopback-only) with `ANTHROPIC_API_KEY`.
+
 ### Fixed — backup/restore and index caches: found by the backup property (0.3.446, mcp-server 1.0.644)
 
 Found by the backup property (P10, `ironbase-backup/tests/pbt_backup.rs`):
