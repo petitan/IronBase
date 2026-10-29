@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `search` dropped whole top-ranked documents to fit its context budget (mcp-server 1.0.646)
+
+Documented in `docs/SEARCH_CONTEXT_BUDGET_BUG.md`. The grouped merge of
+adjacent chunks had no size limit, so a table's consecutive matching chunks
+became one passage of tens of thousands of characters; `search`'s 12 000-char
+budget then left out the whole document while lower-ranked, shorter ones were
+kept (62/62 labelled queries trimmed, 34/62 lost a relevant document; browse
+nDCG@10 −0.14 against the same pipeline without the budget).
+
+- A grouped merged passage holds at most 3 000 bytes, grown from its best chunk;
+  the rest of the run stays in further passages. The best chunk's offset is
+  kept internally. The flat merge (Rhai, `hybrid_search`) is unchanged.
+- The response is always the top of the ranking: as many documents as fit at
+  200 bytes each (the rest dropped from the end, `dropped_due_to_budget`), the
+  budget shared max-min fairly, a long first passage shortened around its best
+  chunk on character boundaries. The passages never exceed the budget.
+- `measure_lanes.py`: `search` may be an order-preserving subsequence of
+  `mirror`; lanes and ablations are compared with `mirror` (the engine), and
+  `search` vs `mirror` measures the response layer. The previous exact-match
+  check stopped every run on a corpus where the budget cut.
+
 ### Added — fair lane comparison for `search` (`mcp-server/eval/measure_lanes.py`, 1.0.645)
 
 A comparison of `search` with a BM25-only and a vector-only lane over the June

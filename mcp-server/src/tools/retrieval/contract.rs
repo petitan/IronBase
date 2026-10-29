@@ -28,6 +28,11 @@ const CHUNK_TRACKING_KEYS: &[&str] = &[
 /// ~12k chars ≈ ~3k tokens, a conservative fit for a small local model's window.
 const DEFAULT_MAX_CONTEXT_CHARS: usize = 12_000;
 
+/// The shortest first passage worth sending: a document whose share of the
+/// budget would be smaller is left out (from the end of the ranking) instead
+/// of being cut to a fragment. A budget, like `DEFAULT_MAX_CONTEXT_CHARS`.
+const MIN_PASSAGE_CHARS: usize = 200;
+
 fn is_stripped_chunk_key(k: &str) -> bool {
     k.starts_with('_')
         || CHUNK_TRACKING_KEYS.contains(&k)
@@ -68,6 +73,8 @@ pub(crate) fn assemble(
         relevance: f64,
         doc_fields: Map<String, Value>,
         texts: Vec<String>,
+        /// Byte offset of the first passage's best chunk (a merged passage)
+        first_best_offset: usize,
         emitted: usize,
     }
 
@@ -97,13 +104,21 @@ pub(crate) fn assemble(
             }
         }
 
-        let texts: Vec<String> = g
+        let bodies: Vec<(&str, usize)> = g
             .chunks
             .iter()
-            .filter_map(|c| c.get(text_field).and_then(|v| v.as_str()))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .filter_map(|c| {
+                let text = c.get(text_field).and_then(|v| v.as_str())?;
+                let best = c
+                    .get(crate::tools::fusion::MERGE_BEST_OFFSET_KEY)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                Some((text, best))
+            })
+            .filter(|(s, _)| !s.is_empty())
             .collect();
+        let first_best_offset = bodies.first().map_or(0, |b| b.1);
+        let texts: Vec<String> = bodies.into_iter().map(|(s, _)| s.to_string()).collect();
 
         if texts.is_empty() {
             // Chunks present but none carried body text under the resolved field.
@@ -118,25 +133,48 @@ pub(crate) fn assemble(
             relevance: g.best_score,
             doc_fields,
             texts,
+            first_best_offset,
             emitted: 0,
         });
     }
 
-    // Pass 1 — breadth: include each document (relevance order) with its first
-    // passage if it fits. The very first document is always included so a
-    // non-empty corpus never yields an empty result, even if its single passage
-    // exceeds the budget.
+    // Pass 1 — breadth: every document gets its first passage, in relevance
+    // order. The documents included are the longest prefix of the ranking whose
+    // first passages, each counted up to `MIN_PASSAGE_CHARS`, fit the budget
+    // (the first document always, so a non-empty corpus never yields an empty
+    // result); the rest of the ranking is dropped. The budget is then shared
+    // max-min fairly: a passage longer than its share is shortened, keeping its
+    // best chunk. A first passage that did not fit used to drop its whole
+    // document while lower-ranked, shorter ones were kept, so the response was
+    // no longer the top of the ranking (docs/SEARCH_CONTEXT_BUDGET_BUG.md).
+    let mut reserved = 0usize;
     let mut included: Vec<usize> = Vec::with_capacity(staged.len());
-    for (i, s) in staged.iter_mut().enumerate() {
-        let first_len = s.texts[0].len();
-        let nothing_yet = included.is_empty();
-        if !nothing_yet && used_chars + first_len > DEFAULT_MAX_CONTEXT_CHARS {
-            dropped_due_to_budget += 1;
-            continue;
+    for (i, s) in staged.iter().enumerate() {
+        let need = s.texts[0].len().min(MIN_PASSAGE_CHARS);
+        if !included.is_empty() && reserved + need > DEFAULT_MAX_CONTEXT_CHARS {
+            dropped_due_to_budget = staged.len() - i;
+            break;
         }
-        used_chars += first_len;
-        s.emitted = 1;
+        reserved += need;
         included.push(i);
+    }
+    // Water-filling: the shortest first passages are served whole, the
+    // remaining budget is split evenly among the longer ones
+    let mut by_len = included.clone();
+    by_len.sort_by_key(|&i| staged[i].texts[0].len());
+    let mut left = DEFAULT_MAX_CONTEXT_CHARS;
+    for (served, &i) in by_len.iter().enumerate() {
+        let share = left / (by_len.len() - served);
+        let s = &mut staged[i];
+        let len = s.texts[0].len();
+        if len > share {
+            s.texts[0] = shorten_around(&s.texts[0], s.first_best_offset, share);
+            trimmed = true;
+        }
+        let taken = s.texts[0].len();
+        left -= taken;
+        used_chars += taken;
+        s.emitted = 1;
     }
 
     // Pass 2 — depth: spend the remaining budget on further passages of the
@@ -219,6 +257,24 @@ pub(crate) fn assemble(
     }
 
     Ok(Value::Object(out))
+}
+
+/// `text` cut to at most `max` bytes on character boundaries, starting at its
+/// best chunk (`best_offset`) and moved back as far as the end requires, so
+/// the part that matched is kept
+fn shorten_around(text: &str, best_offset: usize, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = best_offset.min(text.len() - max);
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (start + max).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[start..end].to_string()
 }
 
 /// Render a citation-marked plain-text block ready to paste into a prompt.
@@ -395,5 +451,117 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("alpha"));
+    }
+
+    fn ids(out: &Value) -> Vec<String> {
+        docs(out)
+            .iter()
+            .map(|d| d["doc_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn passage_chars(out: &Value) -> usize {
+        docs(out)
+            .iter()
+            .flat_map(|d| d["passages"].as_array().unwrap())
+            .map(|p| p["text"].as_str().unwrap().len())
+            .sum()
+    }
+
+    /// docs/SEARCH_CONTEXT_BUDGET_BUG.md §4.2 (`4 oszlopos emelő ár`): the 8th
+    /// document's 8 891-char first passage did not fit after 5 234 used, and
+    /// the whole document was dropped while the 9th and 10th were kept. Every
+    /// document now comes back in ranking order, the long one shortened.
+    #[test]
+    fn a_long_first_passage_is_shortened_not_dropped() {
+        let lens = [702, 707, 711, 165, 1089, 1031, 829, 8891, 854, 837];
+        let groups: Vec<DocGroup> = lens
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| group(&format!("d{i}"), 1.0 - i as f64 * 0.01, &[n]))
+            .collect();
+        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let want: Vec<String> = (0..10).map(|i| format!("d{i}")).collect();
+        assert_eq!(ids(&out), want);
+        assert!(out.get("dropped_due_to_budget").is_none());
+        assert_eq!(out["trimmed"], json!(true));
+        assert_eq!(passage_chars(&out), DEFAULT_MAX_CONTEXT_CHARS);
+        // Only the long passage is shortened; the others are whole
+        for (d, &n) in docs(&out).iter().zip(&lens) {
+            let len = d["passages"][0]["text"].as_str().unwrap().len();
+            if n == 8891 {
+                assert_eq!(len, DEFAULT_MAX_CONTEXT_CHARS - (15_816 - 8891));
+            } else {
+                assert_eq!(len, n);
+            }
+        }
+    }
+
+    /// The response is always the top of the ranking: whatever the passage
+    /// lengths, the documents returned are its first `count`
+    #[test]
+    fn the_response_is_a_prefix_of_the_ranking() {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for round in 0..200 {
+            let n = 1 + round % 80;
+            let groups: Vec<DocGroup> = (0..n)
+                .map(|i| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let len = 1 + (state % 20_000) as usize;
+                    group(&format!("d{i}"), 1.0 - i as f64 * 1e-3, &[len, 300])
+                })
+                .collect();
+            let out = assemble(&groups, n, None, F, "structured", false).unwrap();
+            let got = ids(&out);
+            let want: Vec<String> = (0..got.len()).map(|i| format!("d{i}")).collect();
+            assert_eq!(got, want, "round {round}");
+            let dropped = out
+                .get("dropped_due_to_budget")
+                .map_or(0, |v| v.as_u64().unwrap());
+            assert_eq!(got.len() + dropped as usize, n, "round {round}");
+            assert!(
+                passage_chars(&out) <= DEFAULT_MAX_CONTEXT_CHARS,
+                "round {round}"
+            );
+            if n * MIN_PASSAGE_CHARS <= DEFAULT_MAX_CONTEXT_CHARS {
+                assert_eq!(dropped, 0, "round {round}: room for every document");
+            }
+        }
+    }
+
+    /// A shortened merged passage keeps its best chunk, wherever it is
+    #[test]
+    fn a_shortened_passage_keeps_its_best_chunk() {
+        let text = format!("{}NEEDLE{}", "a".repeat(20_000), "b".repeat(5_000));
+        let mut g = group("big", 1.0, &[1]);
+        g.chunks[0] = json!({"doc_id": "big", F: text,
+            crate::tools::fusion::MERGE_BEST_OFFSET_KEY: 20_000});
+        let mut groups = vec![g];
+        for i in 0..9 {
+            groups.push(group(&format!("d{i}"), 0.5, &[2000]));
+        }
+        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let first = docs(&out)[0]["passages"][0]["text"].as_str().unwrap();
+        assert!(first.starts_with("NEEDLE"), "{}", &first[..20]);
+        // Near the end the window moves back instead of running short
+        let tail = format!("{}NEEDLE{}", "a".repeat(20_000), "b".repeat(100));
+        let s = shorten_around(&tail, 20_000, 3000);
+        assert_eq!(s.len(), 3000);
+        assert!(s.ends_with(&format!("NEEDLE{}", "b".repeat(100))));
+    }
+
+    /// Shortening never splits a multi-byte character
+    #[test]
+    fn shortening_keeps_utf8_whole() {
+        let text = "árvíztűrő tükörfúrógép ".repeat(50);
+        for best in [0, 1, 7, 100, text.len() - 1] {
+            for max in [1, 2, 3, 10, 101, 500] {
+                let s = shorten_around(&text, best, max);
+                assert!(s.len() <= max);
+                assert!(text.contains(&s));
+            }
+        }
     }
 }

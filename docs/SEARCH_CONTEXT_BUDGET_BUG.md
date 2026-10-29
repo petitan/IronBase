@@ -1,6 +1,6 @@
 # `search` — a válaszréteg kontextus-budgetje egész dokumentumokat ejt ki
 
-**Állapot:** feltárva és megmérve, **nincs javítva** (v1.0.645).
+**Állapot:** feltárva, megmérve, **javítva a v1.0.646-ban** (7. és 10. szakasz; a 3. irány, a hívásonkénti budget, nyitott).
 **Érintett:** `search` MCP tool (a Rhai `db_hybrid_search` NEM érintett).
 **Mérés dátuma:** 2026-10-28, lokális `docs.mlite` / `rdocs` (18 987 chunk, 500 dokumentum).
 
@@ -183,3 +183,44 @@ következmény:
   lekérdezésen eltérést lát), hiszen a `db_hybrid_search` nem alkalmazza a budgetet.
   A motor-szintű összehasonlításhoz az ellenőrzésnek a sorrendtartó részhalmazt el kell
   fogadnia, és a lane-eket a `mirror`-hoz kell mérni.
+
+## 10. Javítás (v1.0.646)
+
+Az 1. és 2. irány együtt, mert egyik sem elég magában: a merge-elt passage a chunkokat
+`chunk_index` sorrendben fűzi, a legjobb találat bárhol lehet benne, így egy 57 KB-os
+táblázat **elejéről** csonkolva épp a találat esne ki.
+
+1. **Korlátos merge a csoportosított úton** (`fusion.rs`, `merge_adjacent_values`):
+   egy merge-elt passage legfeljebb `MAX_MERGED_PASSAGE_CHARS` = 3 000 bájt (a budget
+   negyede), a **legjobb chunkból** indulva, a közelebbi szomszéddal bővülve; a sorozat
+   kimaradó részei külön passage-ek lesznek. A legjobb chunk bájt-offsetje a belső
+   `_merge_best_offset` mezőbe kerül (aláhúzásos: sosem emelődik doc-szintre, és a
+   válaszból kimarad). A lapos merge (Rhai flat, `hybrid_search`) változatlan.
+2. **Pass 1 nem ejt, hanem oszt** (`contract.rs`): a válasz mindig a rangsor **eleje** —
+   annyi dokumentum, amennyinek első passage-e `MIN_PASSAGE_CHARS` = 200 bájtig számolva
+   elfér (az első mindig); a többi a rangsor **végéről** esik ki
+   (`dropped_due_to_budget`). A budgetet max-min fair módon osztja (water-filling): a
+   rövid első passage-ek egészben mennek, a hosszabbak a maradék egyenlő részét kapják,
+   a **legjobb chunknál kezdve** rövidítve (karakterhatáron; a vég közelében az ablak
+   visszább csúszik). A teljes passage-szöveg most már sosem lépi át a budgetet (a
+   korábbi „never empty" ág egy túlméretes első passage-et egészben küldött).
+
+Regressziós tesztek: `contract.rs` — a 4.2 szakasz pontos esete (mind a 10 dokumentum,
+sorrendben, a 8. rövidítve), a válasz 200 véletlen esetben a rangsor prefixe, a
+rövidített passage megtartja a legjobb chunkot, UTF-8 sosem törik; `fusion.rs` — a merge
+3 000 bájton belül marad, minden chunk pontosan egyszer szerepel, a legjobb chunk offsetje
+helyes; a lapos merge korlátlan. A régi Pass 1-gyel 3 új teszt elbukik.
+
+**Mérés:** a `measure_lanes.py` mostantól elfogadja, hogy a `search` a `mirror`
+sorrendtartó részhalmaza, a lane-eket a `mirror`-hoz (a motorhoz) méri, és a
+`search vs mirror` sor a válaszréteg hatása. Szintetikus korpuszon (3 táblázatos
+árlista sok egymást követő találó chunkkal, mock embedder és judge, valódi szerver):
+
+| szerver | kevesebb dokumentum, mint a `mirror` | browse nDCG@10 (`search` − `mirror`) |
+|---|---|--:|
+| v1.0.645 | 3 / 12 lekérdezés | −0,4116 |
+| v1.0.646 | 0 / 12 | 0,0000 |
+
+A `docs.mlite` korpuszon a mérést a szerver hostján kell megismételni
+(`ANTHROPIC_API_KEY=… python3 mcp-server/eval/measure_lanes.py --mcp http://localhost:8080/mcp`).
+
