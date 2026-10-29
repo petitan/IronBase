@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — background maintenance moved into the engine (ironbase-core 0.3.449, mcp-server 1.0.647)
+
+- New `ironbase_core::spawn_maintenance(target, MaintenanceConfig)`
+  (`database/background.rs`): one scheduler for the periodic checkpoint (60 s:
+  B+ tree indexes, metadata, WAL — `DatabaseCore::periodic_checkpoint`) and
+  bloat-based compaction (`AutoCompactPolicy`, same defaults as the server's
+  `[compaction]` section: 2.0×, ≥100 MB, checked every 5 min, 30 min cooldown).
+  `MaintenanceTarget` is implemented by `DatabaseCore` (embedded: compaction runs
+  on the maintenance thread) and by the MCP `compaction::ServerMaintenance`
+  (compaction as a job). `MaintenanceHandle::stop` cancels a running compaction.
+- MCP: HTTP and stdio mode start the same maintenance and stop it **before**
+  `close()`. Fixed: stdio mode never ran the periodic checkpoint, so its WAL and
+  dirty indexes were only written at shutdown.
+- Python: `IronBase.start_maintenance(...)` / `stop_maintenance()`; `close()` stops it.
+- `docs/MCP_TO_CORE_PLAN.md`: plan for moving qualification, hybrid search and
+  chunking from the MCP server into the engine (awaiting decisions).
+
 ### Fixed — `search` dropped whole top-ranked documents to fit its context budget (mcp-server 1.0.646)
 
 Documented in `docs/SEARCH_CONTEXT_BUDGET_BUG.md`. The grouped merge of
