@@ -34,7 +34,7 @@ pub fn tools() -> Vec<Value> {
                 },
                 "debug": {
                     "type": "boolean",
-                    "description": "Include a diagnostics block (default false).",
+                    "description": "Include a diagnostics block (default false). Holds `lexical_idf_gate`: the corpus's IDF coverage of the query's tokens and the lexical lane's resulting fusion weight (null = not gated).",
                     "default": false
                 }
             },

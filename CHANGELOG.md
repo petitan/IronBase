@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — the lexical lane's fusion weight is scaled by the corpus's IDF coverage of the query (0.3.449, mcp-server 1.0.647)
+
+**The defect.** RRF fuses *ranks*, so it cannot see that a lane's rank 1 is
+worthless. Measured on `rdocs` (2026-10-29, v1.0.646), query
+`légfékvizsgáló berendezés`, 4 relevant documents in the judged pool: the
+vector lane alone found all 4 (ranks 3, 4, 9, 10), the BM25 lane alone found
+none, and the hybrid found 1, at rank 9 — seven of its top 10 came from the
+BM25 list. `fulltext_search` on `content_text` shows why: `légfékvizsgáló`
+has **0** chunks in the corpus and `berendezés` has 1000+. The query's one
+discriminating token is absent, BM25 therefore ranks on a generic
+high-frequency token alone, and the lane still votes at full weight.
+
+**The change.** Before fusion (`retrieve_and_fuse` STEP 1.6), the lexical
+lane's RRF weight is multiplied by the IDF-weighted share of the query's
+tokens that the corpus actually holds:
+
+```text
+coverage = Σ_present ln(1 + N/df) / ( Σ_present ln(1 + N/df) + |absent| · ln(1 + N) )
+fulltext_weight_effective = fulltext_weight · coverage
+```
+
+**Why these quantities and no tuned constant** (CLAUDE.md forbids an
+unvalidated threshold, so the formula has none to validate):
+
+- `ln(1 + N/df)` is not a new scoring idea — it is verbatim the IDF
+  `FulltextIndex::search` already computes (`ironbase-core/src/fulltext.rs`),
+  read through the same posting lists (`token_posting_count`), so there is no
+  second statistics pass over the corpus.
+- An absent token is worth what it *would* have been worth had the corpus
+  held it: the largest IDF that same formula can produce, `ln(1 + N/1)` — the
+  IDF of a term occurring in exactly one document. A term the corpus has never
+  seen is maximally discriminating, and its absence is precisely the part of
+  the user's intent the lexical lane cannot serve.
+- The map from coverage to weight is the **identity**, so there is no
+  threshold, no knee and no tuned number anywhere in the path. Its two
+  endpoints are exact rather than chosen: every token present → coverage
+  `1.0` → `w · 1.0 == w` in IEEE-754, i.e. fusion is bit-for-bit what it was;
+  no token present → coverage `0.0`, where the lexical lane returns nothing
+  anyway. A single absent token caps coverage at `0.5` even when the surviving
+  term is the rarest the index can hold, which is the intended reading: BM25
+  can serve at most half of a two-term intent when one term does not exist.
+
+**Scope.** Applied only when **both** lanes are active. With a single lane
+there is nothing to arbitrate and a uniform rescale cannot reorder anything,
+so the pure `bm25` and `vector` lanes of `mcp-server/eval/measure_lanes.py`,
+and `search`'s BM25-only degraded mode, are untouched. With several searched
+fields the most favourable field decides, because the lexical lane scores
+best-field: a token the corpus holds in any searched field gives the lane real
+signal. In the shared fusion path, so `search`, Rhai `db_hybrid_search` and
+every MCP caller get it from one implementation.
+
+**Observable, not a hidden constant.** `search` with `debug: true` returns
+`diagnostics.lexical_idf_gate` with the coverage, the base and effective
+lexical weight, the field it was measured on, the index's `N`, each present
+token with its `df`, and the absent tokens. `null` there means the gate did
+not run (single lane) or could not be measured — the weight was then left
+untouched, never silently assumed to be 1.0. A query with a missing token also
+logs one `tracing::info!` line.
+
+**Measurement status.** The end-to-end retrieval-quality effect on the real
+corpus is **not** measured and is **not** claimed here. `script_exec` is
+loopback-only and the 7.76 GB `docs.mlite` lives on the server host, so the
+run belongs to the user: `mcp-server/eval/measure_lanes.py` on that host. What
+is pinned here is the mechanism, by tests: the synthetic `légfékvizsgáló`
+shape (one absent rare token, one generic token, vector-only and lexical-only
+documents) where the vector lane's documents take the top of the ranking
+instead of interleaving with the lexical list from position 2; the
+all-tokens-present case where the lexical weight comes out bit-identical and
+the lexical lane still fills 7 of the top 10; and the single-lane case where
+the gate does not run.
+
+**Added API** (additive, read-only): `Collection::fulltext_index_doc_count`
+and `IronBaseAdapter::fulltext_index_doc_count` — the `N` of a field's
+fulltext index, O(1), without `list_fulltext_indexes`'s `unique_token_count`.
+
 ### Fixed — `search` dropped whole top-ranked documents to fit its context budget (mcp-server 1.0.646)
 
 Documented in `docs/SEARCH_CONTEXT_BUDGET_BUG.md`. The grouped merge of

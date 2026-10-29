@@ -121,6 +121,40 @@ A Σ csak azokon az ágakon fut, amelyek visszaadták a dokumentumot: a hiányz�
 
 Prioritás: explicit weights > search_mode preset > balanced default
 
+**Lexikális lane IDF-coverage kapu (STEP 1.6, v1.0.647):**
+
+Az RRF *rangokat* fuzionál, ezért nem látja, hogy egy lane rank-1-e értéktelen.
+Ha a query megkülönböztető (ritka) tokenje hiányzik a korpuszból és csak egy
+generikus marad, a BM25 továbbra is rangsorol — pusztán a generikus tokenen —,
+és teljes súllyal szavaz. Mért eset (`rdocs`, 2026-10-29): `légfékvizsgáló`
+→ 0 chunk, `berendezés` → 1000+ chunk; a vektor-lane mind a 4 releváns
+dokumentumot megtalálta, a hibrid top-10-ből 7 a BM25-listából jött.
+
+A fulltext súly ezért a query tokenjeinek IDF-súlyozott korpusz-lefedettségével
+szorzódik:
+
+```
+coverage = Σ_present ln(1 + N/df) / ( Σ_present ln(1 + N/df) + |absent| · ln(1 + N) )
+fulltext_weight_effective = fulltext_weight · coverage
+```
+
+- `ln(1 + N/df)` **az index saját BM25 IDF-je** (`fulltext.rs::search`), ugyanazokról
+  a posting-listákról (`token_posting_count`) — nincs második statisztikai menet.
+- Hiányzó token értéke: `ln(1 + N/1)`, az index maximális IDF-je (egyetlen
+  dokumentumban előforduló term).
+- A coverage → súly leképezés az **identitás**: nincs küszöb, nincs hangolt konstans.
+  Minden token jelen → coverage `1.0` → `w · 1.0 == w`, a fúzió bitre azonos a korábbival.
+- Csak akkor fut, ha **mindkét** lane aktív (egy lane-nél nincs mit arbitrálni, és az
+  egyenletes átskálázás nem változtat sorrendet) — a `measure_lanes.py` `bm25`/`vector`
+  lane-jei és a `search` BM25-only degradált módja érintetlen.
+- Több mező esetén a **legkedvezőbb** mező dönt (a lane best-field pontoz).
+- Megfigyelhetőség: `search` `debug:true` → `diagnostics.lexical_idf_gate`
+  (coverage, base/effective súly, mező, `N`, present tokenek `df`-fel, absent tokenek).
+  `null` = a kapu nem futott / nem volt mérhető, a súly érintetlen maradt.
+
+Key files: `fusion.rs` (`lexical_idf_coverage`, `lexical_coverage_gate`,
+`LexicalCoverageGate`), `hybrid.rs` (STEP 1.6), `retrieval/contract.rs` (debug blokk).
+
 **Shared fusion modul (febba776, afd45313):**
 - `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, merge_adjacent_chunks, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
 - hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
@@ -129,6 +163,7 @@ Prioritás: explicit weights > search_mode preset > balanced default
 ```
 STEP 1: Resolve vector + field names (explicit vs auto-embed)
 STEP 1.5: Document-level AND qualification             [match_scope=document OR group_by_document + mode=and]
+STEP 1.6: Lexical lane IDF coverage gate               [csak ha mindkét lane aktív]
 STEP 2: Vector search → ranks (single-pass HashMap)
 STEP 3: Fulltext search → ranks (single-pass HashMap, OR mode + doc_id filter if STEP 1.5)
 STEP 4: RRF Fusion (drain-based, no cloning)

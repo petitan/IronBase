@@ -1829,6 +1829,16 @@ impl IronBaseAdapter {
         Ok(coll.fulltext_token_posting_counts(field, tokens)?)
     }
 
+    /// Number of documents in a field's fulltext index — the `N` of the index's
+    /// own BM25 IDF, `ln(1 + N / df)`. Paired with
+    /// [`Self::fulltext_token_posting_counts`] (the `df`s) it yields the exact
+    /// IDF the scorer used, with no extra pass over the corpus.
+    pub fn fulltext_index_doc_count(&self, collection: &str, field: &str) -> Result<usize> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_index_doc_count(field)?)
+    }
+
     /// Get all chunk _ids from posting list for a stemmed token.
     /// Returns DocumentIds as serde_json::Value for use in $in filters.
     pub fn fulltext_token_chunk_ids(

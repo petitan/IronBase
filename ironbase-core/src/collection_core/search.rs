@@ -1338,6 +1338,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .collect())
     }
 
+    /// Number of documents in the fulltext index of a field.
+    ///
+    /// This is the `N` of the index's own BM25 IDF, `ln(1 + N / df)` (see
+    /// `FulltextIndex::search`), so a caller that already has the per-token
+    /// posting counts from [`Self::fulltext_token_posting_counts`] can
+    /// reproduce the very IDF the scorer used — without a second pass over
+    /// the corpus. O(1); unlike `list_fulltext_indexes()` it computes no
+    /// `unique_token_count()`.
+    pub fn fulltext_index_doc_count(&self, field: &str) -> Result<usize> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index.doc_count())
+    }
+
     /// Get all chunk _ids from posting list for a stemmed token.
     pub fn fulltext_token_chunk_ids(
         &self,
