@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — search logic moves from the MCP server into the engine (ironbase-core 0.3.450, mcp-server 1.0.648)
+
+Plan: `docs/MCP_TO_CORE_PLAN.md` (decisions D1–D5 approved).
+
+- **Document-level AND in the engine:** `CollectionCore::fulltext_qualify_documents(fields, query)
+  -> DocumentQualification` (`NotRequired`, or the qualifying ids keyed on `doc_id` for RAG
+  indexes and `_id` otherwise; several fields union; `to_filter()`). It replaces the MCP copy
+  (adapter fast path, `fusion.rs` posting-list and `find` fallbacks, multi-field union) and the
+  Rhai `db_fulltext_search` call, and runs under one index read lock. The `find` fallback was
+  unreachable (`parent_doc_id_field` is never set) and is gone. **Removed public API:** the six
+  `CollectionCore::fulltext_*` primitives that only served the MCP copy
+  (`fulltext_tokenize_query`, `…_token_posting_counts`, `…_token_chunk_ids`,
+  `…_resolve_chunk_doc_ids`, `…_has_chunk_doc_mapping`, `…_has_parent_doc_id_field`).
+- **`ironbase_core::search::hybrid`:** `FusedResult`, `rerank_results`,
+  `merge_adjacent_chunks`/`merge_adjacent_values`, `mmr_reorder`, `apply_projection`,
+  `id_to_string` moved unchanged from mcp-server `tools/fusion.rs` with their 30 tests.
+- Removed the dead mcp-server query preprocessor (`tools/preprocessing/`, 569 lines, no caller).
+
 ### Changed — background maintenance moved into the engine (ironbase-core 0.3.449, mcp-server 1.0.647)
 
 - New `ironbase_core::spawn_maintenance(target, MaintenanceConfig)`
