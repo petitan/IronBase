@@ -15,7 +15,7 @@ CLAUDE.md-ből (v1.0.544, 2026-06-18). Operatív RAG-referencia: `docs/RAG_PIPEL
 
 | Felület | Fájl | Algoritmus |
 |------|------|-----------|
-| `search` MCP tool (intent-only) + Rhai `db_hybrid_search` (paraméterezhető) | `mcp-server/src/tools/hybrid.rs` (közös motor: `retrieve_and_fuse`) | RRF fusion (explicit vector VAGY auto-embed) |
+| `search` MCP tool (intent-only) + Rhai `db_hybrid_search` (paraméterezhető) | motor: `ironbase-core/src/search/hybrid/` (`CollectionCore::hybrid_fuse`, `hybrid_group_documents`); MCP: `mcp-server/src/tools/hybrid.rs` (`retrieve_and_fuse`: paraméter-, mező- és embedding-feloldás) | RRF fusion (explicit vector VAGY auto-embed) |
 
 > A `hybrid_search` MCP tool megszűnt (v1.0.504, `search` váltotta). Az alábbi paraméterek
 > (mode, match_scope, text_fields, weights, rrf_k, mmr_lambda…) a **közös `hybrid.rs` motoré**:
@@ -122,11 +122,14 @@ A Σ csak azokon az ágakon fut, amelyek visszaadták a dokumentumot: a hiányz�
 
 Prioritás: explicit weights > search_mode preset > balanced default
 
-**Shared fusion modul (febba776, afd45313):**
-- `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, merge_adjacent_chunks, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
-- hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
+**Motor-modul (v1.0.649, `docs/MCP_TO_CORE_PLAN.md` 3. pont):**
+- `ironbase-core/src/search/hybrid/` — `HybridQuery` (kész query-vektor, explicit mezők/súlyok),
+  `fuse.rs` (`hybrid_fuse`: STEP 1.5–6), `group.rs` (`hybrid_group_documents`, `lift_common_fields`),
+  `rerank.rs`, `merge.rs`, `mmr.rs`
+- MCP: `tools/hybrid.rs` (`retrieve_and_fuse`: STEP 1 — súlyok, embedding, RAG-config → `HybridQuery`),
+  `tools/fusion.rs` (`mode`/`match_scope` paraméterek), `retrieval/contract.rs` (a `search` válasza)
 
-**Közös fusion pipeline (hybrid.rs — `search` MCP tool + Rhai `db_hybrid_search`):**
+**Közös fusion pipeline (`search` MCP tool + Rhai `db_hybrid_search`):**
 ```
 STEP 1: Resolve vector + field names (explicit vs auto-embed)
 STEP 1.5: Document-level AND qualification             [match_scope=document OR group_by_document + mode=and]

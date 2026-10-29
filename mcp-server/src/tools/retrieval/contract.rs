@@ -8,7 +8,7 @@
 //! `verdict` is always `"unknown"` (the four-state contract of the redesign §9).
 
 use crate::error::Result;
-use crate::tools::hybrid::DocGroup;
+use ironbase_core::search::hybrid::DocGroup;
 use serde_json::{json, Map, Value};
 
 /// Chunk-level structural / RAG-bookkeeping keys never surfaced to the model.
@@ -304,7 +304,7 @@ fn render_context_block(documents: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::hybrid::DocGroup;
+    use ironbase_core::search::hybrid::DocGroup;
 
     const F: &str = "content_text";
 

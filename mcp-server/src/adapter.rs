@@ -1760,6 +1760,63 @@ impl IronBaseAdapter {
         Ok(coll.get_fulltext_index_options(field)?)
     }
 
+    /// Restrict a fulltext search to document-level AND when asked for (see
+    /// `CollectionCore::fulltext_document_scope`)
+    pub fn fulltext_document_scope(
+        &self,
+        collection: &str,
+        fields: &[&str],
+        query: &str,
+        and_mode: bool,
+        document_scope: bool,
+        user_filter: Option<Value>,
+    ) -> Result<ironbase_core::QualificationOutcome> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_document_scope(fields, query, and_mode, document_scope, user_filter)?)
+    }
+
+    /// Hybrid retrieval + RRF fusion (`CollectionCore::hybrid_fuse`), on the
+    /// shadow index of a re-embed in progress when there is one
+    pub fn hybrid_fuse(
+        &self,
+        collection: &str,
+        query: &ironbase_core::search::hybrid::HybridQuery,
+    ) -> Result<ironbase_core::search::hybrid::HybridFusion> {
+        let searched = query
+            .vector
+            .as_ref()
+            .map(|_| self.searched_vector_field(collection, &query.vector_field))
+            .filter(|searched| *searched != query.vector_field);
+        let resolved;
+        let query = if searched.is_some() {
+            resolved = ironbase_core::search::hybrid::HybridQuery {
+                searched_vector_field: searched,
+                ..query.clone()
+            };
+            &resolved
+        } else {
+            query
+        };
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        Ok(coll.hybrid_fuse(query, Some(&ctx))?)
+    }
+
+    /// Group fused results by document (`CollectionCore::hybrid_group_documents`)
+    pub fn hybrid_group_documents(
+        &self,
+        collection: &str,
+        fused: &[ironbase_core::search::hybrid::FusedResult],
+        query: &ironbase_core::search::hybrid::HybridQuery,
+    ) -> Result<(Vec<ironbase_core::search::hybrid::DocGroup>, usize)> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        Ok(coll.hybrid_group_documents(fused, query, Some(&ctx))?)
+    }
+
     /// Document-level AND qualification: the documents holding every query
     /// token on at least one of `fields` (see
     /// `CollectionCore::fulltext_qualify_documents`).

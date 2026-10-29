@@ -1,8 +1,9 @@
 # MCP → core: a szerverbe nem való logika áthelyezése
 
 **Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
-a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1. lépése
-(`ironbase_core::search::hybrid`: rerank, merge, MMR). Hátra: 3/2–3. és a 4. pont.
+a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1–2. lépése
+(`ironbase_core::search::hybrid`: rerank, merge, MMR, `hybrid_fuse`, `hybrid_group_documents`).
+Hátra: 3/3. (Python-kötés) és a 4. pont.
 
 ## Miért
 
@@ -85,7 +86,12 @@ JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue
    `id_to_string`) a 30 tesztjükkel; az MCP a motorét hívja, viselkedés változatlan.
    Az RRF-pontozás és a csoportosítás a `retrieve_and_fuse`/`build_doc_groups` része, a
    2. lépéssel megy.
-2. **`retrieve_and_fuse` + `build_doc_groups`** a motorba, `HybridQuery`-vel; az MCP
+2. *Kész:* `CollectionCore::hybrid_fuse(&HybridQuery, ctx)` és `hybrid_group_documents`
+   (`search/hybrid/fuse.rs`, `group.rs`), a dokumentum-szintű AND orkesztrációja
+   `CollectionCore::fulltext_document_scope`. Ellenőrzés: ideiglenes aranyfájl-harness (240
+   eset: 10 lekérdezés × 24 paraméterkombináció, flat + grouped) — a kimenet a váltás előtt
+   és után bitre azonos (normalizált JSON). Az eredeti terv:
+   **`retrieve_and_fuse` + `build_doc_groups`** a motorba, `HybridQuery`-vel; az MCP
    `search` és a Rhai `db_hybrid_search` erre vált. Ellenőrzés: a
    `mcp-server/eval/measure_lanes.py` `mirror`-konfigurációja és a `search`
    ugyanazokat a dokumentumokat adja a váltás előtt és után (aranyfájl a címkeszet

@@ -83,6 +83,7 @@ mod transaction_property_tests;
 // Public exports
 pub use collection_core::{
     index_cache_files, CollectionCore, DocumentQualification, FindCursor, InsertManyResult,
+    QualificationOutcome,
 };
 pub use database::background::{
     spawn_maintenance, AutoCompactPolicy, MaintenanceConfig, MaintenanceHandle, MaintenanceTarget,

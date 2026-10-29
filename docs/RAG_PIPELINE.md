@@ -233,7 +233,7 @@ nemdeterminisztikusan választott; tartalmazta a `merge_adjacent_chunks`-nak át
 mezőt, így néha a `title`-t fűzte össze (#64 bug). A `content`-preferáló, deterministic
 feloldás kiküszöböli.
 
-### 2.7 Adjacent chunk merge (`fusion.rs`)
+### 2.7 Adjacent chunk merge (`ironbase-core/src/search/hybrid/merge.rs`)
 
 `merge_adjacent_chunks(results, text_field)`: a futamokban (`doc_id` + szomszédos
 `chunk_index`) össze­vonja a chunkokat. Két fontos részlet:

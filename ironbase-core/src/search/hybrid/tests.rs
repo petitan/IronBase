@@ -709,3 +709,162 @@ fn flat_merge_is_unbounded() {
     assert_eq!(results[0].doc["content"].as_str().unwrap().len(), 6000);
     assert!(results[0].doc.get(MERGE_BEST_OFFSET_KEY).is_none());
 }
+
+// lift_common_fields (#69 — group_by_document doc-level field promotion)
+
+#[test]
+fn test_lift_common_fields_promotes_identical_and_drops_from_chunks() {
+    let mut chunks = vec![
+        json!({"doc_id":"a","title":"T","year":2026,"content":"c1","chunk_index":0,"_text_score":6.2}),
+        json!({"doc_id":"a","title":"T","year":2026,"content":"c2","chunk_index":1,"_text_score":5.1}),
+        json!({"doc_id":"a","title":"T","year":2026,"content":"c3","chunk_index":2,"_text_score":4.0}),
+    ];
+    let lifted = lift_common_fields(&mut chunks);
+
+    // doc_id is explicitly skipped (group root carries it).
+    assert!(!lifted.contains_key("doc_id"));
+    // Identical-everywhere keys lifted.
+    assert_eq!(lifted["title"], json!("T"));
+    assert_eq!(lifted["year"], json!(2026));
+    // Varying keys stay in each chunk.
+    assert!(!lifted.contains_key("content"));
+    assert!(!lifted.contains_key("chunk_index"));
+    assert!(!lifted.contains_key("_text_score"));
+    // Lifted keys removed from each chunk → no duplication.
+    for c in &chunks {
+        assert!(c.get("title").is_none(), "title still in chunk: {c}");
+        assert!(c.get("year").is_none(), "year still in chunk: {c}");
+        assert!(
+            c.get("content").is_some(),
+            "content missing from chunk: {c}"
+        );
+    }
+}
+
+#[test]
+fn test_lift_common_fields_skips_single_chunk_group() {
+    // With one chunk, "all match" is vacuously true on every key — lifting
+    // would strand chunks[0] empty. Gated: no lift, chunk stays self-contained.
+    let mut chunks = vec![json!({"doc_id":"x","title":"T","content":"only"})];
+    let lifted = lift_common_fields(&mut chunks);
+    assert!(lifted.is_empty(), "single-chunk groups must not lift");
+    // chunk[0] retains all its fields (title, content) — clients iterating
+    // group.chunks for snippet text get something to render.
+    assert_eq!(chunks[0]["title"], json!("T"));
+    assert_eq!(chunks[0]["content"], json!("only"));
+}
+
+#[test]
+fn test_lift_common_fields_skips_chunk_level_engine_metadata() {
+    // Chunk-level engine metadata (`_text_score`, `chunk_merged`, etc.) MUST NOT
+    // lift even if it happens to be identical across all chunks (BM25 tie, all
+    // merged, etc.). Lifting would falsely promote chunk semantics to the doc.
+    let mut chunks = vec![
+        json!({
+            "doc_id":"a", "title":"T",
+            "chunk_index":3, "chunk_merged":true, "chunks_in_merge":2,
+            "_text_score":5.0, "_final_score":0.03, "_text_rank":1,
+            "table_header":"| H |\n|---|",
+            "start_char":0, "end_char":100,
+            "content":"first"
+        }),
+        json!({
+            "doc_id":"a", "title":"T",
+            "chunk_index":3, "chunk_merged":true, "chunks_in_merge":2,
+            "_text_score":5.0, "_final_score":0.03, "_text_rank":1,
+            "table_header":"| H |\n|---|",
+            "start_char":0, "end_char":100,
+            "content":"second"
+        }),
+    ];
+    let lifted = lift_common_fields(&mut chunks);
+    // Only the genuinely doc-level field lifts.
+    assert_eq!(lifted["title"], json!("T"));
+    // Chunk-level engine/structural keys stay in chunks, no matter how identical.
+    for k in [
+        "chunk_index",
+        "chunk_merged",
+        "chunks_in_merge",
+        "_text_score",
+        "_final_score",
+        "_text_rank",
+        "table_header",
+        "start_char",
+        "end_char",
+    ] {
+        assert!(
+            !lifted.contains_key(k),
+            "chunk-level key '{k}' must not lift"
+        );
+        for c in &chunks {
+            assert!(
+                c.get(k).is_some(),
+                "chunk-level '{k}' missing from chunk: {c}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_lift_common_fields_skips_chunk_payload_defaults() {
+    // Defensive: duplicate ingest can leave every chunk with identical
+    // `embedding` (vector) and `content` (text) — these must NOT lift, even
+    // when value-equal across the whole group. Lifting `embedding` would
+    // bloat the response; lifting `content` is semantically wrong.
+    let mut chunks = vec![
+        json!({
+            "doc_id":"a", "title":"T",
+            "content":"identical text",
+            "embedding":[0.1,0.2,0.3]
+        }),
+        json!({
+            "doc_id":"a", "title":"T",
+            "content":"identical text",
+            "embedding":[0.1,0.2,0.3]
+        }),
+    ];
+    let lifted = lift_common_fields(&mut chunks);
+    assert_eq!(lifted["title"], json!("T"));
+    for k in ["content", "embedding"] {
+        assert!(
+            !lifted.contains_key(k),
+            "chunk-payload key '{k}' must not lift"
+        );
+        for c in &chunks {
+            assert!(c.get(k).is_some(), "'{k}' should remain in chunk: {c}");
+        }
+    }
+}
+
+#[test]
+fn test_lift_common_fields_skips_engine_reserved_keys() {
+    // A user field happening to be named `best_score`/`chunk_count`/`chunks`
+    // with identical values across chunks must NOT be lifted — those names
+    // are reserved for the engine at the group root and would overwrite it.
+    let mut chunks = vec![
+        json!({"doc_id":"a","title":"T","best_score":0.99,"chunk_count":7,"chunks":["nested"],"content":"c1"}),
+        json!({"doc_id":"a","title":"T","best_score":0.99,"chunk_count":7,"chunks":["nested"],"content":"c2"}),
+    ];
+    let lifted = lift_common_fields(&mut chunks);
+    assert_eq!(lifted["title"], json!("T"));
+    for k in ["doc_id", "best_score", "chunk_count", "chunks"] {
+        assert!(
+            !lifted.contains_key(k),
+            "engine-reserved key '{k}' must not lift"
+        );
+        // ...and stays untouched in each chunk.
+        for c in &chunks {
+            assert!(
+                c.get(k).is_some(),
+                "engine-reserved '{k}' missing from chunk: {c}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_lift_common_fields_empty_input() {
+    let mut chunks: Vec<Value> = Vec::new();
+    let lifted = lift_common_fields(&mut chunks);
+    assert!(lifted.is_empty());
+}

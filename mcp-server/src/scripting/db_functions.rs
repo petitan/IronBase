@@ -1409,19 +1409,7 @@ fn hybrid_search_impl(
 
     if group_by_document {
         // No projection — Rhai callers get the full chunk documents.
-        let (groups, _total) = match crate::tools::hybrid::build_doc_groups(
-            &fo.fused,
-            adapter,
-            &p.collection,
-            &p.query,
-            p.limit,
-            &p.filter,
-            p.max_chunks_per_doc,
-            &None,
-            &fo.effective_text_field,
-            &fo.effective_text_fields,
-            p.merge_chunks,
-        ) {
+        let (groups, _total) = match crate::tools::hybrid::build_doc_groups(adapter, &fo, &None) {
             Ok(g) => g,
             Err(e) => return Dynamic::from(format!("Error: {}", e)),
         };

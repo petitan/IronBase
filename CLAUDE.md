@@ -775,7 +775,7 @@ A Rhai script engine-ben elérhető adatbázis függvények (script_exec / scrip
 | `db_delete_many(collection, filter)` | Törlés (összes találat) |
 | `db_count(collection, query)` | Dokumentumok számolása |
 | `db_aggregate(collection, pipeline)` | Aggregációs pipeline |
-| `db_hybrid_search(collection, query)` | RRF hybrid keresés (fusion.rs delegálás) |
+| `db_hybrid_search(collection, query)` | RRF hybrid keresés (motor: `search::hybrid`) |
 | `db_hybrid_search(collection, query, options)` | Hybrid keresés opciókkal |
 | `db_rag_import(collection, text, metadata)` | RAG dokumentum import |
 | `db_rag_create(collection)` / `db_rag_create(collection, options)` | RAG collection létrehozás |
@@ -802,13 +802,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 });
 ```
 
-**Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/fusion.rs` (shared pipeline)
+**Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/hybrid.rs` (`retrieve_and_fuse`), `ironbase-core/src/search/hybrid/` (fusion motor)
 </details>
 
 ### Score Fusion / hibrid keresés architektúra
 
 RRF fusion, reranking, adjacent-chunk merge, MMR, fulltext mode (OR default v1.0.537+),
-document-level AND, multi-field FTS, search-mode presetek, közös `fusion.rs`/`hybrid.rs` motor.
+document-level AND, multi-field FTS, search-mode presetek; a fusion a motorban (`ironbase_core::search::hybrid`, `CollectionCore::hybrid_fuse`), az MCP csak feloldja a paramétereket.
 → **[`docs/SCORE_FUSION.md`](docs/SCORE_FUSION.md)** (teljes spec). Operatív: [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md).
 
 ### Auto-Embedding & Cache

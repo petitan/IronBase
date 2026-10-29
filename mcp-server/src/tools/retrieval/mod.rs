@@ -152,25 +152,13 @@ fn handle_search(
     // retrieve+fuse → grouped builder → compact contract.
     let fo = retrieve_and_fuse(&hp, adapter, embedding_manager)?;
     let projection = parse_projection_value(Some(search_projection()))?;
-    let (groups, total_chunks) = build_doc_groups(
-        &fo.fused,
-        adapter,
-        &hp.collection,
-        &hp.query,
-        hp.limit,
-        &hp.filter,
-        hp.max_chunks_per_doc,
-        &projection,
-        &fo.effective_text_field,
-        &fo.effective_text_fields,
-        hp.merge_chunks,
-    )?;
+    let (groups, total_chunks) = build_doc_groups(adapter, &fo, &projection)?;
 
     let mut out = contract::assemble(
         &groups,
         total_chunks,
         fo.qual.qualified_doc_count,
-        &fo.effective_text_field,
+        &fo.query.text_field,
         &p.format,
         p.debug,
     )?;
