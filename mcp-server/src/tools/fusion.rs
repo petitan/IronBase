@@ -216,6 +216,7 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
         |r| &r.doc,
         |r| &mut r.doc,
         |_, r| r.final_score,
+        None,
     )
 }
 
@@ -223,18 +224,44 @@ pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: 
 /// (`build_doc_groups`), which are already best-first: each run keeps its
 /// earliest chunk. Grouped mode never merged, so overlapping neighbours
 /// reached the `search` response twice (hybrid review H1).
+///
+/// A merged passage holds at most [`MAX_MERGED_PASSAGE_CHARS`] around its best
+/// chunk; the rest of a longer run stays in further passages. Unbounded, the
+/// consecutive matching chunks of a table merged into one passage of tens of
+/// thousands of characters, which the `search` context budget could not take,
+/// and the whole document was left out (docs/SEARCH_CONTEXT_BUDGET_BUG.md).
+/// The best chunk's byte offset in the merged text is kept under
+/// [`MERGE_BEST_OFFSET_KEY`] so a shortened passage can keep it.
 pub(crate) fn merge_adjacent_values(chunks: &mut Vec<Value>, text_field: &str) -> usize {
-    merge_adjacent_runs(chunks, text_field, |c| c, |c| c, |i, _| -(i as f64))
+    merge_adjacent_runs(
+        chunks,
+        text_field,
+        |c| c,
+        |c| c,
+        |i, _| -(i as f64),
+        Some(MAX_MERGED_PASSAGE_CHARS),
+    )
 }
+
+/// The largest merged passage (bytes) of a grouped result: a quarter of the
+/// `search` context budget, so one document's run cannot take it over
+pub(crate) const MAX_MERGED_PASSAGE_CHARS: usize = 3_000;
+
+/// Internal key (stripped from every response, never lifted) holding the byte
+/// offset of a merged passage's best chunk
+pub(crate) const MERGE_BEST_OFFSET_KEY: &str = "_merge_best_offset";
 
 /// Shared merge: `doc` reads an item's chunk document, `score` ranks an item
 /// (by its position and value) to pick the one that carries the run.
+/// `max_chars`: merge at most this many bytes of a run, growing from its best
+/// chunk; the chunks left out form runs of their own.
 fn merge_adjacent_runs<T>(
     results: &mut Vec<T>,
     text_field: &str,
     doc: impl Fn(&T) -> &Value,
     doc_mut: impl Fn(&mut T) -> &mut Value,
     score: impl Fn(usize, &T) -> f64,
+    max_chars: Option<usize>,
 ) -> usize {
     if results.len() < 2 {
         return 0;
@@ -269,28 +296,80 @@ fn merge_adjacent_runs<T>(
         }
         entries.sort_by_key(|(ci, _)| *ci);
 
-        // Detect consecutive runs
+        // Detect consecutive runs; a run longer than `max_chars` is merged
+        // around its best chunk, and the parts left out are runs of their own
+        let mut pending: Vec<(usize, usize)> = Vec::new();
         let mut run_start = 0;
         while run_start < entries.len() {
             let mut run_end = run_start;
             while run_end + 1 < entries.len() && entries[run_end + 1].0 == entries[run_end].0 + 1 {
                 run_end += 1;
             }
+            pending.push((run_start, run_end));
+            run_start = run_end + 1;
+        }
 
-            if run_end > run_start {
-                // Found a consecutive run of length > 1 — merge
-                let run = &entries[run_start..=run_end];
+        while let Some((range_start, range_end)) = pending.pop() {
+            if range_end > range_start {
+                let range = &entries[range_start..=range_end];
 
                 // Find the entry with the best final_score in this run
-                let best_idx_in_run = run
-                    .iter()
-                    .max_by(|a, b| {
-                        score(a.1, &results[a.1])
-                            .partial_cmp(&score(b.1, &results[b.1]))
+                let best_pos = (0..range.len())
+                    .max_by(|&a, &b| {
+                        score(range[a].1, &results[range[a].1])
+                            .partial_cmp(&score(range[b].1, &results[range[b].1]))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .unwrap()
-                    .1;
+                    .unwrap();
+                let best_idx_in_run = range[best_pos].1;
+
+                // The merged window: the best chunk, then its neighbours (the
+                // nearer side first) while the window stays within `max_chars`
+                let (mut lo, mut hi) = (best_pos, best_pos);
+                if let Some(cap) = max_chars {
+                    let len = |pos: usize| {
+                        doc(&results[range[pos].1])
+                            .get(text_field)
+                            .and_then(|v| v.as_str())
+                            .map_or(0, str::len)
+                    };
+                    let mut total = len(best_pos);
+                    loop {
+                        let left = (lo > 0).then(|| lo - 1).filter(|&p| total + len(p) <= cap);
+                        let right = (hi + 1 < range.len())
+                            .then_some(hi + 1)
+                            .filter(|&p| total + len(p) <= cap);
+                        match (left, right) {
+                            (Some(l), Some(r)) if best_pos - l <= r - best_pos => {
+                                total += len(l);
+                                lo = l;
+                            }
+                            (_, Some(r)) => {
+                                total += len(r);
+                                hi = r;
+                            }
+                            (Some(l), None) => {
+                                total += len(l);
+                                lo = l;
+                            }
+                            (None, None) => break,
+                        }
+                    }
+                    if lo > 0 {
+                        pending.push((range_start, range_start + lo - 1));
+                    }
+                    if hi + 1 < range.len() {
+                        pending.push((range_start + hi + 1, range_end));
+                    }
+                } else {
+                    lo = 0;
+                    hi = range.len() - 1;
+                }
+                if hi == lo {
+                    continue; // nothing to merge with within the cap
+                }
+                let run = &range[lo..=hi];
+                let mut best_offset: Option<usize> = None;
 
                 // Build merged text from all chunks in the run (overlap removed)
                 let mut merged_text = String::new();
@@ -317,6 +396,9 @@ fn merge_adjacent_runs<T>(
                         raw_text
                     };
 
+                    if res_idx == best_idx_in_run {
+                        best_offset = Some(merged_text.len());
+                    }
                     if i == 0 {
                         merged_text.push_str(chunk_text);
                     } else {
@@ -369,6 +451,9 @@ fn merge_adjacent_runs<T>(
                     }
                     obj.insert("chunk_merged".to_string(), json!(true));
                     obj.insert("chunks_in_merge".to_string(), json!(run.len()));
+                    if max_chars.is_some() {
+                        obj.insert(MERGE_BEST_OFFSET_KEY.to_string(), json!(best_offset));
+                    }
                 }
 
                 // Mark all other entries in this run for removal
@@ -378,8 +463,6 @@ fn merge_adjacent_runs<T>(
                     }
                 }
             }
-
-            run_start = run_end + 1;
         }
     }
 
@@ -1529,5 +1612,73 @@ mod tests {
         let removed = merge_adjacent_chunks(&mut results, "content");
         assert_eq!(removed, 0);
         assert_eq!(results.len(), 0);
+    }
+
+    /// docs/SEARCH_CONTEXT_BUDGET_BUG.md: a table's consecutive matching
+    /// chunks merged into one passage of 57 267 chars. A grouped merge now
+    /// stays within `MAX_MERGED_PASSAGE_CHARS` around its best chunk, the rest
+    /// of the run forms further passages, and the best chunk's offset is kept.
+    #[test]
+    fn grouped_merge_is_bounded_around_the_best_chunk() {
+        // 12 consecutive chunks of ~1000 bytes, best-first order: chunk 6 first
+        let order = [6u64, 2, 9, 0, 11, 5, 7, 1, 3, 4, 8, 10];
+        let mut chunks: Vec<Value> = order
+            .iter()
+            .map(|&ci| {
+                json!({"doc_id": "t", "chunk_index": ci,
+                       "content": format!("<{ci:02}>{}", "x".repeat(996))})
+            })
+            .collect();
+        merge_adjacent_values(&mut chunks, "content");
+
+        let texts: Vec<&str> = chunks
+            .iter()
+            .map(|c| c["content"].as_str().unwrap())
+            .collect();
+        for t in &texts {
+            assert!(
+                t.len() <= MAX_MERGED_PASSAGE_CHARS,
+                "passage of {} bytes",
+                t.len()
+            );
+        }
+        // Every chunk's text is kept exactly once
+        let all: String = texts.concat();
+        for ci in 0..12 {
+            assert_eq!(all.matches(&format!("<{ci:02}>")).count(), 1, "chunk {ci}");
+        }
+        // The best chunk leads the first passage's window and its offset is kept
+        let first = &chunks[0];
+        let offset = first[MERGE_BEST_OFFSET_KEY].as_u64().unwrap() as usize;
+        assert!(first["content"].as_str().unwrap()[offset..].starts_with("<06>"));
+        assert_eq!(
+            first["chunks_in_merge"],
+            json!(3),
+            "6 and its neighbours 5, 7"
+        );
+    }
+
+    /// The flat merge (Rhai / `hybrid_search` results) keeps whole runs and
+    /// adds no internal key
+    #[test]
+    fn flat_merge_is_unbounded() {
+        let text = "y".repeat(1000);
+        let mut results: Vec<FusedResult> = (0..6u64)
+            .map(|ci| {
+                let start = ci * 1000;
+                make_chunk(
+                    &format!("c{ci}"),
+                    "t",
+                    ci,
+                    &text,
+                    start,
+                    start + 1000,
+                    1.0 - ci as f64 * 0.1,
+                )
+            })
+            .collect();
+        assert_eq!(merge_adjacent_chunks(&mut results, "content"), 5);
+        assert_eq!(results[0].doc["content"].as_str().unwrap().len(), 6000);
+        assert!(results[0].doc.get(MERGE_BEST_OFFSET_KEY).is_none());
     }
 }

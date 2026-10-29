@@ -18,8 +18,11 @@ What this does instead:
    (`db_hybrid_search` in a script: `hybrid::retrieve_and_fuse` +
    `build_doc_groups`, query embedded by `embed_query`), differing only in its
    weights / fusion options. The `mirror` configuration passes `search`'s own
-   defaults and is checked to return exactly what `search` returns; the run
-   stops if it does not (the other configurations would not be comparable).
+   defaults: `search` must return an order-preserving subsequence of its
+   documents (the response layer's context budget may leave documents out, see
+   docs/SEARCH_CONTEXT_BUDGET_BUG.md), else the run stops (the configurations
+   would not measure `search`'s pipeline). The lanes and ablations are compared
+   with `mirror`, the engine; `search` vs `mirror` measures the response layer.
 2. The judging pool of each query is the union of every configuration's
    top-k documents and the June relevant ids. Every pooled pair is judged
    again by one judge (the June prompt, temperature 0) over the whole document
@@ -81,9 +84,10 @@ SEARCH_DEFAULTS = {
     "merge_chunks": True,
 }
 
-# name -> (options over SEARCH_DEFAULTS, description). `mirror` must equal `search`.
+# name -> (options over SEARCH_DEFAULTS, description). `search` must return a
+# subsequence of `mirror`.
 CONFIGS = {
-    "mirror": ({}, "search's pipeline and defaults (checked against `search`)"),
+    "mirror": ({}, "search's pipeline and defaults, without the response budget"),
     "bm25": ({"vector_weight": 0.0, "fulltext_weight": 1.0}, "lexical lane only"),
     "vector": ({"vector_weight": 1.0, "fulltext_weight": 0.0}, "vector lane only"),
     "no_rerank": ({"rerank": False}, "hybrid without the rerank boosts"),
@@ -183,6 +187,12 @@ def load_judgments(path):
     return out
 
 
+def is_subsequence(short, long):
+    """True if `short` is `long` with some items left out, order kept"""
+    it = iter(long)
+    return all(any(x == y for y in it) for x in short)
+
+
 # --- statistics -------------------------------------------------------------
 def mean(xs):
     return sum(xs) / len(xs) if xs else float("nan")
@@ -274,6 +284,9 @@ def selftest():
     m = metrics_for(["a", "x", "b"], {"a", "b"})
     check("metrics", abs(m["ndcg@5"] - 0.919_721_4) < 1e-6 and m["recall@5"] == 1.0)
     check("judge key stable", judge_key("m", "q", "d") == judge_key("m", "q", "d"))
+    check("subsequence", is_subsequence(["a", "c"], ["a", "b", "c"])
+          and is_subsequence([], ["a"]) and not is_subsequence(["c", "a"], ["a", "b", "c"])
+          and not is_subsequence(["d"], ["a"]))
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -309,12 +322,12 @@ def run(args):
         got = {"search": run_search(args.mcp, coll, lq["query"], k)}
         for name in configs:
             got[name] = run_config(args.mcp, name, coll, lq["query"], k)
-        if got["mirror"] != got["search"]:
+        if not is_subsequence(got["search"], got["mirror"]):
             mismatches.append((lq["query"], got["search"], got["mirror"]))
         runs.append(got)
         print(f"[{i}/{len(labels)}] retrieved :: {lq['query']}", file=sys.stderr)
     if mismatches:
-        print(f"\nSTOP: the mirror configuration differs from `search` on "
+        print(f"\nSTOP: `search` is not a subsequence of the mirror configuration on "
               f"{len(mismatches)}/{len(labels)} queries; the configurations would not "
               f"measure `search`'s pipeline. First: {mismatches[0]}", file=sys.stderr)
         return 3
@@ -376,14 +389,17 @@ def run(args):
         per_query.append(row)
 
     # 4. Report
-    comparisons = [("search", "bm25"), ("search", "vector"), ("search", "no_rerank"),
-                   ("search", "keyword"), ("search", "rrf_k60")]
+    comparisons = [("mirror", "bm25"), ("mirror", "vector"), ("mirror", "no_rerank"),
+                   ("mirror", "keyword"), ("mirror", "rrf_k60"), ("mirror", "search")]
+    shortened = sum(len(got["search"]) < len(got["mirror"]) for got in runs)
     lines = ["# Lane comparison (`search` pipeline)", "",
              f"- labels: `{os.path.basename(args.labels)}`, {len(labels)} answerable queries; "
              f"buckets fixed from the June labels (specific: <= {args.specific_max_relevant} "
              f"relevant)",
              f"- configurations: " + "; ".join(f"`{n}`: {d}" for n, (_, d) in CONFIGS.items()),
-             "- `mirror` returned exactly `search`'s documents on every query",
+             f"- `search` returned a subsequence of `mirror` on every query; fewer documents "
+             f"on {shortened}/{len(labels)} (`search` vs `mirror` is the response layer's "
+             f"effect, its Recall@10 is over the documents it returned)",
              f"- judge: `{args.judge_model}`, temperature 0, June prompt, whole document "
              f"(<= {args.doc_chars} chars); pool = every configuration's top-{k} + June "
              f"relevant ids",
@@ -402,12 +418,10 @@ def run(args):
                   "| configuration | " + " | ".join(METRICS) + " | (June labels) " + PRIMARY + " |",
                   "|---|" + "---|" * (len(METRICS) + 1)]
         for name in ["search"] + configs:
-            if name == "mirror":
-                continue
             vals = [mean([q["metrics"][name][m] for q in qs]) for m in METRICS]
             june = mean([q["june_metrics"][name][PRIMARY] for q in qs])
             lines.append(f"| {name} | " + " | ".join(fmt(v) for v in vals) + f" | {fmt(june)} |")
-        lines += ["", "| comparison | metric | Δ (other − search) | 95% CI | p | p (Holm) | W/T/L |",
+        lines += ["", "| comparison | metric | Δ (other − mirror) | 95% CI | p | p (Holm) | W/T/L |",
                   "|---|---|---|---|---|---|---|"]
         for metric in METRICS:
             rows = [compare(qs, a, b, metric) for a, b in comparisons]
@@ -415,17 +429,17 @@ def run(args):
                 r["p_holm"] = p_adj
                 r["bucket"] = bucket
                 csv_rows.append(r)
-                lines.append(f"| {r['other']} vs search | {metric} | {r['delta']:+.4f} | "
+                lines.append(f"| {r['other']} vs mirror | {metric} | {r['delta']:+.4f} | "
                              f"[{r['ci_lo']:+.4f}, {r['ci_hi']:+.4f}] | {r['p']:.4f} | "
                              f"{r['p_holm']:.4f} | {r['wins']}/{r['ties']}/{r['losses']} |")
         lines.append("")
 
     code_re = re.compile(r"\b(?=\w*\d)[\w-]{3,}\b")
-    lines += ["## specific: per query, search vs bm25 (" + PRIMARY + ")", "",
-              "| query | code-like token | search | bm25 | Δ |", "|---|---|---|---|---|"]
+    lines += ["## specific: per query, mirror vs bm25 (" + PRIMARY + ")", "",
+              "| query | code-like token | mirror | bm25 | Δ |", "|---|---|---|---|---|"]
     for q in sorted((q for q in per_query if q["bucket"] == "specific"),
-                    key=lambda q: q["metrics"]["bm25"][PRIMARY] - q["metrics"]["search"][PRIMARY]):
-        s, b = q["metrics"]["search"][PRIMARY], q["metrics"]["bm25"][PRIMARY]
+                    key=lambda q: q["metrics"]["bm25"][PRIMARY] - q["metrics"]["mirror"][PRIMARY]):
+        s, b = q["metrics"]["mirror"][PRIMARY], q["metrics"]["bm25"][PRIMARY]
         lines.append(f"| {q['query']} | {'yes' if code_re.search(q['query']) else 'no'} | "
                      f"{fmt(s)} | {fmt(b)} | {b - s:+.4f} |")
 
