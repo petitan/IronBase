@@ -536,6 +536,8 @@ impl CollectionWrapper {
 #[pyclass]
 pub struct IronBase {
     db: DatabaseWrapper,
+    /// The background maintenance started by `start_maintenance`
+    maintenance: std::sync::Mutex<Option<ironbase_core::MaintenanceHandle>>,
 }
 
 #[pymethods]
@@ -572,6 +574,7 @@ impl IronBase {
 
         Ok(IronBase {
             db: DatabaseWrapper::File(Arc::new(db)),
+            maintenance: std::sync::Mutex::new(None),
         })
     }
 
@@ -590,6 +593,7 @@ impl IronBase {
 
         Ok(IronBase {
             db: DatabaseWrapper::Memory(Arc::new(db)),
+            maintenance: std::sync::Mutex::new(None),
         })
     }
 
@@ -645,7 +649,87 @@ impl IronBase {
     /// After calling close(), another process can open the same database file.
     /// The database instance should not be used after calling close().
     fn close(&self) -> PyResult<()> {
+        self.stop_maintenance();
         self.db.close().map_err(ironbase_error_to_pyerr)
+    }
+
+    /// Start the background maintenance a long-running process needs: a
+    /// periodic checkpoint (B+ tree indexes, metadata, WAL), so a crash does
+    /// not rebuild the indexes, and a compaction when the file has grown to
+    /// `bloat_ratio` times its live data (and at least `min_file_size_mb`).
+    /// The same schedule the MCP server runs. `close()` stops it.
+    ///
+    /// Args:
+    ///     checkpoint_interval: seconds between checkpoints (None = off)
+    ///     auto_compact: compact when the file is bloated
+    ///     bloat_ratio, min_file_size_mb, compact_check_interval, compact_cooldown:
+    ///         the compaction policy (defaults: 2.0, 100, 300 s, 1800 s)
+    ///
+    /// Example:
+    ///     >>> db = IronBase("app.mlite")
+    ///     >>> db.start_maintenance()
+    #[pyo3(signature = (
+        checkpoint_interval=Some(60.0),
+        auto_compact=true,
+        bloat_ratio=2.0,
+        min_file_size_mb=100,
+        compact_check_interval=300.0,
+        compact_cooldown=1800.0
+    ))]
+    fn start_maintenance(
+        &self,
+        checkpoint_interval: Option<f64>,
+        auto_compact: bool,
+        bloat_ratio: f64,
+        min_file_size_mb: u64,
+        compact_check_interval: f64,
+        compact_cooldown: f64,
+    ) -> PyResult<()> {
+        let DatabaseWrapper::File(db) = &self.db else {
+            return Ok(()); // Nothing to persist in memory
+        };
+        let secs = |name: &str, v: f64| {
+            if v.is_finite() && v > 0.0 {
+                Ok(std::time::Duration::from_secs_f64(v))
+            } else {
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "{name} must be a positive number of seconds, got {v}"
+                )))
+            }
+        };
+        let config = ironbase_core::MaintenanceConfig {
+            checkpoint_interval: checkpoint_interval
+                .map(|v| secs("checkpoint_interval", v))
+                .transpose()?,
+            auto_compact: if auto_compact {
+                Some(ironbase_core::AutoCompactPolicy {
+                    bloat_ratio_threshold: bloat_ratio,
+                    min_file_size_bytes: min_file_size_mb * 1024 * 1024,
+                    check_interval: secs("compact_check_interval", compact_check_interval)?,
+                    cooldown: secs("compact_cooldown", compact_cooldown)?,
+                })
+            } else {
+                None
+            },
+        };
+        self.stop_maintenance();
+        let handle = ironbase_core::spawn_maintenance(Arc::clone(db), config)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        *self.maintenance.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        Ok(())
+    }
+
+    /// Stop the background maintenance (waits for a running compaction to
+    /// cancel). No-op if it is not running.
+    fn stop_maintenance(&self) {
+        let handle = self
+            .maintenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(handle) = handle {
+            handle.stop();
+        }
     }
 
     /// Checkpoint - Clear WAL

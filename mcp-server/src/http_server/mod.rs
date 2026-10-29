@@ -406,92 +406,13 @@ async fn run_http_server_internal(
         }
     });
 
-    // Spawn periodic checkpoint task (every 60 seconds, MongoDB-style)
-    // This ensures indexes are persisted to disk for crash recovery
-    let adapter_for_checkpoint = adapter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        // Skip the first immediate tick
-        interval.tick().await;
-        // Create a separate shutdown signal listener for this task
-        let shutdown = shutdown::shutdown_signal();
-        tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    // IMPORTANT: checkpoint() acquires parking_lot write lock (db.write())
-                    // which blocks the thread. Must use spawn_blocking to avoid
-                    // starving tokio worker threads and freezing the entire runtime.
-                    let adapter_clone = adapter_for_checkpoint.clone();
-                    match tokio::task::spawn_blocking(move || adapter_clone.checkpoint_periodic()).await {
-                        Ok(Ok(stats)) => {
-                            let indexes = stats.get("indexes_flushed").and_then(|v| v.as_u64()).unwrap_or(0);
-                            if indexes > 0 {
-                                tracing::info!(
-                                    indexes_flushed = indexes,
-                                    "Periodic checkpoint completed"
-                                );
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!("Periodic checkpoint failed: {}", e);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Checkpoint task panicked: {}", e);
-                        }
-                    }
-                }
-                _ = &mut shutdown => {
-                    tracing::debug!("Checkpoint task received shutdown signal");
-                    break;
-                }
-            }
-        }
-    });
-
-    // Spawn auto-compact timer task (checks wastage periodically, triggers compact if needed)
-    if config.auto_compact.enabled {
-        let auto_compact_state = Arc::new(parking_lot::Mutex::new(
-            crate::compaction::AutoCompactState::new(config.auto_compact.clone()),
-        ));
-        let adapter_for_compact = adapter.clone();
-        let check_interval_secs = config.auto_compact.check_interval_secs;
-        tokio::spawn(async move {
-            // Use 60s tick interval; should_check() gates actual checks to check_interval_secs
-            let tick_secs = check_interval_secs.min(60);
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
-            // Skip the first immediate tick (let server warm up)
-            interval.tick().await;
-            let shutdown = shutdown::shutdown_signal();
-            tokio::pin!(shutdown);
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let should = { auto_compact_state.lock().should_check() };
-                        if should {
-                            let adapter_clone = adapter_for_compact.clone();
-                            let job_mgr_clone = job_manager_for_compact.clone();
-                            let state_clone = auto_compact_state.clone();
-                            if let Err(e) = tokio::task::spawn_blocking(move || {
-                                crate::compaction::auto_compact_check(
-                                    &adapter_clone,
-                                    &job_mgr_clone,
-                                    &state_clone,
-                                );
-                            }).await {
-                                tracing::warn!("Auto-compact check panicked: {}", e);
-                            }
-                        }
-                    }
-                    _ = &mut shutdown => {
-                        tracing::debug!("Auto-compact task received shutdown signal");
-                        break;
-                    }
-                }
-            }
-        });
-        tracing::info!("Auto-compact timer started (HTTP mode)");
-    }
+    // Background maintenance: periodic checkpoint (60 s) and bloat-triggered
+    // compaction, scheduled by the core (the same in stdio mode)
+    let maintenance = crate::compaction::spawn_server_maintenance(
+        adapter.clone(),
+        job_manager_for_compact.clone(),
+        &config.auto_compact,
+    );
 
     let app_state = Arc::new(HttpAppState {
         service,
@@ -916,13 +837,18 @@ async fn run_http_server_internal(
     // Graceful shutdown: stop background jobs first
     info!("Shutting down gracefully...");
 
-    // 1. Stop all background jobs and wait for threads to complete
+    // 1. Stop the background maintenance (no checkpoint may race the close)
+    if let Some(handle) = maintenance {
+        handle.stop();
+    }
+
+    // 2. Stop all background jobs and wait for threads to complete
     let completed = job_manager_for_shutdown.shutdown();
     if completed > 0 {
         info!("Stopped {} background job threads", completed);
     }
 
-    // 2. Close database (flush indexes + mark clean shutdown)
+    // 3. Close database (flush indexes + mark clean shutdown)
     if let Err(e) = adapter.close() {
         tracing::error!("Error closing database: {}", e);
     } else {
