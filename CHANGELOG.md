@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — hybrid search and RAG import in the engine; Python API (ironbase-core 0.3.451, mcp-server 1.0.649)
+
+Completes `docs/MCP_TO_CORE_PLAN.md` (points 3 and 4).
+
+- **Hybrid retrieval in the engine:** `CollectionCore::hybrid_fuse(&HybridQuery, ctx)` (document-level
+  AND, vector + fulltext lanes, weighted RRF, rerank, per-document cap, adjacent-chunk merge, MMR)
+  and `hybrid_group_documents` (two-phase grouping, `lift_common_fields`).
+  - `HybridQuery` carries the resolved query vector, fields and weights.
+  - `CollectionCore::fulltext_document_scope` is the shared document-level AND orchestration (fulltext
+    tool, hybrid search, Rhai `db_fulltext_search`, which now reports its errors).
+  - The MCP keeps the resolution (weights, embedding, RAG config, shadow re-embed index).
+  - A 240-case golden comparison (10 queries × 24 parameter combinations, flat and grouped) gives
+    identical output before and after the move.
+- **One projection:** the hybrid search projects like `find` (dot notation; a mixed include/exclude
+  projection is refused). The second, top-level-only `apply_projection` is gone.
+- **Chunking behind the `rag` feature:** `ironbase_core::chunking`. `text-splitter` is only a
+  dependency with `rag`; the MCP server and the Python binding enable it.
+  - `chunking::import` provides `build_chunk_documents`, replacing three MCP copies.
+  - It also provides the idempotent `import_chunks` / `should_skip_before_embedding` over a
+    `ChunkStore` trait (`DatabaseCore`, MCP adapter), plus `IfExists`, `RESERVED_METADATA_KEYS` and
+    `check_embedding_dimensions`.
+- **Python:**
+  - `Collection.create_vector_index(field, dimensions, metric)`;
+  - `vector_search(field, vector, limit, filter)`;
+  - `hybrid_search(query, vector=None, ...)`: flat results with score fields, or grouped;
+  - `ironbase.chunk_text(...)`;
+  - `Collection.rag_import(text, embed=None, ...)`: idempotent per `doc_id`. Embeddings whose
+    dimension does not match the field's vector index are refused before the stored chunks are
+    replaced.
+  - Tests: `test_vector_hybrid.py`, `test_rag_import.py`.
+- `DistanceMetric` implements `FromStr` (shared by the binding and the MCP adapter).
+- `FusedResult::write_score_fields` is the one score shape (grouping, Rhai, Python).
+- `just test-core` / `run_dev_checks` run the core tests with `--features rag`.
+
 ### Changed — search logic moves from the MCP server into the engine (ironbase-core 0.3.450, mcp-server 1.0.648)
 
 Plan: `docs/MCP_TO_CORE_PLAN.md` (decisions D1–D5 approved).
