@@ -153,17 +153,6 @@ pub struct FulltextSearchOptions {
     pub target_doc_ids: Option<std::collections::HashSet<String>>,
 }
 
-/// Result of document-level AND qualification for group_by_document.
-#[derive(Debug)]
-pub enum QualificationResult {
-    /// Single token: no intersection needed, skip qualification.
-    NotRequired,
-    /// Documents qualified via chunk_doc_mapping (fast path).
-    Qualified(Vec<String>),
-    /// Legacy index without chunk_doc_mapping — caller should use find-based fallback.
-    LegacyFallback,
-}
-
 /// Full-text search result with optional highlights
 #[derive(Debug)]
 pub struct FulltextSearchResult {
@@ -1759,19 +1748,6 @@ impl IronBaseAdapter {
         Ok(coll.fulltext_indexed_fields()?)
     }
 
-    /// Tokenize query using the fulltext index's config for a given field.
-    /// Returns unique stemmed tokens — same processing as fulltext search uses.
-    pub fn fulltext_tokenize_query(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-    ) -> Result<Vec<String>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_tokenize_query(field, query)?)
-    }
-
     /// Get the stored tokenization options (language, accent_folding, min_word_length)
     /// of an existing fulltext index for a field.
     pub fn get_fulltext_index_options(
@@ -1784,120 +1760,18 @@ impl IronBaseAdapter {
         Ok(coll.get_fulltext_index_options(field)?)
     }
 
-    /// Get posting list sizes for each token (for rarity-based ordering).
-    pub fn fulltext_token_posting_counts(
+    /// Document-level AND qualification: the documents holding every query
+    /// token on at least one of `fields` (see
+    /// `CollectionCore::fulltext_qualify_documents`).
+    pub fn fulltext_qualify_documents(
         &self,
         collection: &str,
-        field: &str,
-        tokens: &[String],
-    ) -> Result<Vec<(String, usize)>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_token_posting_counts(field, tokens)?)
-    }
-
-    /// Get all chunk _ids from posting list for a stemmed token.
-    /// Returns DocumentIds as serde_json::Value for use in $in filters.
-    pub fn fulltext_token_chunk_ids(
-        &self,
-        collection: &str,
-        field: &str,
-        token: &str,
-    ) -> Result<Vec<Value>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let ids = coll.fulltext_token_chunk_ids(field, token)?;
-        Ok(ids
-            .into_iter()
-            .filter_map(|id| serde_json::to_value(id).ok())
-            .collect())
-    }
-
-    /// Resolve chunk _ids to parent doc_id values using the fulltext index's in-memory mapping.
-    /// Returns chunk_id (as DocumentId) → doc_id (String) for all mapped chunks.
-    pub fn fulltext_resolve_chunk_doc_ids(
-        &self,
-        collection: &str,
-        field: &str,
-        chunk_ids: &[ironbase_core::document::DocumentId],
-    ) -> Result<std::collections::HashMap<ironbase_core::document::DocumentId, String>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_resolve_chunk_doc_ids(field, chunk_ids)?)
-    }
-
-    /// Check if the fulltext index has a chunk→doc_id mapping populated.
-    pub fn fulltext_has_chunk_doc_mapping(&self, collection: &str, field: &str) -> Result<bool> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_has_chunk_doc_mapping(field)?)
-    }
-
-    /// Check if the fulltext index tracks a parent doc_id field (RAG-style).
-    /// `false` → non-RAG collection: the chunk `_id` is the document identity.
-    pub fn fulltext_has_parent_doc_id_field(&self, collection: &str, field: &str) -> Result<bool> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_has_parent_doc_id_field(field)?)
-    }
-
-    /// Qualify documents for document-level AND mode using in-memory chunk→doc_id mapping.
-    ///
-    /// For each token, gets the posting list chunk_ids from the fulltext index,
-    /// resolves them to doc_ids via the chunk_doc_mapping, then intersects.
-    /// Returns the set of doc_ids that contain ALL query tokens (across any chunks).
-    pub fn fulltext_qualify_documents_fast(
-        &self,
-        collection: &str,
-        field: &str,
+        fields: &[&str],
         query: &str,
-    ) -> Result<QualificationResult> {
+    ) -> Result<ironbase_core::DocumentQualification> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
-
-        // Tokenize
-        let tokens = coll.fulltext_tokenize_query(field, query)?;
-        if tokens.len() <= 1 {
-            return Ok(QualificationResult::NotRequired);
-        }
-
-        // Check if mapping is available
-        if !coll.fulltext_has_chunk_doc_mapping(field)? {
-            return Ok(QualificationResult::LegacyFallback);
-        }
-
-        // Get posting counts for rarity ordering
-        let mut token_counts = coll.fulltext_token_posting_counts(field, &tokens)?;
-        token_counts.sort_by_key(|(_, count)| *count);
-
-        if token_counts[0].1 == 0 {
-            return Ok(QualificationResult::Qualified(Vec::new()));
-        }
-
-        // Intersect at doc_id level using chunk_doc_mapping
-        let mut qualified: Option<std::collections::HashSet<String>> = None;
-
-        for (token, _) in &token_counts {
-            let chunk_ids = coll.fulltext_token_chunk_ids(field, token)?;
-            let chunk_doc_ids = coll.fulltext_resolve_chunk_doc_ids(field, &chunk_ids)?;
-
-            let doc_ids: std::collections::HashSet<String> = chunk_doc_ids.into_values().collect();
-
-            qualified = Some(match qualified {
-                None => doc_ids,
-                Some(prev) => prev.intersection(&doc_ids).cloned().collect(),
-            });
-
-            if qualified.as_ref().is_some_and(|q| q.is_empty()) {
-                return Ok(QualificationResult::Qualified(Vec::new()));
-            }
-        }
-
-        Ok(QualificationResult::Qualified(
-            qualified
-                .map(|q| q.into_iter().collect())
-                .unwrap_or_default(),
-        ))
+        Ok(coll.fulltext_qualify_documents(fields, query)?)
     }
 
     // ============================================================

@@ -1,7 +1,7 @@
 # MCP → core: a szerverbe nem való logika áthelyezése
 
-**Állapot:** terv (2026-10-29). Az 1. pont (háttér-karbantartás) **kész**, lásd lent; a 2–4.
-pont döntésre vár (a végén: *Döntések*).
+**Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
+a halott `preprocessing/` törlése, 2. pont (qualification). Hátra: 3. és 4. pont.
 
 ## Miért
 
@@ -30,7 +30,16 @@ bloat alapú compaction, közös politikával (`AutoCompactPolicy`, a korábbi
 Az MCP HTTP- és stdio-módja ugyanazt indítja, és leálláskor a zárás **előtt** állítja
 le. Python: `IronBase.start_maintenance(...)`, a `close()` leállítja.
 
-## 2. Dokumentum-szintű AND („qualification") → `CollectionCore`
+## 2. Dokumentum-szintű AND („qualification") → `CollectionCore` — kész
+
+**Megvalósítva:** `CollectionCore::fulltext_qualify_documents(fields, query) ->
+Result<DocumentQualification>` (`collection_core/search.rs`), `to_filter()`-rel. Az MCP
+`apply_document_qualification` és a Rhai `db_fulltext_search` ezt hívja; a hat primitív
+(`fulltext_tokenize_query`, …) a motorból és az adapterből törölve. A `find`-alapú
+fallback halott kód volt (a `parent_doc_id_field` sehol nem állítódik be, így az ága nem
+futott; a régi RAG-indexek mappingját az induló migráció tölti fel) — nem került át.
+
+Az eredeti terv:
 
 **Most:** `adapter.rs:1882` (`fulltext_qualify_documents_fast`) és `fusion.rs:565–700`
 (`qualify_documents`, `apply_document_qualification`, két fallback: posting-list és

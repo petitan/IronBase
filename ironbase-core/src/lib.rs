@@ -80,7 +80,9 @@ mod transaction_integration_tests;
 mod transaction_property_tests;
 
 // Public exports
-pub use collection_core::{index_cache_files, CollectionCore, FindCursor, InsertManyResult};
+pub use collection_core::{
+    index_cache_files, CollectionCore, DocumentQualification, FindCursor, InsertManyResult,
+};
 pub use database::background::{
     spawn_maintenance, AutoCompactPolicy, MaintenanceConfig, MaintenanceHandle, MaintenanceTarget,
     PeriodicCheckpointStats,
