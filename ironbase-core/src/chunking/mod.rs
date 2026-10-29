@@ -1,8 +1,10 @@
-//! Text chunking module for embedding long documents
+//! Text chunking module for embedding long documents (`rag` feature)
 //!
 //! Supports markdown-aware chunking that preserves heading structure,
 //! and plain text chunking. Both modes support configurable overlap.
+//! [`import`] stores a chunked document, one document per chunk.
 
+pub mod import;
 pub mod markdown;
 pub mod text;
 

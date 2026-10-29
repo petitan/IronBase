@@ -59,7 +59,14 @@ A pipeline minden ágában érvényes alapelvek:
 
 ## 2. Komponensek
 
-### 2.1 Chunkolás — `mcp-server/src/chunking/`
+### 2.1 Chunkolás — `ironbase-core/src/chunking/` (`rag` feature)
+
+A motorban (v1.0.649, `docs/MCP_TO_CORE_PLAN.md` 4. pont): a darabolás, a chunk-dokumentum
+építés (`import::build_chunk_documents`) és az idempotens import (`import::import_chunks`,
+`IfExists`, `ChunkStore`) közös az MCP `rag_document_import` / `embed_document`, a Rhai
+`db_rag_import` és a Python `rag_import` között. Python: `ironbase.chunk_text(...)`,
+`Collection.rag_import(text, embed=None, ...)`.
+
 
 `chunk_content(content, options)` → `Vec<Chunk>`. Két splitter (`markdown::split`,
 `text::split`) ugyanazon `Chunk` struktúrát adja. Auto-detekció markdown vs text:

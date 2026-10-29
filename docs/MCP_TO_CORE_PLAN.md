@@ -3,7 +3,8 @@
 **Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
 a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1–2. lépése
 (`ironbase_core::search::hybrid`: rerank, merge, MMR, `hybrid_fuse`, `hybrid_group_documents`),
-3/3. (Python: `create_vector_index`, `vector_search`, `hybrid_search`). Hátra: a 4. pont.
+3/3. (Python: `create_vector_index`, `vector_search`, `hybrid_search`), 4. pont (chunkolás és
+RAG-import a motor `rag` feature-je mögött; Python `chunk_text`, `rag_import`). **A terv kész.**
 
 ## Miért
 
@@ -108,7 +109,18 @@ JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue
 lépés aranyfájl-összevetéssel zárul, és a régi kód csak utána törlődik.
 **Méret:** L.
 
-## 4. Chunkolás → motor (opcionális `rag` feature)
+## 4. Chunkolás → motor (opcionális `rag` feature) — kész
+
+**Megvalósítva:** `ironbase_core::chunking` (`rag` feature, `text-splitter` csak mögötte; az MCP
+és a Python-kötés bekapcsolja). `chunking::import`: `build_chunk_documents` (a három MCP-oldali
+másolat helyett), `IfExists`, `RESERVED_METADATA_KEYS`, `import_chunks` /
+`should_skip_before_embedding` egy `ChunkStore` trait fölött — ezt a két `DatabaseCore` és az MCP
+adapter valósítja meg (az adapter így vezeti a dokumentumszámait). Python:
+`ironbase.chunk_text(text, ...)` (chunk-dict-ek `embed_text`-tel) és
+`Collection.rag_import(text, embed=None, ...)` (az `embed` hívható egyszer kapja meg az összes
+chunk szövegét). A kontextus-prefix (`context_fields`) MCP-oldali maradt.
+
+Az eredeti terv:
 
 **Most:** `mcp-server/src/chunking/` (~1 200 sor; `text_splitter` crate, markdown- és
 szövegdarabolás, kontextus-prefix) és az import-folyamat a `tools/rag.rs`-ben

@@ -8,19 +8,20 @@
 //! Search logic lives in hybrid_search (see hybrid.rs).
 
 use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
-use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
+use ironbase_core::chunking::import::{
+    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
+    ChunkDocumentOptions, IfExists, RESERVED_METADATA_KEYS,
+};
+use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
-use super::helpers::{
-    insert_chunks_idempotent, parse_projection_value, should_skip_before_embedding,
-    validate_collection_name, IfExists, RESERVED_METADATA_KEYS,
-};
+use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
     RagLoadAllChunksParams,
@@ -513,7 +514,7 @@ fn build_import_context_prefix(
             }
         }
     }
-    crate::chunking::build_context_prefix(context_fields, &ctx_map)
+    ironbase_core::chunking::build_context_prefix(context_fields, &ctx_map)
 }
 
 fn handle_rag_document_import(
@@ -590,7 +591,7 @@ fn handle_rag_document_import(
     // an explicit doc_id already has chunks (auto-generated ids never collide).
     let if_exists = IfExists::parse(&p.if_exists);
     if let Some(ref doc_id) = p.doc_id {
-        if should_skip_before_embedding(adapter, &p.collection, doc_id, if_exists)? {
+        if should_skip_before_embedding(adapter.as_ref(), &p.collection, doc_id, if_exists)? {
             return Ok(json!({
                 "success": true,
                 "collection": p.collection,
@@ -735,68 +736,20 @@ fn handle_rag_document_import(
     }
 
     // Generate parent doc_id
-    let parent_id = p.doc_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let parent_id = p.doc_id.unwrap_or_else(new_doc_id);
 
     // Build documents
-    let mut documents: Vec<Value> = Vec::with_capacity(chunks.len());
-    for (chunk, embedding) in chunks.iter().zip(all_embeddings.iter()) {
-        let mut doc = json!({
-            "doc_id": parent_id,
-            "chunk_index": chunk.index,
-            "chunk_total": chunk.total,
-            "start_char": chunk.start_char,
-            "end_char": chunk.end_char
-        });
-
-        // Set text and embedding fields dynamically
-        if let Some(obj) = doc.as_object_mut() {
-            obj.insert(text_field.clone(), json!(chunk.text));
-            obj.insert(embedding_field.clone(), json!(embedding));
-        }
-
-        if let Some(ref title) = p.title {
-            doc["title"] = json!(title);
-        }
-        if let Some(ref heading) = chunk.heading {
-            doc["section"] = json!(heading);
-        }
-        if let Some(level) = chunk.heading_level {
-            doc["heading_level"] = json!(level);
-        }
-        if let Some(ref path) = chunk.section_path {
-            doc["section_path"] = json!(path);
-        }
-        if let Some(ref th) = chunk.table_header {
-            doc["table_header"] = json!(th);
-        }
-        // Add custom metadata (with security filtering)
-        if let Some(ref metadata) = p.metadata {
-            if let Some(meta_obj) = metadata.as_object() {
-                if let Some(doc_obj) = doc.as_object_mut() {
-                    for (k, v) in meta_obj {
-                        // SECURITY: Skip reserved keys to prevent injection
-                        if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
-                            tracing::warn!(
-                                "Ignoring reserved metadata key '{}' in rag_document_import",
-                                k
-                            );
-                            continue;
-                        }
-                        // Also skip embedding and text fields
-                        if k == &embedding_field || k == &text_field {
-                            tracing::warn!(
-                                "Ignoring protected field '{}' in rag_document_import metadata",
-                                k
-                            );
-                            continue;
-                        }
-                        doc_obj.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-        }
-        documents.push(doc);
-    }
+    let documents = build_chunk_documents(
+        &chunks,
+        Some(&all_embeddings),
+        &ChunkDocumentOptions {
+            doc_id: &parent_id,
+            text_field: &text_field,
+            embedding_field: &embedding_field,
+            title: p.title.as_deref(),
+            metadata: p.metadata.as_ref().and_then(|m| m.as_object()),
+        },
+    )?;
 
     // Validate embedding dimension matches expected (if RAG config exists)
     if let Some(ref cfg) = rag_config {
@@ -812,8 +765,13 @@ fn handle_rag_document_import(
 
     // Insert documents (idempotent w.r.t. doc_id — see issue #67).
     // if_exists was parsed before embedding (skip/error already short-circuited).
-    let result =
-        insert_chunks_idempotent(adapter, &p.collection, &parent_id, documents, if_exists)?;
+    let result = import_chunks(
+        adapter.as_ref(),
+        &p.collection,
+        &parent_id,
+        documents,
+        if_exists,
+    )?;
 
     if result.skipped {
         return Ok(json!({

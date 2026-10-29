@@ -10,13 +10,14 @@
 //! All functions include safety limits to prevent OOM attacks.
 
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
-use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::tools::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD};
-use crate::tools::helpers::{
-    insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
-};
 use crate::tools::params::{HybridSearchParams, ParseParams};
+use ironbase_core::chunking::import::{
+    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
+    ChunkDocumentOptions, IfExists,
+};
+use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -1478,9 +1479,7 @@ fn rag_import_impl(
     // Parse options using helper functions
     let title = get_string_option(&options, "title").unwrap_or_default();
     let explicit_doc_id = get_string_option(&options, "doc_id");
-    let doc_id = explicit_doc_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let doc_id = explicit_doc_id.clone().unwrap_or_else(new_doc_id);
     let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
     let language = get_string_option_or(&options, "language", "none");
     let text_fields_opt = get_string_array_option(&options, "text_fields");
@@ -1546,7 +1545,7 @@ fn rag_import_impl(
     // Pre-check before embedding: skip/error short-circuit if an explicit doc_id
     // already has chunks (auto-generated ids never collide).
     if let Some(ref did) = explicit_doc_id {
-        match should_skip_before_embedding(adapter, collection, did, if_exists) {
+        match should_skip_before_embedding(adapter.as_ref(), collection, did, if_exists) {
             Ok(true) => {
                 let mut result = Map::new();
                 result.insert("success".into(), Dynamic::from(true));
@@ -1607,67 +1606,24 @@ fn rag_import_impl(
     }
 
     // Build and insert documents
-    let mut documents: Vec<serde_json::Value> = Vec::with_capacity(chunks.len());
-    for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
-        let mut doc = json!({
-            "doc_id": doc_id,
-            "chunk_index": chunk.index,
-            "chunk_total": chunk.total,
-            "start_char": chunk.start_char,
-            "end_char": chunk.end_char
-        });
-
-        if let Some(obj) = doc.as_object_mut() {
-            obj.insert(text_field.clone(), json!(chunk.text));
-            obj.insert(embedding_field.clone(), json!(embedding));
-        }
-
-        if !title.is_empty() {
-            doc["title"] = json!(title);
-        }
-        if let Some(ref heading) = chunk.heading {
-            doc["section"] = json!(heading);
-        }
-        if let Some(level) = chunk.heading_level {
-            doc["heading_level"] = json!(level);
-        }
-        if let Some(ref path) = chunk.section_path {
-            doc["section_path"] = json!(path);
-        }
-        if let Some(ref th) = chunk.table_header {
-            doc["table_header"] = json!(th);
-        }
-
-        // Add custom metadata from options (with security filtering)
-        if let Some(metadata) = options.get("metadata") {
-            let meta_json = dynamic_to_json(metadata);
-            if let Some(meta_obj) = meta_json.as_object() {
-                if let Some(doc_obj) = doc.as_object_mut() {
-                    for (k, v) in meta_obj {
-                        // SECURITY: Skip reserved keys to prevent injection
-                        if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
-                            tracing::warn!("Ignoring reserved metadata key '{}' in rag_import", k);
-                            continue;
-                        }
-                        // Also skip embedding and text fields
-                        if k == &embedding_field || k == &text_field {
-                            tracing::warn!(
-                                "Ignoring protected field '{}' in rag_import metadata",
-                                k
-                            );
-                            continue;
-                        }
-                        doc_obj.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-        }
-
-        documents.push(doc);
-    }
+    let metadata = options.get("metadata").map(dynamic_to_json);
+    let documents = match build_chunk_documents(
+        &chunks,
+        Some(&embeddings),
+        &ChunkDocumentOptions {
+            doc_id: &doc_id,
+            text_field: &text_field,
+            embedding_field: &embedding_field,
+            title: (!title.is_empty()).then_some(title.as_str()),
+            metadata: metadata.as_ref().and_then(|m| m.as_object()),
+        },
+    ) {
+        Ok(documents) => documents,
+        Err(e) => return Dynamic::from(format!("Error: {}", e)),
+    };
 
     // Insert documents (idempotent w.r.t. doc_id — see issue #67)
-    match insert_chunks_idempotent(adapter, collection, &doc_id, documents, if_exists) {
+    match import_chunks(adapter.as_ref(), collection, &doc_id, documents, if_exists) {
         Ok(outcome) => {
             let mut result = Map::new();
             result.insert("success".into(), Dynamic::from(true));

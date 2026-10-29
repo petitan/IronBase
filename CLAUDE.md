@@ -623,8 +623,8 @@ cd mcp-server && cargo build --release
 mcp-server/src/
 ├── http_server/  # mod.rs, handler.rs, response.rs, state.rs, config.rs
 ├── jobs/         # manager.rs, types.rs
-├── chunking/     # markdown.rs, text.rs
-└── tools/        # auto_embed.rs
+└── tools/        # auto_embed.rs, hybrid.rs (retrieve_and_fuse), rag.rs
+# chunkolás: ironbase-core/src/chunking/ (`rag` feature), fusion: ironbase-core/src/search/hybrid/
 ```
 </details>
 

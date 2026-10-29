@@ -30,6 +30,8 @@
 // ============================================================================
 // PUBLIC API MODULES - User-facing functionality
 // ============================================================================
+#[cfg(feature = "rag")]
+pub mod chunking;
 pub mod collection_core;
 pub mod database;
 pub mod document;

@@ -7,6 +7,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ironbase_core::chunking::import::{
+    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
+    ChunkDocumentOptions, ChunkImport, ChunkStore, IfExists,
+};
+use ironbase_core::chunking::{build_embed_text, chunk_content, Chunk, ChunkMode, ChunkOptions};
 use ironbase_core::search::hybrid::{DocGroup, FusedResult, HybridFusion, HybridQuery};
 use ironbase_core::vector::{DistanceMetric, VectorIndexConfig, VectorSearchOptions};
 use ironbase_core::{
@@ -170,6 +175,46 @@ macro_rules! coll_dispatch {
 }
 
 impl DatabaseWrapper {
+    fn should_skip_before_embedding(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        if_exists: IfExists,
+    ) -> Result<bool, IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => {
+                should_skip_before_embedding(db.as_ref(), collection, doc_id, if_exists)
+            }
+            DatabaseWrapper::Memory(db) => {
+                should_skip_before_embedding(db.as_ref(), collection, doc_id, if_exists)
+            }
+        }
+    }
+
+    fn import_chunks(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        documents: Vec<Value>,
+        if_exists: IfExists,
+    ) -> Result<ChunkImport, IronBaseError> {
+        fn run<S: ChunkStore<Error = IronBaseError>>(
+            store: &S,
+            collection: &str,
+            doc_id: &str,
+            documents: Vec<Value>,
+            if_exists: IfExists,
+        ) -> Result<ChunkImport, IronBaseError> {
+            import_chunks(store, collection, doc_id, documents, if_exists)
+        }
+        match self {
+            DatabaseWrapper::File(db) => run(db.as_ref(), collection, doc_id, documents, if_exists),
+            DatabaseWrapper::Memory(db) => {
+                run(db.as_ref(), collection, doc_id, documents, if_exists)
+            }
+        }
+    }
+
     fn list_collections(&self) -> Vec<String> {
         db_dispatch!(self, list_collections)
     }
@@ -2066,6 +2111,123 @@ impl Collection {
         Ok(py_list)
     }
 
+    /// Chunk a document and store one document per chunk (RAG import).
+    ///
+    /// The text is split like `ironbase.chunk_text`; each chunk becomes a
+    /// document with `doc_id`, `chunk_index`, `chunk_total`, `start_char`,
+    /// `end_char`, the text (`text_field`), the embedding (`embedding_field`,
+    /// when `embed` is given), `title`, the heading fields and `metadata`.
+    /// Re-importing a `doc_id` replaces its chunks (`if_exists`). Indexes are
+    /// not created: add a fulltext / vector index for searching.
+    ///
+    /// Args:
+    ///     text: The document
+    ///     embed: Callable taking a list of texts, returning one vector per
+    ///         text; called once with every chunk's `embed_text`. None = no
+    ///         embeddings
+    ///     doc_id: The document's id (default: a new UUID)
+    ///     chunk_size / overlap: In characters (default: 1000 / 100)
+    ///     mode: "auto" (default), "markdown" or "text"
+    ///     title: `title` of every chunk
+    ///     metadata: Fields copied into every chunk (the chunk-tracking,
+    ///         text and embedding fields are skipped)
+    ///     text_field / embedding_field: default "content" / "embedding"
+    ///     if_exists: "replace" (default), "skip", "error" or "append"
+    ///
+    /// Returns:
+    ///     dict: doc_id, chunks_created, chunks_replaced, skipped
+    ///
+    /// Example:
+    ///     >>> coll.rag_import(text, embed=model.encode, doc_id="manual-v2")
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        text, embed=None, *, doc_id=None, chunk_size=1000, overlap=100, mode="auto",
+        title=None, metadata=None, text_field="content", embedding_field="embedding",
+        if_exists="replace"
+    ))]
+    fn rag_import<'py>(
+        &self,
+        py: Python<'py>,
+        text: &str,
+        embed: Option<Bound<'_, PyAny>>,
+        doc_id: Option<String>,
+        chunk_size: usize,
+        overlap: usize,
+        mode: &str,
+        title: Option<String>,
+        metadata: Option<Bound<'_, PyDict>>,
+        text_field: &str,
+        embedding_field: &str,
+        if_exists: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let if_exists = match if_exists {
+            "replace" | "skip" | "error" | "append" => IfExists::parse(if_exists),
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "if_exists must be 'replace', 'skip', 'error' or 'append', got '{other}'"
+                )))
+            }
+        };
+        let chunks = chunk(text, chunk_size, overlap, mode)?;
+        let result = PyDict::new(py);
+        let doc_id = doc_id.unwrap_or_else(new_doc_id);
+        result.set_item("doc_id", &doc_id)?;
+        let skipped = |result: Bound<'py, PyDict>| -> PyResult<Bound<'py, PyDict>> {
+            result.set_item("chunks_created", 0)?;
+            result.set_item("chunks_replaced", 0)?;
+            result.set_item("skipped", true)?;
+            Ok(result)
+        };
+        if chunks.is_empty() {
+            result.set_item("chunks_created", 0)?;
+            result.set_item("chunks_replaced", 0)?;
+            result.set_item("skipped", false)?;
+            return Ok(result);
+        }
+        // Before the (expensive) embedding: an existing doc_id under skip / error
+        if self
+            .db
+            .should_skip_before_embedding(&self.name, &doc_id, if_exists)
+            .map_err(ironbase_error_to_pyerr)?
+        {
+            return skipped(result);
+        }
+
+        let embeddings: Option<Vec<Vec<f32>>> = match embed {
+            Some(embed) => {
+                let texts: Vec<String> = chunks.iter().map(chunk_embed_text).collect();
+                Some(embed.call1((texts,))?.extract()?)
+            }
+            None => None,
+        };
+        let metadata = metadata
+            .map(|m| python_dict_to_json_value(py, &m))
+            .transpose()?;
+        let documents = build_chunk_documents(
+            &chunks,
+            embeddings.as_deref(),
+            &ChunkDocumentOptions {
+                doc_id: &doc_id,
+                text_field,
+                embedding_field,
+                title: title.as_deref(),
+                metadata: metadata.as_ref().and_then(|m| m.as_object()),
+            },
+        )
+        .map_err(ironbase_error_to_pyerr)?;
+        let outcome = self
+            .db
+            .import_chunks(&self.name, &doc_id, documents, if_exists)
+            .map_err(ironbase_error_to_pyerr)?;
+        if outcome.skipped {
+            return skipped(result);
+        }
+        result.set_item("chunks_created", outcome.inserted_ids.len())?;
+        result.set_item("chunks_replaced", outcome.replaced)?;
+        result.set_item("skipped", false)?;
+        Ok(result)
+    }
+
     /// List all fulltext indexes for this collection.
     ///
     /// Returns:
@@ -2637,6 +2799,60 @@ fn json_value_to_python(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     }
 }
 
+/// Chunk `text` with the engine's chunker
+fn chunk(text: &str, chunk_size: usize, overlap: usize, mode: &str) -> PyResult<Vec<Chunk>> {
+    let options = ChunkOptions::default()
+        .with_chunk_size(chunk_size)
+        .with_overlap(overlap)
+        .with_mode(ChunkMode::parse(mode));
+    chunk_content(text, &options)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// The text to embed for a chunk: its section breadcrumb + body, tables
+/// flattened (the stored text stays as it is)
+fn chunk_embed_text(chunk: &Chunk) -> String {
+    build_embed_text(&chunk.text, chunk.section_path.as_deref(), None)
+}
+
+/// Split a document into overlapping chunks, as `Collection.rag_import` does.
+///
+/// Markdown (detected, or mode="markdown") is split along its headings; each
+/// chunk carries its heading and section path.
+///
+/// Args:
+///     text: The document
+///     chunk_size / overlap: In characters (default: 1000 / 100)
+///     mode: "auto" (default), "markdown" or "text"
+///
+/// Returns:
+///     list of dicts: index, total, text, start_char, end_char, heading,
+///     heading_level, section_path, table_header, and embed_text (the text
+///     to embed: breadcrumb + body, tables flattened)
+#[pyfunction]
+#[pyo3(signature = (text, chunk_size=1000, overlap=100, mode="auto"))]
+fn chunk_text<'py>(
+    py: Python<'py>,
+    text: &str,
+    chunk_size: usize,
+    overlap: usize,
+    mode: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let py_list = PyList::empty(py);
+    for c in chunk(text, chunk_size, overlap, mode)? {
+        let mut value = serde_json::to_value(&c)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        if let Value::Object(ref mut obj) = value {
+            obj.insert(
+                "embed_text".to_string(),
+                Value::String(chunk_embed_text(&c)),
+            );
+        }
+        py_list.append(json_to_python_dict(py, &value)?)?;
+    }
+    Ok(py_list)
+}
+
 /// Python module initialization
 #[pymodule]
 fn ironbase(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2644,6 +2860,9 @@ fn ironbase(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IronBase>()?;
     m.add_class::<Collection>()?;
     m.add_class::<Cursor>()?;
+
+    // Functions
+    m.add_function(wrap_pyfunction!(chunk_text, m)?)?;
 
     // Exceptions - allows: except ironbase.CollectionNotFoundError
     m.add("IronBaseException", m.py().get_type::<IronBaseException>())?;
