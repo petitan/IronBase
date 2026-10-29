@@ -1,16 +1,16 @@
 //! Auto-compaction module — automatic storage bloat management
 //!
-//! Monitors .mlite file size vs estimated live data and triggers
-//! compaction when bloat exceeds configurable thresholds.
+//! The schedule (periodic checkpoint, bloat-triggered compaction) is the
+//! core's (`ironbase_core::spawn_maintenance`); this module gives it the
+//! server's target, whose compactions run as jobs.
 //!
 //! # Architecture
 //!
-//! - `AutoCompactConfig`: TOML-deserializable configuration
-//! - `AutoCompactState`: Runtime state (timers, cooldowns)
+//! - `AutoCompactConfig`: TOML-deserializable configuration (`[compaction]`)
+//! - `ServerMaintenance`: the server's `MaintenanceTarget` (job-based compaction)
+//! - `spawn_server_maintenance()`: starts the schedule (HTTP and stdio mode)
 //! - `CompactGuard`: RAII guard for adapter compacting flag (shared with admin.rs)
 //! - `run_compact_job()`: Background compact job execution (shared with admin.rs)
-//! - `auto_compact_check()`: Wastage check + trigger logic
-//! - `spawn_auto_compact_timer()`: Background thread for stdio mode
 
 use crate::adapter::IronBaseAdapter;
 use crate::jobs::{JobManager, JobType};
@@ -74,86 +74,15 @@ impl Default for AutoCompactConfig {
     }
 }
 
-// ============================================================================
-// Runtime state
-// ============================================================================
-
-/// Runtime state for auto-compaction timer.
-pub struct AutoCompactState {
-    config: AutoCompactConfig,
-    last_check: Instant,
-    last_compact_completed: Option<Instant>,
-}
-
-impl AutoCompactState {
-    pub fn new(config: AutoCompactConfig) -> Self {
-        Self {
-            config,
-            last_check: Instant::now(),
-            last_compact_completed: None,
-        }
-    }
-
-    /// Has enough time elapsed since the last check?
-    pub fn should_check(&mut self) -> bool {
-        if !self.config.enabled {
-            return false;
-        }
-        let elapsed = self.last_check.elapsed().as_secs();
-        if elapsed >= self.config.check_interval_secs {
-            self.last_check = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Should we trigger compaction given the current wastage?
-    ///
-    /// Three gates:
-    /// 1. bloat_ratio >= threshold
-    /// 2. file_size >= min_file_size_mb
-    /// 3. cooldown elapsed since last compact
-    ///
-    /// No file-size/RAM gate: the freeze that motivated one (2026-06-16) was a
-    /// page-cache-management bug, fixed structurally by the page-cache-bounded
-    /// compaction I/O (`storage/io.rs`, posix_fadvise(DONTNEED)+sync_file_range)
-    /// which bounds the resident footprint to ~chunk_size regardless of file
-    /// size. A RAM gate on top of that only disabled auto-compaction for large
-    /// files that are now safe to compact — a capability regression.
-    ///
-    /// NON-GOAL (known, accepted): on non-Linux the page-cache hints in
-    /// `storage/io.rs` are no-ops, so a large auto-compaction's OS buffer-cache
-    /// footprint is not explicitly bounded there. This is acceptable because the
-    /// freeze was only ever observed on Linux/WSL2 (the prod platform, where Fix B
-    /// applies) and macOS/Windows manage the unified buffer cache differently. If a
-    /// non-Linux host ever runs auto-compaction on a near-RAM-sized file, port the
-    /// hints (F_NOCACHE / Windows cache flush) rather than re-adding a RAM gate.
-    pub fn should_compact(&self, bloat_ratio: f64, file_size_bytes: u64) -> bool {
-        // Gate 1: bloat ratio
-        if bloat_ratio < self.config.bloat_ratio_threshold {
-            return false;
-        }
-
-        // Gate 2: minimum file size
-        let min_bytes = self.config.min_file_size_mb * 1024 * 1024;
-        if file_size_bytes < min_bytes {
-            return false;
-        }
-
-        // Gate 3: cooldown
-        if let Some(last) = self.last_compact_completed {
-            if last.elapsed().as_secs() < self.config.cooldown_secs {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    /// Mark that a compaction has completed.
-    pub fn mark_compact_completed(&mut self) {
-        self.last_compact_completed = Some(Instant::now());
+impl AutoCompactConfig {
+    /// The core's compaction policy for this configuration, `None` if disabled
+    pub fn policy(&self) -> Option<ironbase_core::AutoCompactPolicy> {
+        self.enabled.then(|| ironbase_core::AutoCompactPolicy {
+            bloat_ratio_threshold: self.bloat_ratio_threshold,
+            min_file_size_bytes: self.min_file_size_mb * 1024 * 1024,
+            check_interval: std::time::Duration::from_secs(self.check_interval_secs),
+            cooldown: std::time::Duration::from_secs(self.cooldown_secs),
+        })
     }
 }
 
@@ -278,188 +207,117 @@ pub fn run_compact_job(
 }
 
 // ============================================================================
-// Auto-compact check + trigger
+// The server's maintenance target
 // ============================================================================
 
-/// Check storage wastage and trigger compaction if thresholds are exceeded.
-///
-/// Called periodically by the timer task (HTTP: tokio task, stdio: background thread).
-/// Returns true if compaction was triggered.
-pub fn auto_compact_check(
-    adapter: &Arc<IronBaseAdapter>,
-    job_manager: &Option<Arc<JobManager>>,
-    state: &Arc<parking_lot::Mutex<AutoCompactState>>,
-) -> bool {
-    let wastage = adapter.compute_wastage();
+/// The periodic checkpoint every 60 s (MongoDB-style), as the HTTP server
+/// always ran it; the stdio server now runs it too
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-    let should_compact = {
-        let state_guard = state.lock();
-        state_guard.should_compact(wastage.bloat_ratio, wastage.file_size_bytes)
-    };
-
-    tracing::debug!(
-        file_size_mb = wastage.file_size_bytes / (1024 * 1024),
-        estimated_live_mb = wastage.estimated_live_bytes / (1024 * 1024),
-        bloat_ratio = format!("{:.2}", wastage.bloat_ratio),
-        total_writes = wastage.total_writes,
-        total_live = wastage.total_live,
-        dead_writes = wastage.dead_writes,
-        should_compact,
-        "Storage wastage check"
-    );
-
-    if !should_compact {
-        return false;
-    }
-
-    // Check preconditions for compact
-    if adapter.is_compacting() {
-        tracing::debug!("Auto-compact skipped: compaction already in progress");
-        return false;
-    }
-
-    let job_mgr = match job_manager {
-        Some(mgr) => mgr,
-        None => {
-            tracing::debug!("Auto-compact skipped: no job manager");
-            return false;
-        }
-    };
-
-    if !job_mgr.can_start_job() {
-        tracing::debug!("Auto-compact skipped: max concurrent jobs reached");
-        return false;
-    }
-
-    // Acquire compacting flag atomically
-    if !adapter.try_start_compact() {
-        tracing::debug!("Auto-compact skipped: CAS failed (concurrent compact)");
-        return false;
-    }
-
-    let guard = CompactGuard {
-        adapter: adapter.clone(),
-    };
-
-    let (job_id, _job) = job_mgr.create_job(JobType::Compact);
-    let job_mgr_clone = job_mgr.clone();
-    let job_id_clone = job_id.clone();
-    let shutdown_flag = job_mgr.shutdown_flag();
-    let state_clone = state.clone();
-
-    let handle = std::thread::spawn(move || {
-        // Automatic (bloat-triggered) compact: orphan-gated vector rebuild only,
-        // so a routine startup compact does not pay for a full HNSW rebuild.
-        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag, false);
-        // Mark compact completed for cooldown tracking
-        state_clone.lock().mark_compact_completed();
-    });
-
-    job_mgr.register_thread(job_id.clone(), handle);
-
-    tracing::info!(
-        job_id = %job_id,
-        bloat_ratio = format!("{:.2}", wastage.bloat_ratio),
-        file_size_mb = wastage.file_size_bytes / (1024 * 1024),
-        dead_writes = wastage.dead_writes,
-        "Auto-compact triggered"
-    );
-
-    true
+/// The server as a `MaintenanceTarget`: checkpoints through the adapter (which
+/// follows `switch_database`), compactions as jobs (progress, cancellation,
+/// joined on shutdown)
+pub struct ServerMaintenance {
+    pub adapter: Arc<IronBaseAdapter>,
+    pub job_manager: Option<Arc<JobManager>>,
 }
 
-// ============================================================================
-// Background timer for stdio mode
-// ============================================================================
+impl ironbase_core::MaintenanceTarget for ServerMaintenance {
+    fn periodic_checkpoint(&self) -> ironbase_core::Result<ironbase_core::PeriodicCheckpointStats> {
+        self.adapter.periodic_checkpoint()
+    }
 
-/// Spawn a background thread that periodically checks storage wastage
-/// and triggers auto-compaction when thresholds are exceeded.
-///
-/// For stdio mode (no tokio runtime). Uses std::thread + sleep loop.
-/// Returns the JoinHandle for cleanup.
-pub fn spawn_auto_compact_timer(
+    fn storage_wastage(&self) -> ironbase_core::storage::StorageWastage {
+        self.adapter.compute_wastage()
+    }
+
+    fn start_compaction(&self, _cancel: &Arc<AtomicBool>, done: Box<dyn FnOnce() + Send>) -> bool {
+        let adapter = &self.adapter;
+        if adapter.is_compacting() {
+            tracing::debug!("Auto-compact skipped: compaction already in progress");
+            return false;
+        }
+        let Some(job_mgr) = &self.job_manager else {
+            tracing::debug!("Auto-compact skipped: no job manager");
+            return false;
+        };
+        if !job_mgr.can_start_job() {
+            tracing::debug!("Auto-compact skipped: max concurrent jobs reached");
+            return false;
+        }
+        // Acquire compacting flag atomically
+        if !adapter.try_start_compact() {
+            tracing::debug!("Auto-compact skipped: CAS failed (concurrent compact)");
+            return false;
+        }
+
+        let guard = CompactGuard {
+            adapter: adapter.clone(),
+        };
+        let (job_id, _job) = job_mgr.create_job(JobType::Compact);
+        let job_mgr_clone = job_mgr.clone();
+        let job_id_clone = job_id.clone();
+        // The job stops with the server (its shutdown flag), not with the
+        // maintenance schedule: shutdown joins it like every job
+        let shutdown_flag = job_mgr.shutdown_flag();
+        let handle = std::thread::spawn(move || {
+            // Automatic (bloat-triggered) compact: orphan-gated vector rebuild only,
+            // so a routine startup compact does not pay for a full HNSW rebuild.
+            run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag, false);
+            done();
+        });
+        job_mgr.register_thread(job_id.clone(), handle);
+        tracing::info!(job_id = %job_id, "Auto-compact triggered");
+        true
+    }
+}
+
+/// Start the server's background maintenance (HTTP and stdio mode alike).
+/// Stop the handle before closing the adapter.
+pub fn spawn_server_maintenance(
     adapter: Arc<IronBaseAdapter>,
     job_manager: Option<Arc<JobManager>>,
-    config: AutoCompactConfig,
-    shutdown_flag: Arc<AtomicBool>,
-) -> Option<std::thread::JoinHandle<()>> {
-    if !config.enabled {
+    config: &AutoCompactConfig,
+) -> Option<ironbase_core::MaintenanceHandle> {
+    let maintenance = ironbase_core::MaintenanceConfig {
+        checkpoint_interval: Some(CHECKPOINT_INTERVAL),
+        auto_compact: config.policy(),
+    };
+    if maintenance.auto_compact.is_none() {
         tracing::info!("Auto-compaction disabled by config");
-        return None;
     }
-
-    let check_interval = std::time::Duration::from_secs(config.check_interval_secs);
-    let state = Arc::new(parking_lot::Mutex::new(AutoCompactState::new(config)));
-
-    let handle = std::thread::Builder::new()
-        .name("auto-compact-timer".to_string())
-        .spawn(move || {
-            // Initial delay — let the server warm up
-            std::thread::sleep(check_interval);
-
-            while !shutdown_flag.load(Ordering::Relaxed) {
-                let should = { state.lock().should_check() };
-                if should {
-                    auto_compact_check(&adapter, &job_manager, &state);
-                }
-
-                // Sleep in small increments to check shutdown flag responsively
-                let sleep_step = std::time::Duration::from_secs(5);
-                let mut remaining = check_interval;
-                while remaining > std::time::Duration::ZERO {
-                    if shutdown_flag.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let step = remaining.min(sleep_step);
-                    std::thread::sleep(step);
-                    remaining = remaining.saturating_sub(step);
-                }
-            }
-        })
-        .ok();
-
-    if handle.is_some() {
-        tracing::info!("Auto-compact timer started (stdio mode)");
+    let target = Arc::new(ServerMaintenance {
+        adapter,
+        job_manager,
+    });
+    match ironbase_core::spawn_maintenance(target, maintenance) {
+        Ok(handle) => {
+            tracing::info!("Background maintenance started (checkpoint every 60 s)");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::error!("Background maintenance could not start: {}", e);
+            None
+        }
     }
-
-    handle
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const GB: u64 = 1024 * 1024 * 1024;
-
-    fn state() -> AutoCompactState {
-        AutoCompactState::new(AutoCompactConfig::default())
-    }
-
-    // --- should_compact gate composition ------------------------------------
-
+    /// The `[compaction]` section maps onto the core's policy unchanged
     #[test]
-    fn should_compact_allows_oversized_file_at_infinite_bloat() {
-        // Legacy v5 docs.mlite reproduction: never-compacted → bloat_ratio=+inf,
-        // file 7.1GB ≥ 100MB min, no cooldown — all gates pass → auto-compact
-        // fires. The page-cache-bounded compaction I/O makes a large compaction
-        // safe; there is no RAM gate (it was a capability regression).
-        let s = state();
-        assert!(s.should_compact(f64::INFINITY, 7 * GB + GB / 10));
-    }
-
-    #[test]
-    fn should_compact_allows_bloated_file() {
-        let s = state();
-        // bloat 3.0 ≥ 2.0, file 7GB ≥ 100MB → compact regardless of host RAM
-        assert!(s.should_compact(3.0, 7 * GB));
-    }
-
-    #[test]
-    fn should_compact_still_honors_bloat_and_min_size_gates() {
-        let s = state();
-        // low bloat → no compact
-        assert!(!s.should_compact(1.5, 7 * GB));
-        // tiny file (< 100MB) → no compact even at infinite bloat
-        assert!(!s.should_compact(f64::INFINITY, 10 * 1024 * 1024));
+    fn config_maps_onto_the_core_policy() {
+        let p = AutoCompactConfig::default().policy().unwrap();
+        assert_eq!(p.bloat_ratio_threshold, 2.0);
+        assert_eq!(p.min_file_size_bytes, 100 * 1024 * 1024);
+        assert_eq!(p.check_interval, std::time::Duration::from_secs(300));
+        assert_eq!(p.cooldown, std::time::Duration::from_secs(1800));
+        let off = AutoCompactConfig {
+            enabled: false,
+            ..AutoCompactConfig::default()
+        };
+        assert!(off.policy().is_none());
     }
 }

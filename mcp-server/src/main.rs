@@ -437,12 +437,12 @@ fn run_stdio_server(cli: &Cli) {
         }
     };
 
-    // Start auto-compact timer (background thread, checks wastage periodically)
-    let _auto_compact_handle = mcp_ironbase::compaction::spawn_auto_compact_timer(
+    // Background maintenance: periodic checkpoint (60 s) and bloat-triggered
+    // compaction, scheduled by the core (the same in HTTP mode)
+    let maintenance = mcp_ironbase::compaction::spawn_server_maintenance(
         adapter.clone(),
         job_manager.clone(),
-        auto_compact_config,
-        job_manager_for_shutdown.shutdown_flag(),
+        &auto_compact_config,
     );
 
     eprintln!("Ready for requests...");
@@ -510,18 +510,15 @@ fn run_stdio_server(cli: &Cli) {
     // Graceful shutdown when stdin is closed (EOF)
     eprintln!("Shutting down gracefully...");
 
-    // 1. Stop all background jobs and wait for threads to complete
-    //    (sets shutdown_flag = true, which also signals the auto-compact timer)
+    // 1. Stop the background maintenance (no checkpoint may race the close)
+    if let Some(handle) = maintenance {
+        handle.stop();
+    }
+
+    // 2. Stop all background jobs and wait for threads to complete
     let completed = job_manager_for_shutdown.shutdown();
     if completed > 0 {
         eprintln!("Stopped {} background job threads", completed);
-    }
-
-    // 2. Wait for auto-compact timer thread to exit (max ~5s due to sleep step)
-    if let Some(handle) = _auto_compact_handle {
-        if let Err(e) = handle.join() {
-            eprintln!("Auto-compact timer thread panicked: {:?}", e);
-        }
     }
 
     // 3. Close the adapter (flush indexes)

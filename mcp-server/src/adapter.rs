@@ -1033,45 +1033,12 @@ impl IronBaseAdapter {
         }))
     }
 
-    /// Periodic checkpoint (flush btree indexes + metadata + clear WAL)
-    ///
-    /// Skips fulltext/fuzzy/vector index flush to avoid blocking insert_one.
-    /// Fulltext flush holds index_manager.write() for 13+ seconds (130K docs),
-    /// which blocks insert_one's check_index_constraints (needs indexes.read()).
-    /// Btree indexes flush in < 300ms each — acceptable.
-    ///
-    /// Fulltext/fuzzy indexes are flushed during close() and compact() only.
-    /// On dirty shutdown they are rebuilt from documents (safe, slower startup).
-    pub fn checkpoint_periodic(&self) -> Result<Value> {
-        let start = std::time::Instant::now();
-
-        // Phase 1: Flush only btree indexes (fast, < 300ms per index)
-        // Fulltext/fuzzy skipped — they block insert_one for minutes under memory pressure
-        let indexes_flushed = {
-            let db = self.db.read();
-            db.flush_btree_indexes_counted()
-                .map_err(|e| crate::error::McpError::storage(e.to_string()))?
-        };
-
-        // Phase 2: Flush metadata + clear WAL (pre-serialize outside lock)
-        let result = {
-            let db = self.db.read();
-            db.checkpoint_wal_only()
-                .map_err(|e| crate::error::McpError::storage(e.to_string()))?
-        };
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        Ok(serde_json::json!({
-            "success": true,
-            "indexes_flushed": indexes_flushed,
-            "wal_size_before": format_bytes(result.wal_size_before),
-            "wal_size_after": format_bytes(result.wal_size_after),
-            "wal_size_before_bytes": result.wal_size_before,
-            "wal_size_after_bytes": result.wal_size_after,
-            "wal_ops_cleared": result.wal_ops_cleared,
-            "duration_ms": duration_ms,
-        }))
+    /// The periodic checkpoint (`DatabaseCore::periodic_checkpoint`) of the
+    /// current database, for the background maintenance
+    pub fn periodic_checkpoint(
+        &self,
+    ) -> ironbase_core::Result<ironbase_core::PeriodicCheckpointStats> {
+        self.db.read().periodic_checkpoint()
     }
 
     /// Compute storage wastage statistics for auto-compaction decisions.

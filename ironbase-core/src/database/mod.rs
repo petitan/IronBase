@@ -41,6 +41,7 @@
 //! - [`maintenance`] - Flush, compact, close, checkpoint operations
 //! - [`transactions`] - Transaction begin/commit/rollback, write lock management
 
+pub mod background;
 mod batch_flush;
 mod collections;
 mod durability;

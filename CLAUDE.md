@@ -534,6 +534,18 @@ Régi: 1 write lock → flush 22 index → unlock (percek)
 - `ironbase-core/src/index/manager.rs` — `dirty_*_index_names()`, `flush_one_*_index()`
 - `ironbase-core/src/database/maintenance.rs` — `flush_all_indexes_counted()`
 
+### Háttér-karbantartás (v1.0.647)
+
+**Egy ütemező a motorban:** `ironbase_core::spawn_maintenance(target, MaintenanceConfig)`
+(`database/background.rs`) — periodikus checkpoint (60 s: B+ tree indexek, metadata, WAL;
+`DatabaseCore::periodic_checkpoint`) + bloat alapú compaction (`AutoCompactPolicy`: 2.0×,
+≥100 MB, 5 percenként, 30 perc cooldown). A `MaintenanceTarget` trait: `DatabaseCore`
+(beágyazott, a compaction a szálon fut) vagy `compaction::ServerMaintenance` (MCP: jobként).
+Az MCP HTTP- és stdio-módja ugyanazt indítja (a stdio korábban nem checkpointolt), és a
+`close()` ELŐTT állítja le (`MaintenanceHandle::stop`). Python: `db.start_maintenance()`.
+MCP → motor áthelyezési terv (qualification, hibrid keresés, chunkolás):
+[`docs/MCP_TO_CORE_PLAN.md`](docs/MCP_TO_CORE_PLAN.md).
+
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
 
