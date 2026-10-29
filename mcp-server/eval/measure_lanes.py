@@ -61,7 +61,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_labels import _judge_prompt, _parse_yesno  # noqa: E402  (same judge as June)
+from build_labels import (  # noqa: E402  (same judge and batch path as June)
+    _judge_prompt, _parse_yesno, anthropic_judge_batch,
+)
 from run_eval import mcp_init, mcp_tool, ndcg_at_k, recall_at_k  # noqa: E402
 
 MCP_DEFAULT = "http://localhost:8080/mcp"
@@ -145,76 +147,6 @@ def document_text(mcp, collection, doc_id, text_field, max_chars, cache):
 # --- judging ----------------------------------------------------------------
 def judge_key(model, query, doc_id):
     return hashlib.sha256(f"{model}\x00{query}\x00{doc_id}".encode()).hexdigest()
-
-
-BATCHES_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/") + "/v1/messages/batches"
-# The Batches API runs the same requests asynchronously at 50% of standard
-# prices (most batches finish within an hour, 24 h maximum). Worth it for a
-# large judging pool; `--judge-mode sync` stays the default for small reruns.
-BATCH_MAX_REQUESTS = 100_000
-
-
-def _anthropic_request(url, api_key, body=None, method="GET", timeout=180):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode()
-
-
-def anthropic_judge_batch(api_key, model, prompts, poll_seconds=30, max_hours=24,
-                          log=sys.stderr):
-    """Judge `prompts` ({custom_id: prompt}) through the Batches API.
-
-    Returns {custom_id: verdict}; a custom_id missing from the result file or
-    whose request errored maps to None (no verdict), like the sync path.
-    """
-    if len(prompts) > BATCH_MAX_REQUESTS:
-        raise ValueError(f"{len(prompts)} requests exceeds the {BATCH_MAX_REQUESTS} batch limit")
-    requests_body = [
-        {"custom_id": cid,
-         "params": {"model": model, "max_tokens": 8, "temperature": 0,
-                    "messages": [{"role": "user", "content": prompt}]}}
-        for cid, prompt in prompts.items()
-    ]
-    batch = json.loads(_anthropic_request(BATCHES_URL, api_key,
-                                          {"requests": requests_body}, "POST"))
-    batch_id = batch["id"]
-    print(f"batch {batch_id}: {len(requests_body)} requests submitted (50% pricing)",
-          file=log, flush=True)
-
-    deadline = time.time() + max_hours * 3600
-    while True:
-        status = json.loads(_anthropic_request(f"{BATCHES_URL}/{batch_id}", api_key))
-        if status.get("processing_status") == "ended":
-            break
-        if time.time() > deadline:
-            raise TimeoutError(f"batch {batch_id} still {status.get('processing_status')} "
-                               f"after {max_hours} h")
-        counts = status.get("request_counts", {})
-        print(f"  {status.get('processing_status')}: "
-              f"{counts.get('succeeded', 0)} succeeded, "
-              f"{counts.get('processing', 0)} processing", file=log, flush=True)
-        time.sleep(poll_seconds)
-
-    verdicts = {}
-    body = _anthropic_request(f"{BATCHES_URL}/{batch_id}/results", api_key, timeout=600)
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        outcome = row.get("result", {})
-        if outcome.get("type") != "succeeded":
-            verdicts[row["custom_id"]] = None
-            continue
-        text = "".join(b.get("text", "") for b in outcome["message"].get("content", [])
-                       if b.get("type") == "text")
-        verdicts[row["custom_id"]] = _parse_yesno(text)
-    for cid in prompts:
-        verdicts.setdefault(cid, None)
-    return verdicts
 
 
 def anthropic_judge(api_key, model, prompt, retries=4):
