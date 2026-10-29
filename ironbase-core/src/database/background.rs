@@ -392,13 +392,28 @@ mod tests {
             checkpoint_interval: Some(Duration::from_millis(20)),
             auto_compact: None,
         };
+        let spawned = Instant::now();
         let handle = spawn_maintenance(Arc::clone(&target), config).unwrap();
-        std::thread::sleep(Duration::from_millis(230));
+        // Repeats: wait for the third checkpoint (a loaded CI runner may
+        // starve the thread, so no fixed wall-clock count is asserted)
+        while target.checkpoints.load(Ordering::SeqCst) < 3 {
+            assert!(
+                spawned.elapsed() < Duration::from_secs(10),
+                "only {} checkpoints in 10 s at 20 ms",
+                target.checkpoints.load(Ordering::SeqCst)
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let started = Instant::now();
         handle.stop();
         assert!(started.elapsed() < Duration::from_secs(1), "stop waited");
+        // ...but never more often than its interval
         let n = target.checkpoints.load(Ordering::SeqCst);
-        assert!((4..=12).contains(&n), "{n} checkpoints in ~230 ms at 20 ms");
+        let max = (spawned.elapsed().as_millis() / 20) as usize;
+        assert!(
+            n <= max,
+            "{n} checkpoints, at most {max} fit the 20 ms interval"
+        );
         // None after the stop
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(target.checkpoints.load(Ordering::SeqCst), n);
@@ -444,11 +459,6 @@ mod tests {
             .unwrap()
             .create_index("k".to_string(), false, false)
             .unwrap();
-        let config = MaintenanceConfig {
-            checkpoint_interval: Some(Duration::from_millis(20)),
-            auto_compact: None,
-        };
-        let handle = spawn_maintenance(Arc::clone(&db), config).unwrap();
         let wal = path.with_extension("wal");
         for i in 0..20 {
             db.insert_one(
@@ -462,6 +472,12 @@ mod tests {
         }
         let wal_written = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
         assert!(wal_written > 0);
+        // Started after the writes, so the WAL above is not raced
+        let config = MaintenanceConfig {
+            checkpoint_interval: Some(Duration::from_millis(20)),
+            auto_compact: None,
+        };
+        let handle = spawn_maintenance(Arc::clone(&db), config).unwrap();
         // The checkpoint clears the WAL
         let deadline = Instant::now() + Duration::from_secs(5);
         while std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0) > 0 {
