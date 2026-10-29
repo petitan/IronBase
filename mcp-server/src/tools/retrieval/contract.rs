@@ -110,7 +110,7 @@ pub(crate) fn assemble(
             .filter_map(|c| {
                 let text = c.get(text_field).and_then(|v| v.as_str())?;
                 let best = c
-                    .get(crate::tools::fusion::MERGE_BEST_OFFSET_KEY)
+                    .get(ironbase_core::search::hybrid::MERGE_BEST_OFFSET_KEY)
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
                 Some((text, best))
@@ -537,7 +537,7 @@ mod tests {
         let text = format!("{}NEEDLE{}", "a".repeat(20_000), "b".repeat(5_000));
         let mut g = group("big", 1.0, &[1]);
         g.chunks[0] = json!({"doc_id": "big", F: text,
-            crate::tools::fusion::MERGE_BEST_OFFSET_KEY: 20_000});
+            ironbase_core::search::hybrid::MERGE_BEST_OFFSET_KEY: 20_000});
         let mut groups = vec![g];
         for i in 0..9 {
             groups.push(group(&format!("d{i}"), 0.5, &[2000]));

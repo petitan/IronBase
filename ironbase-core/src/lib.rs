@@ -40,6 +40,7 @@ pub mod find_options;
 pub mod fulltext;
 pub mod limits;
 pub mod query;
+pub mod search;
 pub mod storage;
 pub mod transaction;
 pub mod update_options;

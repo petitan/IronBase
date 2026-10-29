@@ -19,10 +19,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
-use super::fusion::{
-    apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
-    merge_adjacent_values, mmr_reorder, rerank_results, FusedResult,
+use ironbase_core::search::hybrid::{
+    apply_projection, id_to_string, merge_adjacent_chunks, merge_adjacent_values, mmr_reorder,
+    rerank_results, FusedResult,
 };
+
+use super::fusion::apply_document_qualification;
 use super::helpers::parse_projection_value;
 use super::params::{resolve_weights, HybridSearchParams};
 use super::rag::get_rag_config;

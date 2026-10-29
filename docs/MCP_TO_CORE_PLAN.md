@@ -1,7 +1,8 @@
 # MCP → core: a szerverbe nem való logika áthelyezése
 
 **Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
-a halott `preprocessing/` törlése, 2. pont (qualification). Hátra: 3. és 4. pont.
+a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1. lépése
+(`ironbase_core::search::hybrid`: rerank, merge, MMR). Hátra: 3/2–3. és a 4. pont.
 
 ## Miért
 
@@ -79,8 +80,11 @@ feloldása (mely mezők), a `search` válaszkontraktusa és budgetje (`contract.
 JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue.
 
 **Lépések (3 PR)**
-1. **Tiszta függvények:** RRF-pontozás, rerank, `merge_adjacent_*`, MMR,
-   csoportosítás — tesztjeikkel; az MCP a motorét hívja. Viselkedés változatlan.
+1. **Tiszta függvények** — *kész:* `ironbase_core::search::hybrid` (`FusedResult`,
+   `rerank_results`, `merge_adjacent_chunks/values`, `mmr_reorder`, `apply_projection`,
+   `id_to_string`) a 30 tesztjükkel; az MCP a motorét hívja, viselkedés változatlan.
+   Az RRF-pontozás és a csoportosítás a `retrieve_and_fuse`/`build_doc_groups` része, a
+   2. lépéssel megy.
 2. **`retrieve_and_fuse` + `build_doc_groups`** a motorba, `HybridQuery`-vel; az MCP
    `search` és a Rhai `db_hybrid_search` erre vált. Ellenőrzés: a
    `mcp-server/eval/measure_lanes.py` `mirror`-konfigurációja és a `search`
