@@ -199,6 +199,10 @@ pub(crate) struct FusionOutcome {
     pub effective_text_field: String,
     pub effective_text_fields: Option<Vec<String>>,
     pub qual: super::fusion::QualificationOutcome,
+    /// Lexical-lane IDF coverage gate (STEP 1.6). `None` = the gate did not run
+    /// (a single active lane) or the coverage could not be measured — the
+    /// lexical weight was then left untouched.
+    pub lexical_gate: Option<super::fusion::LexicalCoverageGate>,
 }
 
 /// Shared retrieve+fuse pipeline (STEP 1–6): resolve fields/provider, document
@@ -376,6 +380,51 @@ pub(crate) fn retrieve_and_fuse(
         p.match_scope.as_deref(),
         p.filter.clone(),
     )?;
+
+    // ========================================================================
+    // STEP 1.6: Lexical lane IDF coverage gate
+    //
+    // RRF fuses ranks, so it cannot see that a lane's rank 1 is worthless. When
+    // the query's discriminating token is missing from the corpus and only a
+    // generic high-frequency one remains, BM25 still ranks — on the generic
+    // token alone — and still votes at full weight, pushing out the documents
+    // the vector lane found. `lexical_coverage_gate` scales the lexical weight
+    // by the IDF-weighted share of the query's tokens the corpus actually
+    // holds; a fully covered query keeps its weight bit-for-bit.
+    //
+    // Only with BOTH lanes active: for a single-lane configuration there is
+    // nothing to arbitrate, and scaling the only lane's weight uniformly cannot
+    // change its order (it would only shrink the reported scores). This also
+    // keeps the pure `bm25` / `vector` lanes of eval/measure_lanes.py untouched.
+    // ========================================================================
+    let lexical_gate = if vector_weight > 0.0 && fulltext_weight > 0.0 {
+        super::fusion::lexical_coverage_gate(
+            adapter,
+            &p.collection,
+            &qual_fields,
+            &p.query,
+            fulltext_weight,
+        )
+    } else {
+        None
+    };
+    let fulltext_weight = match lexical_gate {
+        Some(ref g) => {
+            if !g.absent_terms.is_empty() {
+                tracing::info!(
+                    collection = %p.collection,
+                    field = %g.field,
+                    coverage = g.coverage,
+                    base_weight = g.base_weight,
+                    effective_weight = g.effective_weight,
+                    absent_terms = ?g.absent_terms,
+                    "lexical lane down-weighted: query terms missing from the corpus"
+                );
+            }
+            g.effective_weight
+        }
+        None => fulltext_weight,
+    };
 
     // ========================================================================
     // STEP 2: Vector search → ranks + docs (single pass)
@@ -595,6 +644,7 @@ pub(crate) fn retrieve_and_fuse(
         effective_text_field,
         effective_text_fields,
         qual,
+        lexical_gate,
     })
 }
 
@@ -2079,5 +2129,191 @@ mod pipeline_integration_tests {
             contents.iter().all(|c| !c.starts_with("csak fékpad")),
             "non-qualifying doc (one token) must be excluded by doc-scope AND: {contents:?}"
         );
+    }
+}
+
+// ============================================================================
+// Lexical lane IDF coverage gate (STEP 1.6) — pipeline tests
+//
+// Synthetic corpus in the shape measured on `rdocs` (2026-10-29): a query whose
+// discriminating token has no posting list at all, next to a generic token with
+// a large one. RRF fuses ranks, so without the gate the lexical lane's rank 1
+// votes at full weight however worthless that ranking is.
+// ============================================================================
+#[cfg(test)]
+mod lexical_gate_tests {
+    use super::{retrieve_and_fuse, FusionOutcome};
+    use crate::adapter::IronBaseAdapter;
+    use crate::tools::dispatch_tool;
+    use crate::tools::params::{HybridSearchParams, ParseParams};
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// Documents the VECTOR lane can return (they carry an embedding) and that
+    /// contain none of the query's tokens.
+    const SEMANTIC_DOCS: usize = 3;
+    /// Documents only the LEXICAL lane can return (no embedding field, so the
+    /// vector index skips them) and that carry the generic token.
+    const GENERIC_DOCS: usize = 20;
+
+    fn ok(a: &Arc<IronBaseAdapter>, name: &str, params: Value) -> Value {
+        dispatch_tool(name, params, a, None, None, None, None, &None, &None)
+            .unwrap_or_else(|e| panic!("tool '{name}' should succeed: {e:?}"))
+    }
+
+    /// `SEMANTIC_DOCS` vector-only documents + `GENERIC_DOCS` lexical-only
+    /// documents carrying "berendezes kalibralas". No document anywhere
+    /// contains "legfekvizsgalo" — that is the absent discriminating token.
+    fn corpus() -> (Arc<IronBaseAdapter>, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("gate.mlite");
+        let a =
+            Arc::new(IronBaseAdapter::new(path.to_string_lossy().to_string()).expect("adapter"));
+
+        for i in 0..SEMANTIC_DOCS {
+            // Cosine-decreasing similarity to the query vector [1,0,0,0], so the
+            // vector ranks are sem0 < sem1 < sem2 and the assertion can name them.
+            let emb = json!([1.0 - 0.1 * i as f64, 0.1 * i as f64, 0.0, 0.0]);
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                    "doc_id": format!("sem{i}"),
+                    "content": "A suritett levegos rendszer idoszakos ellenorzese es annak dokumentalasa.",
+                    "embedding": emb}}),
+            );
+        }
+        for i in 0..GENERIC_DOCS {
+            // No `embedding` field → create_vector_index skips these documents,
+            // so they reach fusion through the lexical lane alone.
+            ok(
+                &a,
+                "insert_one",
+                json!({"collection":"kb","document":{
+                    "doc_id": format!("gen{i:02}"),
+                    "content": "Ipari berendezes uzemeltetese es kalibralas, karbantartasi utmutato."}}),
+            );
+        }
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"fulltext","field":"content"}),
+        );
+        ok(
+            &a,
+            "index_create",
+            json!({"collection":"kb","type":"vector","field":"embedding","dim":4,"metric":"cosine"}),
+        );
+        (a, tmp)
+    }
+
+    /// Fuse with an explicit query vector (no embedding provider needed) and the
+    /// mechanism pinned: rerank and merge off, so the assertions see the FUSION
+    /// weights and nothing else.
+    fn fuse(a: &Arc<IronBaseAdapter>, query: &str, extra: Value) -> FusionOutcome {
+        let mut params = json!({
+            "collection": "kb",
+            "query": query,
+            "vector": [1.0, 0.0, 0.0, 0.0],
+            "limit": 10,
+            "rerank": false,
+            "merge_chunks": false,
+        });
+        if let (Value::Object(p), Value::Object(e)) = (&mut params, extra) {
+            p.extend(e);
+        }
+        let p = HybridSearchParams::parse(params).expect("parse params");
+        retrieve_and_fuse(&p, a, &None).expect("retrieve_and_fuse")
+    }
+
+    fn doc_ids(fo: &FusionOutcome) -> Vec<String> {
+        fo.fused
+            .iter()
+            .map(|f| f.doc["doc_id"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn absent_rare_term_collapses_the_lexical_lanes_vote() {
+        let (a, _t) = corpus();
+        let fo = fuse(&a, "legfekvizsgalo berendezes", json!({}));
+
+        let gate = fo
+            .lexical_gate
+            .as_ref()
+            .expect("the gate must run with both lanes active");
+        assert_eq!(gate.absent_terms, vec!["legfekvizsgalo".to_string()]);
+        assert_eq!(
+            gate.present_terms,
+            vec![("berendezes".to_string(), GENERIC_DOCS)]
+        );
+        assert_eq!(gate.doc_count, SEMANTIC_DOCS + GENERIC_DOCS);
+        assert!(
+            gate.coverage < 0.25,
+            "one generic term out of a two-term query: coverage {}",
+            gate.coverage
+        );
+        assert_eq!(gate.base_weight, 0.5);
+        assert_eq!(gate.effective_weight, 0.5 * gate.coverage);
+
+        // The three documents the vector lane found now hold the top of the
+        // ranking. At full lexical weight the BM25 rank 1 scores 0.5/(20+1) —
+        // exactly what the vector rank 1 scores — so the lexical list interleaved
+        // from the first position and pushed vector hits out of the top-k.
+        let ids = doc_ids(&fo);
+        assert_eq!(
+            &ids[..SEMANTIC_DOCS],
+            &["sem0".to_string(), "sem1".to_string(), "sem2".to_string()],
+            "the vector lane's documents must lead: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn every_term_present_leaves_the_lexical_lane_untouched() {
+        let (a, _t) = corpus();
+        // Both tokens have a posting list — the `legújabb díjbekérők` shape,
+        // where BM25 is the lane that answers and must keep its full vote.
+        let fo = fuse(&a, "berendezes kalibralas", json!({}));
+
+        let gate = fo.lexical_gate.as_ref().expect("the gate must run");
+        assert!(gate.absent_terms.is_empty(), "{:?}", gate.absent_terms);
+        assert_eq!(gate.coverage, 1.0);
+        // Exact equality, not an epsilon: `w * 1.0 == w` in IEEE-754, so every
+        // downstream RRF score is bit-for-bit what it was before the gate.
+        assert_eq!(gate.effective_weight, gate.base_weight);
+
+        // …and the ranking shows it: the lexical lane still fills most of the
+        // top-k — 7 of 10 here, the 3 vector-only documents scoring 0.5/(20+r)
+        // for r = 1..3 and the lexical list taking every slot below them.
+        let ids = doc_ids(&fo);
+        let lexical_in_top10 = ids.iter().take(10).filter(|d| d.starts_with("gen")).count();
+        assert_eq!(lexical_in_top10, 7, "{ids:?}");
+    }
+
+    #[test]
+    fn a_single_active_lane_is_never_gated() {
+        let (a, _t) = corpus();
+        // The `bm25` lane of eval/measure_lanes.py. Scaling the only lane's
+        // weight cannot reorder it, and a coverage of 0 would flatten every
+        // score to 0 — so the gate must not run at all.
+        let bm25 = fuse(
+            &a,
+            "legfekvizsgalo berendezes",
+            json!({"vector_weight": 0.0, "fulltext_weight": 1.0}),
+        );
+        assert!(bm25.lexical_gate.is_none());
+        assert!(
+            doc_ids(&bm25).iter().all(|d| d.starts_with("gen")),
+            "the BM25 lane must still return its own hits"
+        );
+
+        // …and the `vector` lane likewise.
+        let vector = fuse(
+            &a,
+            "legfekvizsgalo berendezes",
+            json!({"vector_weight": 1.0, "fulltext_weight": 0.0}),
+        );
+        assert!(vector.lexical_gate.is_none());
     }
 }

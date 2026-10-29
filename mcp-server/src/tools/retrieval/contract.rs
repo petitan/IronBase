@@ -43,7 +43,8 @@ fn is_stripped_chunk_key(k: &str) -> bool {
 /// Build the compact `search` response from the shared pipeline's grouped output.
 ///
 /// - `text_field` is the collection's resolved primary text field (passage body).
-/// - `total_chunks` / `qualified_doc_count` feed the debug diagnostics only.
+/// - `total_chunks` / `qualified_doc_count` / `lexical_gate` feed the debug
+///   diagnostics only.
 /// - `format` is `"structured"` (default) or `"context_block"`.
 pub(crate) fn assemble(
     groups: &[DocGroup],
@@ -52,6 +53,7 @@ pub(crate) fn assemble(
     text_field: &str,
     format: &str,
     debug: bool,
+    lexical_gate: Option<&crate::tools::fusion::LexicalCoverageGate>,
 ) -> Result<Value> {
     let mut used_chars: usize = 0;
     let mut trimmed = false;
@@ -252,6 +254,10 @@ pub(crate) fn assemble(
                 "hyde": "off",
                 "total_chunks": total_chunks,
                 "qualified_doc_ids": qualified_doc_count,
+                // The lexical lane's IDF coverage gate — `null` means it did not
+                // run (single active lane) or could not be measured, and the
+                // lexical weight was left untouched.
+                "lexical_idf_gate": lexical_gate.map(|g| g.to_json()),
             }),
         );
     }
@@ -339,7 +345,7 @@ mod tests {
         for i in 0..60 {
             groups.push(group(&format!("d{i}"), 0.9 - i as f64 * 0.001, &[300]));
         }
-        let out = assemble(&groups, 1000, None, F, "structured", false).unwrap();
+        let out = assemble(&groups, 1000, None, F, "structured", false, None).unwrap();
 
         let count = out.get("count").unwrap().as_u64().unwrap();
         assert!(
@@ -368,7 +374,7 @@ mod tests {
         for i in 0..100 {
             groups.push(group(&format!("d{i}"), 1.0 - i as f64 * 0.001, &[500, 500]));
         }
-        let out = assemble(&groups, 200, None, F, "structured", false).unwrap();
+        let out = assemble(&groups, 200, None, F, "structured", false, None).unwrap();
         let total: usize = docs(&out)
             .iter()
             .flat_map(|d| d["passages"].as_array().unwrap())
@@ -385,7 +391,7 @@ mod tests {
     #[test]
     fn never_empty_for_oversized_first_doc() {
         let groups = vec![group("big", 1.0, &[DEFAULT_MAX_CONTEXT_CHARS + 5000])];
-        let out = assemble(&groups, 1, None, F, "structured", false).unwrap();
+        let out = assemble(&groups, 1, None, F, "structured", false, None).unwrap();
         assert_eq!(out.get("count").unwrap().as_u64().unwrap(), 1);
         assert_eq!(docs(&out)[0]["passages"].as_array().unwrap().len(), 1);
     }
@@ -400,7 +406,7 @@ mod tests {
             lifted: Map::new(),
             chunks: vec![json!({"doc_id": "x", "other": "y"})],
         };
-        let out = assemble(&[g], 1, None, F, "structured", false).unwrap();
+        let out = assemble(&[g], 1, None, F, "structured", false, None).unwrap();
         assert_eq!(out.get("count").unwrap().as_u64().unwrap(), 0);
         assert_eq!(
             out.get("dropped_empty_documents").and_then(|v| v.as_u64()),
@@ -422,7 +428,7 @@ mod tests {
                 "chunk_index": 2, "_text_score": 3.0, "title": "T"
             })],
         };
-        let out = assemble(&[g], 5, None, F, "structured", false).unwrap();
+        let out = assemble(&[g], 5, None, F, "structured", false, None).unwrap();
         assert_eq!(out.get("verdict").unwrap(), &json!("unknown"));
         let obj = docs(&out)[0].as_object().unwrap();
         assert!(!obj.contains_key("embedding"));
@@ -443,6 +449,7 @@ mod tests {
             F,
             "context_block",
             false,
+            None,
         )
         .unwrap();
         assert!(out
@@ -480,7 +487,7 @@ mod tests {
             .enumerate()
             .map(|(i, &n)| group(&format!("d{i}"), 1.0 - i as f64 * 0.01, &[n]))
             .collect();
-        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let out = assemble(&groups, 10, None, F, "structured", false, None).unwrap();
         let want: Vec<String> = (0..10).map(|i| format!("d{i}")).collect();
         assert_eq!(ids(&out), want);
         assert!(out.get("dropped_due_to_budget").is_none());
@@ -513,7 +520,7 @@ mod tests {
                     group(&format!("d{i}"), 1.0 - i as f64 * 1e-3, &[len, 300])
                 })
                 .collect();
-            let out = assemble(&groups, n, None, F, "structured", false).unwrap();
+            let out = assemble(&groups, n, None, F, "structured", false, None).unwrap();
             let got = ids(&out);
             let want: Vec<String> = (0..got.len()).map(|i| format!("d{i}")).collect();
             assert_eq!(got, want, "round {round}");
@@ -542,7 +549,7 @@ mod tests {
         for i in 0..9 {
             groups.push(group(&format!("d{i}"), 0.5, &[2000]));
         }
-        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let out = assemble(&groups, 10, None, F, "structured", false, None).unwrap();
         let first = docs(&out)[0]["passages"][0]["text"].as_str().unwrap();
         assert!(first.starts_with("NEEDLE"), "{}", &first[..20]);
         // Near the end the window moves back instead of running short

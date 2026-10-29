@@ -173,6 +173,7 @@ fn handle_search(
         &fo.effective_text_field,
         &p.format,
         p.debug,
+        fo.lexical_gate.as_ref(),
     )?;
     if !semantic_available {
         if let Value::Object(ref mut o) = out {

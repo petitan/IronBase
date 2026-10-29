@@ -645,6 +645,190 @@ pub(crate) fn mmr_reorder(
 }
 
 // ============================================================================
+// Lexical lane IDF coverage gate
+// ============================================================================
+
+/// How much of a query's lexical discriminating power the corpus can actually
+/// serve, and what that does to the lexical lane's fusion weight.
+///
+/// Diagnostic record of [`lexical_coverage_gate`]; carried out of the pipeline
+/// in `FusionOutcome` so `search --debug` can show it instead of the gate being
+/// an invisible constant.
+#[derive(Debug, Clone)]
+pub(crate) struct LexicalCoverageGate {
+    /// IDF-weighted share of the query's tokens the corpus contains, 0.0–1.0.
+    /// Exactly 1.0 when every token occurs.
+    pub coverage: f64,
+    /// The lexical lane's RRF weight before the gate.
+    pub base_weight: f64,
+    /// … and after it: `base_weight * coverage`.
+    pub effective_weight: f64,
+    /// The fulltext field the coverage was measured on (the most favourable one
+    /// when several are searched).
+    pub field: String,
+    /// `N` of that field's index — the document count its BM25 IDF uses.
+    pub doc_count: usize,
+    /// Query tokens the corpus contains, with their document frequency.
+    pub present_terms: Vec<(String, usize)>,
+    /// Query tokens absent from the corpus (`df == 0`).
+    pub absent_terms: Vec<String>,
+}
+
+impl LexicalCoverageGate {
+    /// Debug-output shape (`search --debug` diagnostics).
+    pub fn to_json(&self) -> Value {
+        json!({
+            "coverage": self.coverage,
+            "fulltext_weight_base": self.base_weight,
+            "fulltext_weight_effective": self.effective_weight,
+            "measured_on": self.field,
+            "index_doc_count": self.doc_count,
+            "present_terms": self.present_terms
+                .iter()
+                .map(|(t, df)| json!({"token": t, "df": df}))
+                .collect::<Vec<_>>(),
+            "absent_terms": self.absent_terms,
+        })
+    }
+}
+
+/// IDF-weighted share of a query's lexical discriminating power that a corpus
+/// can serve.
+///
+/// `term_dfs` holds every unique stemmed query token with its document
+/// frequency (posting-list size; `0` = the corpus does not contain it) and
+/// `doc_count` is the index's `N`.
+///
+/// A present token is worth the index's own BM25 IDF, `ln(1 + N / df)`
+/// (`FulltextIndex::search` in `ironbase-core/src/fulltext.rs`). An absent
+/// token is worth, as what it *would* have been worth had the corpus held it,
+/// the largest IDF that same formula can produce — `ln(1 + N / 1)`, the IDF of
+/// a term occurring in exactly one document. The coverage is the present share
+/// of that total:
+///
+/// ```text
+/// coverage = Σ_present ln(1 + N/df) / ( Σ_present ln(1 + N/df) + |absent| · ln(1 + N) )
+/// ```
+///
+/// Hence `1.0` whenever every query token occurs — there is nothing to
+/// discount and fusion is left exactly as it was — and it falls towards `0.0`
+/// as the tokens the corpus lacks outweigh, in IDF, the ones it has. No
+/// threshold and no tuned constant enter the formula: the only inputs are the
+/// index's own IDF and its minimum document frequency.
+///
+/// `1.0` (no discount) for an empty token list or an empty index: there is no
+/// measurement to make, and the lexical lane returns nothing in either case.
+pub(crate) fn lexical_idf_coverage(term_dfs: &[(String, usize)], doc_count: usize) -> f64 {
+    if term_dfs.is_empty() || doc_count == 0 {
+        return 1.0;
+    }
+    let n = doc_count as f64;
+    // The index's maximum IDF: a term in exactly one document.
+    let idf_max = (1.0 + n).ln();
+    let mut present = 0.0;
+    let mut absent = 0.0;
+    for (_, df) in term_dfs {
+        if *df == 0 {
+            absent += idf_max;
+        } else {
+            present += (1.0 + n / *df as f64).ln();
+        }
+    }
+    let total = present + absent;
+    if total <= 0.0 {
+        return 1.0;
+    }
+    present / total
+}
+
+/// Scale the lexical lane's fusion weight by the corpus's IDF coverage of the
+/// query.
+///
+/// RRF fuses *ranks*, so it cannot tell that a lane's rank 1 is worthless: when
+/// the discriminating token of a query is missing from the corpus and only a
+/// generic high-frequency one remains, BM25 still ranks — on noise — and still
+/// votes at full weight, pushing out what the vector lane found. The weight is
+/// therefore multiplied by [`lexical_idf_coverage`]: the lane votes with exactly
+/// the share of the query's discriminating power it was able to use. A fully
+/// covered query keeps `base_weight` bit-for-bit.
+///
+/// Measured on the fulltext index itself (`token_posting_count` — the same
+/// posting lists BM25 reads), so there is no second statistics pass over the
+/// corpus.
+///
+/// With several searched fields the lane scores best-field, so the *most
+/// favourable* field decides: a token the corpus holds in any searched field
+/// gives the lane real signal.
+///
+/// Returns `None` when the coverage could not be measured (no fulltext index on
+/// any searched field, or the index could not be read) — the weight is then
+/// left untouched and the absent gate is visible in the debug output. Callers
+/// apply it only when BOTH lanes are active: with a single lane there is
+/// nothing to arbitrate and a uniform rescale would not change the order.
+pub(crate) fn lexical_coverage_gate(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    fields: &[&str],
+    query: &str,
+    base_weight: f64,
+) -> Option<LexicalCoverageGate> {
+    let mut best: Option<LexicalCoverageGate> = None;
+
+    for field in fields {
+        let tokens = match adapter.fulltext_tokenize_query(collection, field, query) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(
+                    collection = collection,
+                    field = field,
+                    error = %e,
+                    "lexical_coverage_gate: field has no readable fulltext index, skipped"
+                );
+                continue;
+            }
+        };
+        let term_dfs = match adapter.fulltext_token_posting_counts(collection, field, &tokens) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(collection = collection, field = field, error = %e,
+                    "lexical_coverage_gate: posting counts unavailable, field skipped");
+                continue;
+            }
+        };
+        let doc_count = match adapter.fulltext_index_doc_count(collection, field) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(collection = collection, field = field, error = %e,
+                    "lexical_coverage_gate: index doc count unavailable, field skipped");
+                continue;
+            }
+        };
+
+        let coverage = lexical_idf_coverage(&term_dfs, doc_count);
+        let (present_terms, absent_terms): (Vec<_>, Vec<_>) =
+            term_dfs.into_iter().partition(|(_, df)| *df > 0);
+
+        let candidate = LexicalCoverageGate {
+            coverage,
+            base_weight,
+            effective_weight: base_weight * coverage,
+            field: (*field).to_string(),
+            doc_count,
+            present_terms,
+            absent_terms: absent_terms.into_iter().map(|(t, _)| t).collect(),
+        };
+        if best
+            .as_ref()
+            .is_none_or(|b| candidate.coverage > b.coverage)
+        {
+            best = Some(candidate);
+        }
+    }
+
+    best
+}
+
+// ============================================================================
 // Document-level AND qualification
 // ============================================================================
 
@@ -972,6 +1156,100 @@ mod tests {
         assert!(!resolve_and_mode(Some("or")));
         assert!(resolve_and_mode(Some("and"))); // opt-in precision
         assert!(!resolve_and_mode(Some("anything-else"))); // unknown → OR (safe default)
+    }
+
+    // -------------------------------------------------------------------------
+    // Lexical IDF coverage
+    // -------------------------------------------------------------------------
+
+    fn terms(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
+        pairs.iter().map(|(t, df)| (t.to_string(), *df)).collect()
+    }
+
+    #[test]
+    fn coverage_is_exactly_one_when_every_term_is_in_the_corpus() {
+        // The no-regression case (`legújabb díjbekérők`): every query token has
+        // a posting list, so there is nothing to discount. Exactly 1.0 — the
+        // weight multiplication is then the identity and fusion is bit-identical.
+        let c = lexical_idf_coverage(&terms(&[("dijbekero", 12), ("legujabb", 900)]), 10_000);
+        assert_eq!(c, 1.0);
+    }
+
+    #[test]
+    fn coverage_is_zero_when_no_term_is_in_the_corpus() {
+        let c = lexical_idf_coverage(&terms(&[("zzz", 0), ("qqq", 0)]), 10_000);
+        assert_eq!(c, 0.0);
+    }
+
+    #[test]
+    fn coverage_collapses_when_the_only_rare_term_is_absent() {
+        // The measured `légfékvizsgáló berendezés` shape: the discriminating
+        // token has no posting list, the surviving one is generic.
+        // N = 20_000, df(generic) = 1_000:
+        //   idf(generic) = ln(1 + 20) = 3.0445
+        //   idf_max      = ln(1 + 20_000) = 9.9035
+        //   coverage     = 3.0445 / 12.9480 = 0.23513
+        let c = lexical_idf_coverage(
+            &terms(&[("legfekvizsgalo", 0), ("berendezes", 1_000)]),
+            20_000,
+        );
+        assert!(
+            (c - 0.235_13).abs() < 1e-4,
+            "coverage {c} is not the IDF ratio"
+        );
+        assert!(c < 0.3, "a lone generic term must not carry the lane");
+    }
+
+    #[test]
+    fn coverage_rises_with_the_rarity_of_the_surviving_term() {
+        // Same absent token; the rarer the term that is still there, the more
+        // of the query's discriminating power the lane can actually use.
+        let generic = lexical_idf_coverage(&terms(&[("x", 0), ("common", 5_000)]), 20_000);
+        let mid = lexical_idf_coverage(&terms(&[("x", 0), ("midfreq", 200)]), 20_000);
+        let rare = lexical_idf_coverage(&terms(&[("x", 0), ("hapax", 1)]), 20_000);
+        assert!(generic < mid && mid < rare, "{generic} {mid} {rare}");
+        // A single absent token caps the ratio at one half even when the
+        // surviving term is the rarest the index can hold (its IDF then equals
+        // the absent token's potential IDF).
+        assert!((rare - 0.5).abs() < 1e-12, "rare = {rare}");
+    }
+
+    #[test]
+    fn coverage_falls_as_more_terms_go_missing() {
+        let one_missing = lexical_idf_coverage(&terms(&[("a", 100), ("b", 0)]), 20_000);
+        let two_missing = lexical_idf_coverage(&terms(&[("a", 100), ("b", 0), ("c", 0)]), 20_000);
+        assert!(two_missing < one_missing);
+    }
+
+    #[test]
+    fn coverage_is_one_when_there_is_nothing_to_measure() {
+        // No tokens, or an empty index: the lexical lane returns nothing in
+        // either case, so there is no contribution to discount. Never a silent
+        // zero — that would be a fabricated measurement.
+        assert_eq!(lexical_idf_coverage(&[], 10_000), 1.0);
+        assert_eq!(lexical_idf_coverage(&terms(&[("a", 0)]), 0), 1.0);
+    }
+
+    #[test]
+    fn gate_json_exposes_the_whole_computation() {
+        let gate = LexicalCoverageGate {
+            coverage: 0.25,
+            base_weight: 0.5,
+            effective_weight: 0.125,
+            field: "content".to_string(),
+            doc_count: 20_000,
+            present_terms: vec![("berendezes".to_string(), 1_000)],
+            absent_terms: vec!["legfekvizsgalo".to_string()],
+        };
+        let j = gate.to_json();
+        assert_eq!(j["coverage"], json!(0.25));
+        assert_eq!(j["fulltext_weight_base"], json!(0.5));
+        assert_eq!(j["fulltext_weight_effective"], json!(0.125));
+        assert_eq!(j["measured_on"], json!("content"));
+        assert_eq!(j["index_doc_count"], json!(20_000));
+        assert_eq!(j["absent_terms"], json!(["legfekvizsgalo"]));
+        assert_eq!(j["present_terms"][0]["token"], json!("berendezes"));
+        assert_eq!(j["present_terms"][0]["df"], json!(1_000));
     }
 
     #[test]
