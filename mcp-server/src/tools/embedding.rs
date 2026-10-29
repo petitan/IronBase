@@ -1,17 +1,18 @@
 //! Embedding generation tool handlers
 
 use crate::adapter::IronBaseAdapter;
-use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
+use ironbase_core::chunking::import::{
+    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
+    ChunkDocumentOptions, IfExists,
+};
+use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{default_chunk_mode, default_chunk_overlap, default_chunk_size};
-use super::helpers::{
-    insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
-};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -246,7 +247,7 @@ fn handle_embed_document(
     // an explicit doc_id already has chunks (auto-generated ids never collide).
     let if_exists = IfExists::parse(&p.if_exists);
     if let Some(ref doc_id) = p.doc_id {
-        if should_skip_before_embedding(adapter, &p.collection, doc_id, if_exists)? {
+        if should_skip_before_embedding(adapter.as_ref(), &p.collection, doc_id, if_exists)? {
             return Ok(json!({
                 "success": true,
                 "collection": p.collection,
@@ -310,70 +311,30 @@ fn handle_embed_document(
     }
 
     // Generate parent doc_id if not provided
-    let parent_id = p.doc_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let parent_id = p.doc_id.unwrap_or_else(new_doc_id);
 
     // Insert chunks as documents
-    let mut documents: Vec<Value> = Vec::new();
-    for (chunk, embedding) in chunks.iter().zip(all_embeddings.iter()) {
-        let mut doc = json!({
-            "doc_id": parent_id,
-            "chunk_index": chunk.index,
-            "chunk_total": chunk.total,
-            "content": chunk.text,
-            "embedding": embedding,
-            "start_char": chunk.start_char,
-            "end_char": chunk.end_char
-        });
-
-        // Add optional fields
-        if let Some(ref title) = p.title {
-            doc["title"] = json!(title);
-        }
-
-        if let Some(ref heading) = chunk.heading {
-            doc["section"] = json!(heading);
-        }
-
-        if let Some(level) = chunk.heading_level {
-            doc["heading_level"] = json!(level);
-        }
-
-        if let Some(ref path) = chunk.section_path {
-            doc["section_path"] = json!(path);
-        }
-        if let Some(ref th) = chunk.table_header {
-            doc["table_header"] = json!(th);
-        }
-
-        if let Some(ref metadata) = p.metadata {
-            if let Some(obj) = metadata.as_object() {
-                if let Some(doc_obj) = doc.as_object_mut() {
-                    for (key, value) in obj {
-                        // SECURITY/idempotency: never let metadata overwrite chunk-tracking
-                        // fields (e.g. doc_id, which drives replace) or the content/embedding.
-                        if RESERVED_METADATA_KEYS.contains(&key.as_str())
-                            || key == "content"
-                            || key == "embedding"
-                        {
-                            tracing::warn!(
-                                "Ignoring protected field '{}' in embed_document metadata",
-                                key
-                            );
-                            continue;
-                        }
-                        doc_obj.insert(key.clone(), value.clone());
-                    }
-                }
-            }
-        }
-
-        documents.push(doc);
-    }
+    let documents = build_chunk_documents(
+        &chunks,
+        Some(&all_embeddings),
+        &ChunkDocumentOptions {
+            doc_id: &parent_id,
+            text_field: "content",
+            embedding_field: "embedding",
+            title: p.title.as_deref(),
+            metadata: p.metadata.as_ref().and_then(|m| m.as_object()),
+        },
+    )?;
 
     // Insert all documents (idempotent w.r.t. doc_id — see issue #67).
     // if_exists was parsed before embedding (skip/error already short-circuited).
-    let result =
-        insert_chunks_idempotent(adapter, &p.collection, &parent_id, documents, if_exists)?;
+    let result = import_chunks(
+        adapter.as_ref(),
+        &p.collection,
+        &parent_id,
+        documents,
+        if_exists,
+    )?;
 
     if result.skipped {
         return Ok(json!({

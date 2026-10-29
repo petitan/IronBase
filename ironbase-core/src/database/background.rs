@@ -478,13 +478,86 @@ mod tests {
             auto_compact: None,
         };
         let handle = spawn_maintenance(Arc::clone(&db), config).unwrap();
-        // The checkpoint clears the WAL
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0) > 0 {
+        // The checkpoint clears the WAL. While a checkpoint replaces the WAL
+        // with its kept entries, it is briefly empty or missing: only the size
+        // after the maintenance stopped tells.
+        let wal_len = || std::fs::metadata(&wal).map_or(u64::MAX, |m| m.len());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while wal_len() > 0 {
             assert!(Instant::now() < deadline, "WAL never checkpointed");
             std::thread::sleep(Duration::from_millis(10));
         }
         handle.stop();
+        assert_eq!(wal_len(), 0, "WAL entries kept by the periodic checkpoint");
+        db.close().unwrap();
+    }
+
+    /// The periodic checkpoint drops the WAL entries only when every index
+    /// holds them: a dirty fulltext index (flushed at close / compaction
+    /// only) keeps them for its replay after a crash
+    #[test]
+    fn periodic_checkpoint_keeps_the_wal_a_dirty_fulltext_index_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        let coll = db.collection("c").unwrap();
+        coll.create_index("k".to_string(), false, false).unwrap();
+        coll.create_fulltext_index("t".to_string(), "none", None, None)
+            .unwrap();
+        let wal_len = || std::fs::metadata(path.with_extension("wal")).unwrap().len();
+        let insert = |i: i64| {
+            db.insert_one(
+                "c",
+                std::collections::HashMap::from([
+                    ("_id".to_string(), serde_json::json!(i)),
+                    ("k".to_string(), serde_json::json!(i % 3)),
+                    ("t".to_string(), serde_json::json!("some words")),
+                ]),
+            )
+            .unwrap();
+        };
+        for i in 0..5 {
+            insert(i);
+        }
+        db.periodic_checkpoint().unwrap();
+        assert!(
+            wal_len() > 0,
+            "WAL dropped while the fulltext index is dirty"
+        );
+
+        // Once every index is flushed, the periodic checkpoint clears it
+        db.checkpoint().unwrap();
+        db.periodic_checkpoint().unwrap();
+        assert_eq!(wal_len(), 0);
+        db.close().unwrap();
+    }
+
+    /// Without a dirty fulltext / fuzzy / vector index the periodic
+    /// checkpoint (B+ tree flush + WAL) clears the WAL by itself: it kept the
+    /// whole WAL until the next full flush before
+    #[test]
+    fn periodic_checkpoint_clears_the_wal_when_every_index_is_flushed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("q.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        db.collection("c")
+            .unwrap()
+            .create_index("k".to_string(), false, false)
+            .unwrap();
+        for i in 0..5 {
+            db.insert_one(
+                "c",
+                std::collections::HashMap::from([
+                    ("_id".to_string(), serde_json::json!(i)),
+                    ("k".to_string(), serde_json::json!(i % 3)),
+                ]),
+            )
+            .unwrap();
+        }
+        let wal = path.with_extension("wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        db.periodic_checkpoint().unwrap();
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
         db.close().unwrap();
     }
 }

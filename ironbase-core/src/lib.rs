@@ -30,6 +30,8 @@
 // ============================================================================
 // PUBLIC API MODULES - User-facing functionality
 // ============================================================================
+#[cfg(feature = "rag")]
+pub mod chunking;
 pub mod collection_core;
 pub mod database;
 pub mod document;
@@ -83,6 +85,7 @@ mod transaction_property_tests;
 // Public exports
 pub use collection_core::{
     index_cache_files, CollectionCore, DocumentQualification, FindCursor, InsertManyResult,
+    QualificationOutcome,
 };
 pub use database::background::{
     spawn_maintenance, AutoCompactPolicy, MaintenanceConfig, MaintenanceHandle, MaintenanceTarget,

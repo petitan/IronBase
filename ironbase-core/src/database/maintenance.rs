@@ -865,6 +865,12 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// Fulltext/fuzzy/vector indexes are flushed during `close()` and `compact()` only.
     /// On dirty shutdown, these indexes are rebuilt from documents (safe, just slower startup).
+    ///
+    /// When no fulltext, fuzzy or vector index is dirty afterwards, every index
+    /// file holds the transactions up to the pass's watermark, which then
+    /// becomes `index_flush_watermark`: the next `checkpoint_wal_only` may drop
+    /// their WAL entries. Without it the periodic checkpoint kept the whole WAL
+    /// until the next full flush (close, compaction, `checkpoint()`).
     pub fn flush_btree_indexes_counted(&self) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
@@ -873,6 +879,8 @@ impl DatabaseCore<StorageEngine> {
 
         let watermark = self.watermark_tx_id();
         let mut total_flushed = 0usize;
+        // Every index holds the transactions <= watermark (see above)
+        let mut covered = true;
         let _flush = self.index_flush_lock.lock();
         for (collection_name, index_manager) in self.index_managers_snapshot() {
             let dirty_bt = {
@@ -900,8 +908,25 @@ impl DatabaseCore<StorageEngine> {
                         "Index flushed"
                     );
                     total_flushed += 1;
+                } else if mgr.dirty_btree_index_names().contains(name) {
+                    // Dirty but not flushed (no such tree): not covered
+                    covered = false;
                 }
             }
+
+            // A transaction <= watermark has reached the in-memory indexes,
+            // so it left any index it changed dirty, or flushed
+            let mgr = index_manager.read();
+            if !mgr.dirty_fulltext_index_names().is_empty()
+                || !mgr.dirty_fuzzy_index_names().is_empty()
+                || !mgr.dirty_vector_index_names().is_empty()
+            {
+                covered = false;
+            }
+        }
+        if covered {
+            self.index_flush_watermark
+                .fetch_max(watermark, Ordering::SeqCst);
         }
         Ok(total_flushed)
     }

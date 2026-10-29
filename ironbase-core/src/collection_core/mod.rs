@@ -226,7 +226,7 @@ pub use topk::{topk_select, topk_select_with_skip};
 pub use index_ops::IndexStatisticsInfo;
 
 // Public exports for search
-pub use search::DocumentQualification;
+pub use search::{DocumentQualification, QualificationOutcome};
 
 // Public exports for Query Executor
 pub use query_executor::{

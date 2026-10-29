@@ -1310,6 +1310,80 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(index.options.clone())
     }
 
+    /// Restricts a fulltext search to document-level AND when asked for.
+    ///
+    /// With `and_mode` and `document_scope` (the caller's `match_scope` is not
+    /// `"chunk"`), the documents holding every query token across their chunks
+    /// are qualified first ([`Self::fulltext_qualify_documents`]); the search
+    /// then runs in OR mode inside them, combined with `user_filter`. Without a
+    /// fulltext index on the collection nothing is restricted. Shared by the
+    /// hybrid and the plain fulltext search.
+    pub fn fulltext_document_scope(
+        &self,
+        fields: &[&str],
+        query: &str,
+        and_mode: bool,
+        document_scope: bool,
+        user_filter: Option<Value>,
+    ) -> Result<QualificationOutcome> {
+        let is_doc_scope = and_mode && document_scope;
+        if !is_doc_scope || fields.is_empty() {
+            return Ok(QualificationOutcome {
+                is_doc_scope,
+                effective_and_mode: and_mode,
+                effective_filter: user_filter,
+                qualified_doc_count: None,
+            });
+        }
+        // A collection without fulltext indexes (non-RAG) is not restricted
+        if self
+            .fulltext_indexed_fields()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Ok(QualificationOutcome {
+                is_doc_scope: false,
+                effective_and_mode: and_mode,
+                effective_filter: user_filter,
+                qualified_doc_count: None,
+            });
+        }
+
+        let qualify_start = std::time::Instant::now();
+        let qualification = self.fulltext_qualify_documents(fields, query)?;
+        let qualified_doc_count = match &qualification {
+            DocumentQualification::NotRequired => None,
+            DocumentQualification::Documents { ids, .. } => Some(ids.len()),
+        };
+        if let Some(count) = qualified_doc_count {
+            tracing::info!(
+                collection = %self.name,
+                qualified = count,
+                elapsed_ms = qualify_start.elapsed().as_millis() as u64,
+                "document-level AND qualification"
+            );
+        }
+
+        // The qualified documents hold every token, so the search runs in OR
+        // mode inside them
+        let (effective_and_mode, effective_filter) = match qualification.to_filter() {
+            Some(qualified) => {
+                let merged = match user_filter {
+                    Some(user) => serde_json::json!({ "$and": [user, qualified] }),
+                    None => qualified,
+                };
+                (false, Some(merged))
+            }
+            None => (and_mode, user_filter),
+        };
+        Ok(QualificationOutcome {
+            is_doc_scope,
+            effective_and_mode,
+            effective_filter,
+            qualified_doc_count,
+        })
+    }
+
     /// Document-level AND: the documents whose indexed text holds every query
     /// token, possibly spread over several chunks.
     ///
@@ -1405,6 +1479,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ids: union.into_values().collect(),
         })
     }
+}
+
+/// Result of [`CollectionCore::fulltext_document_scope`]
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualificationOutcome {
+    /// Document-level AND is in effect (`and_mode` + document scope)
+    pub is_doc_scope: bool,
+    /// The fulltext mode to search with: OR once the documents are qualified
+    pub effective_and_mode: bool,
+    /// The caller's filter, combined with the qualified documents
+    pub effective_filter: Option<Value>,
+    /// Number of qualified documents, when they were qualified
+    pub qualified_doc_count: Option<usize>,
 }
 
 /// Result of [`CollectionCore::fulltext_qualify_documents`].

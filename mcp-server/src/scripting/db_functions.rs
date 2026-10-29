@@ -10,13 +10,14 @@
 //! All functions include safety limits to prevent OOM attacks.
 
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
-use crate::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::tools::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD};
-use crate::tools::helpers::{
-    insert_chunks_idempotent, should_skip_before_embedding, IfExists, RESERVED_METADATA_KEYS,
-};
 use crate::tools::params::{HybridSearchParams, ParseParams};
+use ironbase_core::chunking::import::{
+    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
+    ChunkDocumentOptions, IfExists,
+};
+use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -831,19 +832,22 @@ fn register_search_functions(
                 .min(max_find_documents)
                 .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
 
-            // Document-level AND qualification: if and_mode + document scope,
-            // qualify doc_ids first, then switch to OR retrieval
-            let (effective_and_mode, effective_filter) = if and_mode && match_scope == "document" {
-                match adapter_ftsrch
-                    .fulltext_qualify_documents(collection, &[field], query)
-                    .map(|q| q.to_filter())
-                {
-                    Ok(Some(qualified)) => (false, Some(qualified)),
-                    _ => (and_mode, None), // single token or no index: plain AND
-                }
-            } else {
-                (and_mode, None)
+            // Document-level AND qualification (same as the fulltext tool): with
+            // and_mode + document scope, qualify the documents first, then
+            // retrieve in OR mode inside them
+            let qual = match adapter_ftsrch.fulltext_document_scope(
+                collection,
+                &[field],
+                query,
+                and_mode,
+                match_scope == "document",
+                None,
+            ) {
+                Ok(qual) => qual,
+                Err(e) => return Dynamic::from(format!("Error: {}", e)),
             };
+            let (effective_and_mode, effective_filter) =
+                (qual.effective_and_mode, qual.effective_filter);
 
             let options = FulltextSearchOptions {
                 limit: Some(effective_limit),
@@ -1409,19 +1413,7 @@ fn hybrid_search_impl(
 
     if group_by_document {
         // No projection — Rhai callers get the full chunk documents.
-        let (groups, _total) = match crate::tools::hybrid::build_doc_groups(
-            &fo.fused,
-            adapter,
-            &p.collection,
-            &p.query,
-            p.limit,
-            &p.filter,
-            p.max_chunks_per_doc,
-            &None,
-            &fo.effective_text_field,
-            &fo.effective_text_fields,
-            p.merge_chunks,
-        ) {
+        let (groups, _total) = match crate::tools::hybrid::build_doc_groups(adapter, &fo, &None) {
             Ok(g) => g,
             Err(e) => return Dynamic::from(format!("Error: {}", e)),
         };
@@ -1449,24 +1441,12 @@ fn hybrid_search_impl(
     let results: Vec<Dynamic> = fo
         .fused
         .into_iter()
-        .map(|item| {
-            let result = json_to_dynamic(&item.doc);
-            if let Some(mut map) = result.clone().try_cast::<Map>() {
-                map.insert("_rrf_score".into(), Dynamic::from(item.rrf_score));
-                map.insert("_final_score".into(), Dynamic::from(item.final_score));
-                map.insert("_rerank_boost".into(), Dynamic::from(item.rerank_boost));
-                map.insert("_vector_rank".into(), Dynamic::from(item.v_rank as i64));
-                map.insert("_text_rank".into(), Dynamic::from(item.t_rank as i64));
-                if let Some(vs) = item.v_score {
-                    map.insert("_vector_score".into(), Dynamic::from(vs as f64));
-                }
-                if let Some(ts) = item.t_score {
-                    map.insert("_text_score".into(), Dynamic::from(ts));
-                }
-                Dynamic::from(map)
-            } else {
-                result
+        .map(|mut item| {
+            let mut doc = std::mem::take(&mut item.doc);
+            if let Value::Object(ref mut obj) = doc {
+                item.write_score_fields(obj);
             }
+            json_to_dynamic(&doc)
         })
         .collect();
 
@@ -1502,9 +1482,7 @@ fn rag_import_impl(
     // Parse options using helper functions
     let title = get_string_option(&options, "title").unwrap_or_default();
     let explicit_doc_id = get_string_option(&options, "doc_id");
-    let doc_id = explicit_doc_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let doc_id = explicit_doc_id.clone().unwrap_or_else(new_doc_id);
     let if_exists = IfExists::parse(&get_string_option_or(&options, "if_exists", "replace"));
     let language = get_string_option_or(&options, "language", "none");
     let text_fields_opt = get_string_array_option(&options, "text_fields");
@@ -1570,7 +1548,7 @@ fn rag_import_impl(
     // Pre-check before embedding: skip/error short-circuit if an explicit doc_id
     // already has chunks (auto-generated ids never collide).
     if let Some(ref did) = explicit_doc_id {
-        match should_skip_before_embedding(adapter, collection, did, if_exists) {
+        match should_skip_before_embedding(adapter.as_ref(), collection, did, if_exists) {
             Ok(true) => {
                 let mut result = Map::new();
                 result.insert("success".into(), Dynamic::from(true));
@@ -1631,67 +1609,24 @@ fn rag_import_impl(
     }
 
     // Build and insert documents
-    let mut documents: Vec<serde_json::Value> = Vec::with_capacity(chunks.len());
-    for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
-        let mut doc = json!({
-            "doc_id": doc_id,
-            "chunk_index": chunk.index,
-            "chunk_total": chunk.total,
-            "start_char": chunk.start_char,
-            "end_char": chunk.end_char
-        });
-
-        if let Some(obj) = doc.as_object_mut() {
-            obj.insert(text_field.clone(), json!(chunk.text));
-            obj.insert(embedding_field.clone(), json!(embedding));
-        }
-
-        if !title.is_empty() {
-            doc["title"] = json!(title);
-        }
-        if let Some(ref heading) = chunk.heading {
-            doc["section"] = json!(heading);
-        }
-        if let Some(level) = chunk.heading_level {
-            doc["heading_level"] = json!(level);
-        }
-        if let Some(ref path) = chunk.section_path {
-            doc["section_path"] = json!(path);
-        }
-        if let Some(ref th) = chunk.table_header {
-            doc["table_header"] = json!(th);
-        }
-
-        // Add custom metadata from options (with security filtering)
-        if let Some(metadata) = options.get("metadata") {
-            let meta_json = dynamic_to_json(metadata);
-            if let Some(meta_obj) = meta_json.as_object() {
-                if let Some(doc_obj) = doc.as_object_mut() {
-                    for (k, v) in meta_obj {
-                        // SECURITY: Skip reserved keys to prevent injection
-                        if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
-                            tracing::warn!("Ignoring reserved metadata key '{}' in rag_import", k);
-                            continue;
-                        }
-                        // Also skip embedding and text fields
-                        if k == &embedding_field || k == &text_field {
-                            tracing::warn!(
-                                "Ignoring protected field '{}' in rag_import metadata",
-                                k
-                            );
-                            continue;
-                        }
-                        doc_obj.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-        }
-
-        documents.push(doc);
-    }
+    let metadata = options.get("metadata").map(dynamic_to_json);
+    let documents = match build_chunk_documents(
+        &chunks,
+        Some(&embeddings),
+        &ChunkDocumentOptions {
+            doc_id: &doc_id,
+            text_field: &text_field,
+            embedding_field: &embedding_field,
+            title: (!title.is_empty()).then_some(title.as_str()),
+            metadata: metadata.as_ref().and_then(|m| m.as_object()),
+        },
+    ) {
+        Ok(documents) => documents,
+        Err(e) => return Dynamic::from(format!("Error: {}", e)),
+    };
 
     // Insert documents (idempotent w.r.t. doc_id — see issue #67)
-    match insert_chunks_idempotent(adapter, collection, &doc_id, documents, if_exists) {
+    match import_chunks(adapter.as_ref(), collection, &doc_id, documents, if_exists) {
         Ok(outcome) => {
             let mut result = Map::new();
             result.insert("success".into(), Dynamic::from(true));

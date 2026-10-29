@@ -135,5 +135,6 @@ pub const MAX_EMPTY_BATCHES: usize = 3;
 /// Default RRF K constant (lower = wider score spread, more reranking impact)
 pub const DEFAULT_RRF_K: f64 = 20.0;
 
-/// Maximum internal limit for search fusion (caps per-source fetch before RRF)
-pub const MAX_INTERNAL_LIMIT: usize = 10_000;
+/// Maximum internal limit for search fusion (caps per-source fetch before RRF):
+/// the engine's hybrid candidate cap
+pub const MAX_INTERNAL_LIMIT: usize = ironbase_core::search::hybrid::MAX_CANDIDATES;

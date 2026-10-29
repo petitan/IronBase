@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.648"
+version = "1.0.649"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -57,7 +57,7 @@ base64 = "0.22"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 # IronBase integration
-ironbase-core = { path = "../ironbase-core" }
+ironbase-core = { path = "../ironbase-core", features = ["rag"] }
 
 # Embedding support
 ureq = { version = "3", features = ["json"] }
@@ -65,7 +65,6 @@ rayon = { workspace = true }
 log = { workspace = true }
 
 # Text chunking for embed_document
-text-splitter = { version = "0.18", features = ["markdown"] }
 
 # Embedding cache
 lru = { workspace = true }

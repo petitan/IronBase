@@ -17,7 +17,7 @@
 | Művelet | Parancs |
 |---------|---------|
 | Python dev build | `maturin develop` |
-| Rust tesztek | `cargo test -p ironbase-core` |
+| Rust tesztek | `cargo test -p ironbase-core --features rag` (a `rag` feature a chunkolás tesztjeit is futtatja) |
 | Egyetlen teszt | `cargo test -p ironbase-core -- test_name` |
 | Full CI | `just run-dev-checks` |
 | .NET tesztek | `cd IronBase.NET && dotnet test` |
@@ -528,6 +528,8 @@ Régi: 1 write lock → flush 22 index → unlock (percek)
           write lock → flush 1 index → unlock (ms)
 ```
 
+**Periodikus checkpoint WAL-ja (v1.0.649):** a periodikus pass csak B+ tree indexet flush-öl; a `flush_btree_indexes_counted` akkor lépteti az `index_flush_watermark`-ot a pass watermarkjára, ha utána egyetlen fulltext/fuzzy/vector index sem dirty (azokat csak close/compaction flush-öli). Különben a WAL megmarad a következő teljes flush-ig — dirty fulltext indexnél ez szándékos (crash utáni replay), előtte viszont dirty index nélkül is nőtt.
+
 **Race condition:** Ha insert befut két flush között és dirty-re állít egy már flush-ölt indexet, az a KÖVETKEZŐ checkpoint-ban lesz kiírva. Adatvesztés nincs, mert a WAL-törlés **megtartja** a `tx_id > W` bejegyzéseket (W = az index-flush pass watermarkja, `index_flush_watermark`; `StorageEngine::checkpoint_keeping_wal_after`). A crash-recovery sem törli a WAL-t: csak a commitolt tranzakciókat tartja meg, és megnyitáskor azonnal replay-eli az érintett collectionök indexeit — a következő checkpoint dobja el őket (v1.0.557).
 
 **Key files:**
@@ -623,8 +625,8 @@ cd mcp-server && cargo build --release
 mcp-server/src/
 ├── http_server/  # mod.rs, handler.rs, response.rs, state.rs, config.rs
 ├── jobs/         # manager.rs, types.rs
-├── chunking/     # markdown.rs, text.rs
-└── tools/        # auto_embed.rs
+└── tools/        # auto_embed.rs, hybrid.rs (retrieve_and_fuse), rag.rs
+# chunkolás: ironbase-core/src/chunking/ (`rag` feature), fusion: ironbase-core/src/search/hybrid/
 ```
 </details>
 
@@ -653,7 +655,7 @@ Systemd: `TimeoutStopSec=60`, `KillSignal=SIGTERM`
 
 | Típus | Parancs/Hely |
 |-------|--------------|
-| Rust unit | `cargo test -p ironbase-core` |
+| Rust unit | `cargo test -p ironbase-core --features rag` |
 | Property | `ironbase-core/tests/property_tests.rs` |
 | Perf regression | `cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1` (munkaszámláló + arány, CI `Performance regression` job) |
 | Property-based (P1–P10) | `ironbase-core/tests/pbt_*.rs` + `src/pbt_roundtrip_tests.rs`, backup: `ironbase-backup/tests/pbt_backup.rs`, MCP/bridge: `test_any_request_*`, `test_every_tool_denies_*`, `every_request_gets_*`. PR-CI kis esetszám; `PROPTEST_CASES=N` emeli; éjszakai job (`.github/workflows/nightly.yml`): 2000 eset + fuzz 60 s/target |
@@ -775,7 +777,7 @@ A Rhai script engine-ben elérhető adatbázis függvények (script_exec / scrip
 | `db_delete_many(collection, filter)` | Törlés (összes találat) |
 | `db_count(collection, query)` | Dokumentumok számolása |
 | `db_aggregate(collection, pipeline)` | Aggregációs pipeline |
-| `db_hybrid_search(collection, query)` | RRF hybrid keresés (fusion.rs delegálás) |
+| `db_hybrid_search(collection, query)` | RRF hybrid keresés (motor: `search::hybrid`) |
 | `db_hybrid_search(collection, query, options)` | Hybrid keresés opciókkal |
 | `db_rag_import(collection, text, metadata)` | RAG dokumentum import |
 | `db_rag_create(collection)` / `db_rag_create(collection, options)` | RAG collection létrehozás |
@@ -802,13 +804,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 });
 ```
 
-**Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/fusion.rs` (shared pipeline)
+**Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/hybrid.rs` (`retrieve_and_fuse`), `ironbase-core/src/search/hybrid/` (fusion motor)
 </details>
 
 ### Score Fusion / hibrid keresés architektúra
 
 RRF fusion, reranking, adjacent-chunk merge, MMR, fulltext mode (OR default v1.0.537+),
-document-level AND, multi-field FTS, search-mode presetek, közös `fusion.rs`/`hybrid.rs` motor.
+document-level AND, multi-field FTS, search-mode presetek; a fusion a motorban (`ironbase_core::search::hybrid`, `CollectionCore::hybrid_fuse`), az MCP csak feloldja a paramétereket.
 → **[`docs/SCORE_FUSION.md`](docs/SCORE_FUSION.md)** (teljes spec). Operatív: [`docs/RAG_PIPELINE.md`](docs/RAG_PIPELINE.md).
 
 ### Auto-Embedding & Cache

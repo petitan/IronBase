@@ -9,6 +9,8 @@ description = "Pure Rust core library for IronBase - embedded document database"
 [features]
 default = ["parallel"]
 parallel = ["rayon"]
+# Document chunking for RAG import (`ironbase_core::chunking`)
+rag = ["dep:text-splitter"]
 
 [lib]
 name = "ironbase_core"
@@ -35,6 +37,7 @@ unicode-normalization = "0.1"   # For accent folding in full-text search
 rayon = { version = "1.10", optional = true }  # For parallel iteration (default: enabled)
 tracing = "0.1"    # For progress logging during long operations
 ahash = "0.8"      # Fast hashing for group/distinct operations
+text-splitter = { version = "0.18", features = ["markdown"], optional = true }  # `rag` feature: chunking
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"       # System info via sysconf (aggregation/memory_info.rs)

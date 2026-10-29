@@ -1,8 +1,10 @@
 # MCP → core: a szerverbe nem való logika áthelyezése
 
 **Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
-a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1. lépése
-(`ironbase_core::search::hybrid`: rerank, merge, MMR). Hátra: 3/2–3. és a 4. pont.
+a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1–2. lépése
+(`ironbase_core::search::hybrid`: rerank, merge, MMR, `hybrid_fuse`, `hybrid_group_documents`),
+3/3. (Python: `create_vector_index`, `vector_search`, `hybrid_search`), 4. pont (chunkolás és
+RAG-import a motor `rag` feature-je mögött; Python `chunk_text`, `rag_import`). **A terv kész.**
 
 ## Miért
 
@@ -85,12 +87,21 @@ JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue
    `id_to_string`) a 30 tesztjükkel; az MCP a motorét hívja, viselkedés változatlan.
    Az RRF-pontozás és a csoportosítás a `retrieve_and_fuse`/`build_doc_groups` része, a
    2. lépéssel megy.
-2. **`retrieve_and_fuse` + `build_doc_groups`** a motorba, `HybridQuery`-vel; az MCP
+2. *Kész:* `CollectionCore::hybrid_fuse(&HybridQuery, ctx)` és `hybrid_group_documents`
+   (`search/hybrid/fuse.rs`, `group.rs`), a dokumentum-szintű AND orkesztrációja
+   `CollectionCore::fulltext_document_scope`. Ellenőrzés: ideiglenes aranyfájl-harness (240
+   eset: 10 lekérdezés × 24 paraméterkombináció, flat + grouped) — a kimenet a váltás előtt
+   és után bitre azonos (normalizált JSON). Az eredeti terv:
+   **`retrieve_and_fuse` + `build_doc_groups`** a motorba, `HybridQuery`-vel; az MCP
    `search` és a Rhai `db_hybrid_search` erre vált. Ellenőrzés: a
    `mcp-server/eval/measure_lanes.py` `mirror`-konfigurációja és a `search`
    ugyanazokat a dokumentumokat adja a váltás előtt és után (aranyfájl a címkeszet
    62 kérdésére), plusz a meglévő `hybrid.rs`-tesztek.
-3. **Kötések:** Python `Collection.vector_search(vector, field, limit)` (ma hiányzik) és
+3. *Kész:* `Collection.create_vector_index(field, dimensions, metric)`,
+   `vector_search(field, vector, limit, filter)`, `hybrid_search(query, vector=None, ...)`
+   (lapos: pontszám-mezőkkel; csoportosított: a Rhai `db_hybrid_search` alakja),
+   `test_vector_hybrid.py`. A metrika-név parse-olása közös: `DistanceMetric: FromStr`.
+   Az eredeti terv: **Kötések:** Python `Collection.vector_search(vector, field, limit)` (ma hiányzik) és
    `Collection.hybrid_search(query, vector=None, ...)`; C# a következő körben, igény
    szerint.
 
@@ -98,7 +109,18 @@ JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue
 lépés aranyfájl-összevetéssel zárul, és a régi kód csak utána törlődik.
 **Méret:** L.
 
-## 4. Chunkolás → motor (opcionális `rag` feature)
+## 4. Chunkolás → motor (opcionális `rag` feature) — kész
+
+**Megvalósítva:** `ironbase_core::chunking` (`rag` feature, `text-splitter` csak mögötte; az MCP
+és a Python-kötés bekapcsolja). `chunking::import`: `build_chunk_documents` (a három MCP-oldali
+másolat helyett), `IfExists`, `RESERVED_METADATA_KEYS`, `import_chunks` /
+`should_skip_before_embedding` egy `ChunkStore` trait fölött — ezt a két `DatabaseCore` és az MCP
+adapter valósítja meg (az adapter így vezeti a dokumentumszámait). Python:
+`ironbase.chunk_text(text, ...)` (chunk-dict-ek `embed_text`-tel) és
+`Collection.rag_import(text, embed=None, ...)` (az `embed` hívható egyszer kapja meg az összes
+chunk szövegét). A kontextus-prefix (`context_fields`) MCP-oldali maradt.
+
+Az eredeti terv:
 
 **Most:** `mcp-server/src/chunking/` (~1 200 sor; `text_splitter` crate, markdown- és
 szövegdarabolás, kontextus-prefix) és az import-folyamat a `tools/rag.rs`-ben
