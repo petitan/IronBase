@@ -2041,17 +2041,12 @@ impl IronBaseAdapter {
         use ironbase_core::vector::{DistanceMetric, VectorIndexConfig};
 
         // Parse metric
-        let distance_metric = match metric.to_lowercase().as_str() {
-            "cosine" => DistanceMetric::Cosine,
-            "euclidean" => DistanceMetric::Euclidean,
-            "dot_product" | "dotproduct" => DistanceMetric::DotProduct,
-            _ => {
-                return Err(crate::error::McpError::invalid_params(format!(
-                    "Unknown distance metric '{}'. Use: cosine, euclidean, or dot_product",
-                    metric
-                )))
-            }
-        };
+        let distance_metric: DistanceMetric = metric.parse().map_err(|_| {
+            crate::error::McpError::invalid_params(format!(
+                "Unknown distance metric '{}'. Use: cosine, euclidean, or dot_product",
+                metric
+            ))
+        })?;
 
         let config = VectorIndexConfig::new(dim)
             .with_metric(distance_metric)

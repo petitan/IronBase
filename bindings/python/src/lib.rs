@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ironbase_core::search::hybrid::{DocGroup, FusedResult, HybridFusion, HybridQuery};
+use ironbase_core::vector::{DistanceMetric, VectorIndexConfig, VectorSearchOptions};
 use ironbase_core::{
     index::FuzzyAlgorithm, storage::MemoryStorage, CollectionCore, DatabaseCore, DocumentId,
     DurabilityMode, IronBaseError, StorageEngine,
@@ -509,6 +511,44 @@ impl CollectionWrapper {
     ) -> Result<Vec<ironbase_core::fulltext::FulltextIndexMetadata>, ironbase_core::IronBaseError>
     {
         coll_dispatch!(self, list_fulltext_indexes)
+    }
+
+    fn create_vector_index(
+        &self,
+        field: &str,
+        config: VectorIndexConfig,
+    ) -> Result<String, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, create_vector_index, field, config)
+    }
+
+    fn vector_search_with_options(
+        &self,
+        field: &str,
+        vector: &[f32],
+        limit: usize,
+        options: &VectorSearchOptions,
+    ) -> Result<Vec<(Value, f32)>, ironbase_core::IronBaseError> {
+        coll_dispatch!(
+            self,
+            vector_search_with_options,
+            field,
+            vector,
+            limit,
+            options,
+            None
+        )
+    }
+
+    fn hybrid_fuse(&self, query: &HybridQuery) -> Result<HybridFusion, IronBaseError> {
+        coll_dispatch!(self, hybrid_fuse, query, None)
+    }
+
+    fn hybrid_group_documents(
+        &self,
+        fused: &[FusedResult],
+        query: &HybridQuery,
+    ) -> Result<(Vec<DocGroup>, usize), IronBaseError> {
+        coll_dispatch!(self, hybrid_group_documents, fused, query, None)
     }
 
     fn explain(&self, query: &Value) -> Result<Value, ironbase_core::IronBaseError> {
@@ -1784,24 +1824,7 @@ impl Collection {
         min_score: Option<f64>,
         projection: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let proj_map = match projection {
-            Some(ref dict) => {
-                let mut map = HashMap::new();
-                for (key, value) in dict.iter() {
-                    let k: String = key.extract()?;
-                    let v: i32 = value.extract()?;
-                    if v != 0 && v != 1 {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, v
-                        )));
-                    }
-                    map.insert(k, v);
-                }
-                Some(map)
-            }
-            None => None,
-        };
+        let proj_map = projection.as_ref().map(projection_map).transpose()?;
 
         let results = self
             .core
@@ -1823,6 +1846,223 @@ impl Collection {
             py_list.append(tuple)?;
         }
 
+        Ok(py_list)
+    }
+
+    /// Create a vector (HNSW) index on a field holding embedding arrays.
+    ///
+    /// Args:
+    ///     field: Field with the vectors
+    ///     dimensions: Vector length
+    ///     metric: "cosine" (default), "euclidean" or "dot_product"
+    ///
+    /// Returns:
+    ///     Index name
+    ///
+    /// Example:
+    ///     >>> coll.create_vector_index("embedding", 384)
+    #[pyo3(signature = (field, dimensions, metric="cosine"))]
+    fn create_vector_index(
+        &self,
+        field: &str,
+        dimensions: usize,
+        metric: &str,
+    ) -> PyResult<String> {
+        let metric: DistanceMetric = metric.parse().map_err(ironbase_error_to_pyerr)?;
+        let config = VectorIndexConfig::new(dimensions).with_metric(metric);
+        self.core
+            .create_vector_index(field, config)
+            .map_err(ironbase_error_to_pyerr)
+    }
+
+    /// Nearest-neighbour search on a vector index.
+    ///
+    /// Args:
+    ///     field: Field with a vector index
+    ///     vector: Query vector
+    ///     limit: Maximum results (default: 10)
+    ///     filter: Only documents matching this query are searched
+    ///
+    /// Returns:
+    ///     List of tuples: (document, score), most similar first
+    ///
+    /// Example:
+    ///     >>> for doc, score in coll.vector_search("embedding", query_vec, limit=5):
+    ///     ...     print(score, doc["title"])
+    #[pyo3(signature = (field, vector, limit=10, filter=None))]
+    fn vector_search<'py>(
+        &self,
+        py: Python<'py>,
+        field: &str,
+        vector: Vec<f32>,
+        limit: usize,
+        filter: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let options = VectorSearchOptions {
+            filter: filter
+                .map(|f| python_dict_to_json_value(py, &f))
+                .transpose()?,
+            exclude_fields: Vec::new(),
+        };
+        let results = self
+            .core
+            .vector_search_with_options(field, &vector, limit, &options)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        let py_list = PyList::empty(py);
+        for (doc, score) in results {
+            let tuple = PyTuple::new(
+                py,
+                [
+                    json_to_python_dict(py, &doc)?.into_any(),
+                    score.into_pyobject(py)?.into_any(),
+                ],
+            )?;
+            py_list.append(tuple)?;
+        }
+        Ok(py_list)
+    }
+
+    /// Hybrid search: vector and fulltext results fused with weighted
+    /// Reciprocal Rank Fusion (`weight / (rrf_k + rank)` per search),
+    /// optionally reranked, merged, diversified (MMR) and grouped by document.
+    ///
+    /// The embedding is the caller's: pass the query's vector, or omit it for
+    /// a fulltext-only (BM25) search.
+    ///
+    /// Args:
+    ///     query: Query text (fulltext search and reranking)
+    ///     vector: Query embedding; None = fulltext only
+    ///     text_field: Fulltext-indexed field (default: "content")
+    ///     vector_field: Vector-indexed field (default: "embedding")
+    ///     text_fields: Several fulltext fields searched together
+    ///     limit: Results, or documents when grouping (default: 10)
+    ///     vector_weight / fulltext_weight: RRF weights (default: 0.5 / 0.5)
+    ///     rrf_k: RRF constant (default: 20)
+    ///     filter: Query applied to both searches
+    ///     mode: "or" (default) or "and" (every word must match)
+    ///     match_scope: with mode="and": "document" (default; words may be in
+    ///         different chunks of a doc_id) or "chunk"
+    ///     rerank: Phrase / keyword density / title reranking (default: True)
+    ///     title_field: Field whose matches boost a result
+    ///     merge_chunks: Merge adjacent chunks of a document (default: True)
+    ///     deduplicate: MMR diversity reordering (default: False)
+    ///     mmr_lambda: MMR trade-off, 1.0 = relevance only (default: 0.7)
+    ///     max_chunks_per_doc: At most this many chunks per document
+    ///     group_by_document: Group the results by `doc_id` (default: False)
+    ///     projection: Fields to include/exclude in the returned documents
+    ///
+    /// Returns:
+    ///     Flat: list of documents with `_rrf_score`, `_final_score`,
+    ///     `_rerank_boost`, `_vector_rank`, `_text_rank` and, when found by
+    ///     that search, `_vector_score` / `_text_score`.
+    ///     Grouped: list of dicts with `doc_id`, `best_score`, `chunk_count`,
+    ///     the fields common to all its chunks, and `chunks`.
+    ///
+    /// Example:
+    ///     >>> hits = coll.hybrid_search("engine oil", vector=embed("engine oil"))
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        query, vector=None, *, text_field="content", vector_field="embedding",
+        text_fields=None, limit=10, vector_weight=0.5, fulltext_weight=0.5, rrf_k=20.0,
+        filter=None, mode="or", match_scope="document", rerank=true, title_field=None,
+        merge_chunks=true, deduplicate=false, mmr_lambda=0.7, max_chunks_per_doc=None,
+        group_by_document=false, projection=None
+    ))]
+    fn hybrid_search<'py>(
+        &self,
+        py: Python<'py>,
+        query: String,
+        vector: Option<Vec<f32>>,
+        text_field: &str,
+        vector_field: &str,
+        text_fields: Option<Vec<String>>,
+        limit: usize,
+        vector_weight: f64,
+        fulltext_weight: f64,
+        rrf_k: f64,
+        filter: Option<Bound<'_, PyDict>>,
+        mode: &str,
+        match_scope: &str,
+        rerank: bool,
+        title_field: Option<String>,
+        merge_chunks: bool,
+        deduplicate: bool,
+        mmr_lambda: f64,
+        max_chunks_per_doc: Option<usize>,
+        group_by_document: bool,
+        projection: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let value_error = |msg: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(msg);
+        let and_mode = match mode {
+            "or" => false,
+            "and" => true,
+            other => {
+                return Err(value_error(format!(
+                    "mode must be 'or' or 'and', got '{other}'"
+                )))
+            }
+        };
+        let document_scope = match match_scope {
+            "document" => true,
+            "chunk" => false,
+            other => {
+                return Err(value_error(format!(
+                    "match_scope must be 'document' or 'chunk', got '{other}'"
+                )))
+            }
+        };
+        let q = HybridQuery {
+            query,
+            vector,
+            vector_field: vector_field.to_string(),
+            searched_vector_field: None,
+            text_field: text_field.to_string(),
+            text_fields,
+            vector_weight,
+            fulltext_weight,
+            rrf_k,
+            limit,
+            filter: filter
+                .map(|f| python_dict_to_json_value(py, &f))
+                .transpose()?,
+            and_mode,
+            document_scope,
+            rerank,
+            title_field,
+            max_chunks_per_doc,
+            merge_chunks,
+            deduplicate,
+            mmr_lambda,
+            group_by_document,
+            projection: projection.as_ref().map(projection_map).transpose()?,
+        };
+
+        let fusion = self.core.hybrid_fuse(&q).map_err(ironbase_error_to_pyerr)?;
+        let py_list = PyList::empty(py);
+        if group_by_document {
+            let (groups, _total) = self
+                .core
+                .hybrid_group_documents(&fusion.fused, &q)
+                .map_err(ironbase_error_to_pyerr)?;
+            for g in groups {
+                let mut group = serde_json::Map::new();
+                group.insert("doc_id".to_string(), Value::String(g.doc_id));
+                group.insert("best_score".to_string(), serde_json::json!(g.best_score));
+                group.insert("chunk_count".to_string(), serde_json::json!(g.chunks.len()));
+                group.extend(g.lifted);
+                group.insert("chunks".to_string(), Value::Array(g.chunks));
+                py_list.append(json_to_python_dict(py, &Value::Object(group))?)?;
+            }
+        } else {
+            for mut item in fusion.fused {
+                let mut doc = std::mem::take(&mut item.doc);
+                if let Value::Object(ref mut obj) = doc {
+                    item.write_score_fields(obj);
+                }
+                py_list.append(json_to_python_dict(py, &doc)?)?;
+            }
+        }
         Ok(py_list)
     }
 
@@ -2325,6 +2565,23 @@ fn python_to_json(py: Python<'_>, value: &Bound<'_, pyo3::PyAny>) -> PyResult<Va
 }
 
 /// Python dict -> JSON Value
+/// A `{field: 0 | 1}` projection dict
+fn projection_map(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, i32>> {
+    let mut map = HashMap::new();
+    for (key, value) in dict.iter() {
+        let k: String = key.extract()?;
+        let v: i32 = value.extract()?;
+        if v != 0 && v != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid projection value for '{}': expected 0 or 1, got {}",
+                k, v
+            )));
+        }
+        map.insert(k, v);
+    }
+    Ok(map)
+}
+
 fn python_dict_to_json_value(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Value> {
     let mut map = serde_json::Map::new();
     for (k, v) in dict.iter() {

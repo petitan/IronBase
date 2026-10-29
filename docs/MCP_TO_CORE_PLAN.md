@@ -2,8 +2,8 @@
 
 **Állapot:** a döntések (D1–D5) jóváhagyva (2026-10-29). Kész: 1. pont (háttér-karbantartás),
 a halott `preprocessing/` törlése, 2. pont (qualification), 3. pont 1–2. lépése
-(`ironbase_core::search::hybrid`: rerank, merge, MMR, `hybrid_fuse`, `hybrid_group_documents`).
-Hátra: 3/3. (Python-kötés) és a 4. pont.
+(`ironbase_core::search::hybrid`: rerank, merge, MMR, `hybrid_fuse`, `hybrid_group_documents`),
+3/3. (Python: `create_vector_index`, `vector_search`, `hybrid_search`). Hátra: a 4. pont.
 
 ## Miért
 
@@ -96,7 +96,11 @@ JSON-paraméterek (`HybridSearchParams`) → `HybridQuery` fordítás, Rhai-glue
    `mcp-server/eval/measure_lanes.py` `mirror`-konfigurációja és a `search`
    ugyanazokat a dokumentumokat adja a váltás előtt és után (aranyfájl a címkeszet
    62 kérdésére), plusz a meglévő `hybrid.rs`-tesztek.
-3. **Kötések:** Python `Collection.vector_search(vector, field, limit)` (ma hiányzik) és
+3. *Kész:* `Collection.create_vector_index(field, dimensions, metric)`,
+   `vector_search(field, vector, limit, filter)`, `hybrid_search(query, vector=None, ...)`
+   (lapos: pontszám-mezőkkel; csoportosított: a Rhai `db_hybrid_search` alakja),
+   `test_vector_hybrid.py`. A metrika-név parse-olása közös: `DistanceMetric: FromStr`.
+   Az eredeti terv: **Kötések:** Python `Collection.vector_search(vector, field, limit)` (ma hiányzik) és
    `Collection.hybrid_search(query, vector=None, ...)`; C# a következő körben, igény
    szerint.
 

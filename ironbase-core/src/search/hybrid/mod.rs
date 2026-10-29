@@ -99,6 +99,26 @@ pub struct FusedResult {
     pub t_score: Option<f64>,
 }
 
+impl FusedResult {
+    /// Writes the result's scores into its document's shape: `_rrf_score`,
+    /// `_final_score`, `_rerank_boost`, `_vector_rank`, `_text_rank` (0 = the
+    /// lane did not return it) and, when the lane did, `_vector_score` /
+    /// `_text_score`
+    pub fn write_score_fields(&self, obj: &mut serde_json::Map<String, Value>) {
+        obj.insert("_rrf_score".to_string(), json!(self.rrf_score));
+        obj.insert("_final_score".to_string(), json!(self.final_score));
+        obj.insert("_rerank_boost".to_string(), json!(self.rerank_boost));
+        obj.insert("_vector_rank".to_string(), json!(self.v_rank));
+        obj.insert("_text_rank".to_string(), json!(self.t_rank));
+        if let Some(vs) = self.v_score {
+            obj.insert("_vector_score".to_string(), json!(vs));
+        }
+        if let Some(ts) = self.t_score {
+            obj.insert("_text_score".to_string(), json!(ts));
+        }
+    }
+}
+
 /// Convert Value _id to String for HashMap key
 pub fn id_to_string(id: &Value) -> Option<String> {
     match id {

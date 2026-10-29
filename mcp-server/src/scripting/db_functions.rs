@@ -1437,24 +1437,12 @@ fn hybrid_search_impl(
     let results: Vec<Dynamic> = fo
         .fused
         .into_iter()
-        .map(|item| {
-            let result = json_to_dynamic(&item.doc);
-            if let Some(mut map) = result.clone().try_cast::<Map>() {
-                map.insert("_rrf_score".into(), Dynamic::from(item.rrf_score));
-                map.insert("_final_score".into(), Dynamic::from(item.final_score));
-                map.insert("_rerank_boost".into(), Dynamic::from(item.rerank_boost));
-                map.insert("_vector_rank".into(), Dynamic::from(item.v_rank as i64));
-                map.insert("_text_rank".into(), Dynamic::from(item.t_rank as i64));
-                if let Some(vs) = item.v_score {
-                    map.insert("_vector_score".into(), Dynamic::from(vs as f64));
-                }
-                if let Some(ts) = item.t_score {
-                    map.insert("_text_score".into(), Dynamic::from(ts));
-                }
-                Dynamic::from(map)
-            } else {
-                result
+        .map(|mut item| {
+            let mut doc = std::mem::take(&mut item.doc);
+            if let Value::Object(ref mut obj) = doc {
+                item.write_score_fields(obj);
             }
+            json_to_dynamic(&doc)
         })
         .collect();
 

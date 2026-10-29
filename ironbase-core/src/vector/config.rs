@@ -99,6 +99,23 @@ impl DistanceMetric {
     }
 }
 
+impl std::str::FromStr for DistanceMetric {
+    type Err = crate::error::IronBaseError;
+
+    /// `cosine`, `euclidean` or `dot_product` (`dotproduct`), any case
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cosine" => Ok(DistanceMetric::Cosine),
+            "euclidean" => Ok(DistanceMetric::Euclidean),
+            "dot_product" | "dotproduct" => Ok(DistanceMetric::DotProduct),
+            _ => Err(crate::error::IronBaseError::VectorIndexError(format!(
+                "Unknown distance metric '{}'. Use: cosine, euclidean, or dot_product",
+                s
+            ))),
+        }
+    }
+}
+
 /// Configuration for a vector index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorIndexConfig {

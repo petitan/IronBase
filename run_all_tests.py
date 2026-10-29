@@ -23,6 +23,7 @@ TEST_SUITES = [
     ("test_logging_system.py", "Logging system"),
     ("test_catalog_debug.py", "Catalog debugging"),
     ("test_nested_fields.py", "Nested field handling"),
+    ("test_vector_hybrid.py", "Vector + hybrid search"),
 
     # End-to-end and perf (longer)
     ("test_e2e_comprehensive.py", "E2E comprehensive"),

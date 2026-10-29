@@ -118,21 +118,6 @@ pub fn lift_common_fields(chunks: &mut [Value]) -> serde_json::Map<String, Value
     lifted
 }
 
-/// The chunk-level score shape of a fused result
-fn apply_score_fields(obj: &mut serde_json::Map<String, Value>, item: &FusedResult) {
-    obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-    obj.insert("_final_score".to_string(), json!(item.final_score));
-    obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-    obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-    obj.insert("_text_rank".to_string(), json!(item.t_rank));
-    if let Some(vs) = item.v_score {
-        obj.insert("_vector_score".to_string(), json!(vs));
-    }
-    if let Some(ts) = item.t_score {
-        obj.insert("_text_score".to_string(), json!(ts));
-    }
-}
-
 impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Two-phase document grouping over [`CollectionCore::hybrid_fuse`]'s
     /// result (run with `group_by_document`).
@@ -189,7 +174,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 item.doc.clone()
             };
             if let Value::Object(ref mut obj) = chunk {
-                apply_score_fields(obj, item);
+                item.write_score_fields(obj);
             }
             doc_groups.entry(doc_id).or_default().push(chunk);
         }
