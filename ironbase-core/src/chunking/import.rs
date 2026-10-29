@@ -117,6 +117,31 @@ pub fn build_chunk_documents(
     Ok(documents)
 }
 
+/// Check that every embedding has the same length, and `expected` when the
+/// collection has a vector index on the field: the index skips a vector of
+/// another length, so the chunk would silently drop out of vector search.
+pub fn check_embedding_dimensions(embeddings: &[Vec<f32>], expected: Option<usize>) -> Result<()> {
+    let Some(first) = embeddings.first() else {
+        return Ok(());
+    };
+    let dim = expected.unwrap_or(first.len());
+    if let Some((i, v)) = embeddings.iter().enumerate().find(|(_, v)| v.len() != dim) {
+        let source = if expected.is_some() {
+            "the field's vector index"
+        } else {
+            "the first embedding"
+        };
+        return Err(IronBaseError::VectorIndexError(format!(
+            "Embedding dimension mismatch: chunk {} has {} dimensions, {} has {}",
+            i,
+            v.len(),
+            source,
+            dim
+        )));
+    }
+    Ok(())
+}
+
 /// Policy for an existing `doc_id` when importing chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IfExists {
@@ -148,6 +173,9 @@ impl IfExists {
 pub trait ChunkStore {
     /// The store's error; the import's own refusal is an [`IronBaseError`]
     type Error: From<IronBaseError>;
+
+    /// Whether chunks are stored for `doc_id` (not for a missing collection)
+    fn has_chunks(&self, collection: &str, doc_id: &str) -> std::result::Result<bool, Self::Error>;
 
     /// `_id`s of the chunks stored for `doc_id` (none for a missing collection)
     fn chunk_ids(
@@ -211,7 +239,7 @@ pub fn should_skip_before_embedding<S: ChunkStore + ?Sized>(
     if matches!(if_exists, IfExists::Replace | IfExists::Append) {
         return Ok(false);
     }
-    if store.chunk_ids(collection, doc_id)?.is_empty() {
+    if !store.has_chunks(collection, doc_id)? {
         return Ok(false);
     }
     match if_exists {
@@ -314,6 +342,14 @@ macro_rules! database_chunk_store {
     ($storage:ty) => {
         impl ChunkStore for DatabaseCore<$storage> {
             type Error = IronBaseError;
+
+            fn has_chunks(&self, collection: &str, doc_id: &str) -> Result<bool> {
+                match self.get_collection(collection) {
+                    Ok(coll) => Ok(coll.count_documents(&json!({ "doc_id": doc_id }))? > 0),
+                    Err(IronBaseError::CollectionNotFound(_)) => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
 
             fn chunk_ids(&self, collection: &str, doc_id: &str) -> Result<Vec<Value>> {
                 stored_chunk_ids(self, collection, doc_id)
@@ -483,6 +519,16 @@ mod tests {
             section_path: heading.map(|h| vec![h.to_string()]),
             table_header: None,
         }
+    }
+
+    #[test]
+    fn embedding_dimensions_must_agree() {
+        let two = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        assert!(check_embedding_dimensions(&two, None).is_ok());
+        assert!(check_embedding_dimensions(&two, Some(2)).is_ok());
+        assert!(check_embedding_dimensions(&two, Some(3)).is_err());
+        assert!(check_embedding_dimensions(&[vec![1.0, 0.0], vec![1.0]], None).is_err());
+        assert!(check_embedding_dimensions(&[], Some(3)).is_ok());
     }
 
     #[test]

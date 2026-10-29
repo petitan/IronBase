@@ -123,6 +123,26 @@ def test_rag_import_if_exists():
     assert kb.count_documents({"doc_id": "e"}) == 0
     print("✓ Invalid if_exists and a wrong vector count rejected")
 
+    # A vector index fixes the dimension: a wrong one is refused BEFORE the
+    # stored chunks are replaced
+    kb.create_vector_index("embedding", 4)
+    kb.rag_import("Indexed text.", fake_embed, doc_id="v")
+    try:
+        kb.rag_import("New text.", lambda t: [[1.0, 0.0, 0.0] for _ in t], doc_id="v")
+        raise AssertionError("3-dim vectors accepted by a 4-dim index")
+    except ironbase.IronBaseException as e:
+        assert "dimension" in str(e)
+    assert [d["content"] for d in kb.find({"doc_id": "v"})] == ["Indexed text."]
+    print("✓ Wrong embedding dimension rejected, the old chunks kept")
+
+    for bad_mode in ("markdwon", "md "):
+        try:
+            kb.rag_import(DOC, doc_id="m", mode=bad_mode)
+            raise AssertionError(f"accepted mode {bad_mode!r}")
+        except ValueError:
+            pass
+    print("✓ Invalid chunking mode rejected")
+
     auto = kb.rag_import("Some text.")
     assert len(auto["doc_id"]) == 36, auto
     print("✓ A new doc_id is generated")

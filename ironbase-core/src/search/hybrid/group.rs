@@ -6,13 +6,12 @@ use std::collections::{HashMap, HashSet};
 use crate::collection_core::CollectionCore;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
+use crate::find_options::apply_projection;
 use crate::fulltext::FulltextSearchOptions;
 use crate::storage::{RawStorage, Storage};
 
 use super::fuse::{exclusion_projection, fused_doc_id};
-use super::{
-    apply_projection, id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES,
-};
+use super::{id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES};
 
 /// One grouped document: its id, best fused score, doc-level fields lifted from
 /// its chunks ([`lift_common_fields`]), and its (post-cap, merged) chunks.
@@ -169,7 +168,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 phase1_chunk_ids.insert(id.clone());
             }
             let mut chunk = if let Some(ref proj) = projection {
-                apply_projection(&item.doc, proj)
+                apply_projection(&item.doc, proj)?
             } else {
                 item.doc.clone()
             };
@@ -235,7 +234,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 continue; // already in the group from Phase 1
             }
             let mut chunk = if let Some(ref proj) = projection {
-                apply_projection(&res.document, proj)
+                apply_projection(&res.document, proj)?
             } else {
                 res.document
             };

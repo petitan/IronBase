@@ -24,7 +24,7 @@ echo "▶ Running Rust fmt/clippy/tests (workspace root)"
     cd "$PROJECT_ROOT"
     run_fmt
     run_clippy --all-targets --all-features
-    cargo test -p ironbase-core
+    cargo test -p ironbase-core --features rag
 )
 
 echo "▶ Running Rust fmt/clippy/tests (mcp-server)"

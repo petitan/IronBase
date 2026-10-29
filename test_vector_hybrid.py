@@ -82,6 +82,13 @@ def test_hybrid_search_flat():
     assert all("embedding" not in h for h in projected)
     print("✓ Projection")
 
+    nested = kb.hybrid_search("car", vector=[1.0, 0.0, 0.0, 0.0],
+                              projection={"doc_id": 1, "title": 1})
+    assert all(set(h) - {"_id", "doc_id", "title"} <= {
+        "_rrf_score", "_final_score", "_rerank_boost", "_vector_rank", "_text_rank",
+        "_vector_score", "_text_score"} for h in nested), nested
+    print("✓ Inclusion projection")
+
     for bad in ({"mode": "xor"}, {"match_scope": "page"}):
         try:
             kb.hybrid_search("car", **bad)

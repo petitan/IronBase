@@ -1817,20 +1817,6 @@ impl IronBaseAdapter {
         Ok(coll.hybrid_group_documents(fused, query, Some(&ctx))?)
     }
 
-    /// Document-level AND qualification: the documents holding every query
-    /// token on at least one of `fields` (see
-    /// `CollectionCore::fulltext_qualify_documents`).
-    pub fn fulltext_qualify_documents(
-        &self,
-        collection: &str,
-        fields: &[&str],
-        query: &str,
-    ) -> Result<ironbase_core::DocumentQualification> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        Ok(coll.fulltext_qualify_documents(fields, query)?)
-    }
-
     // ============================================================
     // Schema Management
     // ============================================================

@@ -17,7 +17,7 @@
 | Művelet | Parancs |
 |---------|---------|
 | Python dev build | `maturin develop` |
-| Rust tesztek | `cargo test -p ironbase-core` |
+| Rust tesztek | `cargo test -p ironbase-core --features rag` (a `rag` feature a chunkolás tesztjeit is futtatja) |
 | Egyetlen teszt | `cargo test -p ironbase-core -- test_name` |
 | Full CI | `just run-dev-checks` |
 | .NET tesztek | `cd IronBase.NET && dotnet test` |
@@ -653,7 +653,7 @@ Systemd: `TimeoutStopSec=60`, `KillSignal=SIGTERM`
 
 | Típus | Parancs/Hely |
 |-------|--------------|
-| Rust unit | `cargo test -p ironbase-core` |
+| Rust unit | `cargo test -p ironbase-core --features rag` |
 | Property | `ironbase-core/tests/property_tests.rs` |
 | Perf regression | `cargo test --release -p ironbase-core --lib perf_ -- --test-threads=1` (munkaszámláló + arány, CI `Performance regression` job) |
 | Property-based (P1–P10) | `ironbase-core/tests/pbt_*.rs` + `src/pbt_roundtrip_tests.rs`, backup: `ironbase-backup/tests/pbt_backup.rs`, MCP/bridge: `test_any_request_*`, `test_every_tool_denies_*`, `every_request_gets_*`. PR-CI kis esetszám; `PROPTEST_CASES=N` emeli; éjszakai job (`.github/workflows/nightly.yml`): 2000 eset + fuzz 60 s/target |

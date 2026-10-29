@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ironbase_core::chunking::import::{
-    build_chunk_documents, import_chunks, new_doc_id, should_skip_before_embedding,
-    ChunkDocumentOptions, ChunkImport, ChunkStore, IfExists,
+    build_chunk_documents, check_embedding_dimensions, import_chunks, new_doc_id,
+    should_skip_before_embedding, ChunkDocumentOptions, ChunkImport, ChunkStore, IfExists,
 };
 use ironbase_core::chunking::{build_embed_text, chunk_content, Chunk, ChunkMode, ChunkOptions};
 use ironbase_core::search::hybrid::{DocGroup, FusedResult, HybridFusion, HybridQuery};
@@ -556,6 +556,12 @@ impl CollectionWrapper {
     ) -> Result<Vec<ironbase_core::fulltext::FulltextIndexMetadata>, ironbase_core::IronBaseError>
     {
         coll_dispatch!(self, list_fulltext_indexes)
+    }
+
+    fn list_vector_indexes(
+        &self,
+    ) -> Result<Vec<ironbase_core::vector::VectorIndexMetadata>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, list_vector_indexes)
     }
 
     fn create_vector_index(
@@ -2102,6 +2108,10 @@ impl Collection {
         } else {
             for mut item in fusion.fused {
                 let mut doc = std::mem::take(&mut item.doc);
+                if let Some(ref projection) = q.projection {
+                    doc = ironbase_core::find_options::apply_projection(&doc, projection)
+                        .map_err(ironbase_error_to_pyerr)?;
+                }
                 if let Value::Object(ref mut obj) = doc {
                     item.write_score_fields(obj);
                 }
@@ -2170,6 +2180,8 @@ impl Collection {
         };
         let chunks = chunk(text, chunk_size, overlap, mode)?;
         let result = PyDict::new(py);
+        // A generated id never collides: only an explicit one is checked first
+        let explicit_doc_id = doc_id.is_some();
         let doc_id = doc_id.unwrap_or_else(new_doc_id);
         result.set_item("doc_id", &doc_id)?;
         let skipped = |result: Bound<'py, PyDict>| -> PyResult<Bound<'py, PyDict>> {
@@ -2185,10 +2197,11 @@ impl Collection {
             return Ok(result);
         }
         // Before the (expensive) embedding: an existing doc_id under skip / error
-        if self
-            .db
-            .should_skip_before_embedding(&self.name, &doc_id, if_exists)
-            .map_err(ironbase_error_to_pyerr)?
+        if explicit_doc_id
+            && self
+                .db
+                .should_skip_before_embedding(&self.name, &doc_id, if_exists)
+                .map_err(ironbase_error_to_pyerr)?
         {
             return skipped(result);
         }
@@ -2196,7 +2209,18 @@ impl Collection {
         let embeddings: Option<Vec<Vec<f32>>> = match embed {
             Some(embed) => {
                 let texts: Vec<String> = chunks.iter().map(chunk_embed_text).collect();
-                Some(embed.call1((texts,))?.extract()?)
+                let embeddings: Vec<Vec<f32>> = embed.call1((texts,))?.extract()?;
+                // Checked before the import replaces the stored chunks
+                let indexed_dim = self
+                    .core
+                    .list_vector_indexes()
+                    .map_err(ironbase_error_to_pyerr)?
+                    .into_iter()
+                    .find(|idx| idx.field == embedding_field)
+                    .map(|idx| idx.config.dim);
+                check_embedding_dimensions(&embeddings, indexed_dim)
+                    .map_err(ironbase_error_to_pyerr)?;
+                Some(embeddings)
             }
             None => None,
         };
@@ -2726,7 +2750,6 @@ fn python_to_json(py: Python<'_>, value: &Bound<'_, pyo3::PyAny>) -> PyResult<Va
     }
 }
 
-/// Python dict -> JSON Value
 /// A `{field: 0 | 1}` projection dict
 fn projection_map(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, i32>> {
     let mut map = HashMap::new();
@@ -2744,6 +2767,7 @@ fn projection_map(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<String, i32>> {
     Ok(map)
 }
 
+/// Python dict -> JSON Value
 fn python_dict_to_json_value(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Value> {
     let mut map = serde_json::Map::new();
     for (k, v) in dict.iter() {
@@ -2799,12 +2823,21 @@ fn json_value_to_python(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     }
 }
 
-/// Chunk `text` with the engine's chunker
+/// Chunk `text` with the engine's chunker; `mode` is "auto", "markdown"
+/// ("md") or "text" ("plain")
 fn chunk(text: &str, chunk_size: usize, overlap: usize, mode: &str) -> PyResult<Vec<Chunk>> {
+    let mode = match mode.to_lowercase().as_str() {
+        "auto" | "markdown" | "md" | "text" | "plain" => ChunkMode::parse(mode),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "mode must be 'auto', 'markdown' or 'text', got '{mode}'"
+            )))
+        }
+    };
     let options = ChunkOptions::default()
         .with_chunk_size(chunk_size)
         .with_overlap(overlap)
-        .with_mode(ChunkMode::parse(mode));
+        .with_mode(mode);
     chunk_content(text, &options)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }

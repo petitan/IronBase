@@ -163,3 +163,34 @@ fn grouping_keeps_the_vector_lane_documents_and_scores_each_chunk() {
     assert!(first_chunk.get("_rrf_score").is_some());
     assert!(first_chunk.get("_vector_rank").is_some());
 }
+
+/// The grouped chunks are projected as `find` projects: dot notation, and a
+/// mixed include/exclude projection is refused before any search
+#[test]
+fn projection_has_find_semantics() {
+    let (db, coll) = kb();
+    insert(
+        &db,
+        json!({"doc_id": "meta", "chunk_index": 0, "content": "Car maintenance log.",
+            "meta": {"author": "Ann", "pages": 3}, "embedding": [0.5, 0.5, 0.0, 0.0]}),
+    );
+    let mut q = query("car maintenance", None);
+    q.group_by_document = true;
+    q.projection = Some(HashMap::from([("meta.author".to_string(), 1)]));
+    let fusion = coll.hybrid_fuse(&q, None).unwrap();
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    let meta = groups.iter().find(|g| g.doc_id == "meta").unwrap();
+    assert_eq!(meta.chunks[0]["meta"], json!({"author": "Ann"}));
+    assert!(meta.chunks[0].get("content").is_none());
+
+    q.projection = Some(HashMap::from([
+        ("content".to_string(), 1),
+        ("embedding".to_string(), 0),
+    ]));
+    assert!(
+        coll.hybrid_fuse(&q, None).is_err(),
+        "mixed projection accepted"
+    );
+}

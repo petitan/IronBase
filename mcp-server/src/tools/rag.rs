@@ -26,7 +26,8 @@ use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
     RagLoadAllChunksParams,
 };
-use ironbase_core::search::hybrid::{apply_projection, merge_adjacent_chunks, FusedResult};
+use ironbase_core::find_options::apply_projection;
+use ironbase_core::search::hybrid::{merge_adjacent_chunks, FusedResult};
 
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
@@ -281,7 +282,7 @@ fn handle_rag_load_all_chunks(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
     let mut results: Vec<Value> = Vec::with_capacity(fused.len());
     for item in fused {
         let mut doc = if let Some(ref proj) = projection {
-            apply_projection(&item.doc, proj)
+            apply_projection(&item.doc, proj)?
         } else {
             item.doc
         };

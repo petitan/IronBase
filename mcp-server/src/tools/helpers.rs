@@ -426,6 +426,14 @@ pub fn default_if_exists() -> String {
 impl ChunkStore for IronBaseAdapter {
     type Error = McpError;
 
+    fn has_chunks(&self, collection: &str, doc_id: &str) -> Result<bool> {
+        match self.count_documents(collection, json!({ "doc_id": doc_id })) {
+            Ok(n) => Ok(n > 0),
+            Err(e) if e.code == ErrorCode::CollectionNotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     fn chunk_ids(&self, collection: &str, doc_id: &str) -> Result<Vec<Value>> {
         // Project only `_id` so the (potentially large) embedding fields are never loaded.
         let opts = FindOptions {

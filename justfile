@@ -13,7 +13,7 @@ lint:
     (cd mcp-server && cargo clippy --all-targets --all-features)
 
 test-core:
-    cargo test -p ironbase-core
+    cargo test -p ironbase-core --features rag
 
 test-mcp:
     (cd mcp-server && cargo test)

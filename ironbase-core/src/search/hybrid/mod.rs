@@ -78,8 +78,9 @@ pub struct HybridQuery {
     pub mmr_lambda: f64,
     /// Group the results by document (`doc_id`)
     pub group_by_document: bool,
-    /// Projection of the returned documents (as [`apply_projection`]); the
-    /// lanes leave a projected-out embedding unparsed
+    /// Projection of the returned documents (`find` semantics: dot notation,
+    /// no mixed include/exclude); the lanes leave a projected-out embedding
+    /// unparsed
     pub projection: Option<HashMap<String, i32>>,
 }
 
@@ -126,29 +127,4 @@ pub fn id_to_string(id: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         _ => Some(id.to_string()),
     }
-}
-
-/// Apply MongoDB-style projection to a document
-pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value {
-    let is_include_mode = projection.values().any(|&v| v == 1);
-    let id_explicitly_excluded = projection.get("_id").copied() == Some(0);
-
-    let mut result = json!({});
-    if let Value::Object(obj) = doc {
-        for (key, value) in obj {
-            let should_include = if is_include_mode {
-                if key == "_id" {
-                    !id_explicitly_excluded
-                } else {
-                    projection.get(key).copied().unwrap_or(0) == 1
-                }
-            } else {
-                projection.get(key).copied().unwrap_or(1) != 0
-            };
-            if should_include {
-                result[key] = value.clone();
-            }
-        }
-    }
-    result
 }

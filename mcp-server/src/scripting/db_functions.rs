@@ -832,19 +832,22 @@ fn register_search_functions(
                 .min(max_find_documents)
                 .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
 
-            // Document-level AND qualification: if and_mode + document scope,
-            // qualify doc_ids first, then switch to OR retrieval
-            let (effective_and_mode, effective_filter) = if and_mode && match_scope == "document" {
-                match adapter_ftsrch
-                    .fulltext_qualify_documents(collection, &[field], query)
-                    .map(|q| q.to_filter())
-                {
-                    Ok(Some(qualified)) => (false, Some(qualified)),
-                    _ => (and_mode, None), // single token or no index: plain AND
-                }
-            } else {
-                (and_mode, None)
+            // Document-level AND qualification (same as the fulltext tool): with
+            // and_mode + document scope, qualify the documents first, then
+            // retrieve in OR mode inside them
+            let qual = match adapter_ftsrch.fulltext_document_scope(
+                collection,
+                &[field],
+                query,
+                and_mode,
+                match_scope == "document",
+                None,
+            ) {
+                Ok(qual) => qual,
+                Err(e) => return Dynamic::from(format!("Error: {}", e)),
             };
+            let (effective_and_mode, effective_filter) =
+                (qual.effective_and_mode, qual.effective_filter);
 
             let options = FulltextSearchOptions {
                 limit: Some(effective_limit),

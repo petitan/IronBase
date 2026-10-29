@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::collection_core::{CollectionCore, QualificationOutcome};
 use crate::error::Result;
 use crate::execution::ExecutionContext;
+use crate::find_options::validate_projection;
 use crate::fulltext::FulltextSearchOptions;
 use crate::storage::{RawStorage, Storage};
 use crate::vector::VectorSearchOptions;
@@ -21,7 +22,9 @@ use super::{
 pub struct HybridFusion {
     /// Fused, reranked results, best first. Flat mode: merged, capped per
     /// document, MMR-reordered and cut to `limit`. Grouped mode: every
-    /// candidate, for [`CollectionCore::hybrid_group_documents`].
+    /// candidate, for [`CollectionCore::hybrid_group_documents`]. The
+    /// documents are not projected (only a projected-out embedding may be
+    /// missing): flat callers apply `q.projection` to their output.
     pub fused: Vec<FusedResult>,
     /// How document-level AND restricted the fulltext lane
     pub qualification: QualificationOutcome,
@@ -41,6 +44,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         q: &HybridQuery,
         ctx: Option<&ExecutionContext>,
     ) -> Result<HybridFusion> {
+        if let Some(ref projection) = q.projection {
+            validate_projection(projection)?;
+        }
+
         // Internal limit: higher when grouping to capture enough chunks per document
         let internal_multiplier = if q.group_by_document { 20 } else { 3 };
         let internal_limit = q
@@ -260,8 +267,8 @@ pub(super) fn fused_doc_id(item: &FusedResult) -> String {
         })
 }
 
-/// Whether the top-level `projection` (as [`super::apply_projection`] applies
-/// it) drops `field` from a document
+/// Whether `projection` (as `find_options::apply_projection` applies it)
+/// drops the top-level `field` from a document
 fn projection_drops(projection: &HashMap<String, i32>, field: &str) -> bool {
     if projection.values().any(|&v| v == 1) {
         field != "_id" && projection.get(field) != Some(&1)
