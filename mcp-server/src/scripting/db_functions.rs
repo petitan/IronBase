@@ -834,16 +834,12 @@ fn register_search_functions(
             // Document-level AND qualification: if and_mode + document scope,
             // qualify doc_ids first, then switch to OR retrieval
             let (effective_and_mode, effective_filter) = if and_mode && match_scope == "document" {
-                match adapter_ftsrch.fulltext_qualify_documents_fast(collection, field, query) {
-                    Ok(crate::adapter::QualificationResult::Qualified(doc_ids)) => {
-                        let qualified_vec: Vec<serde_json::Value> =
-                            doc_ids.into_iter().map(|s| serde_json::json!(s)).collect();
-                        (
-                            false,
-                            Some(serde_json::json!({"doc_id": {"$in": qualified_vec}})),
-                        )
-                    }
-                    _ => (and_mode, None), // fallback: no qualification available
+                match adapter_ftsrch
+                    .fulltext_qualify_documents(collection, &[field], query)
+                    .map(|q| q.to_filter())
+                {
+                    Ok(Some(qualified)) => (false, Some(qualified)),
+                    _ => (and_mode, None), // single token or no index: plain AND
                 }
             } else {
                 (and_mode, None)

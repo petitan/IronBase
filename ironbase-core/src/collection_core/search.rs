@@ -1310,86 +1310,125 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(index.options.clone())
     }
 
-    /// Tokenize query using the fulltext index's config for a given field.
-    /// Returns unique stemmed tokens — same processing as fulltext search uses.
-    pub fn fulltext_tokenize_query(&self, field: &str, query: &str) -> Result<Vec<String>> {
-        self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(index.tokenize_query(query))
-    }
-
-    /// Get posting list sizes for each token (for rarity-based ordering).
-    pub fn fulltext_token_posting_counts(
+    /// Document-level AND: the documents whose indexed text holds every query
+    /// token, possibly spread over several chunks.
+    ///
+    /// A RAG index (its chunk → parent mapping is populated) intersects the
+    /// tokens' posting lists per parent document and keys the result on the
+    /// parent field (`doc_id`); any other index intersects per indexed
+    /// document (`_id`), since each document is its own identity there.
+    /// Tokens are taken rarest first, so an empty intersection stops early.
+    ///
+    /// With several `fields` a document qualifies if it holds every token in
+    /// ANY one of them (union over the fields). A query of fewer than two
+    /// tokens on any field restricts nothing: `NotRequired`.
+    pub fn fulltext_qualify_documents(
         &self,
-        field: &str,
-        tokens: &[String],
-    ) -> Result<Vec<(String, usize)>> {
+        fields: &[&str],
+        query: &str,
+    ) -> Result<DocumentQualification> {
         self.check_not_closed()?;
         let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(tokens
-            .iter()
-            .map(|t| (t.clone(), index.token_posting_count(t)))
-            .collect())
-    }
+        let mut field_key: Option<String> = None;
+        let mut union: HashMap<String, Value> = HashMap::new();
+        for field in fields {
+            let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+                IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+            })?;
+            let tokens = index.tokenize_query(query);
+            if tokens.len() <= 1 {
+                return Ok(DocumentQualification::NotRequired);
+            }
+            let mut tokens: Vec<(String, usize)> = tokens
+                .into_iter()
+                .map(|t| {
+                    let count = index.token_posting_count(&t);
+                    (t, count)
+                })
+                .collect();
+            tokens.sort_by_key(|(_, count)| *count);
 
-    /// Get all chunk _ids from posting list for a stemmed token.
-    pub fn fulltext_token_chunk_ids(
-        &self,
-        field: &str,
-        token: &str,
-    ) -> Result<Vec<crate::document::DocumentId>> {
-        self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(index.token_chunk_ids(token))
-    }
+            let by_parent = index.has_chunk_doc_mapping();
+            let mut qualified: Option<HashMap<String, Value>> = None;
+            for (token, count) in &tokens {
+                let ids: HashMap<String, Value> = if *count == 0 {
+                    HashMap::new()
+                } else if by_parent {
+                    let chunk_ids = index.token_chunk_ids(token);
+                    index
+                        .resolve_chunk_doc_ids(&chunk_ids)
+                        .into_values()
+                        .map(|doc_id| (doc_id.to_string(), Value::String(doc_id.to_string())))
+                        .collect()
+                } else {
+                    index
+                        .token_chunk_ids(token)
+                        .into_iter()
+                        .filter_map(|id| {
+                            let value = serde_json::to_value(&id).ok()?;
+                            Some((super::doc_id_to_string(&id), value))
+                        })
+                        .collect()
+                };
+                let next = match qualified {
+                    None => ids,
+                    Some(prev) => prev
+                        .into_iter()
+                        .filter(|(k, _)| ids.contains_key(k))
+                        .collect(),
+                };
+                let empty = next.is_empty();
+                qualified = Some(next);
+                if empty {
+                    break;
+                }
+            }
 
-    /// Resolve chunk _ids to parent doc_id values using the fulltext index's chunk_doc_mapping.
-    /// Returns a HashMap of chunk_id → doc_id for all chunks that have a mapping.
-    pub fn fulltext_resolve_chunk_doc_ids(
-        &self,
-        field: &str,
-        chunk_ids: &[crate::document::DocumentId],
-    ) -> Result<std::collections::HashMap<crate::document::DocumentId, String>> {
-        self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(index
-            .resolve_chunk_doc_ids(chunk_ids)
-            .into_iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect())
+            let qualified = qualified.unwrap_or_default();
+            // An index without matches says nothing about the key; the fields
+            // of one collection agree on it otherwise.
+            if !qualified.is_empty() {
+                field_key.get_or_insert_with(|| {
+                    if by_parent {
+                        index.parent_doc_id_field().to_string()
+                    } else {
+                        "_id".to_string()
+                    }
+                });
+            }
+            for (k, v) in qualified {
+                union.entry(k).or_insert(v);
+            }
+        }
+        Ok(DocumentQualification::Documents {
+            field: field_key.unwrap_or_else(|| "_id".to_string()),
+            ids: union.into_values().collect(),
+        })
     }
+}
 
-    /// Check if the fulltext index has a chunk→doc_id mapping populated.
-    pub fn fulltext_has_chunk_doc_mapping(&self, field: &str) -> Result<bool> {
-        self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(index.has_chunk_doc_mapping())
-    }
+/// Result of [`CollectionCore::fulltext_qualify_documents`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocumentQualification {
+    /// The query has fewer than two tokens: every document qualifies.
+    NotRequired,
+    /// The qualifying documents: `ids` are values of `field` (`doc_id` for a
+    /// RAG index, `_id` otherwise). Empty when no document qualifies.
+    Documents { field: String, ids: Vec<Value> },
+}
 
-    /// Check if the fulltext index tracks a parent doc_id field (RAG-style).
-    /// `false` → non-RAG: the chunk `_id` is the document identity.
-    pub fn fulltext_has_parent_doc_id_field(&self, field: &str) -> Result<bool> {
-        self.check_not_closed()?;
-        let indexes = self.indexes.read();
-        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
-        })?;
-        Ok(index.has_parent_doc_id_field())
+impl DocumentQualification {
+    /// The restriction as a query filter (`{field: {"$in": ids}}`), `None`
+    /// when nothing is restricted.
+    pub fn to_filter(&self) -> Option<Value> {
+        match self {
+            Self::NotRequired => None,
+            Self::Documents { field, ids } => {
+                let mut filter = serde_json::Map::new();
+                filter.insert(field.clone(), serde_json::json!({ "$in": ids }));
+                Some(Value::Object(filter))
+            }
+        }
     }
 }
 

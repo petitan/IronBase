@@ -26,7 +26,6 @@ pub mod index;
 pub mod jobs;
 pub mod listener;
 pub mod params;
-pub mod preprocessing;
 pub mod rag;
 pub mod retrieval;
 pub mod script;

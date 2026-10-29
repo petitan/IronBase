@@ -17,7 +17,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
-use super::fusion::{apply_projection, merge_adjacent_chunks, FusedResult};
 use super::helpers::{
     insert_chunks_idempotent, parse_projection_value, should_skip_before_embedding,
     validate_collection_name, IfExists, RESERVED_METADATA_KEYS,
@@ -26,6 +25,7 @@ use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
     RagLoadAllChunksParams,
 };
+use ironbase_core::search::hybrid::{apply_projection, merge_adjacent_chunks, FusedResult};
 
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";

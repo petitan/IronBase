@@ -85,11 +85,12 @@ A Σ csak azokon az ágakon fut, amelyek visszaadták a dokumentumot: a hiányz�
 | Réteg | Változás |
 |-------|----------|
 | `fulltext.rs` | `tokenize_query()`, `token_posting_count()`, `token_chunk_ids()` pub metódusok |
-| `search.rs` | Delegáló metódusok a CollectionCore-on |
-| `adapter.rs` | Adapter metódusok (DocumentId→Value konverzió) |
+| `search.rs` | `CollectionCore::fulltext_qualify_documents()` — a teljes qualification (RAG: `doc_id`, egyéb: `_id`; több mező: unió) |
+| `adapter.rs` | Vékony delegálás |
 | `params.rs` | `pub match_scope: Option<String>`, `pub group_by_document: bool` |
 | `definitions/hybrid.rs` | `"match_scope"` schema (enum: chunk/document), `"group_by_document"` schema |
-| `hybrid.rs` | `qualify_documents()` fn + STEP 1.5 pipeline + STEP 7 grouped response |
+| `fusion.rs` | `apply_document_qualification()` (match_scope, filter-merge, OR-váltás) |
+| `hybrid.rs` | STEP 1.5 pipeline + STEP 7 grouped response |
 
 ```json
 {"collection": "docs", "query": "Ifju János fékpad ár",
@@ -147,7 +148,7 @@ STEP 7: Projection + response
 - Default: `false` — flat chunk lista score sorrendben (hagyományos viselkedés)
 - `true` — eredmények doc_id szerint csoportosítva, dokumentumonként MINDEN releváns chunk visszajön
 - Limit szemantika: flat → max chunk szám, grouped → max dokumentum szám
-- Automatikusan bekapcsolja document-level AND qualification-t (qualify_documents + OR mode)
+- Automatikusan bekapcsolja document-level AND qualification-t (`fulltext_qualify_documents` + OR mode)
 - Dokumentum kiválasztás: AND (minden query szó benne van a dokumentumban)
 - Chunk retrieval: OR (bármely query szó → releváns chunk)
 - Phase 2: egyetlen fulltext OR search `doc_id $in` filterrel (nem N külön keresés)

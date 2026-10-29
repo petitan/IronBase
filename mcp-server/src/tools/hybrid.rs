@@ -19,10 +19,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
-use super::fusion::{
-    apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
-    merge_adjacent_values, mmr_reorder, rerank_results, FusedResult,
+use ironbase_core::search::hybrid::{
+    apply_projection, id_to_string, merge_adjacent_chunks, merge_adjacent_values, mmr_reorder,
+    rerank_results, FusedResult,
 };
+
+use super::fusion::apply_document_qualification;
 use super::helpers::parse_projection_value;
 use super::params::{resolve_weights, HybridSearchParams};
 use super::rag::get_rag_config;
@@ -799,8 +801,6 @@ pub(crate) fn build_doc_groups(
 
     Ok((groups, total_chunks))
 }
-
-// qualify_documents moved to fusion.rs (shared between hybrid and fulltext search)
 
 /// Whether the top-level `projection` (as [`apply_projection`] applies it)
 /// drops `field` from a document
@@ -2014,7 +2014,7 @@ mod pipeline_integration_tests {
 
     /// Regression: multi-field document-scope qualification on a NON-RAG
     /// collection. The fulltext index carries no parent doc_id field, so
-    /// `qualify_documents` keys the filter on `_id`; the multi-field union must
+    /// the qualification keys the filter on `_id`; the multi-field union must
     /// honor that key. It previously hardcoded `doc_id`, zeroing out every
     /// multi-field document-scope query on non-RAG data (the single-field fix
     /// did not cover the union path).
