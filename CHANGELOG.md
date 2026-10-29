@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Completes `docs/MCP_TO_CORE_PLAN.md` (points 3 and 4).
 
+- **Fixed — the periodic checkpoint never shortened the WAL (since v1.0.557).** It flushes only the
+  B+ tree indexes, and the WAL clear keeps the transactions after `index_flush_watermark`, which only
+  a full index flush advanced (close, compaction, `checkpoint()`). The WAL therefore grew between
+  full flushes even when every index was up to date. `flush_btree_indexes_counted` now advances the
+  watermark when no fulltext, fuzzy or vector index is dirty after the pass. A dirty one is flushed
+  at close / compaction only, and still keeps its WAL entries for replay after a crash.
+  - Found by the background-maintenance test, which had passed only by reading the WAL while
+    `retain_after` truncated it before writing back the kept entries.
+  - The test now checks the size after the maintenance stopped; two new tests cover both cases.
+
 - **Hybrid retrieval in the engine:** `CollectionCore::hybrid_fuse(&HybridQuery, ctx)` (document-level
   AND, vector + fulltext lanes, weighted RRF, rerank, per-document cap, adjacent-chunk merge, MMR)
   and `hybrid_group_documents` (two-phase grouping, `lift_common_fields`).

@@ -528,6 +528,8 @@ Régi: 1 write lock → flush 22 index → unlock (percek)
           write lock → flush 1 index → unlock (ms)
 ```
 
+**Periodikus checkpoint WAL-ja (v1.0.649):** a periodikus pass csak B+ tree indexet flush-öl; a `flush_btree_indexes_counted` akkor lépteti az `index_flush_watermark`-ot a pass watermarkjára, ha utána egyetlen fulltext/fuzzy/vector index sem dirty (azokat csak close/compaction flush-öli). Különben a WAL megmarad a következő teljes flush-ig — dirty fulltext indexnél ez szándékos (crash utáni replay), előtte viszont dirty index nélkül is nőtt.
+
 **Race condition:** Ha insert befut két flush között és dirty-re állít egy már flush-ölt indexet, az a KÖVETKEZŐ checkpoint-ban lesz kiírva. Adatvesztés nincs, mert a WAL-törlés **megtartja** a `tx_id > W` bejegyzéseket (W = az index-flush pass watermarkja, `index_flush_watermark`; `StorageEngine::checkpoint_keeping_wal_after`). A crash-recovery sem törli a WAL-t: csak a commitolt tranzakciókat tartja meg, és megnyitáskor azonnal replay-eli az érintett collectionök indexeit — a következő checkpoint dobja el őket (v1.0.557).
 
 **Key files:**
