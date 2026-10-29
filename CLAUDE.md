@@ -37,26 +37,26 @@ cargo +nightly fuzz run fuzz_wal_bytes -- -max_total_time=60
 
 ```
 ironbase-core/src/     bindings/python/    IronBase.NET/    mcp-server/
-├── database.rs        └── PyO3            └── .NET 8       └── HTTP/stdio
+├── database/          └── PyO3            └── .NET 8       └── HTTP/stdio
 ├── collection_core/
-├── query/operators.rs
-├── aggregation.rs
+├── query/operators/
+├── aggregation/
 ├── storage/
-├── index.rs
+├── index/
 ├── transaction.rs
-└── wal.rs
+└── wal/
 ```
 
 ### Core Modules
 
 | Modul | Felelősség | Kulcs API |
 |-------|------------|-----------|
-| `database.rs` | Lifecycle, durability | `open()`, `open_memory()` |
+| `database/` | Lifecycle, durability | `open()`, `open_memory()` |
 | `collection_core/` | CRUD, aggregation | `find`, `insert`, `update`, `delete`, `aggregate` |
-| `query/operators.rs` | Query engine | $eq, $gt, $in, $regex, $and, $or... |
-| `aggregation.rs` | Pipeline | $match, $group, $sort, $limit + accumulators |
+| `query/operators/` | Query engine | $eq, $gt, $in, $regex, $and, $or... |
+| `aggregation/` | Pipeline | $match, $group, $sort, $limit + accumulators |
 | `storage/` | Append-only engine | `.mlite` files, compaction |
-| `index.rs` | B+ tree indexing | `create_index`, `explain`, `hint` |
+| `index/` | B+ tree indexing | `create_index`, `explain`, `hint` |
 | `transaction.rs` | ACID | WAL, Read Committed isolation |
 
 <details>
@@ -895,7 +895,7 @@ coll.aggregate(&json!([
 
 **Dependencies:** serde, parking_lot, pyo3, maturin, ahash/dashmap, thiserror
 
-**MCP cím:** 172.19.144.1:8080
+**MCP cím (dev):** `http://localhost:8080/mcp` (WSL2 mirrored networking — NEM `172.19.144.1`). Prod: `192.168.2.211:8080`.
 
 <details>
 <summary>Hot Backup</summary>
