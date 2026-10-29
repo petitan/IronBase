@@ -410,8 +410,26 @@ def run(args):
              "- Recall is relative to the pool; CI: paired bootstrap 95% (10,000); p: paired "
              "sign-flip randomization, Holm-adjusted within bucket and metric", ""]
     csv_rows = []
+    _nores = [q for q in per_query if q["relevant"] == 0]
+    if _nores:
+        lines += [f"## unanswerable-in-pool (n={len(_nores)})", "",
+                  "A bíró a pool egyetlen dokumentumát sem ítélte relevánsnak: minden "
+                  "konfiguráció nDCG-je definíció szerint 0, a rangsor nem mérhető. "
+                  "Ezek abstention-esetek (a `verdict` ma mindig `unknown`), ezért a "
+                  "fenti bucketekből ki vannak véve.", "",
+                  "| kérdés | bucket | a search visszaadott dokumentumai |",
+                  "|---|---|---|"]
+        for q in _nores:
+            lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} |")
+        lines.append("")
+    # A query whose pool holds no relevant document scores nDCG 0 for every
+    # configuration: the retriever cannot win, so averaging it in understates
+    # the quality floor (5 of the 18 specific queries on the June set). Those
+    # queries are an abstention problem, not a ranking one, and are reported
+    # separately under "unanswerable-in-pool".
     for bucket in ["specific", "browse", "all"]:
-        qs = [q for q in per_query if bucket == "all" or q["bucket"] == bucket]
+        qs = [q for q in per_query
+              if (bucket == "all" or q["bucket"] == bucket) and q["relevant"] > 0]
         if not qs:
             continue
         lines += [f"## {bucket} (n={len(qs)})", "",
