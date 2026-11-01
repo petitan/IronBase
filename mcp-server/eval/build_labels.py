@@ -30,12 +30,29 @@ import os
 import re
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 # ANTHROPIC_BASE_URL points the judge (per request and batch) at a proxy
 ANTHROPIC_URL = (os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
                  + "/v1/messages")
+
+
+def _insecure_endpoint(url):
+    """True when `url` is plain HTTP to a host other than this machine: the
+    API key and the prompts then cross the network unencrypted, unless a VPN
+    carries them"""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    loopback = host == "localhost" or host == "::1" or host.startswith("127.")
+    return parts.scheme == "http" and not loopback
+
+
+if _insecure_endpoint(ANTHROPIC_URL):
+    print(f"WARNING: ANTHROPIC_BASE_URL is plain HTTP to another host ({ANTHROPIC_URL}): "
+          "the API key and the prompts are sent unencrypted. Use HTTPS, a loopback "
+          "address, or a VPN.", file=sys.stderr)
 
 MCP_DEFAULT = "http://192.168.2.211:8080/mcp"
 OLLAMA_DEFAULT = "http://localhost:11434/api/generate"

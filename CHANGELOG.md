@@ -15,8 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--judge-mode batch`** (`build_labels.py`, `measure_lanes.py`) judges through the Batches API at
   50% of the standard price, with up to 24 h latency. Pairs without a verdict are judged again by the
   next run.
-- **`build_labels.py --collection`,** and a first label set for the `docs` collection:
-  `labeled_docs.json` has 150 queries (118 answerable); `labeled_docs_curated.json` has 87 (79).
+- **`build_labels.py --collection`.** A first label set was built for the `docs` collection
+  (150 queries, 118 answerable; curated: 87, 79 answerable). It is kept on the eval host only (below).
+- **Removed — label sets are no longer committed.** The `labeled_*.json` files and the
+  `labels_review.txt` / `review_unanswerable.txt` dumps hold real search queries and production
+  document ids, some of them customer names, and the repository is public. They are now in
+  `mcp-server/eval/.gitignore` with the batch state files and `lane_eval/`. They remain in the git
+  history. The scripts still default to the same file names, so a host that keeps its local
+  copies runs as before.
 - **Fixed — the judge's API address is one setting.** `ANTHROPIC_BASE_URL` is read in
   `build_labels.py` and shared by `measure_lanes.py`. Before, `build_labels.py` and the batch path
   always called `api.anthropic.com`, bypassing a proxy that the per-request judge of
@@ -37,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `measure_lanes.py` shows the unjudged pairs of an unanswerable-in-pool query.
   - The verdict and document-text caches are keyed by collection. `rdocs` keeps its old keys, so
     existing caches stay valid.
+  - A plain-HTTP `ANTHROPIC_BASE_URL` to another host prints a warning: the API key and the
+    prompts are sent unencrypted unless a VPN carries them. HTTPS and loopback addresses are quiet.
 
 ### Added — recall vs ordering in the lane comparison (ironbase-core 0.3.452, mcp-server 1.0.650)
 

@@ -70,7 +70,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from build_labels import (  # noqa: E402  (same judge, endpoint and batch path as June)
-    ANTHROPIC_URL, _judge_prompt, _parse_yesno, anthropic_judge_batch,
+    ANTHROPIC_URL, _insecure_endpoint, _judge_prompt, _parse_yesno, anthropic_judge_batch,
 )
 from run_eval import mcp_init, mcp_tool, ndcg_at_k, recall_at_k  # noqa: E402
 
@@ -367,6 +367,12 @@ def selftest():
             for key, rel in [("a", None), ("a", True), ("b", False), ("b", None), ("c", None)]:
                 f.write(json.dumps({"key": key, "relevant": rel}) + "\n")
         check("judgment cache", load_judgments(path) == {"a": True, "b": False, "c": None})
+    # Plain HTTP to another host warns; HTTPS and loopback do not
+    check("insecure endpoint", _insecure_endpoint("http://10.8.0.5:8080/v1/messages")
+          and not _insecure_endpoint("https://proxy.lan/v1/messages")
+          and not _insecure_endpoint("http://localhost:4000/v1/messages")
+          and not _insecure_endpoint("http://127.0.0.1:4000/v1/messages")
+          and not _insecure_endpoint("http://[::1]:4000/v1/messages"))
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
