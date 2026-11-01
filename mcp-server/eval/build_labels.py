@@ -32,7 +32,9 @@ import time
 import urllib.request
 import urllib.error
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+# ANTHROPIC_BASE_URL points the judge (per request and batch) at a proxy
+ANTHROPIC_URL = (os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+                 + "/v1/messages")
 
 MCP_DEFAULT = "http://192.168.2.211:8080/mcp"
 OLLAMA_DEFAULT = "http://localhost:11434/api/generate"

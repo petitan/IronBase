@@ -69,14 +69,13 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_labels import (  # noqa: E402  (same judge and batch path as June)
-    _judge_prompt, _parse_yesno, anthropic_judge_batch,
+from build_labels import (  # noqa: E402  (same judge, endpoint and batch path as June)
+    ANTHROPIC_URL, _judge_prompt, _parse_yesno, anthropic_judge_batch,
 )
 from run_eval import mcp_init, mcp_tool, ndcg_at_k, recall_at_k  # noqa: E402
 
 MCP_DEFAULT = "http://localhost:8080/mcp"
 LABELS_DEFAULT = os.path.join(os.path.dirname(__file__), "labeled_rdocs_curated_v2.json")
-ANTHROPIC_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/") + "/v1/messages"
 JUDGE_MODEL_DEFAULT = "claude-haiku-4-5-20251001"  # the June judge
 SEED = 20261028
 METRICS = ["ndcg@5", "ndcg@10", "recall@5", "recall@10"]
@@ -507,11 +506,11 @@ def run(args):
     _nores = [q for q in per_query if q["relevant"] == 0]
     if _nores:
         lines += [f"## unanswerable-in-pool (n={len(_nores)})", "",
-                  "A bíró a pool egyetlen dokumentumát sem ítélte relevánsnak: minden "
-                  "konfiguráció nDCG-je definíció szerint 0, a rangsor nem mérhető. "
-                  "Ezek abstention-esetek (a `verdict` ma mindig `unknown`), ezért a "
-                  "fenti bucketekből ki vannak véve.", "",
-                  "| kérdés | bucket | a search visszaadott dokumentumai |",
+                  "The judge found no relevant document in the pool: every configuration "
+                  "scores nDCG 0 by definition, so the ranking cannot be measured. These are "
+                  "abstention cases (`search`'s `verdict` is always `unknown` today) and are "
+                  "left out of the buckets below.", "",
+                  "| query | bucket | documents `search` returned |",
                   "|---|---|---|"]
         for q in _nores:
             lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} |")

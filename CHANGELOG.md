@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — eval: unanswerable-in-pool queries, batch judging, labels for `docs` (ironbase-core 0.3.453, mcp-server 1.0.651)
+
+- **`measure_lanes.py` reports queries with no relevant document in the pool separately.** Every
+  configuration scores nDCG 0 on such a query, so it is an abstention case, not a ranking one. These
+  queries are left out of the specific / browse / all buckets.
+- **`--judge-mode batch`** (`build_labels.py`, `measure_lanes.py`) judges through the Batches API at
+  50% of the standard price, with up to 24 h latency. Pairs without a verdict are judged again by the
+  next run.
+- **`build_labels.py --collection`,** and a first label set for the `docs` collection:
+  `labeled_docs.json` has 150 queries (118 answerable); `labeled_docs_curated.json` has 87 (79).
+- **Fixed — the judge's API address is one setting.** `ANTHROPIC_BASE_URL` is read in
+  `build_labels.py` and shared by `measure_lanes.py`. Before, `build_labels.py` and the batch path
+  always called `api.anthropic.com`, bypassing a proxy that the per-request judge of
+  `measure_lanes.py` used.
+- The unanswerable-in-pool section is in English like the rest of the report, and now says
+  "the buckets below".
+
 ### Added — recall vs ordering in the lane comparison (ironbase-core 0.3.452, mcp-server 1.0.650)
 
 `mcp-server/eval/measure_lanes.py` answers whether a better ordering (a reranker) or a better
