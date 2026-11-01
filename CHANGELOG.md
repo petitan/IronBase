@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — recall vs ordering in the lane comparison (ironbase-core 0.3.452, mcp-server 1.0.650)
+
+`mcp-server/eval/measure_lanes.py` answers whether a better ordering (a reranker) or a better
+recall would gain more:
+
+- The BM25, vector and mirror configurations also run `--deep-k` deep (default 50), and their deep
+  lists join the judging pool.
+- A new report table puts each relevant document in one of four places:
+  - in mirror's top-k;
+  - in a deep lane's top-k but not mirror's, where the fusion ranks it lower;
+  - only deeper in a lane's candidates, which a better ordering could bring up;
+  - in no lane's candidates, which is a recall loss.
+- The table also shows which deep single lane reached each document: BM25 only, vector only, both
+  or neither.
+- Recall@k now counts the deeper pool's relevant documents too, so it reads lower than in earlier
+  reports with the same labels.
+- `--deep-k <= --k` turns the split off.
+- The selftest covers the split and the pool.
+
 ### Changed — hybrid search and RAG import in the engine; Python API (ironbase-core 0.3.451, mcp-server 1.0.649)
 
 Completes `docs/MCP_TO_CORE_PLAN.md` (points 3 and 4).

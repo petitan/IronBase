@@ -24,7 +24,7 @@ What this does instead:
    would not measure `search`'s pipeline). The lanes and ablations are compared
    with `mirror`, the engine; `search` vs `mirror` measures the response layer.
 2. The judging pool of each query is the union of every configuration's
-   top-k documents and the June relevant ids. Every pooled pair is judged
+   top-k documents, the deep lanes' lists (5.) and the June relevant ids. Every pooled pair is judged
    again by one judge (the June prompt, temperature 0) over the whole document
    text (its chunks in order), not over a lane's passage. Judgments are cached
    in a JSONL file, so a rerun only judges new pairs and the run is
@@ -36,9 +36,17 @@ What this does instead:
    query has at most `--specific-max-relevant` relevant documents (default 4:
    18 of the 62 answerable queries of labeled_rdocs_curated_v2.json),
    "browse" otherwise.
+5. Recall vs ordering: the BM25, vector and mirror configurations also run
+   `--deep-k` deep (default 50), and their deep lists join the judging pool.
+   Each relevant document is then shown (in mirror's top-k); in a deep
+   lane's top-k but not mirror's (the fusion ranks it lower); only deeper in
+   a lane's candidates (a better ordering, e.g. a reranker, could bring it
+   up); or in no lane's candidates (a recall loss: only another
+   configuration or the June pool found it), with the lanes that reached it. A deeper pool
+   costs more judge calls (cached).
 
-Recall is relative to the pool (every relevant document any configuration or
-the June pool found). The scripts run with the `script_exec` tool, which only
+Recall is relative to the pool (every relevant document any configuration,
+deep lane or the June pool found). The scripts run with the `script_exec` tool, which only
 a loopback caller may use: run this on the server host.
 
 Usage:
@@ -97,6 +105,8 @@ CONFIGS = {
 # Lanes whose other weight is 0: a document only the zero-weight lane returned
 # scores 0 and must not fill the top-k
 SINGLE_LANE = {"bm25", "vector"}
+# Configurations also run `--deep-k` deep, for the recall-vs-ordering split
+DEEP_LANES = ["bm25", "vector", "mirror"]
 
 RHAI = """
 let r = db_hybrid_search(params.collection, params.query, params.options);
@@ -177,13 +187,54 @@ def anthropic_judge(api_key, model, prompt, retries=4):
 
 
 def load_judgments(path):
+    """The cached verdicts by key. A later verdict wins, but a line without one
+    (a failed judge call) never replaces a verdict."""
     out = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     j = json.loads(line)
-                    out[j["key"]] = j["relevant"]
+                    if j["relevant"] is not None or j["key"] not in out:
+                        out[j["key"]] = j["relevant"]
+    return out
+
+
+def judging_pool(lq, got, configs, k):
+    """The documents judged for a query: the June relevant ids, every
+    configuration's top-k and the deep lanes' lists"""
+    pool = set(lq["relevant_doc_ids"])
+    for name in ["search"] + configs:
+        pool.update(got[name][:k])
+    for docs in got.get("deep", {}).values():
+        pool.update(docs)
+    return pool
+
+
+def recall_breakdown(shown, deep, relevant, k):
+    """Where each relevant document stands: in `shown` (the top-k returned); in
+    a deep lane's top-k but not in `shown` (the fusion ranks it lower); only
+    deeper in a lane's candidates (`deep`: lane -> its ranked deep list; a
+    better ordering could bring it up); or in no lane's candidates (a recall
+    loss); and which of the BM25 / vector deep lanes reached it"""
+    shown = set(shown)
+    reach = {lane: set(docs) for lane, docs in deep.items()}
+    lane_top = set().union(*(docs[:k] for docs in deep.values())) if deep else set()
+    bm25, vector = reach.get("bm25", set()), reach.get("vector", set())
+    out = {"relevant": len(relevant), "shown": 0, "lane_top": 0, "deeper": 0,
+           "unreached": 0, "bm25_only": 0, "vector_only": 0, "both": 0, "neither": 0}
+    for d in relevant:
+        if d in shown:
+            out["shown"] += 1
+        elif d in lane_top:
+            out["lane_top"] += 1
+        elif any(d in r for r in reach.values()):
+            out["deeper"] += 1
+        else:
+            out["unreached"] += 1
+        lanes = (d in bm25, d in vector)
+        out[{(True, True): "both", (True, False): "bm25_only",
+             (False, True): "vector_only", (False, False): "neither"}[lanes]] += 1
     return out
 
 
@@ -287,6 +338,26 @@ def selftest():
     check("subsequence", is_subsequence(["a", "c"], ["a", "b", "c"])
           and is_subsequence([], ["a"]) and not is_subsequence(["c", "a"], ["a", "b", "c"])
           and not is_subsequence(["d"], ["a"]))
+    # k = 2. a: shown; b: in BM25's top-2, not shown; c: deeper in vector only;
+    # d: only deeper in mirror's deep list (both single lanes missed it); e: in
+    # no deep list
+    split = recall_breakdown(["a", "x"], {"bm25": ["a", "b"], "vector": ["a", "y", "c"],
+                                          "mirror": ["a", "x", "d"]},
+                             {"a", "b", "c", "d", "e"}, 2)
+    check("recall breakdown", split == {"relevant": 5, "shown": 1, "lane_top": 1,
+                                        "deeper": 2, "unreached": 1, "bm25_only": 1,
+                                        "vector_only": 1, "both": 1, "neither": 2})
+    pool = judging_pool({"relevant_doc_ids": ["j"]},
+                        {"search": ["s"], "mirror": ["m1", "m2"], "deep": {"bm25": ["b9"]}},
+                        ["mirror"], 1)
+    check("judging pool", pool == {"j", "s", "m1", "b9"})
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "j.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for key, rel in [("a", None), ("a", True), ("b", False), ("b", None), ("c", None)]:
+                f.write(json.dumps({"key": key, "relevant": rel}) + "\n")
+        check("judgment cache", load_judgments(path) == {"a": True, "b": False, "c": None})
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -322,6 +393,9 @@ def run(args):
         got = {"search": run_search(args.mcp, coll, lq["query"], k)}
         for name in configs:
             got[name] = run_config(args.mcp, name, coll, lq["query"], k)
+        if args.deep_k > k:
+            got["deep"] = {lane: run_config(args.mcp, lane, coll, lq["query"], args.deep_k)
+                           for lane in DEEP_LANES}
         if not is_subsequence(got["search"], got["mirror"]):
             mismatches.append((lq["query"], got["search"], got["mirror"]))
         runs.append(got)
@@ -340,12 +414,12 @@ def run(args):
     with open(judgments_path, "a", encoding="utf-8") as jf:
         for lq, got in zip(labels, runs):
             coll = lq.get("collection", "rdocs")
-            pool = set(lq["relevant_doc_ids"])
-            for name in ["search"] + configs:
-                pool.update(got[name][:k])
+            pool = judging_pool(lq, got, configs, k)
             for doc_id in sorted(pool):
                 key = judge_key(args.judge_model, lq["query"], doc_id)
-                if key in judged:
+                # A pair without a verdict (a failed judge call) is judged again;
+                # its new line wins on load
+                if judged.get(key) is not None:
                     continue
                 if args.no_judge:
                     judged[key] = None
@@ -370,9 +444,7 @@ def run(args):
     per_query = []
     june_agree = june_total = 0
     for lq, got in zip(labels, runs):
-        pool = set(lq["relevant_doc_ids"])
-        for name in ["search"] + configs:
-            pool.update(got[name][:k])
+        pool = judging_pool(lq, got, configs, k)
         verdict = {d: judged.get(judge_key(args.judge_model, lq["query"], d)) for d in pool}
         relevant = {d for d, v in verdict.items() if v}
         for d in lq["relevant_doc_ids"]:
@@ -386,6 +458,8 @@ def run(args):
             row["metrics"][name] = metrics_for(got[name], relevant)
             row["june_metrics"][name] = metrics_for(got[name], set(lq["relevant_doc_ids"]))
             row["top"][name] = got[name][:k]
+        if "deep" in got:
+            row["recall_split"] = recall_breakdown(got["mirror"][:k], got["deep"], relevant, k)
         per_query.append(row)
 
     # 4. Report
@@ -402,7 +476,8 @@ def run(args):
              f"effect, its Recall@10 is over the documents it returned)",
              f"- judge: `{args.judge_model}`, temperature 0, June prompt, whole document "
              f"(<= {args.doc_chars} chars); pool = every configuration's top-{k} + June "
-             f"relevant ids",
+             f"relevant ids" + (f" + the top-{args.deep_k} of {', '.join(DEEP_LANES)}"
+                                if args.deep_k > k else ""),
              f"- June relevant ids judged relevant again: {june_agree}/{june_total} "
              f"({june_agree / june_total:.1%})" if june_total else "",
              f"- pairs without a verdict (excluded from relevant): "
@@ -432,6 +507,29 @@ def run(args):
                 lines.append(f"| {r['other']} vs mirror | {metric} | {r['delta']:+.4f} | "
                              f"[{r['ci_lo']:+.4f}, {r['ci_hi']:+.4f}] | {r['p']:.4f} | "
                              f"{r['p_holm']:.4f} | {r['wins']}/{r['ties']}/{r['losses']} |")
+        lines.append("")
+
+    if args.deep_k > k:
+        lines += [f"## Recall vs ordering (mirror top-{k} vs the lanes' top-{args.deep_k})", "",
+                  f"Each relevant document: in mirror's top-{k}; in a lane's top-{k} but not "
+                  f"mirror's (the fusion ranks it lower); only deeper in a lane (a better "
+                  f"ordering, e.g. a reranker, could bring it up); or in no lane's "
+                  f"top-{args.deep_k} (a recall loss). Right: which deep single lane reached "
+                  f"it.", "",
+                  f"| bucket | relevant | mirror top-{k} | a lane's top-{k} | deeper only | "
+                  f"in no lane | BM25 only | vector only | both | neither |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for bucket in ["specific", "browse", "all"]:
+            qs = [q for q in per_query if bucket == "all" or q["bucket"] == bucket]
+            if not qs:
+                continue
+            tot = {key: sum(q["recall_split"][key] for q in qs) for key in qs[0]["recall_split"]}
+            share = lambda key: (f"{tot[key]} ({tot[key] / tot['relevant']:.0%})"
+                                 if tot["relevant"] else "0")
+            lines.append(f"| {bucket} | {tot['relevant']} | {share('shown')} | "
+                         f"{share('lane_top')} | {share('deeper')} | {share('unreached')} | "
+                         f"{share('bm25_only')} | "
+                         f"{share('vector_only')} | {share('both')} | {share('neither')} |")
         lines.append("")
 
     code_re = re.compile(r"\b(?=\w*\d)[\w-]{3,}\b")
@@ -466,6 +564,9 @@ def main():
     ap.add_argument("--labels", default=LABELS_DEFAULT)
     ap.add_argument("--out-dir", default="lane_eval")
     ap.add_argument("--k", type=int, default=10, help="documents per configuration and pool depth")
+    ap.add_argument("--deep-k", type=int, default=50,
+                    help="depth of the bm25 / vector / mirror candidate lists for the "
+                         "recall-vs-ordering split; <= --k turns it off")
     ap.add_argument("--specific-max-relevant", type=int, default=4)
     ap.add_argument("--judge-model", default=JUDGE_MODEL_DEFAULT)
     ap.add_argument("--text-field", default="content_text")
