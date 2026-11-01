@@ -132,6 +132,11 @@ def run(mcp, labels, k, limit, verbose):
         query = lq["query"]
         collection = lq.get("collection", "rdocs")
         relevant = set(lq.get("relevant_doc_ids", []))
+        if "answerable" in lq and lq["answerable"] is None:
+            # undecided label (no YES, some verdicts missing): neither class
+            print(f"[{i}/{len(label_set)}] skipped, undecided label: {query!r}",
+                  file=sys.stderr)
+            continue
         answerable = bool(lq.get("answerable", True))
         try:
             sr = mcp_tool(mcp, "search", {"collection": collection, "query": query, "limit": limit})

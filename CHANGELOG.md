@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `measure_lanes.py` used.
 - The unanswerable-in-pool section is in English like the rest of the report, and now says
   "the buckets below".
+- **Review fixes (#245):**
+  - Every judge call uses temperature 0.
+  - Batch API calls retry on network errors and on 429/5xx.
+  - A submitted batch's id is saved: `batch_pending.json` in the `--out-dir`, or `<--out>.batch.json`.
+    A rerun with the same requests resumes that batch instead of paying for it again.
+  - An empty batch is not submitted.
+  - `build_labels.py --out` defaults to `labeled_<collection>.json`, so a `docs` run no longer
+    overwrites the `rdocs` labels.
+  - When both retrieval lanes fail for a query, `build_labels.py` stops instead of dropping the query.
+  - A query with no YES verdict but some verdicts missing is labelled `answerable: null` (undecided),
+    not unanswerable, and `run_eval.py` skips it.
+  - `measure_lanes.py` shows the unjudged pairs of an unanswerable-in-pool query.
+  - The verdict and document-text caches are keyed by collection. `rdocs` keeps its old keys, so
+    existing caches stay valid.
 
 ### Added — recall vs ordering in the lane comparison (ironbase-core 0.3.452, mcp-server 1.0.650)
 

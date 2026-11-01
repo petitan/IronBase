@@ -24,6 +24,7 @@ Usage:
       --mcp http://localhost:8080/mcp --out labeled_rdocs.json
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -126,6 +127,7 @@ def anthropic_judge(api_key, model, query, title, excerpt, timeout=30):
     body = {
         "model": model,
         "max_tokens": 8,
+        "temperature": 0,  # as the batch path and measure_lanes
         "messages": [{"role": "user", "content": _judge_prompt(query, title, excerpt)}],
     }
     req = urllib.request.Request(
@@ -161,6 +163,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars, collection=COLL
     Dedup by doc_id; first (higher-ranked) occurrence wins the excerpt. Returns
     [{doc_id, title, excerpt}], at most search_k + ft_k unique parent docs."""
     cand = {}  # doc_id -> candidate; dict preserves first-seen (≈ rank) order
+    errors = []
     # Lane 1: unified search — passages excerpt.
     try:
         sr = mcp_tool(mcp, "search", {"collection": collection, "query": query, "limit": search_k})
@@ -171,6 +174,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars, collection=COLL
             excerpt = " ".join(p.get("text", "") for p in d.get("passages", []))[:excerpt_chars]
             cand[did] = {"doc_id": did, "title": d.get("title") or "", "excerpt": excerpt}
     except Exception as e:
+        errors.append(e)
         print(f"    [search lane error: {e}]", file=sys.stderr)
     # Lane 2: pure BM25 keyword — content_text excerpt. Flat hit shape (v1.0.501+),
     # OR mode for broad pool recall (we want every token-bearing doc judged).
@@ -185,7 +189,12 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars, collection=COLL
             cand[did] = {"doc_id": did, "title": d.get("title") or "",
                          "excerpt": str(d.get("content_text") or "")[:excerpt_chars]}
     except Exception as e:
+        errors.append(e)
         print(f"    [fulltext lane error: {e}]", file=sys.stderr)
+    if len(errors) == 2:
+        # Both lanes failed (e.g. a wrong --collection): not "no candidates"
+        raise RuntimeError(f"both retrieval lanes failed for {query!r} on "
+                           f"{collection!r}: {errors[0]}; {errors[1]}")
     return list(cand.values())
 
 
@@ -197,37 +206,77 @@ BATCHES_URL = ANTHROPIC_URL + "/batches"
 BATCH_MAX_REQUESTS = 100_000
 
 
-def _anthropic_request(url, api_key, body=None, method="GET", timeout=180):
+RETRYABLE_HTTP = (429, 500, 502, 503, 529)
+
+
+def _anthropic_request(url, api_key, body=None, method="GET", timeout=180, retries=5):
+    """One Batches API call; a network error or a retryable HTTP status is
+    retried with backoff, so a blip does not abort a batch already paid for"""
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode()
+    for attempt in range(retries):
+        req = urllib.request.Request(
+            url, data=data, method=method,
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                     "content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode()
+        except urllib.error.HTTPError as e:
+            if e.code not in RETRYABLE_HTTP or attempt + 1 == retries:
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt + 1 == retries:
+                raise
+        time.sleep(2 ** attempt * 5)
+
+
+def _batch_fingerprint(model, prompts):
+    """Identifies a batch's requests, so a saved batch is resumed only for them"""
+    h = hashlib.sha256(model.encode())
+    for cid in sorted(prompts):
+        h.update(b"\x00" + cid.encode() + b"\x00" + prompts[cid].encode())
+    return h.hexdigest()
 
 
 def anthropic_judge_batch(api_key, model, prompts, poll_seconds=30, max_hours=24,
-                          log=sys.stderr):
+                          log=sys.stderr, state_path=None):
     """Judge `prompts` ({custom_id: prompt}) through the Batches API.
 
     Returns {custom_id: verdict}; a custom_id whose request errored or is missing
     from the result file maps to None, like the per-request path. Results come
     back in arbitrary order, so they are keyed by custom_id, never by position.
+
+    With `state_path`, the submitted batch's id is saved there, and a rerun with
+    the same requests resumes that batch instead of submitting (and paying for)
+    them again; the file is removed once the results are read.
     """
+    if not prompts:
+        return {}
     if len(prompts) > BATCH_MAX_REQUESTS:
         raise ValueError(f"{len(prompts)} requests exceeds the {BATCH_MAX_REQUESTS} batch limit")
-    requests_body = [
-        {"custom_id": cid,
-         "params": {"model": model, "max_tokens": 8, "temperature": 0,
-                    "messages": [{"role": "user", "content": prompt}]}}
-        for cid, prompt in prompts.items()
-    ]
-    batch = json.loads(_anthropic_request(BATCHES_URL, api_key,
-                                          {"requests": requests_body}, "POST"))
-    batch_id = batch["id"]
-    print(f"batch {batch_id}: {len(requests_body)} requests submitted (50% pricing)",
-          file=log, flush=True)
+    fingerprint = _batch_fingerprint(model, prompts)
+    batch_id = None
+    if state_path and os.path.exists(state_path):
+        with open(state_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        if saved.get("fingerprint") == fingerprint:
+            batch_id = saved["batch_id"]
+            print(f"batch {batch_id}: resuming the batch submitted earlier", file=log, flush=True)
+    if batch_id is None:
+        requests_body = [
+            {"custom_id": cid,
+             "params": {"model": model, "max_tokens": 8, "temperature": 0,
+                        "messages": [{"role": "user", "content": prompt}]}}
+            for cid, prompt in prompts.items()
+        ]
+        batch = json.loads(_anthropic_request(BATCHES_URL, api_key,
+                                              {"requests": requests_body}, "POST"))
+        batch_id = batch["id"]
+        if state_path:
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump({"batch_id": batch_id, "fingerprint": fingerprint}, f)
+        print(f"batch {batch_id}: {len(requests_body)} requests submitted (50% pricing)",
+              file=log, flush=True)
 
     deadline = time.time() + max_hours * 3600
     while True:
@@ -257,6 +306,8 @@ def anthropic_judge_batch(api_key, model, prompts, poll_seconds=30, max_hours=24
         verdicts[row["custom_id"]] = _parse_yesno(text)
     for cid in prompts:
         verdicts.setdefault(cid, None)
+    if state_path and os.path.exists(state_path):
+        os.remove(state_path)
     return verdicts
 
 
@@ -294,11 +345,14 @@ def main():
     ap.add_argument("--collection", default=COLLECTION_DEFAULT,
                     help="collection the judging pool is gathered over (and written into the labels)")
     ap.add_argument("--ollama", default=OLLAMA_DEFAULT)
-    ap.add_argument("--out", default="labeled_rdocs.json")
+    ap.add_argument("--out", default=None,
+                    help="default: labeled_<collection>.json")
     ap.add_argument("--excerpt-chars", type=int, default=600)
     ap.add_argument("--throttle", type=float, default=0.0,
                     help="seconds to sleep between judge calls")
     args = ap.parse_args()
+    if args.out is None:
+        args.out = f"labeled_{args.collection}.json"
 
     # Resolve judge backend + callable.
     if args.judge_backend == "anthropic":
@@ -341,7 +395,8 @@ def main():
                    for ci, c in enumerate(cands)}
         print(f"judging {len(prompts)} pairs over {len(pools)} queries in one batch",
               file=sys.stderr)
-        batch_verdicts = anthropic_judge_batch(api_key, model, prompts)
+        batch_verdicts = anthropic_judge_batch(api_key, model, prompts,
+                                               state_path=args.out + ".batch.json")
 
     labeled = []
     for i, (query, rating, candidates) in enumerate(pools, 1):
@@ -363,7 +418,8 @@ def main():
             "query": query,
             "collection": args.collection,
             "relevant_doc_ids": relevant,
-            "answerable": len(relevant) > 0,
+            # No YES with verdicts missing proves nothing: None, not unanswerable
+            "answerable": True if relevant else (False if unknown == 0 else None),
             "source_rating": rating,
             "candidates_judged": judged,
             "candidates_unknown": unknown,
@@ -374,8 +430,10 @@ def main():
     with open(args.out, "w") as f:
         json.dump(labeled, f, ensure_ascii=False, indent=2)
     ans = sum(1 for x in labeled if x["answerable"])
+    incomplete = sum(1 for x in labeled if x["answerable"] is None)
     print(f"\nWROTE {args.out}: {len(labeled)} labeled queries, {ans} answerable, "
-          f"{len(labeled) - ans} unanswerable (abstention targets).", file=sys.stderr)
+          f"{len(labeled) - ans - incomplete} unanswerable (abstention targets), "
+          f"{incomplete} undecided (no YES, some verdicts missing: rerun).", file=sys.stderr)
 
 
 if __name__ == "__main__":

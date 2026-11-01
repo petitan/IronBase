@@ -141,21 +141,26 @@ def run_config(mcp, name, collection, query, k):
 
 def document_text(mcp, collection, doc_id, text_field, max_chars, cache):
     """Title and the document's text (its chunks in order), for the judge"""
-    if doc_id in cache:
-        return cache[doc_id]
+    if (collection, doc_id) in cache:
+        return cache[(collection, doc_id)]
     r = mcp_tool(mcp, "find", {"collection": collection, "filter": {"doc_id": doc_id},
                                "sort": {"chunk_index": 1}, "limit": 200,
                                "projection": {"title": 1, text_field: 1, "chunk_index": 1}})
     docs = r.get("documents", [])
     title = next((d.get("title") for d in docs if d.get("title")), "")
     text = "\n".join(str(d.get(text_field) or "") for d in docs)
-    cache[doc_id] = (title, text[:max_chars], len(docs))
-    return cache[doc_id]
+    cache[(collection, doc_id)] = (title, text[:max_chars], len(docs))
+    return cache[(collection, doc_id)]
 
 
 # --- judging ----------------------------------------------------------------
-def judge_key(model, query, doc_id):
-    return hashlib.sha256(f"{model}\x00{query}\x00{doc_id}".encode()).hexdigest()
+def judge_key(model, query, doc_id, collection="rdocs"):
+    """The cache key of a verdict. Collections share the queries (all come from
+    tudastar_log) and may share slug doc ids, so the collection is part of the
+    key; `rdocs` keeps the key it had before other collections were measured,
+    so its cached verdicts stay valid."""
+    scope = "" if collection == "rdocs" else f"{collection}\x00"
+    return hashlib.sha256(f"{model}\x00{scope}{query}\x00{doc_id}".encode()).hexdigest()
 
 
 def anthropic_judge(api_key, model, prompt, retries=4):
@@ -336,6 +341,9 @@ def selftest():
     m = metrics_for(["a", "x", "b"], {"a", "b"})
     check("metrics", abs(m["ndcg@5"] - 0.919_721_4) < 1e-6 and m["recall@5"] == 1.0)
     check("judge key stable", judge_key("m", "q", "d") == judge_key("m", "q", "d"))
+    check("judge key per collection",
+          judge_key("m", "q", "d", "docs") != judge_key("m", "q", "d", "rdocs")
+          and judge_key("m", "q", "d", "rdocs") == judge_key("m", "q", "d"))
     check("subsequence", is_subsequence(["a", "c"], ["a", "b", "c"])
           and is_subsequence([], ["a"]) and not is_subsequence(["c", "a"], ["a", "b", "c"])
           and not is_subsequence(["d"], ["a"]))
@@ -430,7 +438,7 @@ def run(args):
             coll = lq.get("collection", "rdocs")
             pool = judging_pool(lq, got, configs, k)
             for doc_id in sorted(pool):
-                key = judge_key(args.judge_model, lq["query"], doc_id)
+                key = judge_key(args.judge_model, lq["query"], doc_id, coll)
                 # A pair without a verdict (a failed judge call) is judged again;
                 # its new line wins on load
                 if judged.get(key) is not None:
@@ -451,8 +459,9 @@ def run(args):
 
         if pending:
             askable = {key: prompt for key, _, _, chunks, prompt in pending if chunks}
-            verdicts = (anthropic_judge_batch(api_key, args.judge_model, askable)
-                        if askable else {})
+            verdicts = anthropic_judge_batch(
+                api_key, args.judge_model, askable,
+                state_path=os.path.join(args.out_dir, "batch_pending.json"))
             for key, query, doc_id, chunks, _ in pending:
                 record(key, query, doc_id, chunks,
                        verdicts.get(key) if chunks else False)
@@ -463,7 +472,9 @@ def run(args):
     june_agree = june_total = 0
     for lq, got in zip(labels, runs):
         pool = judging_pool(lq, got, configs, k)
-        verdict = {d: judged.get(judge_key(args.judge_model, lq["query"], d)) for d in pool}
+        coll = lq.get("collection", "rdocs")
+        verdict = {d: judged.get(judge_key(args.judge_model, lq["query"], d, coll))
+                   for d in pool}
         relevant = {d for d, v in verdict.items() if v}
         for d in lq["relevant_doc_ids"]:
             june_total += 1
@@ -509,11 +520,13 @@ def run(args):
                   "The judge found no relevant document in the pool: every configuration "
                   "scores nDCG 0 by definition, so the ranking cannot be measured. These are "
                   "abstention cases (`search`'s `verdict` is always `unknown` today) and are "
-                  "left out of the buckets below.", "",
-                  "| query | bucket | documents `search` returned |",
-                  "|---|---|---|"]
+                  "left out of the buckets below. A query with pairs still without a verdict "
+                  "is not known to be unanswerable: rerun to judge them.", "",
+                  "| query | bucket | documents `search` returned | pairs without a verdict |",
+                  "|---|---|---|---|"]
         for q in _nores:
-            lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} |")
+            lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} | "
+                         f"{q['unjudged']} |")
         lines.append("")
     # A query whose pool holds no relevant document scores nDCG 0 for every
     # configuration: the retriever cannot win, so averaging it in understates
