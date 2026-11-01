@@ -24,7 +24,7 @@ What this does instead:
    would not measure `search`'s pipeline). The lanes and ablations are compared
    with `mirror`, the engine; `search` vs `mirror` measures the response layer.
 2. The judging pool of each query is the union of every configuration's
-   top-k documents and the June relevant ids. Every pooled pair is judged
+   top-k documents, the deep lanes' lists (5.) and the June relevant ids. Every pooled pair is judged
    again by one judge (the June prompt, temperature 0) over the whole document
    text (its chunks in order), not over a lane's passage. Judgments are cached
    in a JSONL file, so a rerun only judges new pairs and the run is
@@ -38,10 +38,11 @@ What this does instead:
    "browse" otherwise.
 5. Recall vs ordering: the BM25, vector and mirror configurations also run
    `--deep-k` deep (default 50), and their deep lists join the judging pool.
-   Each relevant document is then shown (in mirror's top-k), only deeper in a
-   lane's candidates (a better ordering, e.g. a reranker, could bring it up),
-   or in no lane's candidates (a recall loss: only another configuration or
-   the June pool found it), with the lanes that reached it. A deeper pool
+   Each relevant document is then shown (in mirror's top-k); in a deep
+   lane's top-k but not mirror's (the fusion ranks it lower); only deeper in
+   a lane's candidates (a better ordering, e.g. a reranker, could bring it
+   up); or in no lane's candidates (a recall loss: only another
+   configuration or the June pool found it), with the lanes that reached it. A deeper pool
    costs more judge calls (cached).
 
 Recall is relative to the pool (every relevant document any configuration,
@@ -207,21 +208,25 @@ def judging_pool(lq, got, configs, k):
     return pool
 
 
-def recall_breakdown(shown, deep, relevant):
-    """Where each relevant document stands: in `shown` (the top-k returned),
-    only deeper in a lane's candidates (`deep`: lane -> its deep list; a better
-    ordering could bring it up), or in no lane's candidates (a recall loss),
-    and which of the BM25 / vector deep lanes reached it"""
+def recall_breakdown(shown, deep, relevant, k):
+    """Where each relevant document stands: in `shown` (the top-k returned); in
+    a deep lane's top-k but not in `shown` (the fusion ranks it lower); only
+    deeper in a lane's candidates (`deep`: lane -> its ranked deep list; a
+    better ordering could bring it up); or in no lane's candidates (a recall
+    loss); and which of the BM25 / vector deep lanes reached it"""
     shown = set(shown)
     reach = {lane: set(docs) for lane, docs in deep.items()}
+    lane_top = set().union(*(docs[:k] for docs in deep.values())) if deep else set()
     bm25, vector = reach.get("bm25", set()), reach.get("vector", set())
-    out = {"relevant": len(relevant), "shown": 0, "reorderable": 0, "unreached": 0,
-           "bm25_only": 0, "vector_only": 0, "both": 0, "neither": 0}
+    out = {"relevant": len(relevant), "shown": 0, "lane_top": 0, "deeper": 0,
+           "unreached": 0, "bm25_only": 0, "vector_only": 0, "both": 0, "neither": 0}
     for d in relevant:
         if d in shown:
             out["shown"] += 1
+        elif d in lane_top:
+            out["lane_top"] += 1
         elif any(d in r for r in reach.values()):
-            out["reorderable"] += 1
+            out["deeper"] += 1
         else:
             out["unreached"] += 1
         lanes = (d in bm25, d in vector)
@@ -330,13 +335,15 @@ def selftest():
     check("subsequence", is_subsequence(["a", "c"], ["a", "b", "c"])
           and is_subsequence([], ["a"]) and not is_subsequence(["c", "a"], ["a", "b", "c"])
           and not is_subsequence(["d"], ["a"]))
-    # a: shown; b: deeper in BM25 only; c: deeper in vector only; d: only in
-    # mirror's deep list (both single lanes missed it); e: in no deep list
-    split = recall_breakdown(["a", "x"], {"bm25": ["a", "b"], "vector": ["a", "c"],
-                                          "mirror": ["a", "d"]}, {"a", "b", "c", "d", "e"})
-    check("recall breakdown", split == {"relevant": 5, "shown": 1, "reorderable": 3,
-                                        "unreached": 1, "bm25_only": 1, "vector_only": 1,
-                                        "both": 1, "neither": 2})
+    # k = 2. a: shown; b: in BM25's top-2, not shown; c: deeper in vector only;
+    # d: only deeper in mirror's deep list (both single lanes missed it); e: in
+    # no deep list
+    split = recall_breakdown(["a", "x"], {"bm25": ["a", "b"], "vector": ["a", "y", "c"],
+                                          "mirror": ["a", "x", "d"]},
+                             {"a", "b", "c", "d", "e"}, 2)
+    check("recall breakdown", split == {"relevant": 5, "shown": 1, "lane_top": 1,
+                                        "deeper": 2, "unreached": 1, "bm25_only": 1,
+                                        "vector_only": 1, "both": 1, "neither": 2})
     pool = judging_pool({"relevant_doc_ids": ["j"]},
                         {"search": ["s"], "mirror": ["m1", "m2"], "deep": {"bm25": ["b9"]}},
                         ["mirror"], 1)
@@ -440,7 +447,7 @@ def run(args):
             row["june_metrics"][name] = metrics_for(got[name], set(lq["relevant_doc_ids"]))
             row["top"][name] = got[name][:k]
         if "deep" in got:
-            row["recall_split"] = recall_breakdown(got["mirror"][:k], got["deep"], relevant)
+            row["recall_split"] = recall_breakdown(got["mirror"][:k], got["deep"], relevant, k)
         per_query.append(row)
 
     # 4. Report
@@ -492,12 +499,14 @@ def run(args):
 
     if args.deep_k > k:
         lines += [f"## Recall vs ordering (mirror top-{k} vs the lanes' top-{args.deep_k})", "",
-                  f"Each relevant document: in mirror's top-{k}; only deeper in a lane "
-                  f"(a better ordering, e.g. a reranker, could bring it up); or in no lane's "
+                  f"Each relevant document: in mirror's top-{k}; in a lane's top-{k} but not "
+                  f"mirror's (the fusion ranks it lower); only deeper in a lane (a better "
+                  f"ordering, e.g. a reranker, could bring it up); or in no lane's "
                   f"top-{args.deep_k} (a recall loss). Right: which deep single lane reached "
                   f"it.", "",
-                  f"| bucket | relevant | top-{k} | deeper only | in no lane | BM25 only | "
-                  f"vector only | both | neither |", "|---|---|---|---|---|---|---|---|---|"]
+                  f"| bucket | relevant | mirror top-{k} | a lane's top-{k} | deeper only | "
+                  f"in no lane | BM25 only | vector only | both | neither |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
         for bucket in ["specific", "browse", "all"]:
             qs = [q for q in per_query if bucket == "all" or q["bucket"] == bucket]
             if not qs:
@@ -506,7 +515,8 @@ def run(args):
             share = lambda key: (f"{tot[key]} ({tot[key] / tot['relevant']:.0%})"
                                  if tot["relevant"] else "0")
             lines.append(f"| {bucket} | {tot['relevant']} | {share('shown')} | "
-                         f"{share('reorderable')} | {share('unreached')} | {share('bm25_only')} | "
+                         f"{share('lane_top')} | {share('deeper')} | {share('unreached')} | "
+                         f"{share('bm25_only')} | "
                          f"{share('vector_only')} | {share('both')} | {share('neither')} |")
         lines.append("")
 

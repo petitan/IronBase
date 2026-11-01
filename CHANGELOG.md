@@ -14,8 +14,9 @@ recall would gain more:
 
 - The BM25, vector and mirror configurations also run `--deep-k` deep (default 50), and their deep
   lists join the judging pool.
-- A new report table puts each relevant document in one of three places:
+- A new report table puts each relevant document in one of four places:
   - in mirror's top-k;
+  - in a deep lane's top-k but not mirror's, where the fusion ranks it lower;
   - only deeper in a lane's candidates, which a better ordering could bring up;
   - in no lane's candidates, which is a recall loss.
 - The table also shows which deep single lane reached each document: BM25 only, vector only, both
