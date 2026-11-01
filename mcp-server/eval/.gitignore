@@ -1,1 +1,8 @@
 __pycache__/
+# Label sets and review dumps hold real queries and customer document ids: kept
+# on the eval host only, never committed (the repository is public)
+labeled_*.json
+labels_review.txt
+review_unanswerable.txt
+*.batch.json
+lane_eval/

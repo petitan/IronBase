@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — eval: unanswerable-in-pool queries, batch judging, labels for `docs` (ironbase-core 0.3.453, mcp-server 1.0.651)
+
+- **`measure_lanes.py` reports queries with no relevant document in the pool separately.** Every
+  configuration scores nDCG 0 on such a query, so it is an abstention case, not a ranking one. These
+  queries are left out of the specific / browse / all buckets.
+- **`--judge-mode batch`** (`build_labels.py`, `measure_lanes.py`) judges through the Batches API at
+  50% of the standard price, with up to 24 h latency. Pairs without a verdict are judged again by the
+  next run.
+- **`build_labels.py --collection`.** A first label set was built for the `docs` collection
+  (150 queries, 118 answerable; curated: 87, 79 answerable). It is kept on the eval host only (below).
+- **Removed — label sets are no longer committed.** The `labeled_*.json` files and the
+  `labels_review.txt` / `review_unanswerable.txt` dumps hold real search queries and production
+  document ids, some of them customer names, and the repository is public. They are now in
+  `mcp-server/eval/.gitignore` with the batch state files and `lane_eval/`. They remain in the git
+  history. The scripts still default to the same file names, so a host that keeps its local
+  copies runs as before.
+- **Fixed — the judge's API address is one setting.** `ANTHROPIC_BASE_URL` is read in
+  `build_labels.py` and shared by `measure_lanes.py`. Before, `build_labels.py` and the batch path
+  always called `api.anthropic.com`, bypassing a proxy that the per-request judge of
+  `measure_lanes.py` used.
+- The unanswerable-in-pool section is in English like the rest of the report, and now says
+  "the buckets below".
+- **Review fixes (#245):**
+  - Every judge call uses temperature 0.
+  - Batch API calls retry on network errors and on 429/5xx.
+  - A submitted batch's id is saved: `batch_pending.json` in the `--out-dir`, or `<--out>.batch.json`.
+    A rerun with the same requests resumes that batch instead of paying for it again.
+  - An empty batch is not submitted.
+  - `build_labels.py --out` defaults to `labeled_<collection>.json`, so a `docs` run no longer
+    overwrites the `rdocs` labels.
+  - When both retrieval lanes fail for a query, `build_labels.py` stops instead of dropping the query.
+  - A query with no YES verdict but some verdicts missing is labelled `answerable: null` (undecided),
+    not unanswerable, and `run_eval.py` skips it.
+  - `measure_lanes.py` shows the unjudged pairs of an unanswerable-in-pool query.
+  - The verdict and document-text caches are keyed by collection. `rdocs` keeps its old keys, so
+    existing caches stay valid.
+  - A plain-HTTP `ANTHROPIC_BASE_URL` to another host prints a warning: the API key and the
+    prompts are sent unencrypted unless a VPN carries them. HTTPS and loopback addresses are quiet.
+
 ### Added — recall vs ordering in the lane comparison (ironbase-core 0.3.452, mcp-server 1.0.650)
 
 `mcp-server/eval/measure_lanes.py` answers whether a better ordering (a reranker) or a better

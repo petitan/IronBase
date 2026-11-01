@@ -69,12 +69,13 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_labels import _judge_prompt, _parse_yesno  # noqa: E402  (same judge as June)
+from build_labels import (  # noqa: E402  (same judge, endpoint and batch path as June)
+    ANTHROPIC_URL, _insecure_endpoint, _judge_prompt, _parse_yesno, anthropic_judge_batch,
+)
 from run_eval import mcp_init, mcp_tool, ndcg_at_k, recall_at_k  # noqa: E402
 
 MCP_DEFAULT = "http://localhost:8080/mcp"
 LABELS_DEFAULT = os.path.join(os.path.dirname(__file__), "labeled_rdocs_curated_v2.json")
-ANTHROPIC_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/") + "/v1/messages"
 JUDGE_MODEL_DEFAULT = "claude-haiku-4-5-20251001"  # the June judge
 SEED = 20261028
 METRICS = ["ndcg@5", "ndcg@10", "recall@5", "recall@10"]
@@ -140,21 +141,26 @@ def run_config(mcp, name, collection, query, k):
 
 def document_text(mcp, collection, doc_id, text_field, max_chars, cache):
     """Title and the document's text (its chunks in order), for the judge"""
-    if doc_id in cache:
-        return cache[doc_id]
+    if (collection, doc_id) in cache:
+        return cache[(collection, doc_id)]
     r = mcp_tool(mcp, "find", {"collection": collection, "filter": {"doc_id": doc_id},
                                "sort": {"chunk_index": 1}, "limit": 200,
                                "projection": {"title": 1, text_field: 1, "chunk_index": 1}})
     docs = r.get("documents", [])
     title = next((d.get("title") for d in docs if d.get("title")), "")
     text = "\n".join(str(d.get(text_field) or "") for d in docs)
-    cache[doc_id] = (title, text[:max_chars], len(docs))
-    return cache[doc_id]
+    cache[(collection, doc_id)] = (title, text[:max_chars], len(docs))
+    return cache[(collection, doc_id)]
 
 
 # --- judging ----------------------------------------------------------------
-def judge_key(model, query, doc_id):
-    return hashlib.sha256(f"{model}\x00{query}\x00{doc_id}".encode()).hexdigest()
+def judge_key(model, query, doc_id, collection="rdocs"):
+    """The cache key of a verdict. Collections share the queries (all come from
+    tudastar_log) and may share slug doc ids, so the collection is part of the
+    key; `rdocs` keeps the key it had before other collections were measured,
+    so its cached verdicts stay valid."""
+    scope = "" if collection == "rdocs" else f"{collection}\x00"
+    return hashlib.sha256(f"{model}\x00{scope}{query}\x00{doc_id}".encode()).hexdigest()
 
 
 def anthropic_judge(api_key, model, prompt, retries=4):
@@ -335,6 +341,9 @@ def selftest():
     m = metrics_for(["a", "x", "b"], {"a", "b"})
     check("metrics", abs(m["ndcg@5"] - 0.919_721_4) < 1e-6 and m["recall@5"] == 1.0)
     check("judge key stable", judge_key("m", "q", "d") == judge_key("m", "q", "d"))
+    check("judge key per collection",
+          judge_key("m", "q", "d", "docs") != judge_key("m", "q", "d", "rdocs")
+          and judge_key("m", "q", "d", "rdocs") == judge_key("m", "q", "d"))
     check("subsequence", is_subsequence(["a", "c"], ["a", "b", "c"])
           and is_subsequence([], ["a"]) and not is_subsequence(["c", "a"], ["a", "b", "c"])
           and not is_subsequence(["d"], ["a"]))
@@ -358,6 +367,12 @@ def selftest():
             for key, rel in [("a", None), ("a", True), ("b", False), ("b", None), ("c", None)]:
                 f.write(json.dumps({"key": key, "relevant": rel}) + "\n")
         check("judgment cache", load_judgments(path) == {"a": True, "b": False, "c": None})
+    # Plain HTTP to another host warns; HTTPS and loopback do not
+    check("insecure endpoint", _insecure_endpoint("http://10.8.0.5:8080/v1/messages")
+          and not _insecure_endpoint("https://proxy.lan/v1/messages")
+          and not _insecure_endpoint("http://localhost:4000/v1/messages")
+          and not _insecure_endpoint("http://127.0.0.1:4000/v1/messages")
+          and not _insecure_endpoint("http://[::1]:4000/v1/messages"))
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -411,12 +426,25 @@ def run(args):
     judged = load_judgments(judgments_path)
     texts = {}
     new = unknown = 0
+    pending = []  # batch mode: (key, query, doc_id, chunks, prompt)
     with open(judgments_path, "a", encoding="utf-8") as jf:
+
+        def record(key, query, doc_id, chunks, verdict):
+            nonlocal new, unknown
+            judged[key] = verdict
+            new += 1
+            unknown += verdict is None
+            jf.write(json.dumps({"key": key, "model": args.judge_model,
+                                 "query": query, "doc_id": doc_id,
+                                 "chunks": chunks, "relevant": verdict},
+                                ensure_ascii=False) + "\n")
+            jf.flush()
+
         for lq, got in zip(labels, runs):
             coll = lq.get("collection", "rdocs")
             pool = judging_pool(lq, got, configs, k)
             for doc_id in sorted(pool):
-                key = judge_key(args.judge_model, lq["query"], doc_id)
+                key = judge_key(args.judge_model, lq["query"], doc_id, coll)
                 # A pair without a verdict (a failed judge call) is judged again;
                 # its new line wins on load
                 if judged.get(key) is not None:
@@ -427,17 +455,22 @@ def run(args):
                     continue
                 title, text, chunks = document_text(args.mcp, coll, doc_id, args.text_field,
                                                     args.doc_chars, texts)
-                verdict = (anthropic_judge(api_key, args.judge_model,
-                                           _judge_prompt(lq["query"], title, text))
-                           if chunks else False)  # a document that no longer exists
-                judged[key] = verdict
-                new += 1
-                unknown += verdict is None
-                jf.write(json.dumps({"key": key, "model": args.judge_model,
-                                     "query": lq["query"], "doc_id": doc_id,
-                                     "chunks": chunks, "relevant": verdict},
-                                    ensure_ascii=False) + "\n")
-                jf.flush()
+                prompt = _judge_prompt(lq["query"], title, text) if chunks else None
+                if args.judge_mode == "batch":
+                    pending.append((key, lq["query"], doc_id, chunks, prompt))
+                    continue
+                # a document that no longer exists needs no judge call
+                verdict = anthropic_judge(api_key, args.judge_model, prompt) if chunks else False
+                record(key, lq["query"], doc_id, chunks, verdict)
+
+        if pending:
+            askable = {key: prompt for key, _, _, chunks, prompt in pending if chunks}
+            verdicts = anthropic_judge_batch(
+                api_key, args.judge_model, askable,
+                state_path=os.path.join(args.out_dir, "batch_pending.json"))
+            for key, query, doc_id, chunks, _ in pending:
+                record(key, query, doc_id, chunks,
+                       verdicts.get(key) if chunks else False)
     print(f"judged {new} new pairs ({unknown} without a verdict)", file=sys.stderr)
 
     # 3. Per-query metrics: re-judged pool labels, and the June labels for contrast
@@ -445,7 +478,9 @@ def run(args):
     june_agree = june_total = 0
     for lq, got in zip(labels, runs):
         pool = judging_pool(lq, got, configs, k)
-        verdict = {d: judged.get(judge_key(args.judge_model, lq["query"], d)) for d in pool}
+        coll = lq.get("collection", "rdocs")
+        verdict = {d: judged.get(judge_key(args.judge_model, lq["query"], d, coll))
+                   for d in pool}
         relevant = {d for d, v in verdict.items() if v}
         for d in lq["relevant_doc_ids"]:
             june_total += 1
@@ -485,8 +520,28 @@ def run(args):
              "- Recall is relative to the pool; CI: paired bootstrap 95% (10,000); p: paired "
              "sign-flip randomization, Holm-adjusted within bucket and metric", ""]
     csv_rows = []
+    _nores = [q for q in per_query if q["relevant"] == 0]
+    if _nores:
+        lines += [f"## unanswerable-in-pool (n={len(_nores)})", "",
+                  "The judge found no relevant document in the pool: every configuration "
+                  "scores nDCG 0 by definition, so the ranking cannot be measured. These are "
+                  "abstention cases (`search`'s `verdict` is always `unknown` today) and are "
+                  "left out of the buckets below. A query with pairs still without a verdict "
+                  "is not known to be unanswerable: rerun to judge them.", "",
+                  "| query | bucket | documents `search` returned | pairs without a verdict |",
+                  "|---|---|---|---|"]
+        for q in _nores:
+            lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} | "
+                         f"{q['unjudged']} |")
+        lines.append("")
+    # A query whose pool holds no relevant document scores nDCG 0 for every
+    # configuration: the retriever cannot win, so averaging it in understates
+    # the quality floor (5 of the 18 specific queries on the June set). Those
+    # queries are an abstention problem, not a ranking one, and are reported
+    # separately under "unanswerable-in-pool".
     for bucket in ["specific", "browse", "all"]:
-        qs = [q for q in per_query if bucket == "all" or q["bucket"] == bucket]
+        qs = [q for q in per_query
+              if (bucket == "all" or q["bucket"] == bucket) and q["relevant"] > 0]
         if not qs:
             continue
         lines += [f"## {bucket} (n={len(qs)})", "",
@@ -571,6 +626,8 @@ def main():
     ap.add_argument("--judge-model", default=JUDGE_MODEL_DEFAULT)
     ap.add_argument("--text-field", default="content_text")
     ap.add_argument("--doc-chars", type=int, default=6000)
+    ap.add_argument("--judge-mode", choices=["sync", "batch"], default="sync",
+                    help="batch: Batches API, 50%% cheaper, up to 24 h latency")
     ap.add_argument("--no-judge", action="store_true",
                     help="use cached judgments only; unjudged pairs count as unknown")
     ap.add_argument("--selftest", action="store_true", help="offline checks, no server")
