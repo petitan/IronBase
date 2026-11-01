@@ -187,13 +187,16 @@ def anthropic_judge(api_key, model, prompt, retries=4):
 
 
 def load_judgments(path):
+    """The cached verdicts by key. A later verdict wins, but a line without one
+    (a failed judge call) never replaces a verdict."""
     out = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     j = json.loads(line)
-                    out[j["key"]] = j["relevant"]
+                    if j["relevant"] is not None or j["key"] not in out:
+                        out[j["key"]] = j["relevant"]
     return out
 
 
@@ -348,6 +351,13 @@ def selftest():
                         {"search": ["s"], "mirror": ["m1", "m2"], "deep": {"bm25": ["b9"]}},
                         ["mirror"], 1)
     check("judging pool", pool == {"j", "s", "m1", "b9"})
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "j.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for key, rel in [("a", None), ("a", True), ("b", False), ("b", None), ("c", None)]:
+                f.write(json.dumps({"key": key, "relevant": rel}) + "\n")
+        check("judgment cache", load_judgments(path) == {"a": True, "b": False, "c": None})
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -407,7 +417,9 @@ def run(args):
             pool = judging_pool(lq, got, configs, k)
             for doc_id in sorted(pool):
                 key = judge_key(args.judge_model, lq["query"], doc_id)
-                if key in judged:
+                # A pair without a verdict (a failed judge call) is judged again;
+                # its new line wins on load
+                if judged.get(key) is not None:
                     continue
                 if args.no_judge:
                     judged[key] = None
