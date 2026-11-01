@@ -69,7 +69,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from build_labels import _judge_prompt, _parse_yesno  # noqa: E402  (same judge as June)
+from build_labels import (  # noqa: E402  (same judge and batch path as June)
+    _judge_prompt, _parse_yesno, anthropic_judge_batch,
+)
 from run_eval import mcp_init, mcp_tool, ndcg_at_k, recall_at_k  # noqa: E402
 
 MCP_DEFAULT = "http://localhost:8080/mcp"
@@ -411,7 +413,20 @@ def run(args):
     judged = load_judgments(judgments_path)
     texts = {}
     new = unknown = 0
+    pending = []  # batch mode: (key, query, doc_id, chunks, prompt)
     with open(judgments_path, "a", encoding="utf-8") as jf:
+
+        def record(key, query, doc_id, chunks, verdict):
+            nonlocal new, unknown
+            judged[key] = verdict
+            new += 1
+            unknown += verdict is None
+            jf.write(json.dumps({"key": key, "model": args.judge_model,
+                                 "query": query, "doc_id": doc_id,
+                                 "chunks": chunks, "relevant": verdict},
+                                ensure_ascii=False) + "\n")
+            jf.flush()
+
         for lq, got in zip(labels, runs):
             coll = lq.get("collection", "rdocs")
             pool = judging_pool(lq, got, configs, k)
@@ -427,17 +442,21 @@ def run(args):
                     continue
                 title, text, chunks = document_text(args.mcp, coll, doc_id, args.text_field,
                                                     args.doc_chars, texts)
-                verdict = (anthropic_judge(api_key, args.judge_model,
-                                           _judge_prompt(lq["query"], title, text))
-                           if chunks else False)  # a document that no longer exists
-                judged[key] = verdict
-                new += 1
-                unknown += verdict is None
-                jf.write(json.dumps({"key": key, "model": args.judge_model,
-                                     "query": lq["query"], "doc_id": doc_id,
-                                     "chunks": chunks, "relevant": verdict},
-                                    ensure_ascii=False) + "\n")
-                jf.flush()
+                prompt = _judge_prompt(lq["query"], title, text) if chunks else None
+                if args.judge_mode == "batch":
+                    pending.append((key, lq["query"], doc_id, chunks, prompt))
+                    continue
+                # a document that no longer exists needs no judge call
+                verdict = anthropic_judge(api_key, args.judge_model, prompt) if chunks else False
+                record(key, lq["query"], doc_id, chunks, verdict)
+
+        if pending:
+            askable = {key: prompt for key, _, _, chunks, prompt in pending if chunks}
+            verdicts = (anthropic_judge_batch(api_key, args.judge_model, askable)
+                        if askable else {})
+            for key, query, doc_id, chunks, _ in pending:
+                record(key, query, doc_id, chunks,
+                       verdicts.get(key) if chunks else False)
     print(f"judged {new} new pairs ({unknown} without a verdict)", file=sys.stderr)
 
     # 3. Per-query metrics: re-judged pool labels, and the June labels for contrast
@@ -485,8 +504,26 @@ def run(args):
              "- Recall is relative to the pool; CI: paired bootstrap 95% (10,000); p: paired "
              "sign-flip randomization, Holm-adjusted within bucket and metric", ""]
     csv_rows = []
+    _nores = [q for q in per_query if q["relevant"] == 0]
+    if _nores:
+        lines += [f"## unanswerable-in-pool (n={len(_nores)})", "",
+                  "A bíró a pool egyetlen dokumentumát sem ítélte relevánsnak: minden "
+                  "konfiguráció nDCG-je definíció szerint 0, a rangsor nem mérhető. "
+                  "Ezek abstention-esetek (a `verdict` ma mindig `unknown`), ezért a "
+                  "fenti bucketekből ki vannak véve.", "",
+                  "| kérdés | bucket | a search visszaadott dokumentumai |",
+                  "|---|---|---|"]
+        for q in _nores:
+            lines.append(f"| {q['query']} | {q['bucket']} | {len(q['top']['search'])} |")
+        lines.append("")
+    # A query whose pool holds no relevant document scores nDCG 0 for every
+    # configuration: the retriever cannot win, so averaging it in understates
+    # the quality floor (5 of the 18 specific queries on the June set). Those
+    # queries are an abstention problem, not a ranking one, and are reported
+    # separately under "unanswerable-in-pool".
     for bucket in ["specific", "browse", "all"]:
-        qs = [q for q in per_query if bucket == "all" or q["bucket"] == bucket]
+        qs = [q for q in per_query
+              if (bucket == "all" or q["bucket"] == bucket) and q["relevant"] > 0]
         if not qs:
             continue
         lines += [f"## {bucket} (n={len(qs)})", "",
@@ -571,6 +608,8 @@ def main():
     ap.add_argument("--judge-model", default=JUDGE_MODEL_DEFAULT)
     ap.add_argument("--text-field", default="content_text")
     ap.add_argument("--doc-chars", type=int, default=6000)
+    ap.add_argument("--judge-mode", choices=["sync", "batch"], default="sync",
+                    help="batch: Batches API, 50%% cheaper, up to 24 h latency")
     ap.add_argument("--no-judge", action="store_true",
                     help="use cached judgments only; unjudged pairs count as unknown")
     ap.add_argument("--selftest", action="store_true", help="offline checks, no server")

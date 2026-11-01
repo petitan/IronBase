@@ -5,7 +5,8 @@ Stage B/C). See docs/HYBRID_RETRIEVAL_REDESIGN.md.
 Pipeline (READ-ONLY against production; relevance judgment via Anthropic API):
   1. Pull real user queries from the `tudastar_log` collection (intent=search),
      dedup + sample.
-  2. For each query, build a DE-BIASED judging pool over `rdocs`: union of the
+  2. For each query, build a DE-BIASED judging pool over `--collection` (default
+     `rdocs`): union of the
      unified `search` lane (dense+fusion) and a pure BM25 `fulltext_search` lane,
      deduped by doc_id (see gather_candidates — removes single-lane/top-k pool
      bias so coverage misses become labelable).
@@ -35,7 +36,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 MCP_DEFAULT = "http://192.168.2.211:8080/mcp"
 OLLAMA_DEFAULT = "http://localhost:11434/api/generate"
-COLLECTION = "rdocs"
+COLLECTION_DEFAULT = "rdocs"
 LOG_COLLECTION = "tudastar_log"
 
 
@@ -146,7 +147,7 @@ def anthropic_judge(api_key, model, query, title, excerpt, timeout=30):
         return None
 
 
-def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
+def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars, collection=COLLECTION_DEFAULT):
     """Union the judging pool across two complementary retrieval lanes so the judge
     sees candidates that the unified `search` alone would bury — removing the
     single-lane / top-k POOL BIAS that makes coverage misses structurally
@@ -160,7 +161,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
     cand = {}  # doc_id -> candidate; dict preserves first-seen (≈ rank) order
     # Lane 1: unified search — passages excerpt.
     try:
-        sr = mcp_tool(mcp, "search", {"collection": COLLECTION, "query": query, "limit": search_k})
+        sr = mcp_tool(mcp, "search", {"collection": collection, "query": query, "limit": search_k})
         for d in sr.get("documents", []):
             did = d.get("doc_id")
             if not did or did in cand:
@@ -173,7 +174,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
     # OR mode for broad pool recall (we want every token-bearing doc judged).
     try:
         fr = mcp_tool(mcp, "fulltext_search",
-                      {"collection": COLLECTION, "query": query, "field": "content_text",
+                      {"collection": collection, "query": query, "field": "content_text",
                        "limit": ft_k, "mode": "or"})
         for d in fr.get("results", []):
             did = d.get("doc_id")
@@ -184,6 +185,77 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
     except Exception as e:
         print(f"    [fulltext lane error: {e}]", file=sys.stderr)
     return list(cand.values())
+
+
+BATCHES_URL = ANTHROPIC_URL + "/batches"
+# The Batches API runs the same judge requests asynchronously at 50% of standard
+# prices: up to 100,000 requests per batch, most finish within an hour (24 h
+# maximum), results kept for 29 days. Labeling is not latency-sensitive, so the
+# whole candidate pool goes in one batch.
+BATCH_MAX_REQUESTS = 100_000
+
+
+def _anthropic_request(url, api_key, body=None, method="GET", timeout=180):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode()
+
+
+def anthropic_judge_batch(api_key, model, prompts, poll_seconds=30, max_hours=24,
+                          log=sys.stderr):
+    """Judge `prompts` ({custom_id: prompt}) through the Batches API.
+
+    Returns {custom_id: verdict}; a custom_id whose request errored or is missing
+    from the result file maps to None, like the per-request path. Results come
+    back in arbitrary order, so they are keyed by custom_id, never by position.
+    """
+    if len(prompts) > BATCH_MAX_REQUESTS:
+        raise ValueError(f"{len(prompts)} requests exceeds the {BATCH_MAX_REQUESTS} batch limit")
+    requests_body = [
+        {"custom_id": cid,
+         "params": {"model": model, "max_tokens": 8, "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}]}}
+        for cid, prompt in prompts.items()
+    ]
+    batch = json.loads(_anthropic_request(BATCHES_URL, api_key,
+                                          {"requests": requests_body}, "POST"))
+    batch_id = batch["id"]
+    print(f"batch {batch_id}: {len(requests_body)} requests submitted (50% pricing)",
+          file=log, flush=True)
+
+    deadline = time.time() + max_hours * 3600
+    while True:
+        status = json.loads(_anthropic_request(f"{BATCHES_URL}/{batch_id}", api_key))
+        if status.get("processing_status") == "ended":
+            break
+        if time.time() > deadline:
+            raise TimeoutError(f"batch {batch_id} still {status.get('processing_status')} "
+                               f"after {max_hours} h")
+        counts = status.get("request_counts", {})
+        print(f"  {status.get('processing_status')}: {counts.get('succeeded', 0)} succeeded, "
+              f"{counts.get('processing', 0)} processing", file=log, flush=True)
+        time.sleep(poll_seconds)
+
+    verdicts = {}
+    body = _anthropic_request(f"{BATCHES_URL}/{batch_id}/results", api_key, timeout=600)
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        outcome = row.get("result", {})
+        if outcome.get("type") != "succeeded":
+            verdicts[row["custom_id"]] = None
+            continue
+        text = "".join(b.get("text", "") for b in outcome["message"].get("content", [])
+                       if b.get("type") == "text")
+        verdicts[row["custom_id"]] = _parse_yesno(text)
+    for cid in prompts:
+        verdicts.setdefault(cid, None)
+    return verdicts
 
 
 def ollama_judge(ollama, model, query, title, excerpt, timeout=90):
@@ -211,9 +283,14 @@ def main():
     ap.add_argument("--fulltext-k", type=int, default=25,
                     help="BM25 keyword lane depth for the judging pool (de-bias)")
     ap.add_argument("--judge-backend", choices=["anthropic", "ollama"], default="anthropic")
+    ap.add_argument("--judge-mode", choices=["sync", "batch"], default="sync",
+                    help="batch: Batches API, 50%% cheaper, up to 24 h latency "
+                         "(--judge-backend anthropic only)")
     ap.add_argument("--judge-model", default=None,
                     help="default: claude-haiku-4-5-20251001 (anthropic) / gemma3:12b (ollama)")
     ap.add_argument("--mcp", default=MCP_DEFAULT)
+    ap.add_argument("--collection", default=COLLECTION_DEFAULT,
+                    help="collection the judging pool is gathered over (and written into the labels)")
     ap.add_argument("--ollama", default=OLLAMA_DEFAULT)
     ap.add_argument("--out", default="labeled_rdocs.json")
     ap.add_argument("--excerpt-chars", type=int, default=600)
@@ -239,19 +316,41 @@ def main():
     print(f"queries: {len(queries)} | judge: {args.judge_backend}/{model} | "
           f"pool: search-k={args.search_k}+fulltext-k={args.fulltext_k}", file=sys.stderr)
 
-    labeled = []
+    batch_mode = args.judge_mode == "batch" and args.judge_backend == "anthropic"
+    if args.judge_mode == "batch" and not batch_mode:
+        print("NOTE: --judge-mode batch applies to the anthropic backend only; "
+              "judging one request at a time.", file=sys.stderr)
+
+    # Batch mode gathers every candidate first, so the whole pool goes in one
+    # batch; the per-request path keeps judging as it goes.
+    pools = []  # (query, source_rating, [candidate])
     for i, q in enumerate(queries, 1):
-        query = q["query"]
-        candidates = gather_candidates(args.mcp, query, args.search_k, args.fulltext_k,
-                                       args.excerpt_chars)
+        candidates = gather_candidates(args.mcp, q["query"], args.search_k, args.fulltext_k,
+                                       args.excerpt_chars, args.collection)
         if not candidates:
-            print(f"[{i}/{len(queries)}] no candidates for {query!r}", file=sys.stderr)
+            print(f"[{i}/{len(queries)}] no candidates for {q['query']!r}", file=sys.stderr)
             continue
+        pools.append((q["query"], q.get("rating"), candidates))
+
+    batch_verdicts = {}
+    if batch_mode:
+        prompts = {f"q{qi}-c{ci}": _judge_prompt(query, c["title"], c["excerpt"])
+                   for qi, (query, _, cands) in enumerate(pools)
+                   for ci, c in enumerate(cands)}
+        print(f"judging {len(prompts)} pairs over {len(pools)} queries in one batch",
+              file=sys.stderr)
+        batch_verdicts = anthropic_judge_batch(api_key, model, prompts)
+
+    labeled = []
+    for i, (query, rating, candidates) in enumerate(pools, 1):
         relevant, judged, unknown = [], 0, 0
-        for c in candidates:
-            verdict = judge(query, c["title"], c["excerpt"])
-            if args.throttle:
-                time.sleep(args.throttle)
+        for ci, c in enumerate(candidates):
+            if batch_mode:
+                verdict = batch_verdicts.get(f"q{i - 1}-c{ci}")
+            else:
+                verdict = judge(query, c["title"], c["excerpt"])
+                if args.throttle:
+                    time.sleep(args.throttle)
             if verdict is None:
                 unknown += 1
                 continue
@@ -260,14 +359,14 @@ def main():
                 relevant.append(c["doc_id"])
         labeled.append({
             "query": query,
-            "collection": COLLECTION,
+            "collection": args.collection,
             "relevant_doc_ids": relevant,
             "answerable": len(relevant) > 0,
-            "source_rating": q.get("rating"),
+            "source_rating": rating,
             "candidates_judged": judged,
             "candidates_unknown": unknown,
         })
-        print(f"[{i}/{len(queries)}] {query!r} → {len(relevant)}/{judged} relevant"
+        print(f"[{i}/{len(pools)}] {query!r} → {len(relevant)}/{judged} relevant"
               + (f" ({unknown} unknown)" if unknown else ""), file=sys.stderr)
 
     with open(args.out, "w") as f:
