@@ -5,7 +5,8 @@ Stage B/C). See docs/HYBRID_RETRIEVAL_REDESIGN.md.
 Pipeline (READ-ONLY against production; relevance judgment via Anthropic API):
   1. Pull real user queries from the `tudastar_log` collection (intent=search),
      dedup + sample.
-  2. For each query, build a DE-BIASED judging pool over `rdocs`: union of the
+  2. For each query, build a DE-BIASED judging pool over `--collection` (default
+     `rdocs`): union of the
      unified `search` lane (dense+fusion) and a pure BM25 `fulltext_search` lane,
      deduped by doc_id (see gather_candidates — removes single-lane/top-k pool
      bias so coverage misses become labelable).
@@ -35,7 +36,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 MCP_DEFAULT = "http://192.168.2.211:8080/mcp"
 OLLAMA_DEFAULT = "http://localhost:11434/api/generate"
-COLLECTION = "rdocs"
+COLLECTION_DEFAULT = "rdocs"
 LOG_COLLECTION = "tudastar_log"
 
 
@@ -146,7 +147,7 @@ def anthropic_judge(api_key, model, query, title, excerpt, timeout=30):
         return None
 
 
-def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
+def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars, collection=COLLECTION_DEFAULT):
     """Union the judging pool across two complementary retrieval lanes so the judge
     sees candidates that the unified `search` alone would bury — removing the
     single-lane / top-k POOL BIAS that makes coverage misses structurally
@@ -160,7 +161,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
     cand = {}  # doc_id -> candidate; dict preserves first-seen (≈ rank) order
     # Lane 1: unified search — passages excerpt.
     try:
-        sr = mcp_tool(mcp, "search", {"collection": COLLECTION, "query": query, "limit": search_k})
+        sr = mcp_tool(mcp, "search", {"collection": collection, "query": query, "limit": search_k})
         for d in sr.get("documents", []):
             did = d.get("doc_id")
             if not did or did in cand:
@@ -173,7 +174,7 @@ def gather_candidates(mcp, query, search_k, ft_k, excerpt_chars):
     # OR mode for broad pool recall (we want every token-bearing doc judged).
     try:
         fr = mcp_tool(mcp, "fulltext_search",
-                      {"collection": COLLECTION, "query": query, "field": "content_text",
+                      {"collection": collection, "query": query, "field": "content_text",
                        "limit": ft_k, "mode": "or"})
         for d in fr.get("results", []):
             did = d.get("doc_id")
@@ -288,6 +289,8 @@ def main():
     ap.add_argument("--judge-model", default=None,
                     help="default: claude-haiku-4-5-20251001 (anthropic) / gemma3:12b (ollama)")
     ap.add_argument("--mcp", default=MCP_DEFAULT)
+    ap.add_argument("--collection", default=COLLECTION_DEFAULT,
+                    help="collection the judging pool is gathered over (and written into the labels)")
     ap.add_argument("--ollama", default=OLLAMA_DEFAULT)
     ap.add_argument("--out", default="labeled_rdocs.json")
     ap.add_argument("--excerpt-chars", type=int, default=600)
@@ -323,7 +326,7 @@ def main():
     pools = []  # (query, source_rating, [candidate])
     for i, q in enumerate(queries, 1):
         candidates = gather_candidates(args.mcp, q["query"], args.search_k, args.fulltext_k,
-                                       args.excerpt_chars)
+                                       args.excerpt_chars, args.collection)
         if not candidates:
             print(f"[{i}/{len(queries)}] no candidates for {q['query']!r}", file=sys.stderr)
             continue
@@ -356,7 +359,7 @@ def main():
                 relevant.append(c["doc_id"])
         labeled.append({
             "query": query,
-            "collection": COLLECTION,
+            "collection": args.collection,
             "relevant_doc_ids": relevant,
             "answerable": len(relevant) > 0,
             "source_rating": rating,
