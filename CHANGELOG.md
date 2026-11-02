@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — C#: collections release their native handle (#41) (ironbase-core 0.3.457, mcp-server 1.0.655)
+
+- **`IronBaseCollection<T>` is `IDisposable`.** Its native handle sits in the existing, never-used
+  `CollectionHandle` SafeHandle. `Dispose()` releases it, and so does the garbage collector for an
+  undisposed collection. Before, every `GetCollection` call kept a native handle, and through it the
+  whole `DatabaseCore`, alive until the process exited.
+- After `Dispose()`, or after the client's `Dispose()`, a call throws `ObjectDisposedException`.
+  Previously, use after the client's dispose reached Rust and failed with `DatabaseClosed`.
+  There was no use-after-free: the Rust handle holds an `Arc`.
+- Tests: `CollectionDisposeTests` (dispose, client dispose, 1000 undisposed collections released by
+  the finalizer). The existing 169 C# tests pass.
+
+
 ### Fixed — document size in memory, persisted vector count, `$strLenCP`, `$count` (#43, #51, #59, #107) (ironbase-core 0.3.456, mcp-server 1.0.654)
 
 - **`MemoryStorage` refuses a document over the 64 MB limit (#43),** like the file storage. A `$push`

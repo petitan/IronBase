@@ -11,11 +11,19 @@ namespace IronBase
     /// Provides MongoDB-like CRUD operations.
     /// </summary>
     /// <typeparam name="T">Document type</typeparam>
-    public sealed class IronBaseCollection<T> where T : class
+    /// <remarks>
+    /// The native handle is released by <see cref="Dispose"/>, or by the
+    /// garbage collector when the collection is no longer referenced (#41: it
+    /// was never released, so every <c>GetCollection</c> call kept native
+    /// memory alive until the process exited). As with other .NET
+    /// disposables, do not dispose a collection while another thread is
+    /// still using it.
+    /// </remarks>
+    public sealed class IronBaseCollection<T> : IDisposable where T : class
     {
         private readonly IronBaseClient _client;
         private readonly string _name;
-        private IntPtr _handle;
+        private readonly CollectionHandle _handle = new CollectionHandle();
 
         internal IronBaseCollection(IronBaseClient client, string name)
         {
@@ -35,8 +43,32 @@ namespace IronBase
                     &handlePtr
                 );
                 NativeHelper.ThrowIfError(result);
-                _handle = (IntPtr)handlePtr;
+                _handle.SetHandle((IntPtr)handlePtr);
             }
+        }
+
+        /// <summary>
+        /// The native handle for a call; throws if this collection or its
+        /// client is disposed.
+        /// </summary>
+        private unsafe CollectionHandle* Native
+        {
+            get
+            {
+                if (_handle.IsClosed)
+                    throw new ObjectDisposedException(nameof(IronBaseCollection<T>));
+                _ = _client.Handle; // throws ObjectDisposedException after the client's Dispose
+                return (CollectionHandle*)_handle.DangerousGetHandle();
+            }
+        }
+
+        /// <summary>
+        /// Release the native collection handle. Further calls throw
+        /// <see cref="ObjectDisposedException"/>.
+        /// </summary>
+        public void Dispose()
+        {
+            _handle.Dispose();
         }
 
         /// <summary>
@@ -62,7 +94,7 @@ namespace IronBase
                 {
                     byte* idPtr;
                     int result = NativeMethods.ironbase_insert_one(
-                        (CollectionHandle*)_handle,
+                        Native,
                         docPtr,
                         &idPtr
                     );
@@ -94,7 +126,7 @@ namespace IronBase
                 {
                     byte* resultPtr;
                     int result = NativeMethods.ironbase_insert_many(
-                        (CollectionHandle*)_handle,
+                        Native,
                         docsPtr,
                         &resultPtr
                     );
@@ -135,7 +167,7 @@ namespace IronBase
                 fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
                 {
                     var resultPtr = NativeMethods.ironbase_find(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr
                     );
 
@@ -176,7 +208,7 @@ namespace IronBase
                 fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
                 {
                     var resultPtr = NativeMethods.ironbase_find_one(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr
                     );
 
@@ -206,7 +238,7 @@ namespace IronBase
                 fixed (byte* optionsPtr = NativeHelper.ToUtf8(optionsJson))
                 {
                     var resultPtr = NativeMethods.ironbase_find_with_options(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         optionsPtr
                     );
@@ -253,7 +285,7 @@ namespace IronBase
                 fixed (byte* optionsPtr = NativeHelper.ToUtf8(optionsJson))
                 {
                     var resultPtr = NativeMethods.ironbase_find_with_options(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         optionsPtr
                     );
@@ -280,7 +312,7 @@ namespace IronBase
                     {
                         ulong count;
                         int countResult = NativeMethods.ironbase_count_documents(
-                            (CollectionHandle*)_handle,
+                            Native,
                             filterPtr,
                             &count
                         );
@@ -336,7 +368,7 @@ namespace IronBase
                     byte* upsertedIdPtr;
 
                     int result = NativeMethods.ironbase_update_one_with_options(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         updatePtr,
                         upsert ? 1 : 0,
@@ -372,7 +404,7 @@ namespace IronBase
                 {
                     ulong matched, modified;
                     int result = NativeMethods.ironbase_update_many(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         updatePtr,
                         &matched,
@@ -405,7 +437,7 @@ namespace IronBase
                 {
                     ulong deleted;
                     int result = NativeMethods.ironbase_delete_one(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         &deleted
                     );
@@ -433,7 +465,7 @@ namespace IronBase
                 {
                     ulong deleted;
                     int result = NativeMethods.ironbase_delete_many(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         &deleted
                     );
@@ -463,7 +495,7 @@ namespace IronBase
                 {
                     ulong count;
                     int result = NativeMethods.ironbase_count_documents(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         &count
                     );
@@ -486,7 +518,7 @@ namespace IronBase
                 fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
                 {
                     var resultPtr = NativeMethods.ironbase_distinct(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         filterPtr
                     );
@@ -521,7 +553,7 @@ namespace IronBase
                 {
                     byte* namePtr;
                     int result = NativeMethods.ironbase_create_index(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         unique ? 1 : 0,
                         &namePtr
@@ -545,7 +577,7 @@ namespace IronBase
                 {
                     byte* namePtr;
                     int result = NativeMethods.ironbase_create_compound_index(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldsPtr,
                         unique ? 1 : 0,
                         &namePtr
@@ -566,7 +598,7 @@ namespace IronBase
                 fixed (byte* namePtr = NativeHelper.ToUtf8(indexName))
                 {
                     int result = NativeMethods.ironbase_drop_index(
-                        (CollectionHandle*)_handle,
+                        Native,
                         namePtr
                     );
                     NativeHelper.ThrowIfError(result);
@@ -581,7 +613,7 @@ namespace IronBase
         {
             unsafe
             {
-                var resultPtr = NativeMethods.ironbase_list_indexes((CollectionHandle*)_handle);
+                var resultPtr = NativeMethods.ironbase_list_indexes(Native);
                 var json = NativeHelper.PtrToStringUtf8AndFree(resultPtr);
                 if (string.IsNullOrEmpty(json))
                     return new List<string>();
@@ -607,7 +639,7 @@ namespace IronBase
                 {
                     byte* namePtr;
                     int result = NativeMethods.ironbase_create_fuzzy_index(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         algoPtr,
                         threshold,
@@ -636,7 +668,7 @@ namespace IronBase
                 fixed (byte* algoPtr = algorithm != null ? NativeHelper.ToUtf8(algorithm) : null)
                 {
                     var resultPtr = NativeMethods.ironbase_fuzzy_search(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         queryPtr,
                         threshold ?? -1.0,
@@ -693,7 +725,7 @@ namespace IronBase
                 {
                     byte* namePtr;
                     int result = NativeMethods.ironbase_create_fulltext_index(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         langPtr,
                         minWordLength ?? 0,
@@ -733,7 +765,7 @@ namespace IronBase
                 fixed (byte* projPtr = projectionJson != null ? NativeHelper.ToUtf8(projectionJson) : null)
                 {
                     var resultPtr = NativeMethods.ironbase_fulltext_search(
-                        (CollectionHandle*)_handle,
+                        Native,
                         fieldPtr,
                         queryPtr,
                         limit ?? 0,
@@ -782,7 +814,7 @@ namespace IronBase
         {
             unsafe
             {
-                var resultPtr = NativeMethods.ironbase_list_fulltext_indexes((CollectionHandle*)_handle);
+                var resultPtr = NativeMethods.ironbase_list_fulltext_indexes(Native);
 
                 if (resultPtr == null)
                 {
@@ -810,7 +842,7 @@ namespace IronBase
                 fixed (byte* filterPtr = NativeHelper.ToUtf8(filter.ToJson()))
                 {
                     var resultPtr = NativeMethods.ironbase_explain(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr
                     );
 
@@ -837,7 +869,7 @@ namespace IronBase
                 fixed (byte* pipelinePtr = NativeHelper.ToUtf8(pipelineJson))
                 {
                     var resultPtr = NativeMethods.ironbase_aggregate(
-                        (CollectionHandle*)_handle,
+                        Native,
                         pipelinePtr
                     );
 
@@ -905,7 +937,7 @@ namespace IronBase
                 {
                     CursorState* cursorPtr;
                     int result = NativeMethods.ironbase_create_cursor(
-                        (CollectionHandle*)_handle,
+                        Native,
                         filterPtr,
                         batchSize,
                         &cursorPtr
