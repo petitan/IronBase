@@ -48,19 +48,25 @@ pub const MAX_METADATA_SIZE: usize = 64 * 1024 * 1024;
 /// Struktúra: 8 (tx_id) + 1 (type) + 4 (len) = 13 byte
 pub const WAL_HEADER_SIZE: usize = 13;
 
-/// A WAL-bejegyzés borítéka (collection név, `doc_id`, műveleti címke) számára
+/// Maximum collection-név hossz bájtokban (MongoDB: 255 bájtos namespace).
+/// Új collection és átnevezés célneve; meglévő hosszabb név olvasható marad
+/// (#248). A WAL-boríték is ezzel korlátos.
+pub const MAX_COLLECTION_NAME_BYTES: usize = 255;
+
+/// A WAL-bejegyzés borítéka (collection név háromszor: a művelet és a két
+/// dokumentum `_collection` mezője, JSON-kulcsok, műveleti címke) számára
 /// fenntartott hely a dokumentumokon felül
 pub const WAL_ENTRY_ENVELOPE_RESERVE: usize = 1024 * 1024;
 
-/// Maximum WAL entry méret bájtokban (129 MB)
+/// Maximum WAL entry méret bájtokban (193 MB)
 ///
 /// Biztonsági limit a túl nagy WAL bejegyzések ellen (a reader ennél nagyobb
 /// hosszt sérülésnek vesz). Egy `Update` bejegyzés a régi ÉS az új dokumentumot
 /// is tartalmazza (a recovery index-replay a régi kulcsokat a régi dokumentumból
-/// törli), ezért a limit két maximális dokumentum + boríték. 64 MB-nál egy
-/// ~32 MB feletti dokumentum frissítése olvashatatlan WAL-t írt, és az
-/// adatbázis nem volt megnyitható (#246).
-pub const MAX_WAL_ENTRY_SIZE: usize = 2 * MAX_DOCUMENT_SIZE_BYTES + WAL_ENTRY_ENVELOPE_RESERVE;
+/// törli), plusz a külön szerializált `doc_id`-t, ami a dokumentum része, tehát
+/// legfeljebb egy dokumentumnyi. Ezért a limit három maximális dokumentum +
+/// boríték: minden érvényes művelet belefér (#246, #248).
+pub const MAX_WAL_ENTRY_SIZE: usize = 3 * MAX_DOCUMENT_SIZE_BYTES + WAL_ENTRY_ENVELOPE_RESERVE;
 
 // ============================================================================
 // Index Limits
@@ -237,8 +243,9 @@ mod tests {
     fn test_storage_limits_are_64mb() {
         assert_eq!(MAX_DOCUMENT_SIZE_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_METADATA_SIZE, 64 * 1024 * 1024);
-        // An update entry holds two documents plus its envelope (#246)
-        assert_eq!(MAX_WAL_ENTRY_SIZE, 129 * 1024 * 1024);
+        // An update entry holds two documents, the doc_id (part of the
+        // document) and the envelope (#246, #248)
+        assert_eq!(MAX_WAL_ENTRY_SIZE, 193 * 1024 * 1024);
     }
 
     #[test]

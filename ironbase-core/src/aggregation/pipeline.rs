@@ -182,10 +182,18 @@ impl Pipeline {
         // These are applied inline without materializing
         let streaming_iter = self.apply_streamable_stages(docs, &mut stage_iter);
 
+        // Phase 2 needs the remaining stages to choose the limit
+        let remaining_stages: Vec<&Stage> = stage_iter.collect();
+
         // MEMORY SAFETY: Wrap iterator with document counter
         // Use different limits based on whether there's a leading $match
         // Note: Even with $match, we still need a limit to prevent OOM if $match returns many docs!
-        let doc_limit = if self.has_leading_match {
+        // A $count right after the streamable prefix holds no document (O(1)),
+        // so it is not limited: like a bare $count, the context path and
+        // MongoDB, which has no document limit (#107)
+        let doc_limit = if matches!(remaining_stages.first(), Some(Stage::Count(_))) {
+            usize::MAX
+        } else if self.has_leading_match {
             limits.max_docs_with_match // Higher limit when $match filters documents
         } else {
             limits.max_docs_without_match // Stricter limit for full collection scans
@@ -221,9 +229,6 @@ impl Pipeline {
         });
 
         // Phase 2: Check for $group stage (main optimization target)
-        // Collect remaining stages first to enable early limit detection
-        let remaining_stages: Vec<&Stage> = stage_iter.collect();
-
         let (materialized, stages_consumed) =
             if let Some(Stage::Group(group_stage)) = remaining_stages.first() {
                 // Pass limits to group stage for cardinality checking
@@ -358,12 +363,19 @@ impl Pipeline {
                 };
                 (result, 1)
             } else if let Some(Stage::Count(count_stage)) = remaining_stages.first() {
+                // Like the streaming $group: no document is collected, so the
+                // document limit does not apply, the deadline does (#107)
+                ctx.enter_streaming_group();
                 let mut count: u64 = 0;
                 for doc_result in streaming_iter {
-                    doc_result?;
+                    if let Err(err) = doc_result {
+                        ctx.exit_streaming_group(0);
+                        return Err(err);
+                    }
                     count += 1;
                 }
                 let result = count_stage.output(count);
+                ctx.exit_streaming_group(result.len());
                 (result, 1)
             } else {
                 // No $group: materialize through the streamable prefix
@@ -494,6 +506,10 @@ impl Stage {
             match stage_name.as_str() {
                 "$match" => Ok(Stage::Match(MatchStage::from_json(stage_spec)?)),
                 "$project" => Ok(Stage::Project(ProjectStage::from_json(stage_spec)?)),
+                // $set is MongoDB's alias of $addFields
+                "$addFields" | "$set" => Ok(Stage::Project(ProjectStage::from_add_fields_json(
+                    stage_spec, stage_name,
+                )?)),
                 "$group" => Ok(Stage::Group(GroupStage::from_json(stage_spec)?)),
                 "$count" => Ok(Stage::Count(CountStage::from_json(stage_spec)?)),
                 "$sort" => Ok(Stage::Sort(SortStage::from_json(stage_spec)?)),

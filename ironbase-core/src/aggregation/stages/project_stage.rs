@@ -3,7 +3,7 @@
 
 use crate::aggregation::types::{
     ArithmeticOperand, ProjectExpression, ProjectField, ProjectStage, ReduceExpression,
-    ReduceInExpr, StringOperand,
+    ReduceInExpr, StringOperand, ValueOperand,
 };
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::{get_nested_value, set_nested_value, substr_string};
@@ -68,11 +68,141 @@ impl ProjectStage {
                 ));
             }
 
-            Ok(ProjectStage { fields })
+            Ok(ProjectStage {
+                fields,
+                add_fields: false,
+            })
         } else {
             Err(IronBaseError::AggregationError(
                 "$project must be an object".to_string(),
             ))
+        }
+    }
+
+    /// `$addFields` / `$set` (MongoDB): every input field is kept, each
+    /// spec field is set to its value: an expression, a field reference, or
+    /// a literal (`{a: 1}` sets `a` to 1, it does not include it) (#127)
+    pub(crate) fn from_add_fields_json(spec: &Value, stage_name: &str) -> Result<Self> {
+        let Value::Object(obj) = spec else {
+            return Err(IronBaseError::AggregationError(format!(
+                "{} must be an object",
+                stage_name
+            )));
+        };
+        if obj.is_empty() {
+            return Err(IronBaseError::AggregationError(format!(
+                "{} requires at least one field",
+                stage_name
+            )));
+        }
+        let mut fields = HashMap::new();
+        for (field, value) in obj {
+            if field.is_empty() || field.starts_with('$') {
+                return Err(IronBaseError::AggregationError(format!(
+                    "{} field name must not be empty or start with '$': {}",
+                    stage_name, field
+                )));
+            }
+            let action = match Self::parse_value_operand(value)? {
+                ValueOperand::Field(source) => ProjectField::Rename(format!("${}", source)),
+                ValueOperand::Literal(v) => ProjectField::Expression(ProjectExpression::Literal(v)),
+                ValueOperand::Expression(expr) => ProjectField::Expression(*expr),
+            };
+            fields.insert(field.clone(), action);
+        }
+        // A target and its dotted descendant ("a" and "a.b") would overwrite
+        // each other in an undefined order: MongoDB refuses it as a path
+        // collision
+        for a in fields.keys() {
+            for b in fields.keys() {
+                if a != b && b.starts_with(a.as_str()) && b.as_bytes().get(a.len()) == Some(&b'.') {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "{} path collision: '{}' and '{}'",
+                        stage_name, a, b
+                    )));
+                }
+            }
+        }
+        Ok(ProjectStage {
+            fields,
+            add_fields: true,
+        })
+    }
+
+    /// A general operand: `"$field"`, an `{ $op: ... }` expression, or any
+    /// other value as a literal
+    fn parse_value_operand(value: &Value) -> Result<ValueOperand> {
+        match value {
+            Value::String(s) if s.starts_with('$') => Ok(ValueOperand::Field(s[1..].to_string())),
+            Value::Object(obj) if obj.len() == 1 && obj.keys().all(|k| k.starts_with('$')) => {
+                match Self::parse_expression(obj)? {
+                    ProjectField::Expression(expr) => Ok(ValueOperand::Expression(Box::new(expr))),
+                    _ => Err(IronBaseError::AggregationError(
+                        "Expected an expression operand".to_string(),
+                    )),
+                }
+            }
+            other => Ok(ValueOperand::Literal(other.clone())),
+        }
+    }
+
+    /// $cond: `[if, then, else]` or `{if, then, else}`
+    fn parse_cond_expression(arg: &Value) -> Result<ProjectField> {
+        let (if_, then, else_) = match arg {
+            Value::Array(arr) if arr.len() == 3 => (&arr[0], &arr[1], &arr[2]),
+            Value::Object(obj) => match (obj.get("if"), obj.get("then"), obj.get("else")) {
+                (Some(i), Some(t), Some(e)) if obj.len() == 3 => (i, t, e),
+                _ => {
+                    return Err(IronBaseError::AggregationError(
+                        "$cond object requires exactly 'if', 'then' and 'else'".to_string(),
+                    ))
+                }
+            },
+            _ => {
+                return Err(IronBaseError::AggregationError(
+                    "$cond requires [if, then, else] or {if, then, else}".to_string(),
+                ))
+            }
+        };
+        Ok(ProjectField::Expression(ProjectExpression::Cond(
+            Box::new(Self::parse_value_operand(if_)?),
+            Box::new(Self::parse_value_operand(then)?),
+            Box::new(Self::parse_value_operand(else_)?),
+        )))
+    }
+
+    /// $ifNull: `[expr, ..., replacement]`, at least two operands
+    fn parse_if_null_expression(arg: &Value) -> Result<ProjectField> {
+        let arr = arg.as_array().filter(|a| a.len() >= 2).ok_or_else(|| {
+            IronBaseError::AggregationError(
+                "$ifNull requires an array of at least 2 operands".to_string(),
+            )
+        })?;
+        let operands = arr
+            .iter()
+            .map(Self::parse_value_operand)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ProjectField::Expression(ProjectExpression::IfNull(
+            operands,
+        )))
+    }
+
+    /// The value of a general operand; `None` for a missing field
+    fn evaluate_value_operand(op: &ValueOperand, doc: &Value) -> Option<Value> {
+        match op {
+            ValueOperand::Field(field) => get_nested_value(doc, field).cloned(),
+            ValueOperand::Literal(v) => Some(v.clone()),
+            ValueOperand::Expression(expr) => Some(Self::evaluate_expression(expr, doc)),
+        }
+    }
+
+    /// MongoDB truthiness: false, null, 0 and a missing value are false;
+    /// everything else (also "" and []) is true
+    fn is_truthy(value: Option<&Value>) -> bool {
+        match value {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+            Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+            Some(_) => true,
         }
     }
 
@@ -105,6 +235,11 @@ impl ProjectStage {
                 }
             }
             "$substr" => Self::parse_substr_expression(arg),
+            "$cond" => Self::parse_cond_expression(arg),
+            "$ifNull" => Self::parse_if_null_expression(arg),
+            "$literal" => Ok(ProjectField::Expression(ProjectExpression::Literal(
+                arg.clone(),
+            ))),
             "$strLenCP" => {
                 // A string operand, alone or as a one-element array
                 let operand = match arg.as_array() {
@@ -472,6 +607,28 @@ impl ProjectStage {
     /// Used by the streaming pipeline to transform documents one at a time
     /// without loading the entire collection into memory.
     pub(crate) fn project_one(&self, doc: &Value) -> Result<Value> {
+        if self.add_fields {
+            // $addFields / $set: the input document with the fields set,
+            // every value computed from the input (not from each other)
+            let mut result = doc.clone();
+            for (field, action) in &self.fields {
+                match action {
+                    ProjectField::Rename(source) => {
+                        // A missing source makes the field missing, as in
+                        // MongoDB: an existing value of the target goes too
+                        match get_nested_value(doc, source.trim_start_matches('$')) {
+                            Some(value) => set_nested_value(&mut result, field, value.clone()),
+                            None => remove_path(&mut result, field),
+                        }
+                    }
+                    ProjectField::Expression(expr) => {
+                        set_nested_value(&mut result, field, Self::evaluate_expression(expr, doc));
+                    }
+                    ProjectField::Include | ProjectField::Exclude => {}
+                }
+            }
+            return Ok(result);
+        }
         let mut result = serde_json::Map::new();
 
         if let Value::Object(obj) = doc {
@@ -596,6 +753,26 @@ impl ProjectStage {
                 Some(text) => Value::Number(serde_json::Number::from(text.chars().count())),
                 None => Value::Null,
             },
+            ProjectExpression::Cond(if_, then, else_) => {
+                let branch = if Self::is_truthy(Self::evaluate_value_operand(if_, doc).as_ref()) {
+                    then
+                } else {
+                    else_
+                };
+                Self::evaluate_value_operand(branch, doc).unwrap_or(Value::Null)
+            }
+            ProjectExpression::IfNull(operands) => {
+                let (replacement, candidates) = operands
+                    .split_last()
+                    .expect("$ifNull has at least 2 operands");
+                candidates
+                    .iter()
+                    .filter_map(|op| Self::evaluate_value_operand(op, doc))
+                    .find(|v| !v.is_null())
+                    .or_else(|| Self::evaluate_value_operand(replacement, doc))
+                    .unwrap_or(Value::Null)
+            }
+            ProjectExpression::Literal(v) => v.clone(),
             ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
             // Integer operands stay integers (checked; an overflow or a float
             // operand goes to f64), as in MongoDB: every operation used to run
@@ -948,6 +1125,22 @@ impl Num {
         match self {
             Num::Int(i) => Value::from(i),
             Num::Float(f) => Value::from(f),
+        }
+    }
+}
+
+/// Remove the field at a dotted `path` from an object, if it is there
+fn remove_path(doc: &mut Value, path: &str) {
+    match path.split_once('.') {
+        None => {
+            if let Value::Object(map) = doc {
+                map.shift_remove(path);
+            }
+        }
+        Some((head, rest)) => {
+            if let Some(child) = doc.get_mut(head) {
+                remove_path(child, rest);
+            }
         }
     }
 }

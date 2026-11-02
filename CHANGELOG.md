@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `$addFields` / `$set`, `$cond`, `$ifNull`, `$literal`; MongoDB limits (#127, #107, #248) (ironbase-core 0.3.458, mcp-server 1.0.656)
+
+- **`$addFields` and its alias `$set` (#127),** with the expressions `$cond` (`[if, then, else]` or
+  `{if, then, else}`, MongoDB truthiness), `$ifNull` (`[expr, ..., replacement]`) and `$literal`.
+  - NULLS LAST works with MongoDB's own idiom, without a non-standard sort option:
+    `{$addFields: {_r: {$cond: [{$ifNull: ["$date", false]}, 0, 1]}}}, {$sort: {_r: 1, date: 1}}`.
+  - All existing `$project` expressions work too, as does a dotted target. A literal sets the field
+    (`{a: 1}`). A missing source leaves the field missing and removes an existing value, as in
+    MongoDB. A target together with its dotted descendant (`a`, `a.b`) is refused as a path
+    collision. The MCP `aggregate` description lists the new stages and expressions.
+  - It is a mode of `ProjectStage`, so every streaming, prefix and context path handles it like
+    `$project`.
+- **A `$count` after `$project` is no longer document-limited (#107).** It holds no document. The
+  context path now uses the streaming `$group` mechanism (`enter_streaming_group`), so the deadline
+  still applies; the plain path uses an unlimited counter. MongoDB has no document limit. A
+  pipeline that materializes documents is still limited.
+- **Collection names are at most 255 bytes (#248),** MongoDB's namespace limit, on create and on
+  rename. An existing longer name stays usable.
+- **`MAX_WAL_ENTRY_SIZE` is 3 × the maximum document plus a 1 MB envelope (193 MB) (#248).** An
+  update entry also carries the `doc_id`, which is part of the document. With collection names
+  bounded, every valid operation fits.
+
+
 ### Fixed — C#: collections release their native handle (#41) (ironbase-core 0.3.457, mcp-server 1.0.655)
 
 - **`IronBaseCollection<T>` is `IDisposable`.** Its native handle sits in the existing, never-used

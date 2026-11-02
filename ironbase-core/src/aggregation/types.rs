@@ -359,10 +359,13 @@ pub struct MatchStage {
     pub(crate) query: Query,
 }
 
-/// $project stage - reshape documents
+/// $project stage - reshape documents. Also `$addFields` / `$set`
+/// (`add_fields`): the whole input document with the computed fields set
 #[derive(Debug, Clone)]
 pub struct ProjectStage {
     pub(crate) fields: HashMap<String, ProjectField>,
+    /// `$addFields` / `$set`: keep every input field (#127)
+    pub(crate) add_fields: bool,
 }
 
 /// $count stage - count documents and output as a single field
@@ -408,6 +411,25 @@ pub enum ProjectExpression {
     Floor(Box<ArithmeticOperand>),
     /// $round - round: { $round: ["$value", 2] }
     Round(Box<ArithmeticOperand>, Option<i32>),
+    /// $cond - { $cond: [if, then, else] } or { $cond: {if, then, else} } (#127)
+    Cond(Box<ValueOperand>, Box<ValueOperand>, Box<ValueOperand>),
+    /// $ifNull - { $ifNull: [expr, ..., replacement] }: the first value that
+    /// is neither null nor missing, else the replacement (#127)
+    IfNull(Vec<ValueOperand>),
+    /// $literal - a value taken as is: { $literal: "$notAField" }
+    Literal(Value),
+}
+
+/// Operand of a general expression ($cond, $ifNull): field reference,
+/// literal value, or nested expression
+#[derive(Debug, Clone)]
+pub enum ValueOperand {
+    /// Field reference: "$date"
+    Field(String),
+    /// Any literal value
+    Literal(Value),
+    /// Nested expression: { $ifNull: [...] }
+    Expression(Box<ProjectExpression>),
 }
 
 /// Operand for arithmetic expressions - can be field reference, literal, or nested expression

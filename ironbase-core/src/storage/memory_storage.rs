@@ -199,6 +199,7 @@ impl Storage for MemoryStorage {
         if self.collections.contains_key(name) {
             return Err(IronBaseError::CollectionExists(name.to_string()));
         }
+        super::check_collection_name(name)?;
 
         // Create empty collection
         self.collections.insert(name.to_string(), Vec::new());
@@ -250,6 +251,7 @@ impl Storage for MemoryStorage {
         if old_name == new_name {
             return Ok(());
         }
+        super::check_collection_name(new_name)?;
         if !self.collections.contains_key(old_name) {
             return Err(IronBaseError::CollectionNotFound(old_name.to_string()));
         }

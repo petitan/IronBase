@@ -20,7 +20,7 @@
 //! ## Invariánsok
 //!
 //! - CRC32 checksum minden entry-re → corruption detection
-//! - MAX_WAL_ENTRY_SIZE (2 × max document + envelope, 129 MB) → OOM protection
+//! - MAX_WAL_ENTRY_SIZE (3 × max document + envelope, 193 MB) → OOM protection
 
 use crate::error::{IronBaseError, Result};
 use crate::transaction::TransactionId;

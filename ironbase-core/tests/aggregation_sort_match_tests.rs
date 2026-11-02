@@ -155,3 +155,72 @@ fn unset_keeps_nested_field_order() {
     let keys: Vec<&String> = doc["o"].as_object().unwrap().keys().collect();
     assert_eq!(keys, vec!["b", "c"]);
 }
+
+/// #127: nulls last with MongoDB's own idiom, a computed sort key from
+/// `$addFields` + `$cond` / `$ifNull`
+#[test]
+fn add_fields_cond_if_null_sort_nulls_last() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for doc in [
+        json!({"n": 1, "date": "2026-07-06"}),
+        json!({"n": 2, "date": null}),
+        json!({"n": 3}),
+        json!({"n": 4, "date": "2026-01-01"}),
+    ] {
+        let map: HashMap<String, serde_json::Value> = serde_json::from_value(doc).unwrap();
+        db.insert_one("r", map).unwrap();
+    }
+    let coll = db.collection("r").unwrap();
+
+    for stage in ["$addFields", "$set"] {
+        let out = coll
+            .aggregate(&json!([
+                { stage: {"_r": {"$cond": [{"$ifNull": ["$date", false]}, 0, 1]}} },
+                {"$sort": {"_r": 1, "date": 1}},
+                {"$project": {"_id": 0, "n": 1}}
+            ]))
+            .unwrap();
+        let order: Vec<i64> = out.iter().map(|d| d["n"].as_i64().unwrap()).collect();
+        // Dated documents ascending first, the null and the missing date
+        // last (missing sorts before null)
+        assert_eq!(order, vec![4, 1, 3, 2], "{stage}");
+    }
+
+    // $addFields keeps every field; literals, $literal, field copies,
+    // dotted paths, the object form of $cond and truthiness
+    let out = coll
+        .aggregate(&json!([
+            {"$match": {"n": 3}},
+            {"$addFields": {
+                "one": 1,
+                "lit": {"$literal": "$n"},
+                "copy": "$n",
+                "gone": "$missing",
+                "n": "$also_missing",
+                "meta.d": {"$ifNull": ["$date", "$missing", "none"]},
+                "big": {"$cond": {"if": "$n", "then": "yes", "else": "no"}},
+                "zero": {"$cond": [0, "yes", "no"]},
+                "empty": {"$cond": ["", "yes", "no"]}
+            }},
+            {"$project": {"_id": 0}}
+        ]))
+        .unwrap();
+    assert_eq!(
+        out,
+        vec![
+            // "n" from a missing source is gone; the others read the input's n
+            json!({"one": 1, "lit": "$n", "copy": 3, "meta": {"d": "none"},
+                    "big": "yes", "zero": "no", "empty": "yes"})
+        ]
+    );
+
+    for bad in [
+        json!([{"$addFields": {}}]),
+        json!([{"$addFields": {"$x": 1}}]),
+        json!([{"$addFields": {"c": {"$cond": [1, 2]}}}]),
+        json!([{"$addFields": {"c": {"$ifNull": ["$a"]}}}]),
+        json!([{"$addFields": {"a": 1, "a.b": 2}}]),
+    ] {
+        assert!(coll.aggregate(&bad).is_err(), "accepted {bad}");
+    }
+}

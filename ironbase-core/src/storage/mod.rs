@@ -133,6 +133,20 @@ pub(crate) use crate::limits::MAX_DOCUMENT_SIZE_BYTES;
 /// the file storage refuses (#43).
 pub(crate) use io::check_record_size;
 
+/// Refuse a new collection name over `MAX_COLLECTION_NAME_BYTES` (MongoDB's
+/// 255-byte namespace limit). Checked when a collection is created or renamed;
+/// an existing longer name stays usable (#248).
+pub(crate) fn check_collection_name(name: &str) -> Result<()> {
+    if name.len() > crate::limits::MAX_COLLECTION_NAME_BYTES {
+        return Err(IronBaseError::InvalidCollectionName(format!(
+            "name is {} bytes, the limit is {} bytes",
+            name.len(),
+            crate::limits::MAX_COLLECTION_NAME_BYTES
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn check_document_size(len: usize) -> Result<()> {
     if len > MAX_DOCUMENT_SIZE_BYTES {
         return Err(IronBaseError::InvalidQuery(format!(
@@ -945,6 +959,7 @@ impl StorageEngine {
         if self.collections.contains_key(name) {
             return Err(IronBaseError::CollectionExists(name.to_string()));
         }
+        check_collection_name(name)?;
 
         self.insert_empty_collection_meta(name);
 
@@ -1018,6 +1033,7 @@ impl StorageEngine {
         if old_name == new_name {
             return Ok(());
         }
+        check_collection_name(new_name)?;
         if !self.collections.contains_key(old_name) {
             return Err(IronBaseError::CollectionNotFound(old_name.to_string()));
         }

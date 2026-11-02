@@ -1263,3 +1263,32 @@ fn test_count_fast_path_honours_the_deadline() {
         vec![json!({"_id": null, "n": 20_000})]
     );
 }
+
+/// #107: a `$count` after a streamable prefix holds no document, so it is
+/// not limited by the document limit (MongoDB has none); a materializing
+/// pipeline still is
+#[test]
+fn test_count_after_project_is_not_document_limited() {
+    use ironbase_core::aggregation::AggregationLimits;
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let docs: Vec<HashMap<String, serde_json::Value>> = (0..300)
+        .map(|i| HashMap::from([("a".to_string(), json!(i))]))
+        .collect();
+    db.insert_many("big", docs).unwrap();
+    let coll = db.collection("big").unwrap();
+    let limits = || AggregationLimits {
+        max_docs_without_match: 100,
+        ..AggregationLimits::default()
+    };
+
+    assert_eq!(
+        coll.aggregate_with_limits(&json!([{"$project": {"a": 1}}, {"$count": "n"}]), limits())
+            .unwrap(),
+        vec![json!({"n": 300})]
+    );
+    assert!(coll
+        .aggregate_with_limits(&json!([{"$project": {"a": 1}}]), limits())
+        .is_err());
+}

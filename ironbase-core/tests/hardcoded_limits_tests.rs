@@ -856,3 +856,19 @@ fn test_refused_oversized_batch_leaves_indexes_consistent() {
             .unwrap()
     );
 }
+
+/// #248: a new collection name is at most 255 bytes (MongoDB's namespace
+/// limit), on create and on rename
+#[test]
+fn test_collection_name_length_limit() {
+    let db = create_test_db();
+    let ok = "c".repeat(255);
+    let long = "c".repeat(256);
+    insert_doc(&db, &ok, json!({"a": 1}));
+    assert!(db
+        .insert_one(&long, json_to_hashmap(json!({"a": 1})))
+        .is_err());
+    assert!(db.collection(&long).is_err());
+    assert!(db.rename_collection(&ok, &long).is_err());
+    assert_eq!(db.list_collections(), vec![ok]);
+}
