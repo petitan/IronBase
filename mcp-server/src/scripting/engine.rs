@@ -47,6 +47,13 @@ fn configure_limits(engine: &mut Engine, limits: &ScriptLimits) -> u64 {
     engine.set_max_string_size(limits.max_result_size.min(MAX_SCRIPT_STRING_SIZE));
     engine.set_max_array_size(MAX_SCRIPT_COLLECTION_SIZE);
     engine.set_max_map_size(MAX_SCRIPT_COLLECTION_SIZE);
+
+    // Sandbox (#40): no `eval`, code built at run time escapes review of the
+    // stored script. Recursion and expression nesting keep Rhai's limits
+    // (call levels 64 / expression depth 64 and 32 in release, 8 / 32 and 16
+    // in debug builds): they are sized for the native stack of each profile,
+    // and 64 levels overflowed the stack of a debug-build thread.
+    engine.disable_symbol("eval");
     max_ops
 }
 
@@ -660,6 +667,29 @@ mod tests {
         );
         assert_eq!(engine.max_array_size(), MAX_SCRIPT_COLLECTION_SIZE);
         assert_eq!(engine.max_map_size(), MAX_SCRIPT_COLLECTION_SIZE);
+    }
+
+    /// #40: `eval` is disabled, and recursion and expression nesting stop
+    /// with an error (Rhai's limits), not with a native stack overflow
+    #[test]
+    fn test_sandbox_limits() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter, None);
+        let err = engine
+            .run("eval(\"40 + 2\")", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("eval"), "{err}");
+
+        let err = engine
+            .run("fn down(n) { down(n + 1) } down(0)", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.to_lowercase().contains("stack overflow"), "{err}");
+
+        let deep = format!("{}1{}", "(".repeat(100), ")".repeat(100));
+        let err = engine.run(&deep, None).unwrap_err().to_string();
+        assert!(err.to_lowercase().contains("complex"), "{err}");
     }
 
     /// M5 follow-up: a script keeping many allowed values alive is stopped

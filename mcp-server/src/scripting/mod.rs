@@ -72,6 +72,7 @@
 //! - Result size limits prevent memory exhaustion
 
 // Internal modules
+mod access;
 mod conversion;
 mod db_functions;
 pub(crate) use db_functions::RAG_CONFIG_COLLECTION;
@@ -84,6 +85,7 @@ mod types;
 mod utility_functions;
 
 // Re-export public API
+pub use access::{set_script_access, ScriptAccessGuard};
 pub use conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
 pub use engine::RhaiEngine;
 pub use error::format_rhai_error;

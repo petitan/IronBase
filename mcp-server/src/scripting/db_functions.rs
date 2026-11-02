@@ -9,6 +9,7 @@
 //!
 //! All functions include safety limits to prevent OOM attacks.
 
+use super::access::access_denied;
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::embedding::EmbeddingManager;
 use crate::tools::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD};
@@ -221,6 +222,9 @@ fn register_read_functions(
     // SECURITY: Always applies default limit to prevent OOM
     let adapter_find = adapter.clone();
     engine.register_fn("db_find", move |collection: &str, query: Map| -> Dynamic {
+        if let Some(denied) = access_denied("find", collection) {
+            return denied;
+        }
         let query_json = map_to_json(&query);
 
         // SECURITY: Force limit to prevent OOM
@@ -252,6 +256,9 @@ fn register_read_functions(
     engine.register_fn(
         "db_find",
         move |collection: &str, query: Map, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("find", collection) {
+                return denied;
+            }
             let query_json = map_to_json(&query);
             let mut find_options = AdapterFindOptions::default();
 
@@ -337,6 +344,9 @@ fn register_read_functions(
     engine.register_fn(
         "db_find_one",
         move |collection: &str, query: Map| -> Dynamic {
+            if let Some(denied) = access_denied("find_one", collection) {
+                return denied;
+            }
             let query_json = map_to_json(&query);
             match adapter_find_one.find_one(collection, query_json) {
                 Ok(Some(doc)) => json_to_dynamic(&doc),
@@ -351,6 +361,9 @@ fn register_read_functions(
     engine.register_fn(
         "db_find_one_result",
         move |collection: &str, query: Map| -> Dynamic {
+            if let Some(denied) = access_denied("find_one", collection) {
+                return denied;
+            }
             let query_json = map_to_json(&query);
             let mut result_map = Map::new();
             match adapter_find_one_result.find_one(collection, query_json) {
@@ -377,6 +390,9 @@ fn register_read_functions(
     // db_count(collection, query) -> count
     let adapter_count = adapter.clone();
     engine.register_fn("db_count", move |collection: &str, query: Map| -> Dynamic {
+        if let Some(denied) = access_denied("count", collection) {
+            return denied;
+        }
         let query_json = map_to_json(&query);
         match adapter_count.count_documents(collection, query_json) {
             Ok(count) => Dynamic::from(count as i64),
@@ -390,6 +406,9 @@ fn register_read_functions(
     engine.register_fn(
         "db_aggregate",
         move |collection: &str, pipeline: rhai::Array| -> Dynamic {
+            if let Some(denied) = access_denied("aggregate", collection) {
+                return denied;
+            }
             let pipeline_vec: Vec<serde_json::Value> =
                 pipeline.iter().map(dynamic_to_json).collect();
             match adapter_agg.aggregate(collection, pipeline_vec) {
@@ -420,6 +439,9 @@ fn register_read_functions(
     engine.register_fn(
         "db_distinct",
         move |collection: &str, field: &str, query: Map| -> Dynamic {
+            if let Some(denied) = access_denied("distinct", collection) {
+                return denied;
+            }
             let query_json = map_to_json(&query);
             match adapter_dist.distinct(collection, field, query_json) {
                 Ok(values) => {
@@ -462,6 +484,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_insert_one",
         move |collection: &str, doc: Map| -> Dynamic {
+            if let Some(denied) = access_denied("insert_one", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -478,6 +503,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_insert_many",
         move |collection: &str, docs: rhai::Array| -> Dynamic {
+            if let Some(denied) = access_denied("insert_many", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -500,6 +528,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_update_one",
         move |collection: &str, filter: Map, update: Map| -> Dynamic {
+            if let Some(denied) = access_denied("update_one", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -528,6 +559,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_update_many",
         move |collection: &str, filter: Map, update: Map| -> Dynamic {
+            if let Some(denied) = access_denied("update_many", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -556,6 +590,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_delete_one",
         move |collection: &str, filter: Map| -> Dynamic {
+            if let Some(denied) = access_denied("delete_one", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -572,6 +609,9 @@ fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_delete_many",
         move |collection: &str, filter: Map| -> Dynamic {
+            if let Some(denied) = access_denied("delete_many", collection) {
+                return denied;
+            }
             if is_system_collection(collection) {
                 return Dynamic::from(SYSTEM_COLLECTION_ERROR.to_string());
             }
@@ -594,6 +634,9 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_create_index",
         move |collection: &str, field: &str, unique: bool| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             match adapter_idx.create_index(collection, field, unique, false) {
                 Ok(name) => Dynamic::from(name),
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -606,6 +649,9 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_create_compound_index",
         move |collection: &str, fields: rhai::Array, unique: bool| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             let field_vec: Vec<String> = fields
                 .iter()
                 .filter_map(|f| f.clone().try_cast::<String>())
@@ -620,6 +666,9 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     // db_list_indexes(collection) -> #{btree_indexes: [...], fulltext_indexes: [...], vector_indexes: [...], summary: {...}}
     let adapter_lidx = adapter.clone();
     engine.register_fn("db_list_indexes", move |collection: &str| -> Dynamic {
+        if let Some(denied) = access_denied("index_list", collection) {
+            return denied;
+        }
         let btree = adapter_lidx.list_indexes(collection).unwrap_or_default();
         let fulltext = adapter_lidx
             .list_fulltext_indexes(collection)
@@ -657,6 +706,9 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_drop_index",
         move |collection: &str, index_name: &str| -> Dynamic {
+            if let Some(denied) = access_denied("index_drop", collection) {
+                return denied;
+            }
             match adapter_didx.drop_index(collection, index_name) {
                 Ok(()) => Dynamic::from(true),
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -669,6 +721,9 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     engine.register_fn(
         "db_explain",
         move |collection: &str, query: Map| -> Dynamic {
+            if let Some(denied) = access_denied("explain", collection) {
+                return denied;
+            }
             let query_json = map_to_json(&query);
             match adapter_expl.explain(collection, query_json) {
                 Ok(plan) => json_to_dynamic(&plan),
@@ -692,6 +747,9 @@ fn register_search_functions(
     engine.register_fn(
         "db_create_fuzzy_index",
         move |collection: &str, field: &str, algorithm: &str, threshold: f64| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             match adapter_fzidx.create_fuzzy_index(collection, field, algorithm, threshold) {
                 Ok(name) => Dynamic::from(name),
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -705,6 +763,9 @@ fn register_search_functions(
     engine.register_fn(
         "db_fuzzy_search",
         move |collection: &str, field: &str, query: &str, threshold: f64| -> Dynamic {
+            if let Some(denied) = access_denied("fuzzy_search", collection) {
+                return denied;
+            }
             match adapter_fzsrch.fuzzy_search(collection, field, query, Some(threshold), None, None)
             {
                 Ok(results) => {
@@ -735,6 +796,9 @@ fn register_search_functions(
     engine.register_fn(
         "db_create_fulltext_index",
         move |collection: &str, field: &str, language: &str| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             match adapter_ftidx.create_fulltext_index(collection, field, language, None, None) {
                 Ok(name) => Dynamic::from(name),
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -750,6 +814,9 @@ fn register_search_functions(
     engine.register_fn(
         "db_fulltext_search",
         move |collection: &str, field: &str, query: &str, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("fulltext_search", collection) {
+                return denied;
+            }
             let mut requested_limit = default_limit;
             let mut skip = None;
             let mut min_score = None;
@@ -925,6 +992,9 @@ fn register_vector_functions(
     engine.register_fn(
         "db_create_vector_index",
         move |collection: &str, field: &str, dim: i64, metric: &str| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             match adapter_vidx.create_vector_index(
                 collection,
                 field,
@@ -947,6 +1017,9 @@ fn register_vector_functions(
     engine.register_fn(
         "db_create_vector_index",
         move |collection: &str, field: &str, dim: i64, metric: &str, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("index_create", collection) {
+                return denied;
+            }
             let max_vectors = options
                 .get("max_vectors")
                 .and_then(|v| v.as_int().ok())
@@ -989,6 +1062,9 @@ fn register_vector_functions(
     engine.register_fn(
         "db_list_vector_indexes",
         move |collection: &str| -> Dynamic {
+            if let Some(denied) = access_denied("index_list", collection) {
+                return denied;
+            }
             match adapter_lvidx.list_vector_indexes(collection) {
                 Ok(indexes) => {
                     let result: Vec<Dynamic> =
@@ -1005,6 +1081,9 @@ fn register_vector_functions(
     engine.register_fn(
         "db_drop_vector_index",
         move |collection: &str, index_name: &str| -> Dynamic {
+            if let Some(denied) = access_denied("index_drop", collection) {
+                return denied;
+            }
             match adapter_dvidx.drop_vector_index(collection, index_name) {
                 Ok(()) => Dynamic::from(true),
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -1019,6 +1098,9 @@ fn register_vector_functions(
     engine.register_fn(
         "db_vector_search",
         move |collection: &str, field: &str, query_vector: rhai::Array, limit: i64| -> Dynamic {
+            if let Some(denied) = access_denied("vector_search", collection) {
+                return denied;
+            }
             // Convert Rhai array to Vec<f32>
             let vector: Vec<f32> = query_vector
                 .iter()
@@ -1067,6 +1149,9 @@ fn register_vector_functions(
               filter: Map,
               limit: i64|
               -> Dynamic {
+            if let Some(denied) = access_denied("vector_search", collection) {
+                return denied;
+            }
             // Convert Rhai array to Vec<f32>
             let vector: Vec<f32> = query_vector
                 .iter()
@@ -1142,6 +1227,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_hybrid_search",
         move |collection: &str, query: &str| -> Dynamic {
+            if let Some(denied) = access_denied("search", collection) {
+                return denied;
+            }
             hybrid_search_impl(
                 &adapter_hs1,
                 &emb_mgr1,
@@ -1159,6 +1247,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_hybrid_search",
         move |collection: &str, query: &str, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("search", collection) {
+                return denied;
+            }
             hybrid_search_impl(
                 &adapter_hs2,
                 &emb_mgr2,
@@ -1176,6 +1267,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_import",
         move |collection: &str, content: &str, title: &str| -> Dynamic {
+            if let Some(denied) = access_denied("rag_document_import", collection) {
+                return denied;
+            }
             let mut options = Map::new();
             options.insert("title".into(), Dynamic::from(title.to_string()));
             rag_import_impl(&adapter_imp1, &emb_mgr3, collection, content, options)
@@ -1188,6 +1282,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_import",
         move |collection: &str, content: &str, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("rag_document_import", collection) {
+                return denied;
+            }
             rag_import_impl(&adapter_imp2, &emb_mgr4, collection, content, options)
         },
     );
@@ -1196,6 +1293,9 @@ fn register_rag_functions(
     let adapter_cr1 = adapter.clone();
     let emb_mgr5 = embedding_manager.clone();
     engine.register_fn("db_rag_create", move |collection: &str| -> Dynamic {
+        if let Some(denied) = access_denied("rag_collection_create", collection) {
+            return denied;
+        }
         rag_create_impl(&adapter_cr1, &emb_mgr5, collection, None)
     });
 
@@ -1205,6 +1305,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_create",
         move |collection: &str, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("rag_collection_create", collection) {
+                return denied;
+            }
             rag_create_impl(&adapter_cr2, &emb_mgr6, collection, Some(options))
         },
     );
@@ -1213,6 +1316,9 @@ fn register_rag_functions(
     let adapter_st = adapter.clone();
     let emb_mgr7 = embedding_manager.clone();
     engine.register_fn("db_rag_stats", move |collection: &str| -> Dynamic {
+        if let Some(denied) = access_denied("rag_collection_stats", collection) {
+            return denied;
+        }
         rag_stats_impl(&adapter_st, &emb_mgr7, collection)
     });
 
@@ -1221,6 +1327,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_load_all_chunks",
         move |collection: &str, doc_ids: rhai::Array| -> Dynamic {
+            if let Some(denied) = access_denied("rag_chunks_load", collection) {
+                return denied;
+            }
             rag_load_all_chunks_impl(&adapter_la1, collection, doc_ids, None)
         },
     );
@@ -1230,6 +1339,9 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_load_all_chunks",
         move |collection: &str, doc_ids: rhai::Array, options: Map| -> Dynamic {
+            if let Some(denied) = access_denied("rag_chunks_load", collection) {
+                return denied;
+            }
             rag_load_all_chunks_impl(&adapter_la2, collection, doc_ids, Some(options))
         },
     );
@@ -1369,12 +1481,6 @@ fn hybrid_search_impl(
     }
 
     let opts = options.unwrap_or_default();
-    if opts.contains_key("dedup_threshold") {
-        return Dynamic::from(
-            "Error: Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead."
-                .to_string(),
-        );
-    }
 
     let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
     let group_by_document = get_bool_option_or(&opts, "group_by_document", false);

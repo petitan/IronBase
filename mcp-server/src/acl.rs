@@ -621,6 +621,15 @@ impl AclManager {
         Ok(())
     }
 
+    /// The current rules, for checks that must use one rule set for a whole
+    /// request (the `db_*` functions of a script run, #42)
+    pub fn snapshot(&self) -> Result<AclConfig> {
+        let config = self.config.read().map_err(|_| {
+            McpError::internal("ACL config lock poisoned - service restart required".to_string())
+        })?;
+        Ok(config.clone())
+    }
+
     /// Reload ACL from database
     /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn reload(&self) -> Result<()> {

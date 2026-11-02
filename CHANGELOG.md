@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — scripts: collection ACL, `eval` (#42, #40, #34) (ironbase-core 0.3.455, mcp-server 1.0.653)
+
+- **The `db_*` functions of a script are checked against the collection ACL (#42).** `script_exec` /
+  `script_run` are authorized on `_system.scripts` only, and the collections a script used were
+  never checked. A localhost caller whose rights an ACL rule restricted, for example read-only on
+  `audit_logs`, could still delete from it with `db_delete_many`. `execute_tool` now sets the caller
+  and an ACL snapshot for the script run. Each of the 37 `db_*` functions checks its collection with
+  the permission of the MCP tool it corresponds to (`db_find` → `find`, `db_delete_many` →
+  `delete_many`, `db_create_index` → `index_create`, …). A denied call returns
+  `"Error: Access denied: …"`, like the other `db_*` errors. Without a service context (stdio,
+  internal runs) nothing is checked, like direct tool calls on those paths.
+- **`eval` is disabled in scripts (#40).** Recursion and expression nesting already stop with an
+  error at Rhai's limits; fixed higher values overflowed the native stack of a debug-build thread, so
+  those limits stay. The operation, time, size and memory limits come from the October audit (M4, M5).
+- **Removed: the transitional `dedup_threshold` rejection** in the `db_hybrid_search` options (#34).
+  MMR is configured with `deduplicate` / `mmr_lambda`.
+
+
 ### Fixed — updating a document over ~32 MB made the database unopenable (#246) (ironbase-core 0.3.454, mcp-server 1.0.652)
 
 - **An update's WAL record holds the old and the new document**, because recovery removes the old
