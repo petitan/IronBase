@@ -160,12 +160,12 @@ IronBase egy MongoDB-kompatibilis beágyazott NoSQL dokumentum adatbázis. A leg
 | `$facet` | ✅ | ❌ | Nincs |
 | `$bucket` | ✅ | ❌ | Nincs |
 | `$bucketAuto` | ✅ | ❌ | Nincs |
-| `$count` | ✅ | ❌ | Használj `$group` + `$sum` |
+| `$count` | ✅ | ✅ | Azonos (a kimeneti mező nem kezdődhet `$`-ral és nem tartalmazhat `.`-ot) |
 | `$out` | ✅ | ❌ | Nincs |
 | `$merge` | ✅ | ❌ | Nincs |
 | `$replaceRoot` | ✅ | ❌ | Nincs |
-| `$addFields` | ✅ | ❌ | Használj `$project` |
-| `$set` | ✅ | ❌ | Használj `$project` |
+| `$addFields` | ✅ | ✅ | Azonos; kifejezések: `$cond`, `$ifNull`, `$literal`, `$strLenCP`, `$substr`, `$size`, aritmetika |
+| `$set` | ✅ | ✅ | A `$addFields` aliasa |
 | `$unset` | ✅ | ❌ | Használj `$project` |
 | `$sample` | ✅ | ❌ | Nincs |
 | `$redact` | ✅ | ❌ | Nincs |

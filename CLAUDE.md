@@ -103,7 +103,7 @@ Metadata at END → no race conditions, no truncation.
 |-------|-----------|
 | **Query (25)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex $fuzzy $text · $startsWith $endsWith $contains · $expr · $** |
 | **Update (7)** | $set $inc $unset $push $pull $addToSet $pop (+ dot notation + upsert) |
-| **Aggregation** | $match $group $project $count $sort $limit $skip $unwind · Accumulators: $sum $avg $min $max $first $last $push $addToSet · $group nested object _id |
+| **Aggregation** | $match $group $project $addFields/$set $count $sort $limit $skip $unwind · Kifejezések: $cond $ifNull $literal $strLenCP $substr $size + aritmetika · Accumulators: $sum $avg $min $max $first $last $push $addToSet · $group nested object _id |
 
 ---
 
