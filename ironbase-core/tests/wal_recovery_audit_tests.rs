@@ -185,3 +185,42 @@ fn metadata_recovery_keeps_committed_wal() {
         "committed (fsynced WAL) inserts lost"
     );
 }
+
+/// An update's WAL record holds the old and the new document. With a 64 MB
+/// entry limit, updating a document over ~32 MB wrote a record the reader
+/// rejects: close failed with `WALCorruption` and the database could not be
+/// reopened (#246). The committed update must survive a crash (WAL replay,
+/// index included) and a clean close.
+#[test]
+fn update_of_a_document_over_half_the_entry_limit_is_recoverable() {
+    let t = TempDir::new().unwrap();
+    let c = TempDir::new().unwrap();
+    let p = t.path().join("big.mlite");
+    let big = "x".repeat(33 * 1024 * 1024);
+    {
+        let db = open(&p).unwrap();
+        db.insert_one("c", d(json!({"_id": 1, "k": 1, "s": big})))
+            .unwrap();
+        db.collection("c")
+            .unwrap()
+            .create_index("k".into(), false, false)
+            .unwrap();
+        db.checkpoint().unwrap();
+        db.update_one("c", &json!({"_id": 1}), &json!({"$set": {"k": 2}}))
+            .unwrap();
+
+        // Crash: the update is only in the WAL
+        crash_copy(t.path(), c.path());
+        db.close()
+            .expect("a committed update must leave a readable WAL");
+    }
+
+    for path in [c.path().join("big.mlite"), p] {
+        let db = open(&path).expect("the WAL of a committed update must be readable");
+        let coll = db.collection("c").unwrap();
+        let found = coll.find(&json!({"k": 2})).unwrap();
+        assert_eq!(found.len(), 1, "{}", path.display());
+        assert_eq!(found[0]["s"].as_str().map(str::len), Some(33 * 1024 * 1024));
+        assert!(coll.find(&json!({"k": 1})).unwrap().is_empty());
+    }
+}

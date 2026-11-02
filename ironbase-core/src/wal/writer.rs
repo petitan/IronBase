@@ -26,10 +26,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{IronBaseError, Result};
 use crate::transaction::TransactionId;
 
-use super::entry::{WALEntry, WALEntryType};
+use super::entry::{WALEntry, WALEntryType, MAX_WAL_ENTRY_SIZE};
 use super::reader::WALEntryIterator;
 
 /// Write-Ahead Log file manager
@@ -160,7 +160,18 @@ impl WriteAheadLog {
     /// recovery reports an invalid record followed by valid ones as
     /// corruption (WAL/recovery audit 2026-10-14 W6).
     /// If the cut fails too, appends are refused until it succeeds.
+    ///
+    /// An entry whose data exceeds `MAX_WAL_ENTRY_SIZE` is refused before
+    /// anything is written: the reader rejects such a record, so writing it
+    /// made the WAL unreadable and the database unopenable (#246).
     pub fn append(&mut self, entry: &WALEntry) -> Result<u64> {
+        if entry.data.len() > MAX_WAL_ENTRY_SIZE {
+            return Err(IronBaseError::WALWriteError(format!(
+                "WAL entry exceeds max size: {} bytes (limit: {} bytes)",
+                entry.data.len(),
+                MAX_WAL_ENTRY_SIZE
+            )));
+        }
         self.repair()?;
         let serialized = entry.serialize();
         let offset = self.file.seek(SeekFrom::End(0))?;
@@ -554,6 +565,31 @@ impl Drop for WriteAheadLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry the reader would reject is refused before anything is
+    /// written (#246)
+    #[test]
+    fn oversized_entry_is_refused_before_writing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal_path = temp_dir.path().join("big.wal");
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+        let before = std::fs::metadata(&wal_path).unwrap().len();
+        let big = WALEntry::new(
+            1,
+            WALEntryType::Operation,
+            vec![b'x'; MAX_WAL_ENTRY_SIZE + 1],
+        );
+        assert!(matches!(
+            wal.append(&big),
+            Err(IronBaseError::WALWriteError(_))
+        ));
+        assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), before);
+        // The handle stays usable
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .unwrap();
+    }
 
     /// The WAL after a checkpoint kept tx 2 (watermark 1), crashed at
     /// `stage` of `retain_after` (WAL/recovery audit 2026-10-14 W7).

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — updating a document over ~32 MB made the database unopenable (#246) (ironbase-core 0.3.454, mcp-server 1.0.652)
+
+- **An update's WAL record holds the old and the new document**, because recovery removes the old
+  index keys taken from the old document. The WAL entry limit was 64 MB, the same as one document.
+  Updating a document over ~32 MB therefore wrote a record that the reader rejects: `close()` failed
+  with `WALCorruption` and the database could not be reopened. Repeated `$push` past ~32 MB hit the
+  same limit.
+- `MAX_WAL_ENTRY_SIZE` is now two maximum documents plus a 1 MB envelope (129 MB).
+- `WriteAheadLog::append` refuses an entry over the limit before writing anything, so an unreadable
+  record can no longer be written.
+- Regression tests: `update_of_a_document_over_half_the_entry_limit_is_recoverable` (crash and clean
+  close, indexed field) and `oversized_entry_is_refused_before_writing`.
+
 ### Added — eval: unanswerable-in-pool queries, batch judging, labels for `docs` (ironbase-core 0.3.453, mcp-server 1.0.651)
 
 - **`measure_lanes.py` reports queries with no relevant document in the pool separately.** Every
