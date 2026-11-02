@@ -441,7 +441,7 @@ pub mod fields {
     pub fn pipeline() -> Value {
         json!({
             "type": "array",
-            "description": "Array of pipeline stages. Stages: $match (filter), $group (aggregate), $project (reshape), $sort, $limit, $skip, $unwind, $count. Example: [{\"$match\": {\"status\": \"active\"}}, {\"$group\": {\"_id\": \"$category\", \"total\": {\"$sum\": 1}}}, {\"$sort\": {\"total\": -1}}, {\"$limit\": 10}]"
+            "description": "Array of pipeline stages. Stages: $match (filter), $group (aggregate), $project (reshape), $addFields / $set (add computed fields, keep the rest), $sort, $limit, $skip, $unwind, $count. Expressions in $project / $addFields: $cond, $ifNull, $literal, $strLenCP, $substr, $size, $add, $subtract, $multiply, $divide, $mod, $abs, $ceil, $floor, $round. Nulls last: {\"$addFields\": {\"_r\": {\"$cond\": [{\"$ifNull\": [\"$date\", false]}, 0, 1]}}}, then {\"$sort\": {\"_r\": 1, \"date\": 1}}. Example: [{\"$match\": {\"status\": \"active\"}}, {\"$group\": {\"_id\": \"$category\", \"total\": {\"$sum\": 1}}}, {\"$sort\": {\"total\": -1}}, {\"$limit\": 10}]"
         })
     }
 

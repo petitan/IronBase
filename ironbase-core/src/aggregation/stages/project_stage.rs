@@ -110,6 +110,19 @@ impl ProjectStage {
             };
             fields.insert(field.clone(), action);
         }
+        // A target and its dotted descendant ("a" and "a.b") would overwrite
+        // each other in an undefined order: MongoDB refuses it as a path
+        // collision
+        for a in fields.keys() {
+            for b in fields.keys() {
+                if a != b && b.starts_with(a.as_str()) && b.as_bytes().get(a.len()) == Some(&b'.') {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "{} path collision: '{}' and '{}'",
+                        stage_name, a, b
+                    )));
+                }
+            }
+        }
         Ok(ProjectStage {
             fields,
             add_fields: true,
@@ -601,9 +614,11 @@ impl ProjectStage {
             for (field, action) in &self.fields {
                 match action {
                     ProjectField::Rename(source) => {
-                        // A missing source sets nothing, as in MongoDB
-                        if let Some(value) = get_nested_value(doc, source.trim_start_matches('$')) {
-                            set_nested_value(&mut result, field, value.clone());
+                        // A missing source makes the field missing, as in
+                        // MongoDB: an existing value of the target goes too
+                        match get_nested_value(doc, source.trim_start_matches('$')) {
+                            Some(value) => set_nested_value(&mut result, field, value.clone()),
+                            None => remove_path(&mut result, field),
                         }
                     }
                     ProjectField::Expression(expr) => {
@@ -1110,6 +1125,22 @@ impl Num {
         match self {
             Num::Int(i) => Value::from(i),
             Num::Float(f) => Value::from(f),
+        }
+    }
+}
+
+/// Remove the field at a dotted `path` from an object, if it is there
+fn remove_path(doc: &mut Value, path: &str) {
+    match path.split_once('.') {
+        None => {
+            if let Value::Object(map) = doc {
+                map.shift_remove(path);
+            }
+        }
+        Some((head, rest)) => {
+            if let Some(child) = doc.get_mut(head) {
+                remove_path(child, rest);
+            }
         }
     }
 }

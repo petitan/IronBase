@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - NULLS LAST works with MongoDB's own idiom, without a non-standard sort option:
     `{$addFields: {_r: {$cond: [{$ifNull: ["$date", false]}, 0, 1]}}}, {$sort: {_r: 1, date: 1}}`.
   - All existing `$project` expressions work too, as does a dotted target. A literal sets the field
-    (`{a: 1}`), and a missing source sets nothing.
+    (`{a: 1}`). A missing source leaves the field missing and removes an existing value, as in
+    MongoDB. A target together with its dotted descendant (`a`, `a.b`) is refused as a path
+    collision. The MCP `aggregate` description lists the new stages and expressions.
   - It is a mode of `ProjectStage`, so every streaming, prefix and context path handles it like
     `$project`.
 - **A `$count` after `$project` is no longer document-limited (#107).** It holds no document. The

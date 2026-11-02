@@ -196,6 +196,7 @@ fn add_fields_cond_if_null_sort_nulls_last() {
                 "lit": {"$literal": "$n"},
                 "copy": "$n",
                 "gone": "$missing",
+                "n": "$also_missing",
                 "meta.d": {"$ifNull": ["$date", "$missing", "none"]},
                 "big": {"$cond": {"if": "$n", "then": "yes", "else": "no"}},
                 "zero": {"$cond": [0, "yes", "no"]},
@@ -207,7 +208,8 @@ fn add_fields_cond_if_null_sort_nulls_last() {
     assert_eq!(
         out,
         vec![
-            json!({"n": 3, "one": 1, "lit": "$n", "copy": 3, "meta": {"d": "none"},
+            // "n" from a missing source is gone; the others read the input's n
+            json!({"one": 1, "lit": "$n", "copy": 3, "meta": {"d": "none"},
                     "big": "yes", "zero": "no", "empty": "yes"})
         ]
     );
@@ -217,6 +219,7 @@ fn add_fields_cond_if_null_sort_nulls_last() {
         json!([{"$addFields": {"$x": 1}}]),
         json!([{"$addFields": {"c": {"$cond": [1, 2]}}}]),
         json!([{"$addFields": {"c": {"$ifNull": ["$a"]}}}]),
+        json!([{"$addFields": {"a": 1, "a.b": 2}}]),
     ] {
         assert!(coll.aggregate(&bad).is_err(), "accepted {bad}");
     }
