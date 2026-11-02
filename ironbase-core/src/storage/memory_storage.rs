@@ -345,7 +345,7 @@ impl RawStorage for MemoryStorage {
         doc_id: &DocumentId,
         data: &[u8],
     ) -> Result<u64> {
-        super::check_document_size(data.len())?;
+        super::check_record_size(collection, data)?;
         let offset = self.raw_data.len() as u64;
 
         // Write length prefix (4 bytes, little-endian)
@@ -385,7 +385,7 @@ impl RawStorage for MemoryStorage {
         // the ones written before it in the order
         let mut result = Ok(());
         for (doc_id, data) in docs {
-            if let Err(e) = super::check_document_size(data.len()) {
+            if let Err(e) = super::check_record_size(collection, data) {
                 result = Err(e);
                 break;
             }

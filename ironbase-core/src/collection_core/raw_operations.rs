@@ -436,11 +436,15 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         let doc = Document::new(doc_id.clone(), fields);
         self.validate_document(&doc)?;
 
+        // Serialize and size-check before the index changes: a refused
+        // document must leave no index entry (#43)
+        let doc_json = doc.to_json()?;
+        crate::storage::check_record_size(&self.name, doc_json.as_bytes())?;
+
         // Update indexes BEFORE writing to storage
         self.add_to_indexes(&doc)?;
 
-        // Serialize and write - use write_document with catalog tracking
-        let doc_json = doc.to_json()?;
+        // Write - use write_document with catalog tracking
         storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
         storage.adjust_live_count(&self.name, 1);
 
@@ -560,17 +564,23 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // Update last_id with max of manual + auto-generated IDs
         meta.last_id = meta.last_id.max(start_id + auto_id_count);
 
-        // Update indexes in batch BEFORE writing to storage.
-        // Borrow the documents (no content clone) — batch_add_to_indexes only
-        // reads them, and prepared_docs is consumed by the storage write below.
-        let docs_for_index: Vec<&Document> = prepared_docs.iter().map(|(_, doc)| doc).collect();
-        self.batch_add_to_indexes(&docs_for_index)?;
-
-        // Write all documents to storage
-        for (doc_id, doc) in prepared_docs {
-            let doc_json = doc.to_json()?;
-            storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
-            live_delta += 1;
+        // Per chunk: serialize and size-check, then the indexes, then the
+        // storage. A refused document stops the batch before its chunk
+        // changes any index (#43); the chunks before it are complete.
+        for chunk in prepared_docs.chunks(super::WRITE_CHUNK) {
+            let jsons = chunk
+                .iter()
+                .map(|(_, doc)| doc.to_json().map_err(IronBaseError::from))
+                .collect::<Result<Vec<String>>>()?;
+            for json in &jsons {
+                crate::storage::check_record_size(&self.name, json.as_bytes())?;
+            }
+            let docs_for_index: Vec<&Document> = chunk.iter().map(|(_, doc)| doc).collect();
+            self.batch_add_to_indexes(&docs_for_index)?;
+            for ((doc_id, _), json) in chunk.iter().zip(&jsons) {
+                storage.write_document_raw(&self.name, doc_id, json.as_bytes())?;
+                live_delta += 1;
+            }
         }
 
         // NOTE: We don't flush metadata here for performance!
@@ -634,18 +644,23 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                         // rejected update must leave no trace (audit
                         // 2026-10-06 #35).
                         self.validate_document(&document)?;
-                        self.remove_from_indexes(&original_document)?;
-                        self.add_to_indexes(&document)?;
 
+                        // Serialize and size-check before the index changes:
+                        // a refused write must leave the indexes as they were (#43)
                         let mut tombstone = doc.clone();
                         if let Value::Object(ref mut map) = tombstone {
                             map.insert("_tombstone".to_string(), Value::Bool(true));
                             map.insert("_collection".to_string(), Value::String(self.name.clone()));
                         }
                         let tombstone_json = serde_json::to_string(&tombstone)?;
-                        storage.write_data(tombstone_json.as_bytes())?;
-
                         let updated_json = document.to_json()?;
+                        crate::storage::check_document_size(tombstone_json.len())?;
+                        crate::storage::check_record_size(&self.name, updated_json.as_bytes())?;
+
+                        self.remove_from_indexes(&original_document)?;
+                        self.add_to_indexes(&document)?;
+
+                        storage.write_data(tombstone_json.as_bytes())?;
                         storage.write_document_raw(
                             &self.name,
                             &document.id,
@@ -741,25 +756,29 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                     // Index operations use their own lock (self.indexes), so we can safely
                     // hold the storage lock while updating indexes.
 
-                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES (uses self.indexes lock)
-                    self.remove_from_indexes(&original_document)?;
-
-                    // 📥 ADD UPDATED DOCUMENT TO INDEXES (uses self.indexes lock)
-                    self.add_to_indexes(&document)?;
-
-                    // Mark old document as tombstone
+                    // Mark old document as tombstone. Both records are
+                    // serialized and size-checked before the index changes:
+                    // a refused write must leave the indexes as they were (#43)
                     let mut tombstone = doc.clone();
                     if let Value::Object(ref mut map) = tombstone {
                         map.insert("_tombstone".to_string(), Value::Bool(true));
                         map.insert("_collection".to_string(), Value::String(self.name.clone()));
                     }
                     let tombstone_json = serde_json::to_string(&tombstone)?;
+                    let updated_json = document.to_json()?;
+                    crate::storage::check_document_size(tombstone_json.len())?;
+                    crate::storage::check_record_size(&self.name, updated_json.as_bytes())?;
+
+                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES (uses self.indexes lock)
+                    self.remove_from_indexes(&original_document)?;
+
+                    // 📥 ADD UPDATED DOCUMENT TO INDEXES (uses self.indexes lock)
+                    self.add_to_indexes(&document)?;
 
                     // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
 
                     // Write updated document WITH catalog tracking
-                    let updated_json = document.to_json()?;
                     storage.write_document_raw(
                         &self.name,
                         &document.id,
@@ -1420,31 +1439,39 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             return Ok(Vec::new());
         }
 
-        // Update indexes in batch FIRST (atomic operation, all-or-nothing)
-        // This is safer for partial storage failure - phantom entries are handled gracefully.
-        // Borrow the documents (no content clone) — batch_add_to_indexes only reads them.
-        let docs_for_index: Vec<&Document> =
-            prepared.prepared_docs.iter().map(|p| &p.document).collect();
-        self.batch_add_to_indexes(&docs_for_index)?;
+        // Per chunk: serialize and size-check, then the indexes (phantom
+        // entries of a failed storage write are handled gracefully), then the
+        // storage. A refused document stops the batch before its chunk changes
+        // any index (#43); the chunks before it are complete.
+        for chunk in prepared.prepared_docs.chunks(super::WRITE_CHUNK) {
+            let jsons = chunk
+                .iter()
+                .map(|prep| prep.document.to_json().map_err(IronBaseError::from))
+                .collect::<Result<Vec<String>>>()?;
+            for json in &jsons {
+                crate::storage::check_record_size(&prepared.collection_name, json.as_bytes())?;
+            }
+            let docs_for_index: Vec<&Document> = chunk.iter().map(|p| &p.document).collect();
+            self.batch_add_to_indexes(&docs_for_index)?;
 
-        // Write all documents to storage
-        {
             let mut storage = self.storage.write();
             let mut live_delta = 0i64;
-
-            for prep in &prepared.prepared_docs {
-                let doc_json = prep.document.to_json()?;
-                storage.write_document_raw(
+            let mut result = Ok(());
+            for (prep, json) in chunk.iter().zip(&jsons) {
+                if let Err(e) = storage.write_document_raw(
                     &prepared.collection_name,
                     &prep.doc_id,
-                    doc_json.as_bytes(),
-                )?;
+                    json.as_bytes(),
+                ) {
+                    result = Err(e);
+                    break;
+                }
                 live_delta += 1;
             }
-
             if live_delta != 0 {
                 storage.adjust_live_count(&prepared.collection_name, live_delta);
             }
+            result?;
         }
 
         // Invalidate query cache (collection has changed)

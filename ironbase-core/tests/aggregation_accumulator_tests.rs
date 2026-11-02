@@ -1249,6 +1249,13 @@ fn test_count_fast_path_honours_the_deadline() {
         .with_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
     let err = coll.aggregate_with_context(&pipeline, &ctx).unwrap_err();
     assert!(err.to_string().to_lowercase().contains("time"), "{err}");
+    // Also on the O(1) count of the whole collection, which returns
+    // before any per-chunk check
+    let all = json!([{"$count": "n"}]);
+    let ctx = AggregationLimitContext::new(AggregationLimits::default())
+        .with_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    let err = coll.aggregate_with_context(&all, &ctx).unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("time"), "{err}");
 
     let ctx = AggregationLimitContext::new(AggregationLimits::default());
     assert_eq!(

@@ -122,6 +122,23 @@ pub(crate) fn read_document_from_file(
 /// JSON prefix of a stored document record that names its collection.
 const COLLECTION_MARK_PREFIX: &[u8] = b"{\"_collection\":";
 
+/// Size check of a document record of `collection` before it is written:
+/// the record carries the collection mark ([`mark_document_collection`]), so
+/// its length is bounded by the document plus the mark. Exact unless the
+/// document already holds a `_collection` key (then a few bytes stricter).
+/// Lets a caller refuse an oversized document before it changes any index,
+/// with the bytes it serializes anyway, and lets `MemoryStorage` apply the
+/// same limit as the file storage (#43).
+pub(crate) fn check_record_size(collection: &str, data: &[u8]) -> crate::error::Result<()> {
+    let mark = if data.first() == Some(&b'{') {
+        // prefix + JSON string of the name + the ',' after it
+        COLLECTION_MARK_PREFIX.len() + serde_json::to_string(collection)?.len() + 1
+    } else {
+        0
+    };
+    super::check_document_size(data.len() + mark)
+}
+
 /// Put `"_collection":<collection>` first in a stored document's JSON.
 ///
 /// Metadata rebuild (`rebuild_from_documents`) attributes documents to

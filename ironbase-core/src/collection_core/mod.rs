@@ -275,6 +275,21 @@ use crate::limits::LARGE_QUERY_WARNING_THRESHOLD;
 /// a rewritten id leaves `document_order` in one pass per batch
 const WRITE_CHUNK: usize = 1024;
 
+/// Counts the bytes written to it: the serialized length of a value without
+/// building the string
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
 pub struct InsertManyResult {
@@ -1703,37 +1718,55 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         &self,
         prepared: &raw_operations::UpdateManyPrepared,
     ) -> Result<(u64, u64)> {
-        const INDEX_CHUNK: usize = 256;
-        for chunk in prepared.wal_entries.chunks(INDEX_CHUNK) {
-            let index_updates = chunk
-                .iter()
-                .map(|(_, old, new)| Ok((Document::from_value(old)?, Document::from_value(new)?)))
-                .collect::<Result<Vec<(Document, Document)>>>()?;
-            self.batch_update_indexes(&index_updates)?;
-        }
-
-        if !prepared.wal_entries.is_empty() {
-            // Each chunk's documents go to storage in one batch: a rewrite
-            // moves its id to the end of `document_order`, one pass over the
-            // order per chunk instead of one per document.
-            let mut storage = self.storage.write();
-            for chunk in prepared.wal_entries.chunks(WRITE_CHUNK) {
-                let mut new_docs = Vec::with_capacity(chunk.len());
-                for (doc_id, old, new) in chunk {
-                    let mut tombstone = (**old).clone();
-                    if let Value::Object(ref mut map) = tombstone {
-                        map.insert("_tombstone".to_string(), Value::Bool(true));
-                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                    }
-                    storage.write_data(serde_json::to_string(&tombstone)?.as_bytes())?;
-                    new_docs.push((doc_id, serde_json::to_string(&**new)?));
-                }
-                let docs: Vec<(&DocumentId, &[u8])> = new_docs
-                    .iter()
-                    .map(|(doc_id, json)| (*doc_id, json.as_bytes()))
-                    .collect();
-                storage.write_documents_raw(&self.name, &docs)?;
+        // Per chunk: serialize and size-check the tombstones and the new
+        // documents, then the indexes, then the storage. A refused document
+        // stops the batch before its chunk changes any index (#43); the
+        // chunks before it are complete. Each chunk's documents go to storage
+        // in one batch: a rewrite moves its id to the end of `document_order`,
+        // one pass over the order per chunk instead of one per document.
+        let tombstone_of = |old: &Value| {
+            let mut tombstone = old.clone();
+            if let Value::Object(ref mut map) = tombstone {
+                map.insert("_tombstone".to_string(), Value::Bool(true));
+                map.insert("_collection".to_string(), Value::String(self.name.clone()));
             }
+            tombstone
+        };
+        for chunk in prepared.wal_entries.chunks(WRITE_CHUNK) {
+            let mut new_docs = Vec::with_capacity(chunk.len());
+            for (doc_id, old, new) in chunk {
+                // The tombstone is measured, not kept: holding a chunk of them
+                // raised the peak memory (update_many_memory_tests)
+                let mut counter = ByteCounter(0);
+                serde_json::to_writer(&mut counter, &tombstone_of(old))?;
+                crate::storage::check_document_size(counter.0)?;
+                let new_json = serde_json::to_string(&**new)?;
+                crate::storage::check_record_size(&self.name, new_json.as_bytes())?;
+                new_docs.push((doc_id, new_json));
+            }
+
+            // Index updates in smaller pieces: the document pairs are the
+            // largest transient copies (update_many_memory_tests)
+            const INDEX_CHUNK: usize = 256;
+            for part in chunk.chunks(INDEX_CHUNK) {
+                let index_updates = part
+                    .iter()
+                    .map(|(_, old, new)| {
+                        Ok((Document::from_value(old)?, Document::from_value(new)?))
+                    })
+                    .collect::<Result<Vec<(Document, Document)>>>()?;
+                self.batch_update_indexes(&index_updates)?;
+            }
+
+            let mut storage = self.storage.write();
+            for (_, old, _) in chunk {
+                storage.write_data(serde_json::to_string(&tombstone_of(old))?.as_bytes())?;
+            }
+            let docs: Vec<(&DocumentId, &[u8])> = new_docs
+                .iter()
+                .map(|(doc_id, json)| (*doc_id, json.as_bytes()))
+                .collect();
+            storage.write_documents_raw(&self.name, &docs)?;
         }
 
         if prepared.modified > 0 {

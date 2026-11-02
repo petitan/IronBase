@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that grows a document past the limit is refused by both, and the stored document is unchanged. The
   five copies of the size check share one `storage::check_document_size`. No separate element-count
   cap: the byte limit bounds the array.
+- **A write refused for its size leaves the indexes as they were (#43, review of #249).** Some write
+  paths changed the indexes before the storage write: `update_many`, `insert_many` (Safe and raw),
+  `update_one_raw` and `insert_one_raw`. A refused document left index entries that storage did not
+  have. The file storage had this problem too. These paths now serialize and size-check first, then
+  update the indexes, then write. The batch paths do this per chunk: a refused document stops the
+  batch before its chunk touches an index. `storage::check_record_size` includes the `_collection`
+  mark, so `MemoryStorage` and the pre-checks apply the same limit as the file record.
 - **The persisted `vector_count` follows the index (#51).** It was written once at index creation
   (0 for an empty collection); only `list_vector_indexes` corrected it from memory. A checkpoint and
   every full index flush (close, drop, rename, compaction) now store the size of each loaded vector
@@ -36,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#{documents, count}`.
 - **`$count` (#107):**
   - Its output field must not start with `$` or contain `.`, as in MongoDB.
-  - The count-only fast path honours the pipeline deadline, like the streaming path.
+  - The count-only fast path honours the pipeline deadline, like the streaming path. This includes
+    the O(1), `_id` and exact-index counts, which returned before any check.
   - Every count path builds its result in one `count_output`.
   - The optimizer's write-only `GroupIdKind` / `AccumulatorKind` variants are collapsed to
     `Null`/`Other` and `Count`/`Other`.

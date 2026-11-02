@@ -131,6 +131,8 @@ pub(crate) use crate::limits::MAX_DOCUMENT_SIZE_BYTES;
 /// written. Every storage checks the same limit (must match the read-side
 /// checks of `read_data`/`read_data_at`): `MemoryStorage` accepted documents
 /// the file storage refuses (#43).
+pub(crate) use io::check_record_size;
+
 pub(crate) fn check_document_size(len: usize) -> Result<()> {
     if len > MAX_DOCUMENT_SIZE_BYTES {
         return Err(IronBaseError::InvalidQuery(format!(
