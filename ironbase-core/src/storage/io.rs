@@ -291,16 +291,7 @@ impl StorageEngine {
     /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
     /// to prevent overwriting metadata that was previously flushed.
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
-        use crate::error::IronBaseError;
-
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset
         let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
@@ -509,14 +500,7 @@ impl StorageEngine {
         let marked = mark_document_collection(collection, data)?;
         let data: &[u8] = &marked;
 
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end
@@ -594,14 +578,7 @@ impl StorageEngine {
         let marked = mark_document_collection(collection, data)?;
         let data: &[u8] = &marked;
 
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end

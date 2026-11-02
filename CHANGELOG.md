@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — document size in memory, persisted vector count, `$strLenCP`, `$count` (#43, #51, #59, #107) (ironbase-core 0.3.456, mcp-server 1.0.654)
+
+- **`MemoryStorage` refuses a document over the 64 MB limit (#43),** like the file storage. A `$push`
+  that grows a document past the limit is refused by both, and the stored document is unchanged. The
+  five copies of the size check share one `storage::check_document_size`. No separate element-count
+  cap: the byte limit bounds the array.
+- **The persisted `vector_count` follows the index (#51).** It was written once at index creation
+  (0 for an empty collection); only `list_vector_indexes` corrected it from memory. A checkpoint and
+  every full index flush (close, drop, rename, compaction) now store the size of each loaded vector
+  index (`record_vector_counts`).
+- **`$strLenCP` in `$project` (#59):** the string length in code points (`"héllo"` → 5), from a
+  field or a literal. A missing or non-string value gives `null`, like `$substr`. `$size` stays
+  array-only, as in MongoDB. The Rhai part of #59 was a usage error: `db_find` returns
+  `#{documents, count}`.
+- **`$count` (#107):**
+  - Its output field must not start with `$` or contain `.`, as in MongoDB.
+  - The count-only fast path honours the pipeline deadline, like the streaming path.
+  - Every count path builds its result in one `count_output`.
+  - The optimizer's write-only `GroupIdKind` / `AccumulatorKind` variants are collapsed to
+    `Null`/`Other` and `Count`/`Other`.
+  - Not changed: a `$count` after `$project` still counts against the no-`$match` document limit.
+
+
 ### Security — scripts: collection ACL, `eval` (#42, #40, #34) (ironbase-core 0.3.455, mcp-server 1.0.653)
 
 - **The `db_*` functions of a script are checked against the collection ACL (#42).** `script_exec` /

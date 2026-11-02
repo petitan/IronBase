@@ -230,18 +230,12 @@ impl Pipeline {
                 let result = group_stage.execute_streaming_with_limits(counted_iter, limits)?;
                 (result, 1) // consumed 1 stage ($group)
             } else if let Some(Stage::Count(count_stage)) = remaining_stages.first() {
-                let mut count: i64 = 0;
+                let mut count: u64 = 0;
                 for doc_result in counted_iter {
                     doc_result?;
                     count += 1;
                 }
-                // MongoDB semantics: empty input → no $count document (matches the
-                // count-only $group path and CountStage::execute).
-                let result = if count == 0 {
-                    Vec::new()
-                } else {
-                    vec![serde_json::json!({ count_stage.field.clone(): count })]
-                };
+                let result = count_stage.output(count);
                 (result, 1) // consumed 1 stage ($count)
             } else {
                 // No $group: materialize through the streamable prefix
@@ -364,18 +358,12 @@ impl Pipeline {
                 };
                 (result, 1)
             } else if let Some(Stage::Count(count_stage)) = remaining_stages.first() {
-                let mut count: i64 = 0;
+                let mut count: u64 = 0;
                 for doc_result in streaming_iter {
                     doc_result?;
                     count += 1;
                 }
-                // MongoDB semantics: empty input → no $count document (matches the
-                // count-only $group path and CountStage::execute).
-                let result = if count == 0 {
-                    Vec::new()
-                } else {
-                    vec![serde_json::json!({ count_stage.field.clone(): count })]
-                };
+                let result = count_stage.output(count);
                 (result, 1)
             } else {
                 // No $group: materialize through the streamable prefix

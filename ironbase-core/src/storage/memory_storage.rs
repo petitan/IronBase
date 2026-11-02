@@ -345,6 +345,7 @@ impl RawStorage for MemoryStorage {
         doc_id: &DocumentId,
         data: &[u8],
     ) -> Result<u64> {
+        super::check_document_size(data.len())?;
         let offset = self.raw_data.len() as u64;
 
         // Write length prefix (4 bytes, little-endian)
@@ -380,7 +381,14 @@ impl RawStorage for MemoryStorage {
         docs: &[(&DocumentId, &[u8])],
     ) -> Result<()> {
         let mut written = Vec::with_capacity(docs.len());
+        // Like the file storage: stop at the first refused document, keep
+        // the ones written before it in the order
+        let mut result = Ok(());
         for (doc_id, data) in docs {
+            if let Err(e) = super::check_document_size(data.len()) {
+                result = Err(e);
+                break;
+            }
             let offset = self.raw_data.len() as u64;
             self.raw_data
                 .extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -398,7 +406,7 @@ impl RawStorage for MemoryStorage {
             meta.append_to_document_order(&written);
         }
         self.next_offset = self.raw_data.len() as u64;
-        Ok(())
+        result
     }
 
     /// Read document bytes at specific offset
@@ -408,6 +416,7 @@ impl RawStorage for MemoryStorage {
 
     /// Write raw data without catalog tracking (for tombstones)
     fn write_data(&mut self, data: &[u8]) -> Result<u64> {
+        super::check_document_size(data.len())?;
         let offset = self.raw_data.len() as u64;
 
         // Write length prefix (4 bytes, little-endian)

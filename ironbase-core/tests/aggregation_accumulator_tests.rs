@@ -1203,3 +1203,56 @@ fn test_streaming_project_rename() {
     assert!(values.contains(&json!("value1")));
     assert!(values.contains(&json!("value2")));
 }
+
+/// #107: the `$count` output field is a plain name, as in MongoDB
+#[test]
+fn test_count_stage_rejects_operator_and_dotted_names() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let mut doc = HashMap::new();
+    doc.insert("value".to_string(), json!(1));
+    db.insert_one("items", doc).unwrap();
+    let coll = db.collection("items").unwrap();
+
+    for name in ["$n", "a.b"] {
+        assert!(
+            coll.aggregate(&json!([{ "$count": name }])).is_err(),
+            "$count accepted {name}"
+        );
+    }
+    assert_eq!(
+        coll.aggregate(&json!([{"$count": "n"}])).unwrap(),
+        vec![json!({"n": 1})]
+    );
+}
+
+/// #107: the count-only fast path honours the pipeline's deadline, like
+/// the streaming path
+#[test]
+fn test_count_fast_path_honours_the_deadline() {
+    use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let docs: Vec<HashMap<String, serde_json::Value>> = (0..20_000)
+        .map(|i| HashMap::from([("value".to_string(), json!(i))]))
+        .collect();
+    db.insert_many("items", docs).unwrap();
+    let coll = db.collection("items").unwrap();
+
+    let pipeline = json!([
+        {"$match": {"value": {"$gte": 0}}},
+        {"$group": {"_id": null, "n": {"$sum": 1}}}
+    ]);
+    let ctx = AggregationLimitContext::new(AggregationLimits::default())
+        .with_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    let err = coll.aggregate_with_context(&pipeline, &ctx).unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("time"), "{err}");
+
+    let ctx = AggregationLimitContext::new(AggregationLimits::default());
+    assert_eq!(
+        coll.aggregate_with_context(&pipeline, &ctx).unwrap(),
+        vec![json!({"_id": null, "n": 20_000})]
+    );
+}

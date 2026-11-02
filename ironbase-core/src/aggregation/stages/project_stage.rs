@@ -105,6 +105,21 @@ impl ProjectStage {
                 }
             }
             "$substr" => Self::parse_substr_expression(arg),
+            "$strLenCP" => {
+                // A string operand, alone or as a one-element array
+                let operand = match arg.as_array() {
+                    Some(arr) if arr.len() == 1 => &arr[0],
+                    Some(_) => {
+                        return Err(IronBaseError::AggregationError(
+                            "$strLenCP requires exactly 1 operand".to_string(),
+                        ))
+                    }
+                    None => arg,
+                };
+                Ok(ProjectField::Expression(ProjectExpression::StrLenCP(
+                    Self::parse_string_operand(operand)?,
+                )))
+            }
             "$reduce" => Self::parse_reduce_expression(arg),
             // Arithmetic operators
             "$add" => Self::parse_variadic_arithmetic(arg, ProjectExpression::Add),
@@ -575,6 +590,12 @@ impl ProjectStage {
                     None => Value::Null,
                 }
             }
+            // Code points, not bytes ("é" is 1); a missing or non-string
+            // value gives null, like $substr
+            ProjectExpression::StrLenCP(input) => match Self::evaluate_string_operand(input, doc) {
+                Some(text) => Value::Number(serde_json::Number::from(text.chars().count())),
+                None => Value::Null,
+            },
             ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
             // Integer operands stay integers (checked; an overflow or a float
             // operand goes to f64), as in MongoDB: every operation used to run
@@ -935,6 +956,32 @@ impl Num {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #59: string length in code points; `$size` stays array-only
+    #[test]
+    fn test_project_str_len_cp() {
+        let stage = ProjectStage::from_json(&json!({
+            "n": {"$strLenCP": "$text"},
+            "m": {"$strLenCP": ["$text"]},
+            "lit": {"$strLenCP": "abc"},
+            "size": {"$size": "$text"}
+        }))
+        .unwrap();
+        let result = stage
+            .execute(vec![
+                json!({"text": "héllo"}),
+                json!({"text": 5}),
+                json!({}),
+            ])
+            .unwrap();
+        assert_eq!(result[0]["n"], json!(5));
+        assert_eq!(result[0]["m"], json!(5));
+        assert_eq!(result[0]["lit"], json!(3));
+        assert_eq!(result[0]["size"], Value::Null);
+        assert_eq!(result[1]["n"], Value::Null);
+        assert_eq!(result[2]["n"], Value::Null);
+        assert!(ProjectStage::from_json(&json!({"n": {"$strLenCP": ["$a", "$b"]}})).is_err());
+    }
 
     #[test]
     fn test_project_multiply() {

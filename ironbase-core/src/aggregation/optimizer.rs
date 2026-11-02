@@ -27,27 +27,24 @@ use serde_json::Value;
 // PATTERN DETECTION TYPES
 // ============================================================================
 
-/// Simplified group _id representation
+/// Group `_id` shape, as far as the optimizer reads it (#107: the
+/// field/expression detail was computed and never read)
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupIdKind {
+    /// `_id: null`: one group
     Null,
-    Field(String),
-    Expression, // Compound or expression-based _id (not optimizable)
+    /// Any other `_id`
+    Other,
 }
 
-/// Simplified accumulator representation for optimization
+/// Accumulator shape, as far as the optimizer reads it (#107: the per-kind
+/// field variants were computed and never read)
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccumulatorKind {
-    Count(i64),       // $sum: constant
-    SumField(String), // $sum: "$field"
-    AvgField(String),
-    MinField(String),
-    MaxField(String),
-    FirstField(String),
-    LastField(String),
-    PushField(String),
-    AddToSetField(String),
-    Expression,
+    /// `$sum: <constant>`
+    Count(i64),
+    /// Any other accumulator
+    Other,
 }
 
 impl AccumulatorKind {
@@ -75,9 +72,7 @@ impl GroupShape {
     pub fn from_group_stage(group: &GroupStage) -> Self {
         let id_kind = match &group.id {
             GroupId::Null => GroupIdKind::Null,
-            GroupId::Field(f) => GroupIdKind::Field(f.clone()),
-            GroupId::Substring { .. } => GroupIdKind::Expression,
-            GroupId::Object(_) => GroupIdKind::Expression, // Not optimizable
+            _ => GroupIdKind::Other,
         };
 
         let accumulators: Vec<(String, AccumulatorKind)> = group
@@ -86,46 +81,7 @@ impl GroupShape {
             .map(|(name, acc)| {
                 let kind = match acc {
                     Accumulator::Sum(SumExpression::Constant(n)) => AccumulatorKind::Count(*n),
-                    Accumulator::Sum(SumExpression::Field(f)) => {
-                        AccumulatorKind::SumField(f.clone())
-                    }
-                    Accumulator::Avg(f) => AccumulatorKind::AvgField(f.clone()),
-                    Accumulator::Min(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::MinField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
-                    Accumulator::Max(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::MaxField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
-                    Accumulator::First(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::FirstField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
-                    Accumulator::Last(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::LastField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
-                    Accumulator::Push(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::PushField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
-                    Accumulator::AddToSet(expr) => match expr {
-                        crate::aggregation::types::ValueExpression::Field(f) => {
-                            AccumulatorKind::AddToSetField(f.clone())
-                        }
-                        _ => AccumulatorKind::Expression,
-                    },
+                    _ => AccumulatorKind::Other,
                 };
                 (name.clone(), kind)
             })

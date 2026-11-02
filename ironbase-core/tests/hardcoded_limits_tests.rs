@@ -759,3 +759,48 @@ fn test_cumulative_unwind_limit() {
         "Should fail when cumulative unwind exceeds limit"
     );
 }
+
+/// #43: a `$push` that grows a document past `MAX_DOCUMENT_SIZE_BYTES` is
+/// refused by both storages, and the stored document is unchanged.
+/// `MemoryStorage` accepted it, so the in-memory database kept documents the
+/// file storage refuses.
+#[test]
+fn test_push_past_document_limit_is_refused_by_both_storages() {
+    macro_rules! check {
+        ($db:expr) => {{
+        let db = $db;
+        let chunk = "x".repeat(24 * 1024 * 1024);
+        db.insert_one("big", json_to_hashmap(json!({"_id": 1, "parts": [chunk]})))
+            .unwrap();
+        // 48 MB: allowed
+        db.update_one(
+            "big",
+            &json!({"_id": 1}),
+            &json!({"$push": {"parts": "x".repeat(24 * 1024 * 1024)}}),
+        )
+        .unwrap();
+        // 72 MB: refused
+        let err = db
+            .update_one(
+                "big",
+                &json!({"_id": 1}),
+                &json!({"$push": {"parts": "x".repeat(24 * 1024 * 1024)}}),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds max size"), "{err}");
+        let docs = db
+            .collection("big")
+            .unwrap()
+            .find(&json!({"_id": 1}))
+            .unwrap();
+        assert_eq!(docs[0]["parts"].as_array().unwrap().len(), 2);
+        }};
+    }
+
+    check!(&create_test_db());
+    let dir = tempfile::TempDir::new().unwrap();
+    let file_db =
+        DatabaseCore::<ironbase_core::storage::StorageEngine>::open(dir.path().join("big.mlite"))
+            .unwrap();
+    check!(&file_db);
+}
