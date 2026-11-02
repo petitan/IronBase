@@ -177,6 +177,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Batch mode: see the inserts acknowledged before this call
         self.flush_pending_writes()?;
         self.check_not_closed()?;
+        // An expired or cancelled request fails here too: the fast paths
+        // below return without reaching the per-chunk checks (#107)
+        if let Some(ctx) = ctx {
+            ctx.check_cancelled()?;
+        }
 
         // Fast path: empty query = count all (O(1))
         if Self::query_matches_all(query_json) {

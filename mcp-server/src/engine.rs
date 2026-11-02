@@ -237,6 +237,18 @@ impl IronBaseService {
         // Get current dynamic limits from LimitsManager
         let script_limits = self.limits_manager.get_limits();
 
+        // A script is authorized on `_system.scripts` only: the collections
+        // its db_* functions use are checked for this caller against the
+        // same rules (#42)
+        let _script_access = if matches!(request.name.as_str(), "script_run" | "script_exec") {
+            match self.acl_manager.snapshot() {
+                Ok(acl) => Some(crate::scripting::set_script_access(acl, ctx.caller.clone())),
+                Err(e) => return ToolResult::AccessDenied(format!("Access denied: {}", e)),
+            }
+        } else {
+            None
+        };
+
         let result = match dispatch_tool(
             &request.name,
             request.arguments.clone(),
@@ -505,6 +517,68 @@ mod tests {
             &ToolRequest::new("script_exec", serde_json::json!({"code": "1"})),
         );
         assert!(result.is_success(), "localhost script_exec denied");
+    }
+
+    /// #42: the `db_*` functions of a script are checked for the caller on
+    /// the collection they use, with the permission of the equivalent tool.
+    /// A script used to bypass a rule that restricted the caller.
+    #[test]
+    fn test_script_db_functions_are_acl_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = test_service(dir.path());
+        let ctx = ServiceContext::localhost();
+        service
+            .adapter()
+            .insert_one("audit_logs", serde_json::json!({"msg": "keep me"}))
+            .unwrap();
+        service
+            .adapter()
+            .insert_one("notes", serde_json::json!({"msg": "free"}))
+            .unwrap();
+        let set = service.execute_tool(
+            &ctx,
+            &ToolRequest::new(
+                "acl_set",
+                serde_json::json!({"collection": "audit_logs",
+                    "rules": [{"principal": "interface:localhost", "permissions": "read"}]}),
+            ),
+        );
+        assert!(set.is_success(), "acl_set failed");
+        let run = |code: &str| match service.execute_tool(
+            &ctx,
+            &ToolRequest::new("script_exec", serde_json::json!({ "code": code })),
+        ) {
+            ToolResult::Success(v) => v["result"].clone(),
+            other => panic!("script_exec did not run: {:?}", other.is_success()),
+        };
+
+        // The direct tool call is denied ...
+        let direct = service.execute_tool(
+            &ctx,
+            &ToolRequest::new(
+                "delete_many",
+                serde_json::json!({"collection": "audit_logs", "filter": {}}),
+            ),
+        );
+        assert!(matches!(direct, ToolResult::AccessDenied(_)));
+        // ... and so is the same write from a script
+        let denied = run("db_delete_many(\"audit_logs\", #{})");
+        assert!(
+            denied.as_str().is_some_and(|s| s.contains("Access denied")),
+            "{denied}"
+        );
+        let count = |c: &str| {
+            service
+                .adapter()
+                .count_documents(c, serde_json::json!({}))
+                .unwrap()
+        };
+        assert_eq!(count("audit_logs"), 1);
+
+        // Reading it stays allowed, other collections are not restricted
+        assert_eq!(run("db_count(\"audit_logs\", #{})"), serde_json::json!(1));
+        assert_eq!(run("db_delete_many(\"notes\", #{})"), serde_json::json!(1));
+        assert_eq!(count("notes"), 0);
     }
 
     /// M2: every collection argument is checked, not only the first one.

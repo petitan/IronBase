@@ -759,3 +759,100 @@ fn test_cumulative_unwind_limit() {
         "Should fail when cumulative unwind exceeds limit"
     );
 }
+
+/// #43: a `$push` that grows a document past `MAX_DOCUMENT_SIZE_BYTES` is
+/// refused by both storages, and the stored document is unchanged.
+/// `MemoryStorage` accepted it, so the in-memory database kept documents the
+/// file storage refuses.
+#[test]
+fn test_push_past_document_limit_is_refused_by_both_storages() {
+    macro_rules! check {
+        ($db:expr) => {{
+        let db = $db;
+        let chunk = "x".repeat(24 * 1024 * 1024);
+        db.insert_one("big", json_to_hashmap(json!({"_id": 1, "parts": [chunk]})))
+            .unwrap();
+        // 48 MB: allowed
+        db.update_one(
+            "big",
+            &json!({"_id": 1}),
+            &json!({"$push": {"parts": "x".repeat(24 * 1024 * 1024)}}),
+        )
+        .unwrap();
+        // 72 MB: refused
+        let err = db
+            .update_one(
+                "big",
+                &json!({"_id": 1}),
+                &json!({"$push": {"parts": "x".repeat(24 * 1024 * 1024)}}),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds max size"), "{err}");
+        let docs = db
+            .collection("big")
+            .unwrap()
+            .find(&json!({"_id": 1}))
+            .unwrap();
+        assert_eq!(docs[0]["parts"].as_array().unwrap().len(), 2);
+        }};
+    }
+
+    check!(&create_test_db());
+    let dir = tempfile::TempDir::new().unwrap();
+    let file_db =
+        DatabaseCore::<ironbase_core::storage::StorageEngine>::open(dir.path().join("big.mlite"))
+            .unwrap();
+    check!(&file_db);
+}
+
+/// #43 follow-up: a write refused for its size leaves the indexes as they
+/// were. The batch paths (`update_many`, `insert_many`) updated the indexes
+/// before the storage write, so a refused document left index entries that
+/// storage did not have.
+#[test]
+fn test_refused_oversized_batch_leaves_indexes_consistent() {
+    macro_rules! check {
+        ($db:expr) => {{
+            let db = $db;
+            let big = "x".repeat(40 * 1024 * 1024);
+            db.insert_one("c", json_to_hashmap(json!({"_id": 1, "k": "a", "s": big})))
+                .unwrap();
+            db.collection("c")
+                .unwrap()
+                .create_index("k".into(), false, false)
+                .unwrap();
+
+            // 40 MB + 40 MB: refused, the index keeps "a"
+            let err = db
+                .update_many(
+                    "c",
+                    &json!({"_id": 1}),
+                    &json!({"$set": {"k": "b", "t": "y".repeat(40 * 1024 * 1024)}}),
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("exceeds max size"), "{err}");
+            let coll = db.collection("c").unwrap();
+            assert_eq!(coll.count_documents(&json!({"k": "a"})).unwrap(), 1);
+            assert_eq!(coll.count_documents(&json!({"k": "b"})).unwrap(), 0);
+
+            let err = db
+                .insert_many(
+                    "c",
+                    vec![json_to_hashmap(
+                        json!({"_id": 2, "k": "c", "s": "z".repeat(70 * 1024 * 1024)}),
+                    )],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("exceeds max size"), "{err}");
+            assert_eq!(coll.count_documents(&json!({"k": "c"})).unwrap(), 0);
+            assert_eq!(coll.count_documents(&json!({})).unwrap(), 1);
+        }};
+    }
+
+    check!(&create_test_db());
+    let dir = tempfile::TempDir::new().unwrap();
+    check!(
+        &DatabaseCore::<ironbase_core::storage::StorageEngine>::open(dir.path().join("c.mlite"))
+            .unwrap()
+    );
+}

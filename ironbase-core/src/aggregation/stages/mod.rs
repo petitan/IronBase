@@ -3,6 +3,7 @@
 
 mod accumulator;
 mod count_stage;
+pub(crate) use count_stage::count_output;
 mod group_stage;
 mod limit_stage;
 mod match_stage;

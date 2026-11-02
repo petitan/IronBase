@@ -180,6 +180,7 @@ pub mod optimizer;
 mod pipeline;
 pub mod profiles;
 mod stages;
+pub(crate) use stages::count_output;
 pub mod stream;
 mod types;
 

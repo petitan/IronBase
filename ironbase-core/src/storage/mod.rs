@@ -127,6 +127,22 @@ pub const HEADER_SIZE: u64 = 256; // Fixed header size
 // Re-export from central limits module
 pub(crate) use crate::limits::MAX_DOCUMENT_SIZE_BYTES;
 
+/// Refuse a document record over `MAX_DOCUMENT_SIZE_BYTES` before it is
+/// written. Every storage checks the same limit (must match the read-side
+/// checks of `read_data`/`read_data_at`): `MemoryStorage` accepted documents
+/// the file storage refuses (#43).
+pub(crate) use io::check_record_size;
+
+pub(crate) fn check_document_size(len: usize) -> Result<()> {
+    if len > MAX_DOCUMENT_SIZE_BYTES {
+        return Err(IronBaseError::InvalidQuery(format!(
+            "Document exceeds max size: {} bytes (limit: {} bytes)",
+            len, MAX_DOCUMENT_SIZE_BYTES
+        )));
+    }
+    Ok(())
+}
+
 /// Database file header
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {

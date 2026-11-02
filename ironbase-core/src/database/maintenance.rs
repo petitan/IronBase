@@ -282,6 +282,7 @@ impl DatabaseCore<StorageEngine> {
 
         // 1. Flush all indexes to disk first (like MongoDB's checkpoint)
         let (indexes_flushed, watermark) = self.flush_all_indexes_with_watermark()?;
+        self.record_vector_counts();
 
         // 2. Flush metadata and clear WAL. The exclusive persist gate waits for
         // auto-commits that are already in the WAL but not yet in storage
@@ -1070,7 +1071,44 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
             }
         }
+        self.record_vector_counts();
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Store each loaded vector index's size in its metadata, so the
+    /// persisted `vector_count` follows the index instead of keeping the
+    /// count at creation (#51). Called after the index flushes, before the
+    /// metadata is written. Locks in the order of `list_vector_indexes`
+    /// (storage, then indexes); both are released before the storage write.
+    fn record_vector_counts(&self) {
+        for (collection, index_manager) in self.index_managers_snapshot() {
+            let counts: Vec<(String, usize)> = {
+                let storage = self.storage.read();
+                let manager = index_manager.read();
+                let mut counts = Vec::new();
+                if let Some(meta) = storage.get_collection_meta(&collection) {
+                    for idx in &meta.vector_indexes {
+                        if let Some(hnsw) = manager.get_vector_index(&idx.name) {
+                            if hnsw.len() != idx.vector_count {
+                                counts.push((idx.name.clone(), hnsw.len()));
+                            }
+                        }
+                    }
+                }
+                counts
+            };
+            if counts.is_empty() {
+                continue;
+            }
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&collection) {
+                for idx in &mut meta.vector_indexes {
+                    if let Some((_, n)) = counts.iter().find(|(name, _)| *name == idx.name) {
+                        idx.vector_count = *n;
+                    }
+                }
+            }
+        }
     }
 
     /// Get database path

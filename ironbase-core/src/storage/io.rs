@@ -122,6 +122,23 @@ pub(crate) fn read_document_from_file(
 /// JSON prefix of a stored document record that names its collection.
 const COLLECTION_MARK_PREFIX: &[u8] = b"{\"_collection\":";
 
+/// Size check of a document record of `collection` before it is written:
+/// the record carries the collection mark ([`mark_document_collection`]), so
+/// its length is bounded by the document plus the mark. Exact unless the
+/// document already holds a `_collection` key (then a few bytes stricter).
+/// Lets a caller refuse an oversized document before it changes any index,
+/// with the bytes it serializes anyway, and lets `MemoryStorage` apply the
+/// same limit as the file storage (#43).
+pub(crate) fn check_record_size(collection: &str, data: &[u8]) -> crate::error::Result<()> {
+    let mark = if data.first() == Some(&b'{') {
+        // prefix + JSON string of the name + the ',' after it
+        COLLECTION_MARK_PREFIX.len() + serde_json::to_string(collection)?.len() + 1
+    } else {
+        0
+    };
+    super::check_document_size(data.len() + mark)
+}
+
 /// Put `"_collection":<collection>` first in a stored document's JSON.
 ///
 /// Metadata rebuild (`rebuild_from_documents`) attributes documents to
@@ -291,16 +308,7 @@ impl StorageEngine {
     /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
     /// to prevent overwriting metadata that was previously flushed.
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
-        use crate::error::IronBaseError;
-
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset
         let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
@@ -509,14 +517,7 @@ impl StorageEngine {
         let marked = mark_document_collection(collection, data)?;
         let data: &[u8] = &marked;
 
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end
@@ -594,14 +595,7 @@ impl StorageEngine {
         let marked = mark_document_collection(collection, data)?;
         let data: &[u8] = &marked;
 
-        // Validate document size (must match read-side checks in read_data/read_data_at)
-        if data.len() > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::InvalidQuery(format!(
-                "Document exceeds max size: {} bytes (limit: {} bytes)",
-                data.len(),
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
+        super::check_document_size(data.len())?;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end

@@ -163,7 +163,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 } => {
                     // Use count_documents() instead of full scan - O(1) for unfiltered!
                     let query = filter.unwrap_or_else(|| serde_json::json!({}));
-                    let count = self.count_documents(&query)?;
+                    // The pipeline's deadline applies here too, as on the
+                    // streaming path (#107)
+                    let exec_ctx =
+                        crate::execution::ExecutionContext::new().with_deadline_opt(ctx.deadline());
+                    let count = self.count_documents_with_ctx(&query, Some(&exec_ctx))?;
                     // saturating_mul to match the streaming accumulator path, which
                     // saturates on overflow (accumulator.rs $sum: <constant>). Plain `*`
                     // would panic in debug builds and silently wrap in release.
@@ -175,22 +179,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         multiplier
                     );
 
-                    // MongoDB semantics: a `{$group: {_id: null}}` or `$count` over an
-                    // EMPTY input set produces NO document. The streaming $group path
-                    // (group_stage::execute_streaming_with_context) and CountStage::execute
-                    // both return [] for zero input rows, so the fast path must match them
-                    // instead of emitting a spurious `{_id: null, <field>: 0}` / `{field: 0}`.
-                    let mut docs = if count == 0 {
-                        Vec::new()
-                    } else {
-                        let mut doc = serde_json::json!({ output_field: result_count });
-                        if include_id {
-                            if let Some(obj) = doc.as_object_mut() {
-                                obj.insert("_id".to_string(), serde_json::Value::Null);
-                            }
-                        }
-                        vec![doc]
-                    };
+                    // No document for an empty input, like the streaming
+                    // $group / $count paths (count_output)
+                    let mut docs = crate::aggregation::count_output(
+                        &output_field,
+                        count,
+                        result_count,
+                        include_id,
+                    );
 
                     let stages = pipeline.stages();
                     let group_idx =

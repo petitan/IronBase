@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — C#: collections release their native handle (#41) (ironbase-core 0.3.457, mcp-server 1.0.655)
+
+- **`IronBaseCollection<T>` is `IDisposable`.** Its native handle sits in the existing, never-used
+  `CollectionHandle` SafeHandle. `Dispose()` releases it, and so does the garbage collector for an
+  undisposed collection. Before, every `GetCollection` call kept a native handle, and through it the
+  whole `DatabaseCore`, alive until the process exited.
+- After `Dispose()`, or after the client's `Dispose()`, a call throws `ObjectDisposedException`.
+  Previously, use after the client's dispose reached Rust and failed with `DatabaseClosed`.
+  There was no use-after-free: the Rust handle holds an `Arc`.
+- Tests: `CollectionDisposeTests` (dispose, client dispose, 1000 undisposed collections released by
+  the finalizer). The existing 169 C# tests pass.
+
+
+### Fixed — document size in memory, persisted vector count, `$strLenCP`, `$count` (#43, #51, #59, #107) (ironbase-core 0.3.456, mcp-server 1.0.654)
+
+- **`MemoryStorage` refuses a document over the 64 MB limit (#43),** like the file storage. A `$push`
+  that grows a document past the limit is refused by both, and the stored document is unchanged. The
+  five copies of the size check share one `storage::check_document_size`. No separate element-count
+  cap: the byte limit bounds the array.
+- **A write refused for its size leaves the indexes as they were (#43, review of #249).** Some write
+  paths changed the indexes before the storage write: `update_many`, `insert_many` (Safe and raw),
+  `update_one_raw` and `insert_one_raw`. A refused document left index entries that storage did not
+  have. The file storage had this problem too. These paths now serialize and size-check first, then
+  update the indexes, then write. The batch paths do this per chunk: a refused document stops the
+  batch before its chunk touches an index. `storage::check_record_size` includes the `_collection`
+  mark, so `MemoryStorage` and the pre-checks apply the same limit as the file record.
+- **The persisted `vector_count` follows the index (#51).** It was written once at index creation
+  (0 for an empty collection); only `list_vector_indexes` corrected it from memory. A checkpoint and
+  every full index flush (close, drop, rename, compaction) now store the size of each loaded vector
+  index (`record_vector_counts`).
+- **`$strLenCP` in `$project` (#59):** the string length in code points (`"héllo"` → 5), from a
+  field or a literal. A missing or non-string value gives `null`, like `$substr`. `$size` stays
+  array-only, as in MongoDB. The Rhai part of #59 was a usage error: `db_find` returns
+  `#{documents, count}`.
+- **`$count` (#107):**
+  - Its output field must not start with `$` or contain `.`, as in MongoDB.
+  - The count-only fast path honours the pipeline deadline, like the streaming path. This includes
+    the O(1), `_id` and exact-index counts, which returned before any check.
+  - Every count path builds its result in one `count_output`.
+  - The optimizer's write-only `GroupIdKind` / `AccumulatorKind` variants are collapsed to
+    `Null`/`Other` and `Count`/`Other`.
+  - Not changed: a `$count` after `$project` still counts against the no-`$match` document limit.
+
+
+### Security — scripts: collection ACL, `eval` (#42, #40, #34) (ironbase-core 0.3.455, mcp-server 1.0.653)
+
+- **The `db_*` functions of a script are checked against the collection ACL (#42).** `script_exec` /
+  `script_run` are authorized on `_system.scripts` only, and the collections a script used were
+  never checked. A localhost caller whose rights an ACL rule restricted, for example read-only on
+  `audit_logs`, could still delete from it with `db_delete_many`. `execute_tool` now sets the caller
+  and an ACL snapshot for the script run. Each of the 37 `db_*` functions checks its collection with
+  the permission of the MCP tool it corresponds to (`db_find` → `find`, `db_delete_many` →
+  `delete_many`, `db_create_index` → `index_create`, …). A denied call returns
+  `"Error: Access denied: …"`, like the other `db_*` errors. Without a service context (stdio,
+  internal runs) nothing is checked, like direct tool calls on those paths.
+- **`eval` is disabled in scripts (#40).** Recursion and expression nesting already stop with an
+  error at Rhai's limits; fixed higher values overflowed the native stack of a debug-build thread, so
+  those limits stay. The operation, time, size and memory limits come from the October audit (M4, M5).
+- **Removed: the transitional `dedup_threshold` rejection** in the `db_hybrid_search` options (#34).
+  MMR is configured with `deduplicate` / `mmr_lambda`.
+
+
 ### Fixed — updating a document over ~32 MB made the database unopenable (#246) (ironbase-core 0.3.454, mcp-server 1.0.652)
 
 - **An update's WAL record holds the old and the new document**, because recovery removes the old

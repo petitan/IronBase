@@ -386,6 +386,8 @@ pub enum ProjectExpression {
     Size(String), // Field name (e.g., "$tags" -> "tags")
     /// $substr - substring of a string field
     Substr(StringOperand, usize, usize),
+    /// $strLenCP - length of a string in Unicode code points (#59)
+    StrLenCP(StringOperand),
     /// $reduce - apply a custom reduction to an array
     Reduce(ReduceExpression),
     /// $add - add numbers: { $add: ["$price", "$tax"] }
