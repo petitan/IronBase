@@ -48,10 +48,19 @@ pub const MAX_METADATA_SIZE: usize = 64 * 1024 * 1024;
 /// Struktúra: 8 (tx_id) + 1 (type) + 4 (len) = 13 byte
 pub const WAL_HEADER_SIZE: usize = 13;
 
-/// Maximum WAL entry méret bájtokban (64 MB)
+/// A WAL-bejegyzés borítéka (collection név, `doc_id`, műveleti címke) számára
+/// fenntartott hely a dokumentumokon felül
+pub const WAL_ENTRY_ENVELOPE_RESERVE: usize = 1024 * 1024;
+
+/// Maximum WAL entry méret bájtokban (129 MB)
 ///
-/// Biztonsági limit a túl nagy WAL bejegyzések ellen.
-pub const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+/// Biztonsági limit a túl nagy WAL bejegyzések ellen (a reader ennél nagyobb
+/// hosszt sérülésnek vesz). Egy `Update` bejegyzés a régi ÉS az új dokumentumot
+/// is tartalmazza (a recovery index-replay a régi kulcsokat a régi dokumentumból
+/// törli), ezért a limit két maximális dokumentum + boríték. 64 MB-nál egy
+/// ~32 MB feletti dokumentum frissítése olvashatatlan WAL-t írt, és az
+/// adatbázis nem volt megnyitható (#246).
+pub const MAX_WAL_ENTRY_SIZE: usize = 2 * MAX_DOCUMENT_SIZE_BYTES + WAL_ENTRY_ENVELOPE_RESERVE;
 
 // ============================================================================
 // Index Limits
@@ -228,7 +237,8 @@ mod tests {
     fn test_storage_limits_are_64mb() {
         assert_eq!(MAX_DOCUMENT_SIZE_BYTES, 64 * 1024 * 1024);
         assert_eq!(MAX_METADATA_SIZE, 64 * 1024 * 1024);
-        assert_eq!(MAX_WAL_ENTRY_SIZE, 64 * 1024 * 1024);
+        // An update entry holds two documents plus its envelope (#246)
+        assert_eq!(MAX_WAL_ENTRY_SIZE, 129 * 1024 * 1024);
     }
 
     #[test]
