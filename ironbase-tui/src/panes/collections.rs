@@ -53,7 +53,8 @@ fn render_collections_list(frame: &mut Frame, area: Rect, app: &App, theme: &The
     let visible_height = inner.height as usize;
     // Calculate scroll offset to keep selected item visible
     let scroll_offset = if app.selected_collection >= visible_height {
-        app.selected_collection.saturating_sub(visible_height - 1)
+        app.selected_collection
+            .saturating_sub(visible_height.saturating_sub(1))
     } else {
         0
     };

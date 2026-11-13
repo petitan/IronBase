@@ -24,8 +24,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Format  "),
-        Span::styled("[Shift+J/C]", Style::default().fg(theme.accent)),
-        Span::raw(" JSON/CSV  "),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Exportalas  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
@@ -48,9 +46,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
 
     let format_line = Line::from(vec![
         Span::raw(" Formatum: "),
-        Span::styled("[J] JSON", json_style),
+        Span::styled("JSON", json_style),
         Span::raw("  "),
-        Span::styled("[C] CSV", csv_style),
+        Span::styled("CSV", csv_style),
     ]);
     frame.render_widget(Paragraph::new(format_line), chunks[1]);
 
@@ -64,10 +62,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     frame.render_widget(Paragraph::new(path_line), chunks[2]);
 
     // Status info
+    let filtered = if state.filtered { " - szűrt" } else { "" };
     let info_line = Line::from(vec![Span::styled(
         format!(
-            " Kollekció: {} ({} dokumentum)",
-            state.collection, state.doc_count
+            " Kollekció: {} ({} dokumentum{})",
+            state.collection, state.doc_count, filtered
         ),
         Style::default().fg(theme.muted),
     )]);

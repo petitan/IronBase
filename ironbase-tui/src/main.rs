@@ -41,9 +41,7 @@ fn parse_bool_flexible(s: &str) -> Result<bool, String> {
     }
 }
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    },
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -77,20 +75,14 @@ struct Cli {
     server: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    // Load config
-    let mut config = Config::load();
-
-    // CLI overrides config
-    if let Some(url) = cli.url {
-        config.mcp_url = url;
+/// Apply CLI/env overrides to the effective (runtime) config
+fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
+    if let Some(url) = &cli.url {
+        config.mcp_url = url.clone();
         config.transport = TransportMode::Http;
     }
-    if let Some(key) = cli.api_key {
-        config.mcp_api_key = Some(key);
+    if let Some(key) = &cli.api_key {
+        config.mcp_api_key = Some(key.clone());
     }
     if cli.insecure {
         config.mcp_insecure = true;
@@ -98,6 +90,39 @@ async fn main() -> anyhow::Result<()> {
     if cli.server.is_some() {
         config.transport = TransportMode::Stdio;
     }
+}
+
+/// The config to write on exit: the persisted one plus what the user changed
+/// inside the TUI (theme, last database). CLI/env overrides live only in the
+/// effective config (`app.config`), so a key or `--insecure` given on the
+/// command line never reaches the file.
+fn config_to_save(mut persisted: Config, app: &App) -> Config {
+    persisted.theme = app.theme_name;
+    persisted.last_db_path = app.db_path.clone();
+    persisted
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Load the persisted config. A broken file is reported and never
+    // overwritten on exit.
+    let (persisted_config, config_error) = match Config::try_load() {
+        Ok(config) => (config, None),
+        Err(e) => {
+            eprintln!(
+                "Config hiba: {} - alapertelmezett beallitasokkal indul, a fajl nem lesz felulirva",
+                e
+            );
+            (Config::default(), Some(e))
+        }
+    };
+
+    // Effective runtime config: CLI/env overrides apply to this copy only and
+    // are never written back to the config file
+    let mut config = persisted_config.clone();
+    apply_cli_overrides(&mut config, &cli);
 
     // Get db_path for later use
     let db_path = cli.database.or_else(|| config.last_db_path.clone());
@@ -110,14 +135,14 @@ async fn main() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(move |panic_info| {
         // Restore terminal before showing panic message
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         original_hook(panic_info);
     }));
 
     // Setup terminal FIRST - before DB connection (so we can show splash)
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -187,21 +212,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // Save config
-    app.config.theme = app.theme_name;
-    app.config.last_db_path = app.db_path.clone();
-    let _ = app.config.save();
+    // Save config (only what the user changed inside the TUI)
+    match config_error {
+        None => {
+            let _ = config_to_save(persisted_config, &app).save();
+        }
+        Some(e) => eprintln!("Config hiba: {} - a beallitasok nem lettek elmentve", e),
+    }
 
     // Close MCP connection
+    // In stdio mode this waits for the server's graceful shutdown (flush), which
+    // can take a while on a large database: say so instead of sitting silent.
     if let Some(ref db) = app.db {
-        let _ = db.close().await;
+        let close = db.close();
+        tokio::pin!(close);
+        tokio::select! {
+            _ = &mut close => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                eprintln!("Varakozas a szerver leallasara...");
+                let _ = close.await;
+            }
+        }
     }
 
     result
@@ -237,7 +271,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
                     // Update page_size when terminal is resized
                     if app.update_page_size(height) => {
                         // Refresh documents with new page size
-                        let _ = app.refresh_documents_async().await;
+                        app.reload_documents_async().await;
                     }
                 _ => {}
             }
@@ -360,7 +394,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Update) => handle_update_key(app, key),
         Some(Modal::Database) => handle_database_key_async(app, key).await,
         Some(Modal::ApiKey) => handle_api_key_key_async(app, key).await,
-        Some(Modal::Fulltext) => handle_fulltext_key_async(app, key).await,
+        Some(Modal::Fulltext) => handle_fulltext_key_async(app, key, modifiers).await,
         Some(Modal::Acl) => handle_acl_key_async(app, key).await,
         Some(Modal::Listener) => handle_listener_key_async(app, key).await,
         Some(Modal::VectorSearch) => handle_vector_key_async(app, key, modifiers).await,
@@ -447,10 +481,34 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                 // Clone collection name before borrowing app mutably
                 let collection = app.current_collection_name().map(|s| s.to_string());
                 if let Some(coll) = collection {
-                    app.acl_state = modals::acl::AclState::new();
-                    app.acl_state.is_localhost = true;
-                    app.acl_state.start_edit(coll);
-                    app.modal = Some(Modal::Acl);
+                    // Load the current ACL first: acl_set replaces the whole rule list,
+                    // so an editor opened empty would overwrite the existing rules
+                    let existing = match app.db {
+                        Some(ref db) => db.acl_get(&coll).await.map_err(|e| e.to_string()),
+                        None => Err("Nincs megnyitva adatbázis".to_string()),
+                    };
+                    match existing {
+                        Ok(acl) => {
+                            let info = acl
+                                .as_ref()
+                                .and_then(modals::acl::CollectionAclInfo::from_value);
+                            // Never load a mangled copy: saving it would
+                            // corrupt the stored rules
+                            if let Some(message) =
+                                info.as_ref().and_then(|info| info.uneditable_message())
+                            {
+                                app.set_error(message);
+                            } else {
+                                let rules = info.map(|info| info.rules).unwrap_or_default();
+                                app.acl_state = modals::acl::AclState::new();
+                                app.acl_state.is_localhost = true;
+                                app.acl_state.start_edit(coll);
+                                app.acl_state.load_edit_rules(&rules);
+                                app.modal = Some(Modal::Acl);
+                            }
+                        }
+                        Err(e) => app.set_error(format!("ACL betoltese sikertelen: {}", e)),
+                    }
                 }
             }
         }
@@ -799,13 +857,15 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
 
                             // Reset UI state and refresh collections
                             app.reset_for_new_database();
-                            if let Err(e) = app.refresh_collections_async().await {
-                                app.set_error(format!("Kollekcio betoltes hiba: {}", e));
-                            }
+                            let refreshed = app.refresh_collections_async().await;
 
                             // Close modal after success
                             app.close_modal();
-                            app.set_status(format!("Adatbazis {}: {}", action, path));
+                            // set_status clears a stale error, so the load error must win
+                            match refreshed {
+                                Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
+                                Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                            }
                         }
                         Err(e) => {
                             app.database_state.loading = false;
@@ -866,13 +926,15 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
 
                     // Reset UI state and refresh collections
                     app.reset_for_new_database();
-                    if let Err(e) = app.refresh_collections_async().await {
-                        app.set_error(format!("Kollekcio betoltes hiba: {}", e));
-                    }
+                    let refreshed = app.refresh_collections_async().await;
 
                     // Close modal after success
                     app.close_modal();
-                    app.set_status(format!("Adatbazis {}: {}", action, path));
+                    // set_status clears a stale error, so the load error must win
+                    match refreshed {
+                        Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
+                        Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                    }
                 }
                 Err(e) => {
                     app.database_state.loading = false;
@@ -1494,12 +1556,17 @@ async fn handle_fulltext_open(app: &mut App) {
 }
 
 /// Async fulltext key handler
-async fn handle_fulltext_key_async(app: &mut App, key: KeyCode) {
+async fn handle_fulltext_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
         KeyCode::Esc => app.close_modal(),
         KeyCode::Tab => app.fulltext_state.next_field(),
-        KeyCode::Up | KeyCode::Char('k') => app.fulltext_state.select_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.fulltext_state.select_down(),
+        // Plain j/k belong to the query input; results: arrows or Ctrl+j/k
+        KeyCode::Up => app.fulltext_state.select_up(),
+        KeyCode::Down => app.fulltext_state.select_down(),
+        KeyCode::Char('k') if modifiers == KeyModifiers::CONTROL => app.fulltext_state.select_up(),
+        KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
+            app.fulltext_state.select_down()
+        }
         KeyCode::Left => app.fulltext_state.move_cursor_left(),
         KeyCode::Right => app.fulltext_state.move_cursor_right(),
         KeyCode::Backspace => app.fulltext_state.backspace(),
@@ -1606,22 +1673,8 @@ fn handle_document_search_key(app: &mut App, key: KeyCode) {
                 app.active_pane = crate::app::Pane::Detail;
             }
         }
-        KeyCode::Char('n') => {
-            // Next match
-            if !app.search.doc_matches.is_empty() {
-                app.goto_next_match();
-            } else {
-                app.search.insert_char('n');
-            }
-        }
-        KeyCode::Char('N') => {
-            // Previous match
-            if !app.search.doc_matches.is_empty() {
-                app.goto_prev_match();
-            } else {
-                app.search.insert_char('N');
-            }
-        }
+        // n/N are typed like any other character here; match navigation (n/N)
+        // lives in the Detail pane, where the modal lands after a successful search
         KeyCode::Char(c) => app.search.insert_char(c),
         KeyCode::Backspace => app.search.delete_char(),
         KeyCode::Left => app.search.cursor_left(),
@@ -1633,7 +1686,7 @@ fn handle_document_search_key(app: &mut App, key: KeyCode) {
 /// Async confirm key handler
 async fn handle_confirm_key_async(app: &mut App, key: KeyCode) {
     match key {
-        KeyCode::Esc => app.close_modal(),
+        KeyCode::Esc => app.close_confirm(),
         KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
             app.confirm_toggle();
         }
@@ -1645,7 +1698,7 @@ async fn handle_confirm_key_async(app: &mut App, key: KeyCode) {
             app.execute_confirm_action_async().await;
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
-            app.close_modal();
+            app.close_confirm();
         }
         _ => {}
     }
@@ -1724,7 +1777,7 @@ async fn handle_index_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
             KeyCode::Up | KeyCode::Char('k') => app.index_state.select_up(),
             KeyCode::Down | KeyCode::Char('j') => app.index_state.select_down(),
             KeyCode::Tab | KeyCode::Char('n') => app.index_state.start_create(),
-            KeyCode::Char('d') | KeyCode::Delete => app.execute_delete_index_async().await,
+            KeyCode::Char('d') | KeyCode::Delete => app.open_drop_index_confirm(),
             KeyCode::Char('a') => app.execute_analyze_index_async().await,
             _ => {}
         }
@@ -1811,8 +1864,6 @@ async fn handle_query_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
 
 /// Async export key handler
 async fn handle_export_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    use crate::modals::export::ExportFormat;
-
     match (key, modifiers) {
         (KeyCode::Esc, _) => app.close_modal(),
         (KeyCode::Enter, _) => {
@@ -1820,12 +1871,6 @@ async fn handle_export_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         }
         (KeyCode::Tab, _) => {
             app.export_state.toggle_format();
-        }
-        (KeyCode::Char('J'), KeyModifiers::SHIFT) => {
-            app.export_state.set_format(ExportFormat::Json);
-        }
-        (KeyCode::Char('C'), KeyModifiers::SHIFT) => {
-            app.export_state.set_format(ExportFormat::Csv);
         }
         (KeyCode::Backspace, _) => {
             app.export_state.backspace();
@@ -2039,7 +2084,8 @@ async fn handle_script_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
     // Handle confirmation dialog first if active
     if let Some(action) = app.script_state.confirm_action {
         match key {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            // Only an explicit 'y' confirms; Enter must not mean "yes" (see modals/confirm.rs)
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
                 app.script_state.confirm_action = None;
                 match action {
                     ScriptConfirmAction::DiscardChanges => {
@@ -2051,7 +2097,7 @@ async fn handle_script_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                     }
                 }
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
                 app.script_state.confirm_action = None;
             }
             _ => {}
@@ -2208,9 +2254,9 @@ async fn handle_script_history_key(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('r')
-            // Rollback to selected version
+            // Rollback to selected version (with confirmation)
             if !app.script_state.versions.is_empty() => {
-                app.rollback_script_async().await;
+                app.open_rollback_script_confirm();
             }
         _ => {}
     }
@@ -2611,39 +2657,8 @@ async fn handle_vector_list_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.vector_state.index_up(),
         KeyCode::Down | KeyCode::Char('j') => app.vector_state.index_down(),
 
-        // Delete index
-        KeyCode::Char('d') | KeyCode::Delete => {
-            if app.vector_state.indexes.is_empty() {
-                return;
-            }
-
-            let collection = app.vector_state.collection.clone();
-            let index_name = app.vector_state.indexes[app.vector_state.selected_index]
-                .name
-                .clone();
-
-            if let Some(ref db) = app.db {
-                match db.drop_vector_index(&collection, &index_name).await {
-                    Ok(()) => {
-                        app.vector_state.message = Some(format!("Index '{}' deleted!", index_name));
-
-                        // Refresh index list
-                        if let Ok(indexes) = db.list_vector_indexes(&collection).await {
-                            app.vector_state.update_indexes(indexes);
-                            if app.vector_state.selected_index >= app.vector_state.indexes.len()
-                                && !app.vector_state.indexes.is_empty()
-                            {
-                                app.vector_state.selected_index =
-                                    app.vector_state.indexes.len() - 1;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        app.vector_state.error = Some(format!("{}", e));
-                    }
-                }
-            }
-        }
+        // Delete index (with confirmation)
+        KeyCode::Char('d') | KeyCode::Delete => app.open_drop_vector_index_confirm(),
 
         _ => {}
     }
@@ -2783,13 +2798,13 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             }
         }
 
-        // Navigate results
-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE)
+        // Navigate results (plain j/k belong to the query input)
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL)
             if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
         {
             app.rag_state.search_result_up();
         }
-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE)
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL)
             if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
         {
             app.rag_state.search_result_down();
@@ -3167,21 +3182,8 @@ async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             }
         }
 
-        // Disable auto-embed
-        (KeyCode::Char('d'), _) => {
-            let collection = app.rag_state.collection.clone();
-            if let Some(ref db) = app.db {
-                match db.auto_embed_disable(&collection).await {
-                    Ok(_) => {
-                        app.rag_state.message = Some("Auto-embed disabled".to_string());
-                        app.rag_state.auto_embed_config = None;
-                    }
-                    Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
-                    }
-                }
-            }
-        }
+        // Disable auto-embed (with confirmation)
+        (KeyCode::Char('d'), _) => app.open_disable_auto_embed_confirm(),
 
         // Cache stats
         (KeyCode::Char('c'), _) => {
@@ -3198,20 +3200,8 @@ async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             }
         }
 
-        // Clear cache
-        (KeyCode::Char('x'), _) => {
-            if let Some(ref db) = app.db {
-                match db.embed_cache_clear().await {
-                    Ok(_) => {
-                        app.rag_state.cache_stats = None;
-                        app.rag_state.message = Some("Cache cleared".to_string());
-                    }
-                    Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
-                    }
-                }
-            }
-        }
+        // Clear cache (with confirmation)
+        (KeyCode::Char('x'), _) => app.open_clear_embed_cache_confirm(),
 
         // Test embed
         (KeyCode::Char('t'), _) => {
@@ -3234,27 +3224,8 @@ async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
         KeyCode::Up | KeyCode::Char('k') => app.rag_state.job_up(),
         KeyCode::Down | KeyCode::Char('j') => app.rag_state.job_down(),
 
-        // Cancel job
-        KeyCode::Char('x') => {
-            if let Some(job_id) = app.rag_state.selected_job_id() {
-                if let Some(ref db) = app.db {
-                    match db.embed_job_cancel(&job_id).await {
-                        Ok(_) => {
-                            app.rag_state.message = Some(format!("Job {} cancelled", job_id));
-                            // Refresh
-                            if let Ok(result) = db.embed_job_list(false).await {
-                                if let Some(jobs) = result.get("jobs").and_then(|v| v.as_array()) {
-                                    app.rag_state.jobs = jobs.clone();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            app.rag_state.error = Some(format!("{}", e));
-                        }
-                    }
-                }
-            }
-        }
+        // Cancel job (with confirmation)
+        KeyCode::Char('x') => app.open_cancel_embed_job_confirm(),
 
         // Refresh job list
         KeyCode::Char('r') => {
@@ -3277,5 +3248,44 @@ async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
         KeyCode::Tab => app.rag_state.next_tab(),
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI/env overrides are runtime-only: a key or `--insecure` given on the
+    /// command line used to be written to config.toml on exit
+    #[test]
+    fn test_cli_overrides_are_not_persisted() {
+        let cli = Cli::parse_from([
+            "tuti-tui",
+            "--api-key",
+            "sk-test",
+            "--insecure",
+            "--url",
+            "https://db.example:9000/mcp",
+        ]);
+        let persisted = Config::default();
+        let mut effective = persisted.clone();
+        apply_cli_overrides(&mut effective, &cli);
+        assert_eq!(effective.mcp_api_key.as_deref(), Some("sk-test"));
+        assert!(effective.mcp_insecure);
+        assert_eq!(effective.mcp_url, "https://db.example:9000/mcp");
+
+        let mut app = App::new(effective);
+        app.next_theme();
+        app.db_path = Some(PathBuf::from("/data/x.mlite"));
+
+        let saved = config_to_save(persisted.clone(), &app);
+        assert_eq!(saved.mcp_api_key, None);
+        assert!(!saved.mcp_insecure);
+        assert_eq!(saved.mcp_url, persisted.mcp_url);
+        assert_eq!(saved.transport, persisted.transport);
+        // What the user changed inside the TUI is saved
+        assert_eq!(saved.theme, app.theme_name);
+        assert_ne!(saved.theme, persisted.theme);
+        assert_eq!(saved.last_db_path, Some(PathBuf::from("/data/x.mlite")));
     }
 }

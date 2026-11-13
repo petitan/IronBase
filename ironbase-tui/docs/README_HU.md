@@ -8,35 +8,35 @@ Terminal User Interface az IronBase NoSQL adatbázishoz.
 
 ```bash
 # Release build
-cargo build --release -p ironbase-tui
+cargo build --release -p tuti-tui
 
 # A bináris itt lesz:
-./target/release/ironbase-tui
+./target/release/tuti-tui
 ```
 
 ## Használat
 
 ```bash
-# Alapértelmezett (localhost:8080)
-ironbase-tui
+# Alapértelmezett (http://127.0.0.1:8080)
+tuti-tui
 
 # Távoli szerver
-ironbase-tui --url https://192.168.0.136:8080/mcp
+tuti-tui --url https://192.168.0.136:8080/mcp
 
 # Self-signed tanúsítvány elfogadása
-ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 
 # API key-el
-ironbase-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
 
 # API key környezeti változóból
-IRONBASE_API_KEY=sk-xxx ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+IRONBASE_API_KEY=sk-xxx tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
 ## CLI Opciók
 
 ```
-ironbase-tui [OPTIONS] [DATABASE]
+tuti-tui [OPTIONS] [DATABASE]
 
 Arguments:
   [DATABASE]  Database file path (.mlite) - required for stdio transport
@@ -86,7 +86,7 @@ Options:
 | `d` | Dokumentum törlése |
 | `f` | Vizuális szűrő |
 | `i` | Dokumentum beszúrása |
-| `x` | Index kezelés |
+| `a`, majd `x` | Index kezelés (az akciók menüből) |
 | `y` | Másolás vágólapra |
 
 ### Globális
@@ -96,7 +96,8 @@ Options:
 | `Shift+I` | Szerver információk |
 | `Shift+U` | Frissítés ellenőrzés |
 | `Shift+K` | API Key kezelés |
-| `Shift+D` | Adatbázis váltás |
+| `Shift+D` | A kiválasztott kollekció törlése (Kollekciók panel, megerősítést kér) |
+| `a`, majd `b` | Adatbázis megnyitása / váltása (az akciók menüből) |
 
 ## HTTPS beállítás mkcert-tel
 
@@ -150,10 +151,10 @@ key_file = "./key.pem"
 
 ```bash
 # Nem kell --insecure, mert a CA megbízható
-ironbase-tui --url https://localhost:8080/mcp
+tuti-tui --url https://localhost:8080/mcp
 
 # Távoli gép esetén (ha a CA telepítve van ott is)
-ironbase-tui --url https://192.168.0.136:8080/mcp
+tuti-tui --url https://192.168.0.136:8080/mcp
 ```
 
 ### WSL2 / Cross-machine használat
@@ -171,7 +172,7 @@ mkcert -key-file key.pem -cert-file cert.pem localhost 127.0.0.1 172.19.152.126
 Ha nem akarod a CA-t telepíteni, használd az `--insecure` flaget:
 
 ```bash
-ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
 ## Konfiguráció
@@ -180,7 +181,7 @@ A konfiguráció helye: `~/.config/ironbase-tui/config.toml` (Linux/macOS) vagy 
 
 ```toml
 # Alapértelmezett MCP szerver URL
-mcp_url = "http://localhost:8080/mcp"
+mcp_url = "http://127.0.0.1:8080"
 
 # API key (opcionális)
 mcp_api_key = "sk-your-key"
@@ -188,8 +189,8 @@ mcp_api_key = "sk-your-key"
 # Self-signed tanúsítvány elfogadása
 mcp_insecure = false
 
-# Téma: "dark", "light", "nord", "dracula"
-theme = "dark"
+# Téma: "Claude", "Dark", "Light", "Ocean"
+theme = "Claude"
 ```
 
 ## Architektúra

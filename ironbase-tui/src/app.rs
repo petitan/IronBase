@@ -59,11 +59,8 @@ pub use crate::state::{
 
 // === UI Layout Constants ===
 
-/// Terminal overhead (header + command bar + borders)
-const TERMINAL_OVERHEAD: u16 = 4;
-
-/// Minimum document page size
-const MIN_PAGE_SIZE: u16 = 5;
+/// Minimum document page size (keeps the pagination maths away from zero)
+const MIN_PAGE_SIZE: usize = 1;
 
 /// Detail pane scroll step (also used for page jump in collections)
 const SCROLL_STEP: usize = 10;
@@ -227,14 +224,18 @@ impl App {
     /// Update page_size based on terminal height
     /// Returns true if page_size changed (requires document refresh)
     pub fn update_page_size(&mut self, terminal_height: u16) -> bool {
-        // Calculate available height for documents:
-        // terminal_height - header(1) - command_bar(1) - borders(2) = inner height
-        let new_page_size = terminal_height
-            .saturating_sub(TERMINAL_OVERHEAD)
-            .max(MIN_PAGE_SIZE) as usize;
+        // The page is exactly the rows the documents pane draws (same layout
+        // and row maths as the renderer), so no fetched row is ever invisible
+        let new_page_size =
+            crate::panes::documents::visible_rows(crate::ui::content_height(terminal_height))
+                .max(MIN_PAGE_SIZE);
 
         if new_page_size != self.page_size {
             self.page_size = new_page_size;
+            // Keep the selected row inside the (possibly smaller) window
+            if self.selected_document >= self.doc_scroll_offset + self.page_size {
+                self.doc_scroll_offset = self.selected_document + 1 - self.page_size;
+            }
             true
         } else {
             false
@@ -293,7 +294,12 @@ impl App {
         if self.total_docs == 0 {
             return (0, 0);
         }
-        let current_page = (self.doc_scroll_offset / self.page_size) + 1;
+        // Page of the last visible row: the window scrolls row by row, so the
+        // offset is not page-aligned and the last window must show N/N
+        let last_visible = (self.doc_scroll_offset + self.page_size)
+            .min(self.total_docs)
+            .saturating_sub(1);
+        let current_page = (last_visible / self.page_size) + 1;
         let total_pages = self.total_docs.div_ceil(self.page_size);
         (current_page, total_pages)
     }
@@ -449,6 +455,91 @@ impl App {
         let doc_count = coll.doc_count.unwrap_or(0);
         self.confirm = ConfirmState::delete_collection(coll.name, doc_count);
         self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open drop confirmation for the selected index (index modal)
+    pub fn open_drop_index_confirm(&mut self) {
+        let Some(index_name) = self
+            .index_state
+            .indexes
+            .get(self.index_state.selected_index)
+            .cloned()
+        else {
+            return;
+        };
+
+        if self.index_state.is_primary_index(&index_name) {
+            self.index_state.error = Some(format!(
+                "Az elsodleges _id index nem torolheto: {}",
+                index_name
+            ));
+            return;
+        }
+
+        let collection = self.index_state.collection.clone();
+        self.confirm = ConfirmState::drop_index(collection, index_name);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open drop confirmation for the selected vector index (vector modal)
+    pub fn open_drop_vector_index_confirm(&mut self) {
+        let Some(index) = self
+            .vector_state
+            .indexes
+            .get(self.vector_state.selected_index)
+        else {
+            return;
+        };
+
+        let index_name = index.name.clone();
+        let collection = self.vector_state.collection.clone();
+        self.confirm = ConfirmState::drop_vector_index(collection, index_name);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open rollback confirmation for the selected script version (script history)
+    pub fn open_rollback_script_confirm(&mut self) {
+        let Some(version_info) = self
+            .script_state
+            .versions
+            .get(self.script_state.selected_version)
+        else {
+            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
+            return;
+        };
+
+        let version = version_info.version;
+        let name = self.script_state.name.clone();
+        self.confirm = ConfirmState::rollback_script(name, version);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for disabling auto-embed (RAG modal)
+    pub fn open_disable_auto_embed_confirm(&mut self) {
+        let collection = self.rag_state.collection.clone();
+        self.confirm = ConfirmState::disable_auto_embed(collection);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for clearing the embedding cache (RAG modal)
+    pub fn open_clear_embed_cache_confirm(&mut self) {
+        self.confirm = ConfirmState::clear_embed_cache();
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for cancelling the selected embed job (RAG modal)
+    pub fn open_cancel_embed_job_confirm(&mut self) {
+        let Some(job_id) = self.rag_state.selected_job_id() else {
+            return;
+        };
+
+        self.confirm = ConfirmState::cancel_embed_job(job_id);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Close the confirm dialog and return to the modal it was opened from (if any)
+    pub fn close_confirm(&mut self) {
+        self.modal = self.confirm.return_to.take();
     }
 
     /// Toggle confirm dialog selection
@@ -630,6 +721,12 @@ impl App {
         };
 
         self.export_state = ExportState::new(coll.name.clone(), coll.doc_count.unwrap_or(0));
+        // The export follows the document list: with an active filter the
+        // count is the filtered one
+        if self.active_filter.is_some() {
+            self.export_state.doc_count = self.total_docs;
+            self.export_state.filtered = true;
+        }
         self.modal = Some(Modal::Export);
     }
 
@@ -950,25 +1047,15 @@ impl App {
         }
     }
 
-    /// Rollback script to a specific version
-    pub async fn rollback_script_async(&mut self) {
-        let Some(version_info) = self
-            .script_state
-            .versions
-            .get(self.script_state.selected_version)
-        else {
-            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
-            return;
-        };
-        let target_version = version_info.version;
-        let script_name = self.script_state.name.clone();
-
+    /// Rollback script to a specific version - name/version are captured when the
+    /// confirm dialog opens
+    pub async fn rollback_script_async(&mut self, script_name: &str, target_version: u32) {
         let Some(db) = &self.db else {
             self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
             return;
         };
 
-        match db.script_rollback(&script_name, target_version).await {
+        match db.script_rollback(script_name, target_version).await {
             Ok(new_version) => {
                 self.script_state.message =
                     Some(format!("Rollback sikeres, új verzió: v{}", new_version));
@@ -1004,11 +1091,10 @@ impl App {
             Ok(()) => {
                 self.close_modal();
                 self.set_status(format!("Kollekció létrehozva: {}", name));
-                let _ = self.refresh_collections_async().await;
+                self.reload_collections_async().await;
                 // Select the new collection
                 if let Some(idx) = self.collections.iter().position(|c| c.name == name) {
-                    self.selected_collection = idx;
-                    let _ = self.refresh_documents_async().await;
+                    self.switch_collection_async(idx).await;
                 }
             }
             Err(e) => {
@@ -1029,7 +1115,11 @@ impl App {
     // === Status ===
 
     /// Set status message with auto-clear timestamp
+    ///
+    /// Also drops a stale error: the status bar prefers `error_message`, so an
+    /// earlier error would otherwise hide every later success.
     pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.error_message = None;
         self.status_message = Some(msg.into());
         self.status_message_time = Some(std::time::Instant::now());
     }
@@ -1132,13 +1222,74 @@ impl App {
     async fn refresh_collections_inner(&mut self) -> anyhow::Result<()> {
         if let Some(db) = &self.db {
             let collections = db.list_collections().await?;
+            // Collection identity is the NAME: the index is only valid for one list
+            let previous = self.current_collection_name().map(String::from);
             self.collections = collections;
-            if !self.collections.is_empty() && self.selected_collection >= self.collections.len() {
-                self.selected_collection = 0;
-            }
+            self.reselect_collection(previous.as_deref());
             self.refresh_documents_inner().await?;
         }
         Ok(())
+    }
+
+    /// Re-resolve the selection after the collection list was replaced.
+    ///
+    /// Keeps the previously selected collection (by name). If it no longer
+    /// exists, falls back to a clamped index and drops the filter/sort and the
+    /// document position, which belonged to the old collection.
+    /// Returns true if the same collection is still selected.
+    fn reselect_collection(&mut self, previous: Option<&str>) -> bool {
+        if let Some(idx) =
+            previous.and_then(|name| self.collections.iter().position(|c| c.name == name))
+        {
+            self.selected_collection = idx;
+            return true;
+        }
+        let clamped = self
+            .selected_collection
+            .min(self.collections.len().saturating_sub(1));
+        self.set_selected_collection(clamped);
+        false
+    }
+
+    /// Select a collection by index: the single place that switches
+    /// collection. The filter, sort and document position belong to the old
+    /// collection, so they are always dropped (the caller reloads documents).
+    fn set_selected_collection(&mut self, idx: usize) {
+        self.selected_collection = idx;
+        self.doc_scroll_offset = 0;
+        self.selected_document = 0;
+        self.active_filter = None; // Clear filter on collection change
+        self.active_sort = None; // Clear sort on collection change
+        self.filter_state = FilterState::new(); // Clear filter state too
+    }
+
+    /// Switch to another collection and load its documents (async)
+    async fn switch_collection_async(&mut self, idx: usize) {
+        self.set_selected_collection(idx);
+        self.reload_documents_async().await;
+    }
+
+    /// Drop the loaded documents (nothing is selected, nothing is shown)
+    fn clear_documents(&mut self) {
+        self.documents.clear();
+        self.selected_document = 0;
+        self.doc_scroll_offset = 0;
+        self.total_docs = 0;
+    }
+
+    /// Refresh documents and surface a failure instead of swallowing it
+    /// (the document list is already cleared by then)
+    pub async fn reload_documents_async(&mut self) {
+        if let Err(e) = self.refresh_documents_async().await {
+            self.set_error(format!("Dokumentumok betoltese sikertelen: {}", e));
+        }
+    }
+
+    /// Refresh collections + documents and surface a failure
+    async fn reload_collections_async(&mut self) {
+        if let Err(e) = self.refresh_collections_async().await {
+            self.set_error(format!("Frissites hiba: {}", e));
+        }
     }
 
     /// Refresh documents for selected collection (async)
@@ -1154,10 +1305,23 @@ impl App {
         self.refresh_documents_inner().await
     }
 
+    /// Refresh documents; on failure the list is cleared, so the panes never
+    /// show (and `d`/`e` never act on) another collection's or page's documents
     async fn refresh_documents_inner(&mut self) -> anyhow::Result<()> {
+        let result = self.fetch_documents_inner().await;
+        if result.is_err() {
+            self.clear_documents();
+        }
+        result
+    }
+
+    async fn fetch_documents_inner(&mut self) -> anyhow::Result<()> {
         let coll_name = match self.collections.get(self.selected_collection) {
             Some(coll) => coll.name.clone(),
-            None => return Ok(()),
+            None => {
+                self.clear_documents();
+                return Ok(());
+            }
         };
 
         if let Some(db) = &self.db {
@@ -1179,7 +1343,7 @@ impl App {
             // BUG FIX: Always refresh total_docs, not just when needs_details
             if let Some(filter) = &self.active_filter {
                 // When filter is active, count matching documents
-                let count = db.count_with_query(&coll_name, filter).await.unwrap_or(0);
+                let count = db.count_with_query(&coll_name, filter).await?;
                 self.total_docs = count;
             } else {
                 // No filter - get total collection count
@@ -1229,13 +1393,8 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection > 0 {
-                    self.selected_collection -= 1;
-                    self.doc_scroll_offset = 0;
-                    self.selected_document = 0;
-                    self.active_filter = None; // Clear filter on collection change
-                    self.active_sort = None; // Clear sort on collection change
-                    self.filter_state = FilterState::new(); // Clear filter state too
-                    let _ = self.refresh_documents_async().await;
+                    self.switch_collection_async(self.selected_collection - 1)
+                        .await;
                 }
             }
             Pane::Documents => {
@@ -1243,7 +1402,7 @@ impl App {
                     self.selected_document -= 1;
                     if self.selected_document < self.doc_scroll_offset {
                         self.doc_scroll_offset = self.selected_document;
-                        let _ = self.refresh_documents_async().await;
+                        self.reload_documents_async().await;
                     }
                 }
             }
@@ -1260,13 +1419,8 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection + 1 < self.collections.len() {
-                    self.selected_collection += 1;
-                    self.doc_scroll_offset = 0;
-                    self.selected_document = 0;
-                    self.active_filter = None; // Clear filter on collection change
-                    self.active_sort = None; // Clear sort on collection change
-                    self.filter_state = FilterState::new(); // Clear filter state too
-                    let _ = self.refresh_documents_async().await;
+                    self.switch_collection_async(self.selected_collection + 1)
+                        .await;
                 }
             }
             Pane::Documents => {
@@ -1275,7 +1429,7 @@ impl App {
                     let visible_end = self.doc_scroll_offset + self.page_size;
                     if self.selected_document >= visible_end {
                         self.doc_scroll_offset += 1;
-                        let _ = self.refresh_documents_async().await;
+                        self.reload_documents_async().await;
                     }
                 }
             }
@@ -1290,17 +1444,17 @@ impl App {
     pub async fn page_up_async(&mut self) {
         match self.active_pane {
             Pane::Collections => {
-                self.selected_collection = self.selected_collection.saturating_sub(SCROLL_STEP);
-                self.doc_scroll_offset = 0;
-                self.selected_document = 0;
-                let _ = self.refresh_documents_async().await;
+                let target = self.selected_collection.saturating_sub(SCROLL_STEP);
+                if target != self.selected_collection {
+                    self.switch_collection_async(target).await;
+                }
             }
             Pane::Documents => {
                 let old_offset = self.doc_scroll_offset;
                 self.doc_scroll_offset = self.doc_scroll_offset.saturating_sub(self.page_size);
                 self.selected_document = self.selected_document.saturating_sub(self.page_size);
                 if old_offset != self.doc_scroll_offset {
-                    let _ = self.refresh_documents_async().await;
+                    self.reload_documents_async().await;
                 }
             }
             Pane::Detail => {
@@ -1314,10 +1468,10 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 let max = self.collections.len().saturating_sub(1);
-                self.selected_collection = (self.selected_collection + SCROLL_STEP).min(max);
-                self.doc_scroll_offset = 0;
-                self.selected_document = 0;
-                let _ = self.refresh_documents_async().await;
+                let target = (self.selected_collection + SCROLL_STEP).min(max);
+                if target != self.selected_collection {
+                    self.switch_collection_async(target).await;
+                }
             }
             Pane::Documents => {
                 let max_offset = self.total_docs.saturating_sub(self.page_size);
@@ -1326,7 +1480,7 @@ impl App {
                 self.selected_document = (self.selected_document + self.page_size)
                     .min(self.total_docs.saturating_sub(1));
                 if old_offset != self.doc_scroll_offset {
-                    let _ = self.refresh_documents_async().await;
+                    self.reload_documents_async().await;
                 }
             }
             Pane::Detail => {
@@ -1341,17 +1495,14 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection != 0 {
-                    self.selected_collection = 0;
-                    self.doc_scroll_offset = 0;
-                    self.selected_document = 0;
-                    let _ = self.refresh_documents_async().await;
+                    self.switch_collection_async(0).await;
                 }
             }
             Pane::Documents => {
                 if self.doc_scroll_offset != 0 || self.selected_document != 0 {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
-                    let _ = self.refresh_documents_async().await;
+                    self.reload_documents_async().await;
                 }
             }
             Pane::Detail => {
@@ -1369,10 +1520,7 @@ impl App {
                 }
                 let last = self.collections.len() - 1;
                 if self.selected_collection != last {
-                    self.selected_collection = last;
-                    self.doc_scroll_offset = 0;
-                    self.selected_document = 0;
-                    let _ = self.refresh_documents_async().await;
+                    self.switch_collection_async(last).await;
                 }
             }
             Pane::Documents => {
@@ -1382,7 +1530,7 @@ impl App {
                 let last = self.total_docs - 1;
                 self.selected_document = last;
                 self.doc_scroll_offset = last.saturating_sub(self.page_size.saturating_sub(1));
-                let _ = self.refresh_documents_async().await;
+                self.reload_documents_async().await;
             }
             Pane::Detail => {
                 // Scroll to end - use total lines as scroll position
@@ -1533,10 +1681,7 @@ impl App {
         {
             // Navigate to collection
             if let Some(idx) = self.collections.iter().position(|c| c.name == result.name) {
-                self.selected_collection = idx;
-                self.doc_scroll_offset = 0;
-                self.selected_document = 0;
-                let _ = self.refresh_documents_async().await;
+                self.switch_collection_async(idx).await;
                 self.active_pane = Pane::Documents;
             }
             self.close_modal();
@@ -1548,12 +1693,12 @@ impl App {
     /// Execute the confirmed action (async)
     pub async fn execute_confirm_action_async(&mut self) {
         if self.confirm.selected != ConfirmOption::Confirm {
-            self.close_modal();
+            self.close_confirm();
             return;
         }
 
         let action = self.confirm.on_confirm.clone();
-        self.close_modal();
+        self.close_confirm();
 
         match action {
             ConfirmAction::DeleteDocument { collection, doc_id } => {
@@ -1561,6 +1706,106 @@ impl App {
             }
             ConfirmAction::DeleteCollection { name } => {
                 self.do_delete_collection_async(&name).await;
+            }
+            ConfirmAction::DropIndex {
+                collection,
+                index_name,
+            } => {
+                self.execute_delete_index_async(&collection, &index_name)
+                    .await;
+            }
+            ConfirmAction::DropVectorIndex {
+                collection,
+                index_name,
+            } => {
+                self.do_drop_vector_index_async(&collection, &index_name)
+                    .await;
+            }
+            ConfirmAction::RollbackScript { name, version } => {
+                self.rollback_script_async(&name, version).await;
+            }
+            ConfirmAction::DisableAutoEmbed { collection } => {
+                self.do_disable_auto_embed_async(&collection).await;
+            }
+            ConfirmAction::ClearEmbedCache => {
+                self.do_clear_embed_cache_async().await;
+            }
+            ConfirmAction::CancelEmbedJob { job_id } => {
+                self.do_cancel_embed_job_async(&job_id).await;
+            }
+        }
+    }
+
+    /// Actually drop a vector index (async)
+    async fn do_drop_vector_index_async(&mut self, collection: &str, index_name: &str) {
+        if let Some(ref db) = self.db {
+            match db.drop_vector_index(collection, index_name).await {
+                Ok(()) => {
+                    self.vector_state.message = Some(format!("Index '{}' deleted!", index_name));
+
+                    // Refresh index list
+                    if let Ok(indexes) = db.list_vector_indexes(collection).await {
+                        self.vector_state.update_indexes(indexes);
+                        if self.vector_state.selected_index >= self.vector_state.indexes.len()
+                            && !self.vector_state.indexes.is_empty()
+                        {
+                            self.vector_state.selected_index = self.vector_state.indexes.len() - 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.vector_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually disable auto-embed for a collection (async)
+    async fn do_disable_auto_embed_async(&mut self, collection: &str) {
+        if let Some(ref db) = self.db {
+            match db.auto_embed_disable(collection).await {
+                Ok(_) => {
+                    self.rag_state.message = Some("Auto-embed disabled".to_string());
+                    self.rag_state.auto_embed_config = None;
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually clear the embedding cache (async)
+    async fn do_clear_embed_cache_async(&mut self) {
+        if let Some(ref db) = self.db {
+            match db.embed_cache_clear().await {
+                Ok(_) => {
+                    self.rag_state.cache_stats = None;
+                    self.rag_state.message = Some("Cache cleared".to_string());
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually cancel an embed job (async)
+    async fn do_cancel_embed_job_async(&mut self, job_id: &str) {
+        if let Some(ref db) = self.db {
+            match db.embed_job_cancel(job_id).await {
+                Ok(_) => {
+                    self.rag_state.message = Some(format!("Job {} cancelled", job_id));
+                    // Refresh
+                    if let Ok(result) = db.embed_job_list(false).await {
+                        if let Some(jobs) = result.get("jobs").and_then(|v| v.as_array()) {
+                            self.rag_state.jobs = jobs.clone();
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
             }
         }
     }
@@ -1576,7 +1821,7 @@ impl App {
             Ok(count) => {
                 if count > 0 {
                     self.set_status("Dokumentum törölve");
-                    let _ = self.refresh_collections_async().await;
+                    self.reload_collections_async().await;
                 } else {
                     self.set_error("Dokumentum nem található");
                 }
@@ -1597,12 +1842,11 @@ impl App {
         match db.drop_collection(name).await {
             Ok(()) => {
                 self.set_status(format!("Kollekció törölve: {}", name));
-                // Reset selection and refresh
-                self.selected_collection = 0;
-                self.documents.clear();
-                self.selected_document = 0;
-                self.doc_scroll_offset = 0;
-                let _ = self.refresh_collections_async().await;
+                // Reset selection (also drops the dropped collection's
+                // filter/sort) and refresh
+                self.set_selected_collection(0);
+                self.clear_documents();
+                self.reload_collections_async().await;
             }
             Err(e) => {
                 self.set_error(format!("Törlés hiba: {}", e));
@@ -1648,7 +1892,7 @@ impl App {
                     } else {
                         self.set_status("Dokumentum nem található");
                     }
-                    let _ = self.refresh_collections_async().await;
+                    self.reload_collections_async().await;
                 }
                 Err(e) => {
                     self.insert.error = Some(format!("Frissítés hiba: {}", e));
@@ -1659,7 +1903,7 @@ impl App {
                 Ok(id) => {
                     self.close_modal();
                     self.set_status(format!("Dokumentum beszúrva, _id: {}", id));
-                    let _ = self.refresh_collections_async().await;
+                    self.reload_collections_async().await;
                 }
                 Err(e) => {
                     self.insert.error = Some(format!("Beszúrás hiba: {}", e));
@@ -1727,7 +1971,7 @@ impl App {
                 self.index_state.cancel_create();
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Refresh collection list to update index_count
-                let _ = self.refresh_collections_async().await;
+                self.reload_collections_async().await;
             }
             Err(e) => {
                 self.index_state.error = Some(format!("Hiba: {}", e));
@@ -1735,23 +1979,17 @@ impl App {
         }
     }
 
-    /// Delete selected index (async)
-    pub async fn execute_delete_index_async(&mut self) {
-        if self.index_state.indexes.is_empty() {
-            return;
-        }
-
-        let index_name = self.index_state.indexes[self.index_state.selected_index].clone();
-        let collection = self.index_state.collection.clone();
-
+    /// Delete an index (async) - names are captured when the confirm dialog opens
+    pub async fn execute_delete_index_async(&mut self, collection: &str, index_name: &str) {
         let Some(db) = &self.db else {
             self.set_error("Nincs megnyitva adatbázis");
             return;
         };
 
-        match db.drop_index(&collection, &index_name).await {
+        match db.drop_index(collection, index_name).await {
             Ok(()) => {
                 self.index_state.message = Some(format!("Index törölve: {}", index_name));
+                self.index_state.error = None;
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Adjust selection after deletion
                 if self.index_state.indexes.is_empty() {
@@ -1760,7 +1998,7 @@ impl App {
                     self.index_state.selected_index = self.index_state.indexes.len() - 1;
                 }
                 // Refresh collection list to update index_count
-                let _ = self.refresh_collections_async().await;
+                self.reload_collections_async().await;
             }
             Err(e) => {
                 self.index_state.error = Some(format!("Hiba: {}", e));
@@ -1909,7 +2147,7 @@ impl App {
         self.close_modal();
 
         // Refresh documents with filter
-        let _ = self.refresh_documents_async().await;
+        self.reload_documents_async().await;
     }
 
     // === Async Filter ===
@@ -1997,41 +2235,81 @@ impl App {
     // === Async Export ===
 
     /// Execute the export (async) - streaming with batches
+    ///
+    /// Exports what the document list shows (active filter + sort). The data
+    /// goes to a temp file next to the target and is renamed on success, so a
+    /// failed export never truncates an existing file.
     pub async fn execute_export_async(&mut self) {
+        if self.export_state.file_path.trim().is_empty() {
+            self.export_state.error = Some("Fájl útvonal megadása kötelező".to_string());
+            return;
+        }
+
+        let file_path = self.export_state.file_path.clone();
+        let Some(tmp_path) = export_temp_path(std::path::Path::new(&file_path)) else {
+            self.export_state.error =
+                Some(format!("Fájl hiba: érvénytelen útvonal: {}", file_path));
+            return;
+        };
+
+        if self.db.is_none() {
+            self.set_error("Nincs megnyitva adatbázis");
+            return;
+        }
+
+        let result = match self.write_export_async(&tmp_path).await {
+            Ok(count) => std::fs::rename(&tmp_path, &file_path)
+                .map(|()| count)
+                .map_err(|e| format!("Fájl hiba: {}", e)),
+            Err(e) => Err(e),
+        };
+
+        match result {
+            Ok(count) => {
+                let filtered = if self.export_state.filtered {
+                    " (szűrt)"
+                } else {
+                    ""
+                };
+                self.export_state.message = Some(format!(
+                    "{} dokumentum exportálva{}: {}",
+                    count, filtered, file_path
+                ));
+                self.export_state.error = None;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                self.export_state.error = Some(e);
+            }
+        }
+    }
+
+    /// Write the export into `path` (the temp file); returns the exported
+    /// document count. On error the caller removes the file.
+    async fn write_export_async(&self, path: &std::path::Path) -> Result<usize, String> {
         use crate::modals::export::ExportFormat;
         use std::fs::File;
         use std::io::{BufWriter, Write};
 
         const BATCH_SIZE: usize = 1000;
 
-        if self.export_state.file_path.trim().is_empty() {
-            self.export_state.error = Some("Fájl útvonal megadása kötelező".to_string());
-            return;
-        }
-
         let collection = self.export_state.collection.clone();
-        let file_path = self.export_state.file_path.clone();
         let format = self.export_state.format;
-        let _total_docs = self.export_state.doc_count;
-
-        let file = match File::create(&file_path) {
-            Ok(f) => f,
-            Err(e) => {
-                self.export_state.error = Some(format!("Fájl hiba: {}", e));
-                return;
-            }
-        };
-        let mut writer = BufWriter::new(file);
+        // Same filter + sort as the document list
+        let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
+        let sort = self.active_sort.as_ref();
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
-            return;
+            return Err("Nincs megnyitva adatbázis".to_string());
         };
 
-        let result: Result<usize, String> = match format {
+        let file = File::create(path).map_err(|e| format!("Fájl hiba: {}", e))?;
+        let mut writer = BufWriter::new(file);
+
+        let exported = match format {
             ExportFormat::Json => {
                 if let Err(e) = writeln!(writer, "[") {
-                    return self.export_state.error = Some(format!("Írási hiba: {}", e));
+                    return Err(format!("Írási hiba: {}", e));
                 }
 
                 let mut exported = 0;
@@ -2040,13 +2318,12 @@ impl App {
 
                 loop {
                     let docs = match db
-                        .find_with_options(&collection, &serde_json::json!({}), offset, BATCH_SIZE)
+                        .find_with_sort(&collection, &query, offset, BATCH_SIZE, sort)
                         .await
                     {
                         Ok(d) => d,
                         Err(e) => {
-                            self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                            return;
+                            return Err(format!("Lekérdezés hiba: {}", e));
                         }
                     };
 
@@ -2061,14 +2338,12 @@ impl App {
                         let json = match serde_json::to_string(doc) {
                             Ok(j) => j,
                             Err(e) => {
-                                self.export_state.error = Some(format!("JSON hiba: {}", e));
-                                return;
+                                return Err(format!("JSON hiba: {}", e));
                             }
                         };
 
                         if let Err(e) = write!(writer, "{}{}", prefix, json) {
-                            self.export_state.error = Some(format!("Írási hiba: {}", e));
-                            return;
+                            return Err(format!("Írási hiba: {}", e));
                         }
                     }
 
@@ -2077,27 +2352,21 @@ impl App {
                 }
 
                 if let Err(e) = writeln!(writer, "\n]") {
-                    self.export_state.error = Some(format!("Írási hiba: {}", e));
-                    return;
+                    return Err(format!("Írási hiba: {}", e));
                 }
 
-                Ok(exported)
+                exported
             }
             ExportFormat::Csv => {
-                let sample = match db
-                    .find_with_options(&collection, &serde_json::json!({}), 0, 100)
-                    .await
-                {
+                let sample = match db.find_with_sort(&collection, &query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
-                        self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                        return;
+                        return Err(format!("Lekérdezés hiba: {}", e));
                     }
                 };
 
                 if sample.is_empty() {
-                    self.export_state.error = Some("Nincs exportálandó dokumentum".to_string());
-                    return;
+                    return Err("Nincs exportálandó dokumentum".to_string());
                 }
 
                 let mut fields: Vec<String> = Vec::new();
@@ -2112,8 +2381,7 @@ impl App {
                 }
 
                 if let Err(e) = writeln!(writer, "{}", fields.join(",")) {
-                    self.export_state.error = Some(format!("Írási hiba: {}", e));
-                    return;
+                    return Err(format!("Írási hiba: {}", e));
                 }
 
                 let mut exported = 0;
@@ -2121,13 +2389,12 @@ impl App {
 
                 loop {
                     let docs = match db
-                        .find_with_options(&collection, &serde_json::json!({}), offset, BATCH_SIZE)
+                        .find_with_sort(&collection, &query, offset, BATCH_SIZE, sort)
                         .await
                     {
                         Ok(d) => d,
                         Err(e) => {
-                            self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                            return;
+                            return Err(format!("Lekérdezés hiba: {}", e));
                         }
                     };
 
@@ -2155,8 +2422,7 @@ impl App {
                             .collect();
 
                         if let Err(e) = writeln!(writer, "{}", row.join(",")) {
-                            self.export_state.error = Some(format!("Írási hiba: {}", e));
-                            return;
+                            return Err(format!("Írási hiba: {}", e));
                         }
                     }
 
@@ -2164,24 +2430,628 @@ impl App {
                     offset += docs.len();
                 }
 
-                Ok(exported)
+                exported
             }
         };
 
-        if let Err(e) = writer.flush() {
-            self.export_state.error = Some(format!("Flush hiba: {}", e));
-            return;
+        writer.flush().map_err(|e| format!("Flush hiba: {}", e))?;
+
+        Ok(exported)
+    }
+}
+
+/// Temp file next to the export target (same directory, so the final rename
+/// stays on one filesystem)
+fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
+    let name = target.file_name()?.to_string_lossy();
+    Some(target.with_file_name(format!(".{}.{}.tmp", name, std::process::id())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpResult, Transport};
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory stand-in for the MCP server: just enough of
+    /// collection_list / find / count / index_list / collection_drop
+    #[derive(Default)]
+    struct FakeServer {
+        /// (name, documents) in the order the server lists them
+        collections: Mutex<Vec<(String, Vec<Value>)>>,
+        /// `find` on this collection fails
+        failing_find: Mutex<Option<String>>,
+    }
+
+    impl FakeServer {
+        fn new(collections: Vec<(&str, Vec<Value>)>) -> Arc<Self> {
+            Arc::new(Self {
+                collections: Mutex::new(
+                    collections
+                        .into_iter()
+                        .map(|(name, docs)| (name.to_string(), docs))
+                        .collect(),
+                ),
+                failing_find: Mutex::new(None),
+            })
         }
 
-        match result {
-            Ok(count) => {
-                self.export_state.message =
-                    Some(format!("{} dokumentum exportálva: {}", count, file_path));
-                self.export_state.error = None;
-            }
-            Err(e) => {
-                self.export_state.error = Some(format!("Export hiba: {}", e));
+        /// Documents matching a query of top-level equalities
+        fn matching(&self, args: &Value) -> Vec<Value> {
+            let name = args["collection"].as_str().unwrap_or_default();
+            let collections = self.collections.lock().unwrap();
+            let docs = collections
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, docs)| docs.clone())
+                .unwrap_or_default();
+            let query = args["query"].as_object().cloned().unwrap_or_default();
+            docs.into_iter()
+                .filter(|doc| query.iter().all(|(k, v)| doc.get(k) == Some(v)))
+                .collect()
+        }
+
+        fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
+            match name {
+                "collection_list" => {
+                    let collections = self.collections.lock().unwrap();
+                    let names: Vec<&String> = collections.iter().map(|(n, _)| n).collect();
+                    Ok(serde_json::json!({ "collections": names }))
+                }
+                "find" => {
+                    let collection = args["collection"].as_str().map(String::from);
+                    if *self.failing_find.lock().unwrap() == collection {
+                        return Err("find failed".to_string());
+                    }
+                    let mut docs = self.matching(args);
+                    if let Some((field, dir)) =
+                        args["sort"].as_object().and_then(|s| s.iter().next())
+                    {
+                        docs.sort_by_key(|doc| doc[field].as_i64().unwrap_or(0));
+                        if dir.as_i64() == Some(-1) {
+                            docs.reverse();
+                        }
+                    }
+                    let skip = args["skip"].as_u64().unwrap_or(0) as usize;
+                    let limit = args["limit"].as_u64().unwrap_or(u64::MAX) as usize;
+                    let page: Vec<Value> = docs.into_iter().skip(skip).take(limit).collect();
+                    Ok(serde_json::json!({ "documents": page }))
+                }
+                "count" => Ok(serde_json::json!({ "count": self.matching(args).len() })),
+                "index_list" => Ok(serde_json::json!({ "btree_indexes": [] })),
+                "collection_drop" => {
+                    let name = args["collection"].as_str().unwrap_or_default();
+                    self.collections.lock().unwrap().retain(|(n, _)| n != name);
+                    Ok(serde_json::json!({ "success": true }))
+                }
+                other => Err(format!("unexpected tool: {}", other)),
             }
         }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for FakeServer {
+        async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
+            let params = request.params.clone().unwrap_or_default();
+            let name = params["name"].as_str().unwrap_or_default();
+            let (text, is_error) = match self.call(name, &params["arguments"]) {
+                Ok(value) => (value.to_string(), false),
+                Err(message) => (message, true),
+            };
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(request.id),
+                result: Some(serde_json::json!({
+                    "content": [{"type": "text", "text": text}],
+                    "isError": is_error
+                })),
+                error: None,
+            })
+        }
+
+        async fn close(&self) -> McpResult<()> {
+            Ok(())
+        }
+    }
+
+    /// `count` documents: {"_id": i, "n": i, "even": i % 2 == 0}
+    fn numbered_docs(count: i64) -> Vec<Value> {
+        (0..count)
+            .map(|i| serde_json::json!({"_id": i, "n": i, "even": i % 2 == 0}))
+            .collect()
+    }
+
+    async fn app_with_server(server: &Arc<FakeServer>) -> App {
+        let mut app = App::new(Config::default());
+        app.db = Some(DbWrapper::with_transport(server.clone()));
+        app.refresh_collections_async().await.unwrap();
+        app
+    }
+
+    fn doc_ids(app: &App) -> Vec<i64> {
+        app.documents
+            .iter()
+            .map(|d| d["_id"].as_i64().unwrap())
+            .collect()
+    }
+
+    // === Page size / pagination ===
+
+    /// The page is exactly what the documents pane draws: with the old
+    /// maths (inner height, header row not counted) the last fetched row was
+    /// never drawn but could be selected
+    #[test]
+    fn test_every_fetched_row_is_drawn() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        for height in [12u16, 24, 37, 50] {
+            let mut app = App::new(Config::default());
+            app.update_page_size(height);
+            app.total_docs = 1000;
+            // Distinct, greppable ids: 1000, 1001, ...
+            app.documents = (0..app.page_size as i64)
+                .map(|i| serde_json::json!({"_id": 1000 + i, "name": "x"}))
+                .collect();
+
+            let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
+            terminal.draw(|f| crate::ui::render_ui(f, &app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+
+            let last_id = (1000 + app.page_size as i64 - 1).to_string();
+            assert!(
+                screen.contains(&last_id),
+                "height {}: last row {} of the page is not drawn",
+                height,
+                last_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_page_size_never_zero_and_resize_keeps_selection_visible() {
+        let mut app = App::new(Config::default());
+        for height in 0..=12u16 {
+            app.update_page_size(height);
+            assert!(app.page_size >= 1);
+            let _ = app.get_pagination_info();
+        }
+
+        app.update_page_size(40);
+        app.total_docs = 100;
+        app.selected_document = app.page_size - 1;
+        app.update_page_size(20);
+        assert!(app.selected_document < app.doc_scroll_offset + app.page_size);
+    }
+
+    /// End on the last (partial or scrolled) window is the last page: 100
+    /// docs, 9 rows -> offset 91 used to show "11/12"
+    #[test]
+    fn test_pagination_shows_last_page_at_end() {
+        let mut app = App::new(Config::default());
+        app.page_size = 9;
+        app.total_docs = 100;
+
+        app.doc_scroll_offset = 0;
+        assert_eq!(app.get_pagination_info(), (1, 12));
+        app.doc_scroll_offset = 9;
+        assert_eq!(app.get_pagination_info(), (2, 12));
+        app.doc_scroll_offset = 91;
+        assert_eq!(app.get_pagination_info(), (12, 12));
+
+        app.total_docs = 5;
+        app.doc_scroll_offset = 0;
+        assert_eq!(app.get_pagination_info(), (1, 1));
+        app.total_docs = 0;
+        assert_eq!(app.get_pagination_info(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn test_document_window_matches_page_size() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(100))]);
+        let mut app = app_with_server(&server).await;
+        app.page_size = 9;
+        app.refresh_documents_async().await.unwrap();
+        app.active_pane = Pane::Documents;
+        assert_eq!(doc_ids(&app), (0..9).collect::<Vec<_>>());
+
+        // Page 2 starts right after the last row of page 1
+        app.page_down_async().await;
+        assert_eq!(doc_ids(&app), (9..18).collect::<Vec<_>>());
+
+        // End: the true last document is selected and loaded
+        app.go_to_end_async().await;
+        assert_eq!(doc_ids(&app), (91..100).collect::<Vec<_>>());
+        assert_eq!(app.get_selected_document().unwrap()["_id"], 99);
+        assert_eq!(app.get_pagination_info(), (12, 12));
+    }
+
+    // === Collection identity ===
+
+    /// The server lists collections in HashMap order: the list is sorted and
+    /// the selection follows the collection NAME across a refresh
+    #[tokio::test]
+    async fn test_refresh_keeps_selected_collection_by_name() {
+        let server = FakeServer::new(vec![
+            ("zebra", numbered_docs(1)),
+            ("apple", numbered_docs(2)),
+            ("mango", numbered_docs(3)),
+        ]);
+        let mut app = app_with_server(&server).await;
+        let names: Vec<&str> = app.collections.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["apple", "mango", "zebra"]);
+
+        app.select_down_async().await;
+        assert_eq!(app.current_collection_name(), Some("mango"));
+        app.active_filter = Some(serde_json::json!({"even": true}));
+
+        // Another client creates collections; the server order changes too
+        {
+            let mut collections = server.collections.lock().unwrap();
+            collections.push(("banana".to_string(), numbered_docs(4)));
+            collections.push(("aaa".to_string(), numbered_docs(5)));
+            collections.reverse();
+        }
+        app.refresh_collections_async().await.unwrap();
+        assert_eq!(app.current_collection_name(), Some("mango"));
+        // Same collection: its filter stays, the documents are its documents
+        assert!(app.active_filter.is_some());
+        assert_eq!(app.total_docs, 2);
+    }
+
+    /// The selected collection disappeared: clamped index, and the filter of
+    /// the old collection must not be applied to the new one
+    #[tokio::test]
+    async fn test_refresh_after_selected_collection_vanished() {
+        let server = FakeServer::new(vec![
+            ("a", numbered_docs(4)),
+            ("b", numbered_docs(6)),
+            ("c", numbered_docs(8)),
+        ]);
+        let mut app = app_with_server(&server).await;
+        app.go_to_end_async().await;
+        assert_eq!(app.current_collection_name(), Some("c"));
+        app.active_filter = Some(serde_json::json!({"even": true}));
+        app.active_sort = Some(serde_json::json!({"n": -1}));
+
+        server.collections.lock().unwrap().retain(|(n, _)| n != "c");
+        app.refresh_collections_async().await.unwrap();
+
+        assert_eq!(app.current_collection_name(), Some("b"));
+        assert_eq!(app.active_filter, None);
+        assert_eq!(app.active_sort, None);
+        assert_eq!(app.total_docs, 6);
+        assert_eq!(app.documents.len(), 6);
+    }
+
+    /// Every way of switching collection drops the filter and sort
+    #[tokio::test]
+    async fn test_every_collection_switch_clears_filter_and_sort() {
+        let names: Vec<String> = (0..25).map(|i| format!("c{:02}", i)).collect();
+        let server = FakeServer::new(
+            names
+                .iter()
+                .map(|n| (n.as_str(), numbered_docs(3)))
+                .collect(),
+        );
+        let mut app = app_with_server(&server).await;
+
+        async fn check(app: &mut App, step: &str, expected: &str) {
+            app.active_filter = Some(serde_json::json!({"even": true}));
+            app.active_sort = Some(serde_json::json!({"n": -1}));
+            app.doc_scroll_offset = 1;
+            app.selected_document = 2;
+            match step {
+                "down" => app.select_down_async().await,
+                "up" => app.select_up_async().await,
+                "pgdn" => app.page_down_async().await,
+                "pgup" => app.page_up_async().await,
+                "end" => app.go_to_end_async().await,
+                "home" => app.go_to_start_async().await,
+                _ => {
+                    app.search.results = vec![SearchResult {
+                        name: expected.to_string(),
+                        doc_count: 3,
+                    }];
+                    app.search.selected_result = 0;
+                    app.goto_search_result_async().await;
+                    app.active_pane = Pane::Collections;
+                }
+            }
+            assert_eq!(app.current_collection_name(), Some(expected), "{}", step);
+            assert_eq!(app.active_filter, None, "{}", step);
+            assert_eq!(app.active_sort, None, "{}", step);
+            assert_eq!((app.doc_scroll_offset, app.selected_document), (0, 0));
+            assert_eq!(app.total_docs, 3, "{}", step);
+        }
+
+        check(&mut app, "down", "c01").await;
+        check(&mut app, "pgdn", "c11").await;
+        check(&mut app, "up", "c10").await;
+        check(&mut app, "pgup", "c00").await;
+        check(&mut app, "end", "c24").await;
+        check(&mut app, "home", "c00").await;
+        check(&mut app, "search", "c07").await;
+    }
+
+    // === Failed refresh ===
+
+    /// A failed document refresh must not leave the previous collection's
+    /// documents on screen (`d`/`e` would act on them under the new name)
+    #[tokio::test]
+    async fn test_failed_refresh_clears_documents_and_reports() {
+        let server = FakeServer::new(vec![("a", numbered_docs(4)), ("b", numbered_docs(6))]);
+        let mut app = app_with_server(&server).await;
+        assert_eq!(app.documents.len(), 4);
+        app.selected_document = 2;
+
+        *server.failing_find.lock().unwrap() = Some("b".to_string());
+        app.select_down_async().await;
+
+        assert_eq!(app.current_collection_name(), Some("b"));
+        assert!(app.documents.is_empty());
+        assert_eq!(app.get_selected_document(), None);
+        assert_eq!(
+            (app.selected_document, app.doc_scroll_offset, app.total_docs),
+            (0, 0, 0)
+        );
+        assert!(app
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("find failed"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_collection_clears_active_filter() {
+        let server = FakeServer::new(vec![("a", numbered_docs(4)), ("b", numbered_docs(6))]);
+        let mut app = app_with_server(&server).await;
+        app.select_down_async().await;
+        app.active_filter = Some(serde_json::json!({"even": true}));
+        app.active_sort = Some(serde_json::json!({"n": -1}));
+
+        app.do_delete_collection_async("b").await;
+
+        assert_eq!(app.current_collection_name(), Some("a"));
+        assert_eq!(app.active_filter, None);
+        assert_eq!(app.active_sort, None);
+        assert_eq!(app.total_docs, 4);
+    }
+
+    #[test]
+    fn test_delete_document_confirm_names_the_collection() {
+        let mut app = App::new(Config::default());
+        app.collections = vec![CollectionInfo::unloaded("invoices".to_string())];
+        app.documents = vec![serde_json::json!({"_id": 7})];
+        app.open_delete_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("\"invoices\""));
+    }
+
+    // === Export ===
+
+    fn export_target(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tuti-tui-export-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("out.v1").join("..").join("docs.json")
+    }
+
+    fn files_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The export is what the document list shows: filtered and sorted
+    #[tokio::test]
+    async fn test_export_uses_active_filter_and_sort() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
+        let mut app = app_with_server(&server).await;
+        app.active_filter = Some(serde_json::json!({"even": true}));
+        app.active_sort = Some(serde_json::json!({"n": -1}));
+        app.refresh_documents_async().await.unwrap();
+
+        app.open_export_modal();
+        assert_eq!(app.export_state.doc_count, 5);
+        assert!(app.export_state.filtered);
+
+        let target = export_target("filtered");
+        let dir = target
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(dir.join("out.v1")).unwrap();
+        app.export_state.file_path = target.to_string_lossy().into_owned();
+        app.execute_export_async().await;
+        assert_eq!(app.export_state.error, None);
+        assert!(app
+            .export_state
+            .message
+            .as_deref()
+            .unwrap()
+            .starts_with("5 "));
+
+        let exported: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("docs.json")).unwrap()).unwrap();
+        let ids: Vec<i64> = exported
+            .iter()
+            .map(|d| d["_id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [8, 6, 4, 2, 0]);
+        // No temp file left behind
+        assert_eq!(files_in(&dir), ["docs.json", "out.v1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a filter the whole collection is exported and the modal says so
+    #[tokio::test]
+    async fn test_export_without_filter_is_unfiltered() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
+        let mut app = app_with_server(&server).await;
+        app.open_export_modal();
+        assert_eq!(app.export_state.doc_count, 10);
+        assert!(!app.export_state.filtered);
+    }
+
+    /// A failed export reports the error, keeps the existing target file
+    /// untouched and leaves no temp file
+    #[tokio::test]
+    async fn test_failed_export_keeps_existing_file() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
+        let mut app = app_with_server(&server).await;
+        app.open_export_modal();
+
+        let dir = std::env::temp_dir().join(format!("tuti-tui-export-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("docs.json");
+        std::fs::write(&target, "precious").unwrap();
+        app.export_state.file_path = target.to_string_lossy().into_owned();
+
+        *server.failing_find.lock().unwrap() = Some("docs".to_string());
+        app.execute_export_async().await;
+
+        assert!(app
+            .export_state
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("find failed"));
+        assert_eq!(app.export_state.message, None);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+        assert_eq!(files_in(&dir), ["docs.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_export_temp_path_is_next_to_target() {
+        let tmp = export_temp_path(std::path::Path::new("/data/v1.2/users.json")).unwrap();
+        assert_eq!(tmp.parent(), Some(std::path::Path::new("/data/v1.2")));
+        assert_ne!(tmp.file_name().unwrap(), "users.json");
+        assert_eq!(export_temp_path(std::path::Path::new("/data/..")), None);
+    }
+
+    #[test]
+    fn test_set_status_clears_stale_error() {
+        let mut app = App::new(Config::default());
+        app.set_error("regi hiba");
+        app.set_status("Dokumentum törölve");
+        assert_eq!(app.error_message, None);
+        assert_eq!(app.status_message.as_deref(), Some("Dokumentum törölve"));
+
+        // A later error is shown again (and `e` opens its details)
+        app.set_error("uj hiba");
+        assert_eq!(app.error_message.as_deref(), Some("uj hiba"));
+    }
+
+    #[test]
+    fn test_drop_index_needs_confirm_and_returns_to_index_modal() {
+        let mut app = App::new(Config::default());
+        app.index_state = IndexState::new(
+            "users".to_string(),
+            vec!["users_id".to_string(), "users_age".to_string()],
+        );
+        app.index_state.selected_index = 1;
+        app.modal = Some(Modal::Index);
+
+        app.open_drop_index_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+        assert!(app.confirm.message.contains("users_age"));
+        assert!(app.confirm.message.contains("users"));
+        assert!(matches!(
+            &app.confirm.on_confirm,
+            ConfirmAction::DropIndex { collection, index_name }
+                if collection == "users" && index_name == "users_age"
+        ));
+
+        // Cancel: back in the index modal, state intact
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Index));
+        assert_eq!(app.index_state.selected_index, 1);
+        assert_eq!(app.index_state.indexes.len(), 2);
+    }
+
+    #[test]
+    fn test_primary_id_index_drop_is_refused() {
+        let mut app = App::new(Config::default());
+        app.index_state = IndexState::new("users".to_string(), vec!["users_id".to_string()]);
+        app.modal = Some(Modal::Index);
+
+        app.open_drop_index_confirm();
+        assert_eq!(app.modal, Some(Modal::Index));
+        assert!(app.index_state.error.is_some());
+    }
+
+    #[test]
+    fn test_rollback_confirm_names_script_and_version() {
+        let mut app = App::new(Config::default());
+        app.script_state.name = "cleanup".to_string();
+        app.script_state.versions = vec![ScriptVersion {
+            version: 3,
+            code: String::new(),
+            description: None,
+            created_at: String::new(),
+        }];
+        app.modal = Some(Modal::Script);
+
+        app.open_rollback_script_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("cleanup"));
+        assert!(app.confirm.message.contains("v3"));
+        assert!(matches!(
+            &app.confirm.on_confirm,
+            ConfirmAction::RollbackScript { name, version } if name == "cleanup" && *version == 3
+        ));
+
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Script));
+    }
+
+    #[test]
+    fn test_rag_destructive_actions_need_confirm_and_return_to_rag() {
+        let mut app = App::new(Config::default());
+        app.rag_state = RagState::new("kb".to_string());
+        app.rag_state.jobs = vec![serde_json::json!({"job_id": "job-1"})];
+
+        app.modal = Some(Modal::Rag);
+        app.open_disable_auto_embed_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("kb"));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+
+        app.open_clear_embed_cache_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(matches!(
+            app.confirm.on_confirm,
+            ConfirmAction::ClearEmbedCache
+        ));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+
+        app.open_cancel_embed_job_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("job-1"));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+    }
+
+    #[test]
+    fn test_document_delete_confirm_closes_to_panes() {
+        let mut app = App::new(Config::default());
+        app.confirm = ConfirmState::delete_collection("users".to_string(), 0);
+        app.modal = Some(Modal::Confirm);
+        app.close_confirm();
+        assert_eq!(app.modal, None);
     }
 }

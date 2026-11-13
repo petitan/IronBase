@@ -6,17 +6,26 @@ use crate::panes;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 
-/// Render the entire UI
-pub fn render_ui(frame: &mut Frame, app: &App) {
-    let theme = app.theme.clone();
-
-    // Main layout: Header + Content + Command Bar
-    let layout = Layout::vertical([
+/// Main layout: Header + Content + Command Bar
+fn main_layout(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::vertical([
         Constraint::Length(1), // Header
         Constraint::Min(10),   // Content (3 panes)
         Constraint::Length(1), // Command bar
     ])
-    .split(frame.area());
+    .split(area)
+}
+
+/// Height of the content area (the 3 panes) for a given terminal height
+pub fn content_height(terminal_height: u16) -> u16 {
+    main_layout(Rect::new(0, 0, 1, terminal_height))[1].height
+}
+
+/// Render the entire UI
+pub fn render_ui(frame: &mut Frame, app: &App) {
+    let theme = app.theme.clone();
+
+    let layout = main_layout(frame.area());
 
     // Background
     frame.render_widget(
@@ -261,4 +270,32 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
 
     let line = Line::from(spans).patch_style(bar_style);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::db::CollectionInfo;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Rendering must survive any terminal size: `visible_height - 1` in the
+    /// collections pane underflowed when the pane had no inner rows
+    #[test]
+    fn test_render_survives_tiny_terminals() {
+        let mut app = App::new(Config::default());
+        app.collections = (0..30)
+            .map(|i| CollectionInfo::unloaded(format!("coll{}", i)))
+            .collect();
+        app.selected_collection = 29;
+        app.documents = (0..30).map(|i| serde_json::json!({"_id": i})).collect();
+        app.total_docs = 30;
+
+        for width in 1..=24u16 {
+            for height in 1..=24u16 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| render_ui(f, &app)).unwrap();
+            }
+        }
+    }
 }

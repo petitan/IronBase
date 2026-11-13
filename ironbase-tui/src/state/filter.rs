@@ -249,7 +249,9 @@ impl FilterState {
         if self.all_fields.is_empty() {
             return;
         }
-        self.sort_field_idx = (self.sort_field_idx + 1) % (self.all_fields.len() + 1);
+        // The schema is reloaded on every open: clamp a stale index
+        let current = self.sort_field_idx.min(self.all_fields.len());
+        self.sort_field_idx = (current + 1) % (self.all_fields.len() + 1);
         self.sort_field = if self.sort_field_idx == 0 {
             None // First option = no sort
         } else {
@@ -263,11 +265,9 @@ impl FilterState {
             return;
         }
         let total = self.all_fields.len() + 1;
-        self.sort_field_idx = if self.sort_field_idx == 0 {
-            total - 1
-        } else {
-            self.sort_field_idx - 1
-        };
+        // The schema is reloaded on every open: clamp a stale index
+        let current = self.sort_field_idx.min(self.all_fields.len());
+        self.sort_field_idx = if current == 0 { total - 1 } else { current - 1 };
         self.sort_field = if self.sort_field_idx == 0 {
             None
         } else {
@@ -621,5 +621,32 @@ impl FilterState {
                 self.update_suggestions();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The schema is reloaded on every open; a sort index kept from a wider
+    /// schema used to index `all_fields` out of bounds
+    #[test]
+    fn test_stale_sort_field_idx_is_clamped() {
+        let mut state = FilterState::new();
+        state.set_fields(vec!["a".into(), "b".into(), "c".into(), "d".into()]);
+        state.prev_sort_field();
+        assert_eq!(state.sort_field.as_deref(), Some("d"));
+        assert_eq!(state.sort_field_idx, 4);
+
+        state.set_fields(vec!["a".into()]);
+        state.prev_sort_field();
+        assert_eq!(state.sort_field, None);
+
+        // Stale index 4 counts as the last option (1): next wraps to "no sort"
+        state.sort_field_idx = 4;
+        state.next_sort_field();
+        assert_eq!(state.sort_field, None);
+        state.next_sort_field();
+        assert_eq!(state.sort_field.as_deref(), Some("a"));
     }
 }

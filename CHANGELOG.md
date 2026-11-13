@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI data-loss and wrong-display bugs; `_id` index can no longer be dropped (ironbase-core 0.3.459, mcp-server 1.0.657)
+
+Phase 0 of the Tuti TUI overhaul: targeted safety fixes, no restructuring.
+
+- **Core: the automatic `_id` index cannot be dropped.** `CollectionCore::drop_index` accepted
+  `<collection>_id`; without that index every write path skipped the duplicate-`_id` check until the
+  collection was reopened. It now fails with `cannot drop _id index` (MongoDB behaviour). Applies to
+  the MCP `index_drop` tool, the script `db_drop_index` function and the Python/C# bindings.
+- **TUI: destructive single-key actions ask first.** Dropping a B+ tree or vector index, script
+  rollback, auto-embed disable, embed cache clear and embed job cancel open the confirm dialog, which
+  names the target and returns to the modal it came from. Script delete/discard no longer treats Enter
+  as "yes". The delete-document dialog names the collection.
+- **TUI: Shift+P no longer overwrites a collection's ACL.** The editor loads the stored rules first
+  (`acl_get` was parsed with the wrong shape) and refuses ACLs it cannot represent losslessly
+  (`anyone`, unknown principals) instead of mangling them. A custom `*` ACL is editable.
+- **TUI: the last row of every page was fetched but never drawn** (the table header was not counted);
+  the fetch, scroll and render now share one row count, and the page indicator is correct.
+- **TUI: collections are identified by name.** The list is sorted, and the selection is restored by
+  name after every refresh; every way of switching collection clears the active filter and sort. A
+  failed document refresh clears the list and reports the error instead of showing the previous
+  collection's documents.
+- **TUI: export follows the active filter and sort,** writes to a temporary file and renames it on
+  success. The extension switch no longer rewrites a dot in a directory name.
+- **TUI: text entry.** `j`/`k` can be typed in the fulltext and RAG search fields, capital `J`/`C` in the
+  export path, `n`/`N` in the document search field (match navigation stays in the Detail pane); a
+  successful action clears a stale error message.
+- **TUI: panics fixed** — a non-ASCII character in the database path field, and terminals only a few
+  rows high.
+- **TUI: stdio mode shuts the server down gracefully** (closes stdin and waits) instead of killing it,
+  which forced a WAL replay on the next start.
+- **TUI: configuration.** An API key, `--insecure` or `--url` given on the command line or through the
+  environment is no longer written to `config.toml`; the file is created with mode 0600 (Unix); a file that
+  fails to parse is reported and left untouched.
+- **TUI: mouse capture removed** (no mouse events were handled, and it blocked the terminal's own text
+  selection). Help and README corrected (`Shift+D` drops a collection; package name `tuti-tui`; themes).
+
 ### Added — `$addFields` / `$set`, `$cond`, `$ifNull`, `$literal`; MongoDB limits (#127, #107, #248) (ironbase-core 0.3.458, mcp-server 1.0.656)
 
 - **`$addFields` and its alias `$set` (#127),** with the expressions `$cond` (`[if, then, else]` or

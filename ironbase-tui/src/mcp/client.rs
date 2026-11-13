@@ -34,6 +34,15 @@ impl McpClient {
         Ok(client)
     }
 
+    /// Client over a ready transport (tests: no connection needed)
+    #[cfg(test)]
+    pub(crate) fn with_transport(transport: Arc<dyn Transport>) -> Self {
+        Self {
+            transport,
+            initialized: true,
+        }
+    }
+
     /// Connect via stdio transport (spawns MCP server)
     pub async fn connect_stdio(server_path: &Path, db_path: &Path) -> McpResult<Self> {
         let transport = StdioTransport::new(server_path, db_path).await?;
@@ -834,11 +843,7 @@ impl McpClient {
             "collection": collection
         });
         let result = self.call_tool("acl_get", args).await?;
-        // Result is {"acl": {...}} or {"acl": null}
-        match result.get("acl") {
-            Some(acl) if !acl.is_null() => Ok(Some(acl.clone())),
-            _ => Ok(None),
-        }
+        Ok(parse_acl_get_result(result))
     }
 
     /// Set ACL for a collection (localhost only)
@@ -1414,4 +1419,45 @@ fn get_nested<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
         cur = cur.get(part)?;
     }
     Some(cur)
+}
+
+/// Interpret the `acl_get` tool result.
+///
+/// The server returns the stored ACL document itself
+/// (`{"collection": ..., "rules": [...]}`) or, when the collection has no
+/// custom ACL, `{"collection": ..., "rules": null, "note": ...}`.
+fn parse_acl_get_result(result: Value) -> Option<Value> {
+    match result.get("rules") {
+        Some(rules) if !rules.is_null() => Some(result),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_acl_get_result_returns_stored_document() {
+        let doc = json!({
+            "_id": 1,
+            "collection": "users",
+            "rules": [{
+                "principal": {"type": "apikey", "value": "abc"},
+                "permissions": {"read": true, "write": false, "admin": false}
+            }]
+        });
+        assert_eq!(parse_acl_get_result(doc.clone()), Some(doc));
+    }
+
+    #[test]
+    fn test_parse_acl_get_result_no_custom_acl() {
+        let result = json!({
+            "collection": "users",
+            "rules": null,
+            "note": "No custom ACL for this collection. Default rules apply."
+        });
+        assert_eq!(parse_acl_get_result(result), None);
+    }
 }

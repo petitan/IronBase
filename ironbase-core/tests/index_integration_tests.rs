@@ -135,6 +135,40 @@ fn test_drop_index() {
     assert!(!indexes.contains(&index_name));
 }
 
+/// The automatic `_id` index is what enforces `_id` uniqueness on every write
+/// path; MongoDB refuses to drop it ("cannot drop _id index"). Dropping it used
+/// to succeed and silently disabled the duplicate-`_id` check until reopen.
+#[test]
+fn test_drop_id_index_is_refused() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+    let mut first = std::collections::HashMap::new();
+    first.insert("_id".to_string(), json!(1));
+    first.insert("name".to_string(), json!("a"));
+    db.insert_one("users", first).unwrap();
+
+    let err = collection.drop_index("users_id").unwrap_err();
+    assert!(
+        err.to_string().contains("cannot drop _id index"),
+        "unexpected error: {err}"
+    );
+    assert!(collection
+        .list_indexes()
+        .unwrap()
+        .contains(&"users_id".to_string()));
+
+    // The uniqueness check the index provides is still in force.
+    let mut second = std::collections::HashMap::new();
+    second.insert("_id".to_string(), json!(1));
+    second.insert("name".to_string(), json!("b"));
+    let duplicate = db.insert_one("users", second);
+    assert!(duplicate.is_err(), "duplicate _id must still be rejected");
+    assert_eq!(collection.count_documents(&json!({})).unwrap(), 1);
+}
+
 // ========== UNIQUE INDEX CONSTRAINT TESTS FOR UPDATE/DELETE ==========
 
 #[test]

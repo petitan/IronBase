@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Total number of help lines (for scroll bounds)
-pub const HELP_LINES: usize = 40;
+pub const HELP_LINES: usize = 53;
 
 /// Render the help modal
 pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
@@ -81,6 +81,30 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("RAG & Embedding"),
         ]),
         Line::from(vec![
+            Span::styled("f         ", Style::default().fg(theme.accent)),
+            Span::raw("Vizualis szuro"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+F   ", Style::default().fg(theme.accent)),
+            Span::raw("Fulltext kereses"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+V   ", Style::default().fg(theme.accent)),
+            Span::raw("Vektor kereses / indexek"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+A   ", Style::default().fg(theme.accent)),
+            Span::raw("ACL szabalyok"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+L   ", Style::default().fg(theme.accent)),
+            Span::raw("Listenerek"),
+        ]),
+        Line::from(vec![
+            Span::styled("e         ", Style::default().fg(theme.accent)),
+            Span::raw("Hiba reszletei (ha van hiba)"),
+        ]),
+        Line::from(vec![
             Span::styled("Shift+R   ", Style::default().fg(theme.accent)),
             Span::raw("Kollekcio lista frissites"),
         ]),
@@ -98,7 +122,25 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Detail panel",
+            "Kollekciok panel",
+            Style::default().fg(theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("i         ", Style::default().fg(theme.accent)),
+            Span::raw("Dokumentum beszurasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+D   ", Style::default().fg(theme.accent)),
+            Span::raw("Kollekcio torlese"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+P   ", Style::default().fg(theme.accent)),
+            Span::raw("Kollekcio ACL szerkesztese"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Dokumentumok / Detail panel",
             Style::default().fg(theme.accent).bold(),
         )),
         Line::from(""),
@@ -111,16 +153,20 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("Dokumentum torlese"),
         ]),
         Line::from(vec![
-            Span::styled("f         ", Style::default().fg(theme.accent)),
-            Span::raw("Vizualis szuro"),
+            Span::styled("y         ", Style::default().fg(theme.accent)),
+            Span::raw("Dokumentum masolasa vagolapra"),
         ]),
         Line::from(vec![
             Span::styled("i         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum beszurasa"),
+            Span::raw("Dokumentum beszurasa (Dokumentumok)"),
         ]),
         Line::from(vec![
-            Span::styled("x         ", Style::default().fg(theme.accent)),
-            Span::raw("Index kezeles"),
+            Span::styled("n/N       ", Style::default().fg(theme.accent)),
+            Span::raw("Kovetkezo/elozo talalat (Detail)"),
+        ]),
+        Line::from(vec![
+            Span::styled("a, x      ", Style::default().fg(theme.accent)),
+            Span::raw("Index kezeles (akciok menu)"),
         ]),
         Line::from(""),
         Line::from(Span::styled(

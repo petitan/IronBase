@@ -109,7 +109,7 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        let chars: String = s.chars().take(max_len - 1).collect();
+        let chars: String = s.chars().take(max_len.saturating_sub(1)).collect();
         format!("{}…", chars)
     }
 }
@@ -393,4 +393,16 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
 
     let explain_widget = Paragraph::new(lines);
     frame.render_widget(explain_widget, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_zero_width_does_not_underflow() {
+        assert_eq!(truncate("abc", 0), "…");
+        assert_eq!(truncate("abc", 2), "a…");
+        assert_eq!(truncate("abc", 3), "abc");
+    }
 }

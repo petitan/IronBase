@@ -8,35 +8,35 @@ Terminal User Interface for IronBase NoSQL database.
 
 ```bash
 # Release build
-cargo build --release -p ironbase-tui
+cargo build --release -p tuti-tui
 
 # Binary location:
-./target/release/ironbase-tui
+./target/release/tuti-tui
 ```
 
 ## Usage
 
 ```bash
-# Default (localhost:8080)
-ironbase-tui
+# Default (http://127.0.0.1:8080)
+tuti-tui
 
 # Remote server
-ironbase-tui --url https://192.168.0.136:8080/mcp
+tuti-tui --url https://192.168.0.136:8080/mcp
 
 # Accept self-signed certificate
-ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 
 # With API key
-ironbase-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
 
 # API key from environment variable
-IRONBASE_API_KEY=sk-xxx ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+IRONBASE_API_KEY=sk-xxx tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
 ## CLI Options
 
 ```
-ironbase-tui [OPTIONS] [DATABASE]
+tuti-tui [OPTIONS] [DATABASE]
 
 Arguments:
   [DATABASE]  Database file path (.mlite) - required for stdio transport
@@ -86,7 +86,7 @@ Options:
 | `d` | Delete document |
 | `f` | Visual filter |
 | `i` | Insert document |
-| `x` | Index management |
+| `a` then `x` | Index management (via the actions menu) |
 | `y` | Copy to clipboard |
 
 ### Global
@@ -96,7 +96,8 @@ Options:
 | `Shift+I` | Server info |
 | `Shift+U` | Check for updates |
 | `Shift+K` | API Key management |
-| `Shift+D` | Switch database |
+| `Shift+D` | Drop the selected collection (Collections panel, asks for confirmation) |
+| `a` then `b` | Open / switch database (via the actions menu) |
 
 ## HTTPS Setup with mkcert
 
@@ -150,10 +151,10 @@ key_file = "./key.pem"
 
 ```bash
 # No --insecure needed when CA is trusted
-ironbase-tui --url https://localhost:8080/mcp
+tuti-tui --url https://localhost:8080/mcp
 
 # Remote machine (if CA is installed there too)
-ironbase-tui --url https://192.168.0.136:8080/mcp
+tuti-tui --url https://192.168.0.136:8080/mcp
 ```
 
 ### WSL2 / Cross-machine Usage
@@ -171,7 +172,7 @@ mkcert -key-file key.pem -cert-file cert.pem localhost 127.0.0.1 172.19.152.126
 If you don't want to install the CA, use the `--insecure` flag:
 
 ```bash
-ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
+tuti-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
 ## Configuration
@@ -180,7 +181,7 @@ Config location: `~/.config/ironbase-tui/config.toml` (Linux/macOS) or `%APPDATA
 
 ```toml
 # Default MCP server URL
-mcp_url = "http://localhost:8080/mcp"
+mcp_url = "http://127.0.0.1:8080"
 
 # API key (optional)
 mcp_api_key = "sk-your-key"
@@ -188,8 +189,8 @@ mcp_api_key = "sk-your-key"
 # Accept self-signed certificates
 mcp_insecure = false
 
-# Theme: "dark", "light", "nord", "dracula"
-theme = "dark"
+# Theme: "Claude", "Dark", "Light", "Ocean"
+theme = "Claude"
 ```
 
 ## Architecture

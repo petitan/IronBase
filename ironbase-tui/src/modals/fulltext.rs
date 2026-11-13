@@ -42,7 +42,7 @@ fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::raw(" Kereses  "),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Mezo valtas  "),
-        Span::styled("[j/k]", Style::default().fg(theme.accent)),
+        Span::styled("[↑/↓]", Style::default().fg(theme.accent)),
         Span::raw(" Navigacio  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
         Span::raw(" Bezar"),

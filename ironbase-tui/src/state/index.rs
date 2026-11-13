@@ -116,6 +116,11 @@ pub struct IndexState {
 }
 
 impl IndexState {
+    /// The primary `_id` index (`<collection>_id`) must not be dropped
+    pub fn is_primary_index(&self, index_name: &str) -> bool {
+        index_name == format!("{}_id", self.collection)
+    }
+
     pub fn new(collection: String, indexes: Vec<String>) -> Self {
         Self {
             collection,
@@ -165,10 +170,7 @@ impl IndexState {
 
     /// Get statistics for the currently selected index
     pub fn selected_statistics(&self) -> Option<&IndexStatistics> {
-        if self.indexes.is_empty() {
-            return None;
-        }
-        let selected_name = &self.indexes[self.selected_index];
+        let selected_name = self.indexes.get(self.selected_index)?;
         self.statistics.iter().find(|s| &s.name == selected_name)
     }
 
@@ -264,5 +266,18 @@ impl IndexState {
             // Single field mode - take first field only
             self.compound_fields.first().cloned().into_iter().collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_primary_index() {
+        let state = IndexState::new("users".to_string(), vec![]);
+        assert!(state.is_primary_index("users_id"));
+        assert!(!state.is_primary_index("users_age"));
+        assert!(!state.is_primary_index("orders_id"));
     }
 }

@@ -93,8 +93,6 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         SearchMode::Document => Line::from(vec![
             Span::styled("[Enter]", Style::default().fg(theme.accent)),
             Span::styled(" Kereses  ", Style::default().fg(theme.muted)),
-            Span::styled("[n/N]", Style::default().fg(theme.accent)),
-            Span::styled(" Kov/Eloz  ", Style::default().fg(theme.muted)),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
             Span::styled(" Bezar", Style::default().fg(theme.muted)),
         ]),
