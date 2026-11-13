@@ -46,9 +46,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
 
     let format_line = Line::from(vec![
         Span::raw(" Formatum: "),
-        Span::styled("[J] JSON", json_style),
+        Span::styled("JSON", json_style),
         Span::raw("  "),
-        Span::styled("[C] CSV", csv_style),
+        Span::styled("CSV", csv_style),
     ]);
     frame.render_widget(Paragraph::new(format_line), chunks[1]);
 
