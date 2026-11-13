@@ -919,8 +919,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Drop an index
+    ///
+    /// The automatic `_id` index cannot be dropped (MongoDB: "cannot drop _id
+    /// index"): every write path checks `_id` uniqueness through it and skips
+    /// the check when it is missing, so dropping it allowed duplicate `_id`s
+    /// until the collection was reopened.
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
         self.check_not_closed()?;
+        if index_name == format!("{}_id", self.name) {
+            return Err(IronBaseError::IndexError(format!(
+                "cannot drop _id index '{}'",
+                index_name
+            )));
+        }
         // LOCK ORDER (issue #75): acquire `storage` BEFORE `indexes` to match the
         // global storage→indexes order used by the write paths (insert/update *_raw)
         // and by count_with_plan. Acquiring indexes-then-storage here previously
