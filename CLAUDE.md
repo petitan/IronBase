@@ -219,6 +219,50 @@ Konvenciók: [naming, error, stb.]
 
 > **Nincs jogod módosítani amit nem te terveztél. Kérdezz. Mindig.**
 
+### Delegált döntések (2026-11)
+
+A fenti szabály alól a tulajdonos **egy szűk kivételt** adott: nem kell kérdezni, ha
+**mindhárom** feltétel teljesül.
+
+| Feltétel | Jelentés |
+|----------|----------|
+| Additív | Új stage/operátor/opció/mező; meglévő viselkedés, név, típus nem változik |
+| Visszafelé kompatibilis | Régi adatbázisfájl, régi kliens, régi konfiguráció változatlanul működik; nincs migráció |
+| A döntési elv eldönti | A **legkisebb technológiai adósság** és a **MongoDB-kompatibilitás** egyértelműen egy megoldásra mutat (ha a MongoDB-nek van saját megoldása, az a nyerő — nincs saját, nem szabványos kiterjesztés) |
+
+**Továbbra is KÉRDEZNI kell:**
+- Fájlformátum (`.mlite`, WAL, indexfájlok) változása, migráció
+- Törő változás: meglévő viselkedés, mezőnév/-típus, API-szignatúra módosítása vagy eltávolítása
+- Biztonsági döntés (hitelesítés, ACL, hálózat, titkok, személyes adat)
+- Visszafordíthatatlan művelet (history rewrite, adat/ág törlése)
+- Ha a két elv ütközik, vagy nem dönt egyértelműen
+- Ha nincs követhető minta a kódban (lásd *Kód Konzisztencia Protokoll*)
+
+A delegált döntést a PR leírásában indokolni kell (melyik elv döntött, mi volt az alternatíva).
+
+### Munkafolyamat (döntési fa)
+
+```
+Új tétel (issue / review-megjegyzés / hiba / funkció)
+├─ 1. Megértés
+│  ├─ Hiba: reprodukálható? root cause megvan? → különben NINCS kód
+│  ├─ 2 sikertelen kísérlet → megállás, elemzés
+│  └─ Nem hiba → lezárás indoklással
+├─ 2. Döntési kapu (minden változtatásnál)
+│  ├─ Delegált döntés feltételei teljesülnek → dönts, indokold a PR-ban
+│  └─ Különben → kérdezz
+├─ 3. Megvalósítás
+│  ├─ Meglévő minta követése; nincs workaround, nincs kéretlen refaktor
+│  ├─ Minden kódút (git grep); duplikáció → közös helper
+│  ├─ Rust → PyO3 → C# → teszt (a regressziós teszt a javítás nélkül bukik)
+│  └─ Verzióemelés + CHANGELOG + `just run-dev-checks`
+├─ 4. PR
+│  ├─ Piros CI → root cause; teszt kikapcsolása, üres commit TILOS
+│  ├─ Review-bot megjegyzés: kísérlettel/teszttel igazold → javítás VAGY indokolt válasz a szálon
+│  └─ Merge feltétele: zöld CI ÉS minden review-szál megválaszolva
+└─ 5. Túl nagy tétel → a kész rész megy be, a maradék dokumentálva nyitott issue-ban
+```
+
 ---
 
 ## Hibakezelési Protokoll
