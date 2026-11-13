@@ -224,8 +224,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Close MCP connection
+    // In stdio mode this waits for the server's graceful shutdown (flush), which
+    // can take a while on a large database: say so instead of sitting silent.
     if let Some(ref db) = app.db {
-        let _ = db.close().await;
+        let close = db.close();
+        tokio::pin!(close);
+        tokio::select! {
+            _ = &mut close => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                eprintln!("Varakozas a szerver leallasara...");
+                let _ = close.await;
+            }
+        }
     }
 
     result
@@ -847,13 +857,15 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
 
                             // Reset UI state and refresh collections
                             app.reset_for_new_database();
-                            if let Err(e) = app.refresh_collections_async().await {
-                                app.set_error(format!("Kollekcio betoltes hiba: {}", e));
-                            }
+                            let refreshed = app.refresh_collections_async().await;
 
                             // Close modal after success
                             app.close_modal();
-                            app.set_status(format!("Adatbazis {}: {}", action, path));
+                            // set_status clears a stale error, so the load error must win
+                            match refreshed {
+                                Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
+                                Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                            }
                         }
                         Err(e) => {
                             app.database_state.loading = false;
@@ -914,13 +926,15 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
 
                     // Reset UI state and refresh collections
                     app.reset_for_new_database();
-                    if let Err(e) = app.refresh_collections_async().await {
-                        app.set_error(format!("Kollekcio betoltes hiba: {}", e));
-                    }
+                    let refreshed = app.refresh_collections_async().await;
 
                     // Close modal after success
                     app.close_modal();
-                    app.set_status(format!("Adatbazis {}: {}", action, path));
+                    // set_status clears a stale error, so the load error must win
+                    match refreshed {
+                        Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
+                        Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                    }
                 }
                 Err(e) => {
                     app.database_state.loading = false;

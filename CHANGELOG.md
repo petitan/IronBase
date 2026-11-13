@@ -31,13 +31,14 @@ Phase 0 of the Tuti TUI overhaul: targeted safety fixes, no restructuring.
 - **TUI: export follows the active filter and sort,** writes to a temporary file and renames it on
   success. The extension switch no longer rewrites a dot in a directory name.
 - **TUI: text entry.** `j`/`k` can be typed in the fulltext and RAG search fields, capital `J`/`C` in the
-  export path; a successful action clears a stale error message.
+  export path, `n`/`N` in the document search field (match navigation stays in the Detail pane); a
+  successful action clears a stale error message.
 - **TUI: panics fixed** — a non-ASCII character in the database path field, and terminals only a few
   rows high.
 - **TUI: stdio mode shuts the server down gracefully** (closes stdin and waits) instead of killing it,
   which forced a WAL replay on the next start.
 - **TUI: configuration.** An API key, `--insecure` or `--url` given on the command line or through the
-  environment is no longer written to `config.toml`; the file is created with mode 0600; a file that
+  environment is no longer written to `config.toml`; the file is created with mode 0600 (Unix); a file that
   fails to parse is reported and left untouched.
 - **TUI: mouse capture removed** (no mouse events were handled, and it blocked the terminal's own text
   selection). Help and README corrected (`Shift+D` drops a collection; package name `tuti-tui`; themes).
