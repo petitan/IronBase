@@ -7,6 +7,12 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::collections::HashSet;
 
+/// Number of document rows the pane draws for a given pane height
+/// (borders: 2, table header: 1). Single source of truth for the page size.
+pub fn visible_rows(pane_height: u16) -> usize {
+    pane_height.saturating_sub(3) as usize
+}
+
 /// Render the documents pane (center panel) as a table
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: bool) {
     let border_color = if focused {
@@ -83,7 +89,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     // Build data rows
     let local_selected = app.selected_document.saturating_sub(app.doc_scroll_offset);
-    let visible_height = inner.height.saturating_sub(1) as usize; // -1 for header
+    let visible_height = visible_rows(area.height);
 
     let rows: Vec<Row> = documents
         .iter()

@@ -4,4 +4,4 @@
 
 mod renderer;
 
-pub use renderer::render_ui;
+pub use renderer::{content_height, render_ui};

@@ -62,10 +62,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     frame.render_widget(Paragraph::new(path_line), chunks[2]);
 
     // Status info
+    let filtered = if state.filtered { " - szűrt" } else { "" };
     let info_line = Line::from(vec![Span::styled(
         format!(
-            " Kollekció: {} ({} dokumentum)",
-            state.collection, state.doc_count
+            " Kollekció: {} ({} dokumentum{})",
+            state.collection, state.doc_count, filtered
         ),
         Style::default().fg(theme.muted),
     )]);

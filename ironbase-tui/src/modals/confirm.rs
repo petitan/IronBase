@@ -88,7 +88,8 @@ impl ConfirmState {
         Self {
             title: "Dokumentum torlese".to_string(),
             message: format!(
-                "Biztosan torli a dokumentumot?\n\n{}",
+                "Biztosan torli a dokumentumot a(z) \"{}\" kollekciobol?\n\n{}",
+                collection,
                 truncate(preview, 100)
             ),
             confirm_text: "Torles".to_string(),

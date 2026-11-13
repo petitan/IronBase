@@ -69,6 +69,14 @@ impl DbWrapper {
         Ok(Self { client })
     }
 
+    /// Wrapper over a ready transport (tests: no connection needed)
+    #[cfg(test)]
+    pub(crate) fn with_transport(transport: std::sync::Arc<dyn crate::mcp::Transport>) -> Self {
+        Self {
+            client: McpClient::with_transport(transport),
+        }
+    }
+
     /// Connect via stdio transport (spawns MCP server)
     pub async fn connect_stdio(server_path: &Path, db_path: &Path) -> Result<Self> {
         let client = McpClient::connect_stdio(server_path, db_path).await?;
@@ -77,7 +85,9 @@ impl DbWrapper {
 
     /// List all collections (fast - names only, no counts)
     pub async fn list_collections(&self) -> Result<Vec<CollectionInfo>> {
-        let names = self.client.list_collections().await?;
+        let mut names = self.client.list_collections().await?;
+        // The server lists collections in HashMap order: sort for a stable list
+        names.sort();
 
         // Fast path: just names, counts will be loaded lazily on selection
         let infos = names.into_iter().map(CollectionInfo::unloaded).collect();

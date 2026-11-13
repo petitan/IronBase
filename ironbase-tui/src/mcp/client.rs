@@ -34,6 +34,15 @@ impl McpClient {
         Ok(client)
     }
 
+    /// Client over a ready transport (tests: no connection needed)
+    #[cfg(test)]
+    pub(crate) fn with_transport(transport: Arc<dyn Transport>) -> Self {
+        Self {
+            transport,
+            initialized: true,
+        }
+    }
+
     /// Connect via stdio transport (spawns MCP server)
     pub async fn connect_stdio(server_path: &Path, db_path: &Path) -> McpResult<Self> {
         let transport = StdioTransport::new(server_path, db_path).await?;

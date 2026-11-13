@@ -75,20 +75,14 @@ struct Cli {
     server: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    // Load config
-    let mut config = Config::load();
-
-    // CLI overrides config
-    if let Some(url) = cli.url {
-        config.mcp_url = url;
+/// Apply CLI/env overrides to the effective (runtime) config
+fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
+    if let Some(url) = &cli.url {
+        config.mcp_url = url.clone();
         config.transport = TransportMode::Http;
     }
-    if let Some(key) = cli.api_key {
-        config.mcp_api_key = Some(key);
+    if let Some(key) = &cli.api_key {
+        config.mcp_api_key = Some(key.clone());
     }
     if cli.insecure {
         config.mcp_insecure = true;
@@ -96,6 +90,39 @@ async fn main() -> anyhow::Result<()> {
     if cli.server.is_some() {
         config.transport = TransportMode::Stdio;
     }
+}
+
+/// The config to write on exit: the persisted one plus what the user changed
+/// inside the TUI (theme, last database). CLI/env overrides live only in the
+/// effective config (`app.config`), so a key or `--insecure` given on the
+/// command line never reaches the file.
+fn config_to_save(mut persisted: Config, app: &App) -> Config {
+    persisted.theme = app.theme_name;
+    persisted.last_db_path = app.db_path.clone();
+    persisted
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Load the persisted config. A broken file is reported and never
+    // overwritten on exit.
+    let (persisted_config, config_error) = match Config::try_load() {
+        Ok(config) => (config, None),
+        Err(e) => {
+            eprintln!(
+                "Config hiba: {} - alapertelmezett beallitasokkal indul, a fajl nem lesz felulirva",
+                e
+            );
+            (Config::default(), Some(e))
+        }
+    };
+
+    // Effective runtime config: CLI/env overrides apply to this copy only and
+    // are never written back to the config file
+    let mut config = persisted_config.clone();
+    apply_cli_overrides(&mut config, &cli);
 
     // Get db_path for later use
     let db_path = cli.database.or_else(|| config.last_db_path.clone());
@@ -188,10 +215,13 @@ async fn main() -> anyhow::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    // Save config
-    app.config.theme = app.theme_name;
-    app.config.last_db_path = app.db_path.clone();
-    let _ = app.config.save();
+    // Save config (only what the user changed inside the TUI)
+    match config_error {
+        None => {
+            let _ = config_to_save(persisted_config, &app).save();
+        }
+        Some(e) => eprintln!("Config hiba: {} - a beallitasok nem lettek elmentve", e),
+    }
 
     // Close MCP connection
     if let Some(ref db) = app.db {
@@ -231,7 +261,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
                     // Update page_size when terminal is resized
                     if app.update_page_size(height) => {
                         // Refresh documents with new page size
-                        let _ = app.refresh_documents_async().await;
+                        app.reload_documents_async().await;
                     }
                 _ => {}
             }
@@ -449,16 +479,23 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                     };
                     match existing {
                         Ok(acl) => {
-                            let rules = acl
+                            let info = acl
                                 .as_ref()
-                                .and_then(modals::acl::CollectionAclInfo::from_value)
-                                .map(|info| info.rules)
-                                .unwrap_or_default();
-                            app.acl_state = modals::acl::AclState::new();
-                            app.acl_state.is_localhost = true;
-                            app.acl_state.start_edit(coll);
-                            app.acl_state.load_edit_rules(&rules);
-                            app.modal = Some(Modal::Acl);
+                                .and_then(modals::acl::CollectionAclInfo::from_value);
+                            // Never load a mangled copy: saving it would
+                            // corrupt the stored rules
+                            if let Some(message) =
+                                info.as_ref().and_then(|info| info.uneditable_message())
+                            {
+                                app.set_error(message);
+                            } else {
+                                let rules = info.map(|info| info.rules).unwrap_or_default();
+                                app.acl_state = modals::acl::AclState::new();
+                                app.acl_state.is_localhost = true;
+                                app.acl_state.start_edit(coll);
+                                app.acl_state.load_edit_rules(&rules);
+                                app.modal = Some(Modal::Acl);
+                            }
                         }
                         Err(e) => app.set_error(format!("ACL betoltese sikertelen: {}", e)),
                     }
@@ -3197,5 +3234,44 @@ async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
         KeyCode::Tab => app.rag_state.next_tab(),
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI/env overrides are runtime-only: a key or `--insecure` given on the
+    /// command line used to be written to config.toml on exit
+    #[test]
+    fn test_cli_overrides_are_not_persisted() {
+        let cli = Cli::parse_from([
+            "tuti-tui",
+            "--api-key",
+            "sk-test",
+            "--insecure",
+            "--url",
+            "https://db.example:9000/mcp",
+        ]);
+        let persisted = Config::default();
+        let mut effective = persisted.clone();
+        apply_cli_overrides(&mut effective, &cli);
+        assert_eq!(effective.mcp_api_key.as_deref(), Some("sk-test"));
+        assert!(effective.mcp_insecure);
+        assert_eq!(effective.mcp_url, "https://db.example:9000/mcp");
+
+        let mut app = App::new(effective);
+        app.next_theme();
+        app.db_path = Some(PathBuf::from("/data/x.mlite"));
+
+        let saved = config_to_save(persisted.clone(), &app);
+        assert_eq!(saved.mcp_api_key, None);
+        assert!(!saved.mcp_insecure);
+        assert_eq!(saved.mcp_url, persisted.mcp_url);
+        assert_eq!(saved.transport, persisted.transport);
+        // What the user changed inside the TUI is saved
+        assert_eq!(saved.theme, app.theme_name);
+        assert_ne!(saved.theme, persisted.theme);
+        assert_eq!(saved.last_db_path, Some(PathBuf::from("/data/x.mlite")));
     }
 }

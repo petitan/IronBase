@@ -13,6 +13,12 @@ use tokio::sync::Mutex;
 /// Timeout for stdio communication (30 seconds)
 const STDIO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long `close()` waits for the server to exit on its own after stdin EOF
+/// before killing it. The server flushes on shutdown; a kill is a dirty
+/// shutdown (index rebuild on next start), so this matches the documented
+/// 60 s graceful-stop window.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Transport trait for MCP communication
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -122,17 +128,22 @@ impl Transport for HttpTransport {
 /// Stdio transport for MCP communication (spawns server as child process)
 pub struct StdioTransport {
     child: Arc<Mutex<Option<Child>>>,
-    stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
+    /// `None` once closed (dropping it is the EOF that stops the server)
+    stdin: Arc<Mutex<Option<BufWriter<ChildStdin>>>>,
     stdout: Arc<Mutex<BufReader<ChildStdout>>>,
 }
 
 impl StdioTransport {
     /// Create a new stdio transport by spawning the MCP server
     pub async fn new(server_path: &Path, db_path: &Path) -> McpResult<Self> {
-        let mut child = Command::new(server_path)
-            .arg("--stdio")
-            .arg("--db")
-            .arg(db_path)
+        let mut command = Command::new(server_path);
+        command.arg("--stdio").arg("--db").arg(db_path);
+        Self::spawn(command)
+    }
+
+    /// Spawn the given server command with piped stdin/stdout
+    fn spawn(mut command: Command) -> McpResult<Self> {
+        let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -151,9 +162,25 @@ impl StdioTransport {
 
         Ok(Self {
             child: Arc::new(Mutex::new(Some(child))),
-            stdin: Arc::new(Mutex::new(BufWriter::new(stdin))),
+            stdin: Arc::new(Mutex::new(Some(BufWriter::new(stdin)))),
             stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
         })
+    }
+
+    /// Graceful shutdown: close the child's stdin (the server exits on EOF),
+    /// wait for it to exit, and kill it only if it has not exited in time
+    async fn close_with_timeout(&self, timeout: Duration) -> McpResult<()> {
+        if let Some(mut stdin) = self.stdin.lock().await.take() {
+            let _ = stdin.shutdown().await;
+        }
+
+        let mut child_guard = self.child.lock().await;
+        if let Some(mut child) = child_guard.take() {
+            if tokio::time::timeout(timeout, child.wait()).await.is_err() {
+                let _ = child.kill().await;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -167,7 +194,10 @@ impl Transport for StdioTransport {
 
         // Send request with timeout
         {
-            let mut stdin = self.stdin.lock().await;
+            let mut stdin_guard = self.stdin.lock().await;
+            let Some(stdin) = stdin_guard.as_mut() else {
+                return Err(McpError::connection("Connection is closed"));
+            };
             tokio::time::timeout(STDIO_TIMEOUT, async {
                 stdin.write_all(json.as_bytes()).await?;
                 stdin.flush().await?;
@@ -200,22 +230,71 @@ impl Transport for StdioTransport {
     }
 
     async fn close(&self) -> McpResult<()> {
-        let mut child_guard = self.child.lock().await;
-        if let Some(mut child) = child_guard.take() {
-            let _ = child.kill().await;
-        }
-        Ok(())
+        self.close_with_timeout(GRACEFUL_SHUTDOWN_TIMEOUT).await
     }
 }
 
 impl Drop for StdioTransport {
     fn drop(&mut self) {
-        // Best effort cleanup - kill the child process if it's still running
+        // Last resort only (`close()` was not called): kill the child process
+        // if it's still running. After `close()` there is no child here.
         // We can't do async here, so we just try to get the lock and kill
         if let Ok(mut guard) = self.child.try_lock() {
             if let Some(ref mut child) = *guard {
                 let _ = child.start_kill();
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn marker_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tuti-tui-{}-{}", name, std::process::id()))
+    }
+
+    /// `close()` must let the server finish its shutdown work after stdin EOF.
+    /// The child writes the marker only after it has seen EOF; a kill (the old
+    /// behaviour) would leave no marker.
+    #[tokio::test]
+    async fn test_close_lets_server_exit_gracefully_on_stdin_eof() {
+        let marker = marker_path("graceful");
+        let _ = std::fs::remove_file(&marker);
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("cat >/dev/null; sleep 0.3; echo done > \"$0\"")
+            .arg(&marker);
+        let transport = StdioTransport::spawn(command).unwrap();
+
+        transport.close().await.unwrap();
+
+        let content = std::fs::read_to_string(&marker).unwrap_or_default();
+        let _ = std::fs::remove_file(&marker);
+        assert_eq!(content.trim(), "done");
+        assert!(transport.child.lock().await.is_none());
+    }
+
+    /// A server that does not exit on EOF is killed after the timeout
+    #[tokio::test]
+    async fn test_close_kills_server_that_ignores_eof() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exec sleep 30");
+        let transport = StdioTransport::spawn(command).unwrap();
+
+        let started = std::time::Instant::now();
+        transport
+            .close_with_timeout(Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(transport.child.lock().await.is_none());
+
+        // A closed transport refuses further requests instead of hanging
+        let request = JsonRpcRequest::initialize();
+        assert!(transport.send(&request).await.is_err());
     }
 }

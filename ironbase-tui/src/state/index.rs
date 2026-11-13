@@ -170,10 +170,7 @@ impl IndexState {
 
     /// Get statistics for the currently selected index
     pub fn selected_statistics(&self) -> Option<&IndexStatistics> {
-        if self.indexes.is_empty() {
-            return None;
-        }
-        let selected_name = &self.indexes[self.selected_index];
+        let selected_name = self.indexes.get(self.selected_index)?;
         self.statistics.iter().find(|s| &s.name == selected_name)
     }
 

@@ -66,6 +66,8 @@ pub struct CollectionAclInfo {
     pub collection: String,
     pub rules: Vec<AclRuleInfo>,
     pub is_builtin: bool,
+    /// Stored rules the editor cannot represent losslessly (empty = editable)
+    pub uneditable: Vec<String>,
 }
 
 impl CollectionAclInfo {
@@ -81,14 +83,83 @@ impl CollectionAclInfo {
             .map(|arr| arr.iter().filter_map(AclRuleInfo::from_value).collect())
             .unwrap_or_default();
 
-        // Consider builtin if collection starts with _system or is "*"
-        let is_builtin = collection.starts_with("_system") || collection == "*";
+        // Checked on the raw JSON: `rules` above is already a lossy view
+        let uneditable: Vec<String> = match value.get("rules") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Array(arr)) => {
+                arr.iter().filter_map(uneditable_reason).collect()
+            }
+            Some(other) => vec![other.to_string()],
+        };
+
+        // Builtin = what the server protects: acl_delete refuses only the
+        // "_system.*" rule. A custom "*" ACL is an ordinary, editable one.
+        let is_builtin = collection == "_system.*";
 
         Some(Self {
             collection,
             rules,
             is_builtin,
+            uneditable,
         })
+    }
+
+    /// Message for refusing to open the editor (None = the ACL is editable).
+    /// Saving replaces the whole rule list, so a rule the editor cannot
+    /// represent would be mangled or dropped.
+    pub fn uneditable_message(&self) -> Option<String> {
+        if self.uneditable.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "ACL for '{}' contains rules this editor cannot edit yet: {}",
+            self.collection,
+            self.uneditable.join("; ")
+        ))
+    }
+}
+
+/// Why the editor cannot represent a stored rule losslessly (None = it can).
+///
+/// The editor keeps a rule as `type:value` + read/write/admin and saves it
+/// through `acl_set`, which re-parses both strings. Only a rule that comes
+/// back from that round trip unchanged may be loaded (so no `anyone` or
+/// unknown principal, no unexpected fields, no permission set that `acl_set`
+/// would normalize).
+fn uneditable_reason(rule: &serde_json::Value) -> Option<String> {
+    let principal = rule.get("principal").and_then(|v| v.as_object());
+    let permissions = rule.get("permissions").and_then(|v| v.as_object());
+    let (Some(principal), Some(permissions)) = (principal, permissions) else {
+        return Some(rule.to_string());
+    };
+    if rule.as_object().map(|obj| obj.len()) != Some(2) {
+        return Some(rule.to_string());
+    }
+
+    let ptype = principal.get("type").and_then(|v| v.as_str());
+    let known_type = PrincipalType::all()
+        .iter()
+        .any(|t| Some(t.as_str()) == ptype);
+    let string_value = principal.get("value").is_some_and(|v| v.is_string());
+    if !known_type || !string_value || principal.len() != 2 {
+        return Some(format!(
+            "principal {}",
+            serde_json::Value::Object(principal.clone())
+        ));
+    }
+
+    let flag = |name: &str| permissions.get(name).and_then(|v| v.as_bool());
+    match (flag("read"), flag("write"), flag("admin")) {
+        // acl_set normalizes: write implies read, admin implies write
+        (Some(read), Some(write), Some(admin))
+            if permissions.len() == 3 && (read || !write) && (write || !admin) =>
+        {
+            None
+        }
+        _ => Some(format!(
+            "permissions {}",
+            serde_json::Value::Object(permissions.clone())
+        )),
     }
 }
 
@@ -417,12 +488,23 @@ impl AclState {
     /// Start editing existing ACL (from list)
     pub fn start_edit_existing(&mut self) {
         // Clone data before mutating
-        let (collection, rules, is_builtin) = match self.get_selected() {
-            Some(acl) => (acl.collection.clone(), acl.rules.clone(), acl.is_builtin),
+        let (collection, rules, is_builtin, uneditable) = match self.get_selected() {
+            Some(acl) => (
+                acl.collection.clone(),
+                acl.rules.clone(),
+                acl.is_builtin,
+                acl.uneditable_message(),
+            ),
             None => return,
         };
 
         if is_builtin {
+            return;
+        }
+
+        // Never load a mangled copy: saving it would corrupt the stored rules
+        if let Some(message) = uneditable {
+            self.set_error(message);
             return;
         }
 
@@ -1171,5 +1253,162 @@ mod tests {
                 json!({"principal": "iprange:10.0.0.0/8", "permissions": "read"}),
             ]
         );
+    }
+
+    /// What `acl_set` stores for a rule sent by the editor - mirrors
+    /// `Principal::parse` + `Permissions::parse` in mcp-server/src/acl.rs
+    fn server_stored_form(rule: &serde_json::Value) -> serde_json::Value {
+        let principal = rule["principal"].as_str().unwrap();
+        let (ptype, pvalue) = principal.split_once(':').unwrap();
+        let (mut read, mut write, mut admin) = (false, false, false);
+        let perms = rule["permissions"].as_str().unwrap().to_lowercase();
+        if perms != "deny" && perms != "none" {
+            for part in perms.split(',') {
+                match part.trim() {
+                    "read" => read = true,
+                    "write" => (read, write) = (true, true),
+                    "admin" | "all" => (read, write, admin) = (true, true, true),
+                    _ => {}
+                }
+            }
+        }
+        json!({
+            "principal": {"type": ptype, "value": pvalue},
+            "permissions": {"read": read, "write": write, "admin": admin}
+        })
+    }
+
+    fn acl_doc(rules: serde_json::Value) -> CollectionAclInfo {
+        CollectionAclInfo::from_value(&json!({"collection": "users", "rules": rules})).unwrap()
+    }
+
+    /// Every rule the editor accepts must be saved back as exactly the JSON
+    /// it was loaded from
+    #[test]
+    fn test_accepted_rules_round_trip_exactly() {
+        let principals = [
+            json!({"type": "interface", "value": "localhost"}),
+            json!({"type": "interface", "value": "internal"}),
+            json!({"type": "apikey", "value": "sk:with:colons"}),
+            json!({"type": "apikey", "value": ""}),
+            json!({"type": "ip", "value": "192.168.1.100"}),
+            json!({"type": "ip", "value": "::1"}),
+            json!({"type": "iprange", "value": "10.0.0.0/8"}),
+        ];
+        let permissions = [
+            json!({"read": false, "write": false, "admin": false}),
+            json!({"read": true, "write": false, "admin": false}),
+            json!({"read": true, "write": true, "admin": false}),
+            json!({"read": true, "write": true, "admin": true}),
+        ];
+        let mut stored = Vec::new();
+        for principal in &principals {
+            for perms in &permissions {
+                stored.push(json!({"principal": principal, "permissions": perms}));
+            }
+        }
+
+        let info = acl_doc(json!(stored));
+        assert_eq!(info.uneditable, Vec::<String>::new());
+        assert_eq!(info.uneditable_message(), None);
+
+        let mut state = AclState::new();
+        state.start_edit("users".to_string());
+        state.load_edit_rules(&info.rules);
+        let saved: Vec<_> = state
+            .get_rules_json()
+            .iter()
+            .map(server_stored_form)
+            .collect();
+        assert_eq!(saved, stored);
+    }
+
+    /// Rules that would not survive the editor are detected one by one
+    #[test]
+    fn test_unrepresentable_rules_are_detected() {
+        let ok_perms = json!({"read": true, "write": false, "admin": false});
+        let ok_principal = json!({"type": "apikey", "value": "abc"});
+        let unrepresentable = [
+            // `anyone` has no value and no editor type
+            json!({"principal": {"type": "anyone"}, "permissions": ok_perms}),
+            json!({"principal": {"type": "group", "value": "x"}, "permissions": ok_perms}),
+            json!({"principal": {"type": "apikey", "value": 42}, "permissions": ok_perms}),
+            json!({"principal": "apikey:abc", "permissions": ok_perms}),
+            json!({"permissions": ok_perms}),
+            // acl_set would add the implied permissions
+            json!({"principal": ok_principal,
+                   "permissions": {"read": false, "write": true, "admin": false}}),
+            json!({"principal": ok_principal,
+                   "permissions": {"read": true, "write": false, "admin": true}}),
+            json!({"principal": ok_principal, "permissions": {"read": true}}),
+            json!({"principal": ok_principal, "permissions": "read"}),
+            // Unknown fields would be dropped
+            json!({"principal": ok_principal, "permissions": ok_perms, "expires": "2030"}),
+            json!({"principal": ok_principal,
+                   "permissions": {"read": true, "write": false, "admin": false, "deny": true}}),
+        ];
+        for rule in &unrepresentable {
+            assert!(uneditable_reason(rule).is_some(), "accepted: {}", rule);
+        }
+
+        // A rules field that is not a list at all
+        let info = CollectionAclInfo::from_value(&json!({"collection": "users", "rules": "x"}));
+        assert!(info.unwrap().uneditable_message().is_some());
+        // No custom ACL yet: nothing to mangle
+        let info = CollectionAclInfo::from_value(&json!({"collection": "users", "rules": null}));
+        assert_eq!(info.unwrap().uneditable_message(), None);
+    }
+
+    /// The list editor refuses an ACL it would mangle (`anyone` used to be
+    /// loaded as `interface:""`) and says why
+    #[test]
+    fn test_editor_refuses_acl_with_unrepresentable_rule() {
+        let info = acl_doc(json!([
+            {
+                "principal": {"type": "apikey", "value": "abc"},
+                "permissions": {"read": true, "write": true, "admin": false}
+            },
+            {
+                "principal": {"type": "anyone"},
+                "permissions": {"read": true, "write": false, "admin": false}
+            }
+        ]));
+        let message = info.uneditable_message().unwrap();
+        assert!(message.contains("contains rules this editor cannot edit yet"));
+        assert!(message.contains("anyone"));
+
+        let mut state = AclState::new();
+        state.is_localhost = true;
+        state.set_acls(vec![info]);
+        state.start_edit_existing();
+        assert_eq!(state.mode, AclModalMode::List);
+        assert!(state.edit_rules.is_empty());
+        assert_eq!(state.error, Some(message));
+    }
+
+    /// Only the server-protected "_system.*" rule is builtin; a custom "*"
+    /// ACL can be edited and deleted
+    #[test]
+    fn test_custom_wildcard_acl_is_not_builtin() {
+        let wildcard = CollectionAclInfo::from_value(&json!({
+            "collection": "*",
+            "rules": [{
+                "principal": {"type": "interface", "value": "internal"},
+                "permissions": {"read": true, "write": false, "admin": false}
+            }]
+        }))
+        .unwrap();
+        assert!(!wildcard.is_builtin);
+
+        let mut state = AclState::new();
+        state.is_localhost = true;
+        state.set_acls(vec![wildcard]);
+        state.start_edit_existing();
+        assert_eq!(state.mode, AclModalMode::Edit);
+        assert_eq!(state.edit_collection, "*");
+        assert_eq!(state.edit_rules.len(), 1);
+
+        let system = CollectionAclInfo::from_value(&json!({"collection": "_system.*"}));
+        assert!(system.unwrap().is_builtin);
     }
 }
