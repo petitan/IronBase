@@ -5,7 +5,6 @@
 use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
-use crate::modals::export::ExportFormat;
 use crate::theme::{Theme, ThemeName};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -19,11 +18,9 @@ pub use crate::state::{
     DatabaseState,
     // Search
     DocSearchMatch,
-    EditorMode,
     // Export
     ExportState,
     // Filter
-    FilterCondition,
     FilterFocus,
     FilterOperator,
     FilterState,
@@ -51,7 +48,6 @@ pub use crate::state::{
     SearchMode,
     SearchResult,
     SearchState,
-    SortDirection,
     // Vector
     VectorSearchState,
     QUERY_TEMPLATES,
@@ -86,7 +82,6 @@ pub struct App {
     // Collections pane
     pub collections: Vec<CollectionInfo>,
     pub selected_collection: usize,
-    pub collections_scroll: usize,
 
     // Documents pane
     pub documents: Vec<Value>,
@@ -184,7 +179,6 @@ impl App {
             db_path: None,
             collections: Vec::new(),
             selected_collection: 0,
-            collections_scroll: 0,
             documents: Vec::new(),
             selected_document: 0,
             doc_scroll_offset: 0,
@@ -668,18 +662,6 @@ impl App {
         self.modal = Some(Modal::Query);
     }
 
-    /// Open visual filter modal (sync - no schema loading)
-    pub fn open_filter_modal(&mut self) {
-        if self.current_collection_name().is_none() {
-            self.set_error("Nincs kiválasztott kollekció");
-            return;
-        };
-
-        // Preserve existing filters, only reset input fields
-        self.filter_state.reset_inputs();
-        self.modal = Some(Modal::Filter);
-    }
-
     /// Open visual filter modal with schema loading (async)
     pub async fn open_filter_modal_async(&mut self) {
         let coll_name = match self.current_collection_name() {
@@ -1137,11 +1119,6 @@ impl App {
     /// Set error message
     pub fn set_error(&mut self, msg: impl Into<String>) {
         self.error_message = Some(msg.into());
-    }
-
-    /// Clear error
-    pub fn clear_error(&mut self) {
-        self.error_message = None;
     }
 
     /// Reset UI state for database switch (clear documents, filters, selections)
@@ -1618,10 +1595,9 @@ impl App {
             let line_lower = line.to_lowercase();
             let mut search_start = 0;
             while let Some(col) = line_lower[search_start..].find(&query) {
-                self.search.doc_matches.push(DocSearchMatch {
-                    line: line_num,
-                    col_start: search_start + col,
-                });
+                self.search
+                    .doc_matches
+                    .push(DocSearchMatch { line: line_num });
                 search_start += col + query.len();
             }
         }
@@ -2154,8 +2130,6 @@ impl App {
 
     /// Execute the visual filter (async) - max 1000 results
     pub async fn execute_filter_async(&mut self) {
-        const FILTER_LIMIT: usize = 1000;
-
         // Ha van kitöltött field, automatikusan adjuk hozzá keresés előtt
         if !self.filter_state.field_input.is_empty() {
             self.filter_state.add_filter();
@@ -2450,123 +2424,7 @@ fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpResult, Transport};
-    use std::sync::{Arc, Mutex};
-
-    /// In-memory stand-in for the MCP server: just enough of
-    /// collection_list / find / count / index_list / collection_drop
-    #[derive(Default)]
-    struct FakeServer {
-        /// (name, documents) in the order the server lists them
-        collections: Mutex<Vec<(String, Vec<Value>)>>,
-        /// `find` on this collection fails
-        failing_find: Mutex<Option<String>>,
-    }
-
-    impl FakeServer {
-        fn new(collections: Vec<(&str, Vec<Value>)>) -> Arc<Self> {
-            Arc::new(Self {
-                collections: Mutex::new(
-                    collections
-                        .into_iter()
-                        .map(|(name, docs)| (name.to_string(), docs))
-                        .collect(),
-                ),
-                failing_find: Mutex::new(None),
-            })
-        }
-
-        /// Documents matching a query of top-level equalities
-        fn matching(&self, args: &Value) -> Vec<Value> {
-            let name = args["collection"].as_str().unwrap_or_default();
-            let collections = self.collections.lock().unwrap();
-            let docs = collections
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, docs)| docs.clone())
-                .unwrap_or_default();
-            let query = args["query"].as_object().cloned().unwrap_or_default();
-            docs.into_iter()
-                .filter(|doc| query.iter().all(|(k, v)| doc.get(k) == Some(v)))
-                .collect()
-        }
-
-        fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
-            match name {
-                "collection_list" => {
-                    let collections = self.collections.lock().unwrap();
-                    let names: Vec<&String> = collections.iter().map(|(n, _)| n).collect();
-                    Ok(serde_json::json!({ "collections": names }))
-                }
-                "find" => {
-                    let collection = args["collection"].as_str().map(String::from);
-                    if *self.failing_find.lock().unwrap() == collection {
-                        return Err("find failed".to_string());
-                    }
-                    let mut docs = self.matching(args);
-                    if let Some((field, dir)) =
-                        args["sort"].as_object().and_then(|s| s.iter().next())
-                    {
-                        docs.sort_by_key(|doc| doc[field].as_i64().unwrap_or(0));
-                        if dir.as_i64() == Some(-1) {
-                            docs.reverse();
-                        }
-                    }
-                    let skip = args["skip"].as_u64().unwrap_or(0) as usize;
-                    let limit = args["limit"].as_u64().unwrap_or(u64::MAX) as usize;
-                    let page: Vec<Value> = docs.into_iter().skip(skip).take(limit).collect();
-                    Ok(serde_json::json!({ "documents": page }))
-                }
-                "count" => Ok(serde_json::json!({ "count": self.matching(args).len() })),
-                "index_list" => Ok(serde_json::json!({ "btree_indexes": [] })),
-                "collection_drop" => {
-                    let name = args["collection"].as_str().unwrap_or_default();
-                    self.collections.lock().unwrap().retain(|(n, _)| n != name);
-                    Ok(serde_json::json!({ "success": true }))
-                }
-                other => Err(format!("unexpected tool: {}", other)),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Transport for FakeServer {
-        async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
-            let params = request.params.clone().unwrap_or_default();
-            let name = params["name"].as_str().unwrap_or_default();
-            let (text, is_error) = match self.call(name, &params["arguments"]) {
-                Ok(value) => (value.to_string(), false),
-                Err(message) => (message, true),
-            };
-            Ok(JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: Some(request.id),
-                result: Some(serde_json::json!({
-                    "content": [{"type": "text", "text": text}],
-                    "isError": is_error
-                })),
-                error: None,
-            })
-        }
-
-        async fn close(&self) -> McpResult<()> {
-            Ok(())
-        }
-    }
-
-    /// `count` documents: {"_id": i, "n": i, "even": i % 2 == 0}
-    fn numbered_docs(count: i64) -> Vec<Value> {
-        (0..count)
-            .map(|i| serde_json::json!({"_id": i, "n": i, "even": i % 2 == 0}))
-            .collect()
-    }
-
-    async fn app_with_server(server: &Arc<FakeServer>) -> App {
-        let mut app = App::new(Config::default());
-        app.db = Some(DbWrapper::with_transport(server.clone()));
-        app.refresh_collections_async().await.unwrap();
-        app
-    }
+    use crate::testing::{app_with_server, numbered_docs, FakeServer};
 
     fn doc_ids(app: &App) -> Vec<i64> {
         app.documents

@@ -1,7 +1,7 @@
 //! MCP Client - high-level API for IronBase MCP operations
 
 use crate::mcp::error::{McpError, McpResult};
-use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallResult};
+use crate::mcp::protocol::{JsonRpcRequest, ToolCallResult};
 use crate::mcp::transport::{HttpTransport, StdioTransport, Transport};
 use serde_json::Value;
 use std::path::Path;
@@ -14,11 +14,6 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Connect via HTTP transport
-    pub async fn connect_http(url: &str, api_key: Option<String>) -> McpResult<Self> {
-        Self::connect_http_with_options(url, api_key, false).await
-    }
-
     /// Connect via HTTP transport with TLS options
     pub async fn connect_http_with_options(
         url: &str,
@@ -185,22 +180,6 @@ impl McpClient {
         Ok(docs)
     }
 
-    /// Find one document
-    pub async fn find_one(&self, collection: &str, query: &Value) -> McpResult<Option<Value>> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "query": query
-        });
-
-        let result = self.call_tool("find_one", args).await?;
-
-        // Result is {"document": {...}} or {"document": null}
-        match result.get("document") {
-            Some(doc) if !doc.is_null() => Ok(Some(doc.clone())),
-            _ => Ok(None),
-        }
-    }
-
     /// Count documents matching a query
     pub async fn count_documents(&self, collection: &str, query: &Value) -> McpResult<u64> {
         let args = serde_json::json!({
@@ -270,112 +249,6 @@ impl McpClient {
         Ok(count)
     }
 
-    /// Delete multiple documents
-    pub async fn delete_many(&self, collection: &str, filter: &Value) -> McpResult<u64> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "filter": filter
-        });
-
-        let result = self.call_tool("delete_many", args).await?;
-        Ok(result
-            .get("deleted_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0))
-    }
-
-    /// Insert multiple documents
-    pub async fn insert_many(
-        &self,
-        collection: &str,
-        documents: &[Value],
-    ) -> McpResult<Vec<Value>> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "documents": documents
-        });
-
-        let result = self.call_tool("insert_many", args).await?;
-        Ok(result
-            .get("inserted_ids")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    /// Update multiple documents
-    pub async fn update_many(
-        &self,
-        collection: &str,
-        filter: &Value,
-        update: &Value,
-    ) -> McpResult<(u64, u64)> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "filter": filter,
-            "update": update
-        });
-
-        let result = self.call_tool("update_many", args).await?;
-        let matched = result
-            .get("matched_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let modified = result
-            .get("modified_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        Ok((matched, modified))
-    }
-
-    /// Get distinct values for a field
-    pub async fn distinct(
-        &self,
-        collection: &str,
-        field: &str,
-        filter: Option<&Value>,
-    ) -> McpResult<Vec<Value>> {
-        let mut args = serde_json::json!({
-            "collection": collection,
-            "field": field
-        });
-        if let Some(f) = filter {
-            args["query"] = f.clone();
-        }
-
-        let result = self.call_tool("distinct", args).await?;
-        Ok(result
-            .get("values")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    /// Fuzzy search on a field
-    pub async fn fuzzy_search(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        limit: Option<usize>,
-    ) -> McpResult<Vec<Value>> {
-        let mut args = serde_json::json!({
-            "collection": collection,
-            "field": field,
-            "query": query
-        });
-        if let Some(l) = limit {
-            args["limit"] = serde_json::json!(l);
-        }
-
-        let result = self.call_tool("fuzzy_search", args).await?;
-        Ok(result
-            .get("results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
-    }
-
     /// Explain query plan
     pub async fn explain(&self, collection: &str, query: &Value) -> McpResult<Value> {
         let args = serde_json::json!({
@@ -388,22 +261,6 @@ impl McpClient {
             .get("plan")
             .cloned()
             .unwrap_or(serde_json::json!(null)))
-    }
-
-    /// Run aggregation pipeline
-    pub async fn aggregate(&self, collection: &str, pipeline: &Value) -> McpResult<Vec<Value>> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "pipeline": pipeline
-        });
-
-        let result = self.call_tool("aggregate", args).await?;
-        // Result is {"results": [...], "count": N}
-        let docs: Vec<Value> = result
-            .get("results")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(docs)
     }
 
     /// List indexes for a collection (names only, for backward compat)
@@ -705,18 +562,6 @@ impl McpClient {
         Ok(())
     }
 
-    /// Run a saved script
-    pub async fn script_run(&self, name: &str, params: Option<&Value>) -> McpResult<Value> {
-        let mut args = serde_json::json!({
-            "name": name
-        });
-        if let Some(p) = params {
-            args["params"] = p.clone();
-        }
-        let result = self.call_tool("script_run", args).await?;
-        Ok(result)
-    }
-
     /// Execute inline script code (not saved)
     pub async fn script_exec(&self, code: &str, params: Option<&Value>) -> McpResult<Value> {
         let mut args = serde_json::json!({
@@ -888,19 +733,6 @@ impl McpClient {
         Ok(listeners)
     }
 
-    /// Get listener by ID
-    pub async fn listener_get(&self, id: &str) -> McpResult<Option<Value>> {
-        let args = serde_json::json!({
-            "id": id
-        });
-        let result = self.call_tool("listener_get", args).await?;
-        // Result is {"listener": {...}} or {"listener": null}
-        match result.get("listener") {
-            Some(listener) if !listener.is_null() => Ok(Some(listener.clone())),
-            _ => Ok(None),
-        }
-    }
-
     /// Add new listener (localhost only)
     pub async fn listener_add(
         &self,
@@ -969,46 +801,6 @@ impl McpClient {
     }
 
     // === Full-text Search operations ===
-
-    /// Create a fulltext index on a field
-    pub async fn create_fulltext_index(
-        &self,
-        collection: &str,
-        field: &str,
-        language: &str,
-    ) -> McpResult<()> {
-        let args = serde_json::json!({
-            "type": "fulltext",
-            "collection": collection,
-            "field": field,
-            "language": language
-        });
-        self.call_tool("index_create", args).await?;
-        Ok(())
-    }
-
-    /// Create a fuzzy index on a field
-    pub async fn create_fuzzy_index(
-        &self,
-        collection: &str,
-        field: &str,
-        algorithm: Option<&str>,
-        threshold: Option<f64>,
-    ) -> McpResult<()> {
-        let mut args = serde_json::json!({
-            "type": "fuzzy",
-            "collection": collection,
-            "field": field
-        });
-        if let Some(alg) = algorithm {
-            args["algorithm"] = serde_json::json!(alg);
-        }
-        if let Some(thresh) = threshold {
-            args["threshold"] = serde_json::json!(thresh);
-        }
-        self.call_tool("index_create", args).await?;
-        Ok(())
-    }
 
     /// Execute fulltext search
     /// Returns Vec of (document, score, matched_tokens)
@@ -1239,41 +1031,6 @@ impl McpClient {
         self.call_tool("embed_text", args).await
     }
 
-    /// Generate embeddings for multiple texts
-    pub async fn embed_batch(&self, texts: &[String], provider: &str) -> McpResult<Value> {
-        let args = serde_json::json!({
-            "texts": texts,
-            "provider": provider
-        });
-        self.call_tool("embed_batch", args).await
-    }
-
-    /// Embed a document with chunking
-    #[allow(clippy::too_many_arguments)]
-    pub async fn embed_document(
-        &self,
-        collection: &str,
-        content: &str,
-        title: Option<&str>,
-        chunk_size: usize,
-        overlap: usize,
-        mode: &str,
-        provider: &str,
-    ) -> McpResult<Value> {
-        let mut args = serde_json::json!({
-            "collection": collection,
-            "content": content,
-            "chunk_size": chunk_size,
-            "overlap": overlap,
-            "mode": mode,
-            "provider": provider
-        });
-        if let Some(t) = title {
-            args["title"] = serde_json::json!(t);
-        }
-        self.call_tool("embed_document", args).await
-    }
-
     /// List available embedding models
     pub async fn embed_list_models(&self) -> McpResult<Value> {
         self.call_tool("embed_models_list", serde_json::json!({}))
@@ -1329,12 +1086,6 @@ impl McpClient {
     pub async fn embed_job_list(&self, active_only: bool) -> McpResult<Value> {
         let args = serde_json::json!({"active_only": active_only});
         self.call_tool("embed_job_list", args).await
-    }
-
-    /// Get job status
-    pub async fn embed_job_status(&self, job_id: &str) -> McpResult<Value> {
-        let args = serde_json::json!({"job_id": job_id});
-        self.call_tool("embed_job_status", args).await
     }
 
     /// Cancel a running job

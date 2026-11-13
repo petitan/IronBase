@@ -27,11 +27,6 @@ impl CollectionInfo {
         }
     }
 
-    /// Check if details have been loaded
-    pub fn is_loaded(&self) -> bool {
-        self.doc_count.is_some()
-    }
-
     /// Format doc_count for display ("?" if not loaded)
     pub fn doc_count_display(&self) -> String {
         match self.doc_count {
@@ -45,7 +40,6 @@ impl CollectionInfo {
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
     pub name: String,
-    pub types: Vec<String>,
 }
 
 /// Wrapper around MCP client for TUI operations
@@ -54,11 +48,6 @@ pub struct DbWrapper {
 }
 
 impl DbWrapper {
-    /// Connect via HTTP transport
-    pub async fn connect_http(url: &str, api_key: Option<String>) -> Result<Self> {
-        Self::connect_http_with_options(url, api_key, false).await
-    }
-
     /// Connect via HTTP transport with TLS options
     pub async fn connect_http_with_options(
         url: &str,
@@ -111,29 +100,6 @@ impl DbWrapper {
         let index_names = indexes_result?;
 
         Ok((doc_count, index_names))
-    }
-
-    /// Get documents from a collection with pagination
-    pub async fn get_documents(
-        &self,
-        collection: &str,
-        skip: usize,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
-        let docs = self
-            .client
-            .find(collection, &serde_json::json!({}), Some(skip), Some(limit))
-            .await?;
-        Ok(docs)
-    }
-
-    /// Count documents in a collection
-    pub async fn count_documents(&self, collection: &str) -> Result<usize> {
-        let count = self
-            .client
-            .count_documents(collection, &serde_json::json!({}))
-            .await?;
-        Ok(count as usize)
     }
 
     /// Get database statistics
@@ -190,12 +156,6 @@ impl DbWrapper {
         Ok(count as usize)
     }
 
-    /// Execute a query on a collection
-    pub async fn find(&self, collection: &str, query: &Value) -> Result<Vec<Value>> {
-        let docs = self.client.find(collection, query, None, None).await?;
-        Ok(docs)
-    }
-
     /// Execute a query with options (skip, limit)
     pub async fn find_with_options(
         &self,
@@ -227,12 +187,6 @@ impl DbWrapper {
         Ok(docs)
     }
 
-    /// Find one document
-    pub async fn find_one(&self, collection: &str, query: &Value) -> Result<Option<Value>> {
-        let doc = self.client.find_one(collection, query).await?;
-        Ok(doc)
-    }
-
     /// Get collection schema (field names and types from sample)
     pub async fn infer_schema(
         &self,
@@ -253,16 +207,8 @@ impl DbWrapper {
             }
         }
 
-        let mut result: Vec<FieldInfo> = fields
-            .into_iter()
-            .map(|(name, types)| {
-                let types_vec: Vec<String> = types.into_iter().collect();
-                FieldInfo {
-                    name,
-                    types: types_vec,
-                }
-            })
-            .collect();
+        let mut result: Vec<FieldInfo> =
+            fields.into_keys().map(|name| FieldInfo { name }).collect();
 
         result.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(result)
@@ -281,12 +227,6 @@ impl DbWrapper {
     ) -> Result<Vec<crate::state::index::IndexEntry>> {
         let entries = self.client.list_indexes_typed(collection).await?;
         Ok(entries)
-    }
-
-    /// Get total document count across all loaded collections
-    pub async fn total_documents(&self) -> Result<usize> {
-        let collections = self.list_collections().await?;
-        Ok(collections.iter().filter_map(|c| c.doc_count).sum())
     }
 
     /// Create a single-field index
@@ -339,12 +279,6 @@ impl DbWrapper {
     pub async fn get_index_statistics(&self, collection: &str) -> Result<Vec<Value>> {
         let stats = self.client.get_index_statistics(collection).await?;
         Ok(stats)
-    }
-
-    /// Run aggregation pipeline
-    pub async fn aggregate(&self, collection: &str, pipeline: &Value) -> Result<Vec<Value>> {
-        let docs = self.client.aggregate(collection, pipeline).await?;
-        Ok(docs)
     }
 
     /// Explain query plan
@@ -451,12 +385,6 @@ impl DbWrapper {
         Ok(())
     }
 
-    /// Run a saved script
-    pub async fn script_run(&self, name: &str, params: Option<&Value>) -> Result<Value> {
-        let result = self.client.script_run(name, params).await?;
-        Ok(result)
-    }
-
     /// Execute inline script code (not saved)
     pub async fn script_exec(&self, code: &str, params: Option<&Value>) -> Result<Value> {
         let result = self.client.script_exec(code, params).await?;
@@ -502,19 +430,6 @@ impl DbWrapper {
     }
 
     // === Full-text Search ===
-
-    /// Create a fulltext index on a field
-    pub async fn create_fulltext_index(
-        &self,
-        collection: &str,
-        field: &str,
-        language: &str,
-    ) -> Result<()> {
-        self.client
-            .create_fulltext_index(collection, field, language)
-            .await?;
-        Ok(())
-    }
 
     /// Execute fulltext search
     pub async fn fulltext_search(
@@ -563,12 +478,6 @@ impl DbWrapper {
     pub async fn listener_list(&self) -> Result<Vec<Value>> {
         let listeners = self.client.listener_list().await?;
         Ok(listeners)
-    }
-
-    /// Get a specific listener
-    pub async fn listener_get(&self, id: &str) -> Result<Option<Value>> {
-        let listener = self.client.listener_get(id).await?;
-        Ok(listener)
     }
 
     /// Add a new listener
@@ -727,26 +636,6 @@ impl DbWrapper {
         Ok(result)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn embed_document(
-        &self,
-        collection: &str,
-        content: &str,
-        title: Option<&str>,
-        chunk_size: usize,
-        overlap: usize,
-        mode: &str,
-        provider: &str,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .embed_document(
-                collection, content, title, chunk_size, overlap, mode, provider,
-            )
-            .await?;
-        Ok(result)
-    }
-
     pub async fn embed_list_models(&self) -> Result<Value> {
         let result = self.client.embed_list_models().await?;
         Ok(result)
@@ -792,11 +681,6 @@ impl DbWrapper {
 
     pub async fn embed_job_list(&self, active_only: bool) -> Result<Value> {
         let result = self.client.embed_job_list(active_only).await?;
-        Ok(result)
-    }
-
-    pub async fn embed_job_status(&self, job_id: &str) -> Result<Value> {
-        let result = self.client.embed_job_status(job_id).await?;
         Ok(result)
     }
 

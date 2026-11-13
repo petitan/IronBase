@@ -264,16 +264,6 @@ impl VectorSearchState {
         self.metric = self.metric.next();
     }
 
-    /// Clear search inputs
-    pub fn clear_search(&mut self) {
-        self.vector_input.clear();
-        self.filter_input.clear();
-        self.results.clear();
-        self.selected_result = 0;
-        self.error = None;
-        self.message = None;
-    }
-
     /// Clear create form
     pub fn clear_create_form(&mut self) {
         self.new_field.clear();

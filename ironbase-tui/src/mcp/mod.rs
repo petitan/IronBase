@@ -9,6 +9,6 @@ mod protocol;
 mod transport;
 
 pub use client::McpClient;
-pub use error::{McpError, McpResult};
-pub use protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallResult};
-pub use transport::{HttpTransport, StdioTransport, Transport};
+pub use error::McpResult;
+pub use protocol::{JsonRpcRequest, JsonRpcResponse};
+pub use transport::Transport;

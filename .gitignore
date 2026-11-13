@@ -3,7 +3,6 @@ target/
 **/*.rs.bk
 # Cargo.lock for libraries (binaries should commit their own)
 /Cargo.lock
-!ironbase-tui/Cargo.lock
 !mcp-server/Cargo.lock
 
 # Python

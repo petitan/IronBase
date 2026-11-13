@@ -42,11 +42,6 @@ pub struct HttpTransport {
 }
 
 impl HttpTransport {
-    /// Create a new HTTP transport
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> McpResult<Self> {
-        Self::with_options(base_url, api_key, false)
-    }
-
     /// Create a new HTTP transport with TLS options
     pub fn with_options(
         base_url: impl Into<String>,

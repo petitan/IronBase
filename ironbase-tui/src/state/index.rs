@@ -141,27 +141,6 @@ impl IndexState {
         }
     }
 
-    pub fn new_with_entries(collection: String, entries: Vec<IndexEntry>) -> Self {
-        let indexes = entries.iter().map(|e| e.name.clone()).collect();
-        Self {
-            collection,
-            indexes,
-            index_entries: entries,
-            selected_index: 0,
-            is_creating: false,
-            form_field: 0,
-            field_input: String::new(),
-            compound_fields: Vec::new(),
-            is_compound: false,
-            unique: false,
-            sparse: false,
-            error: None,
-            message: None,
-            statistics: Vec::new(),
-            is_analyzing: false,
-        }
-    }
-
     /// Update statistics from MCP response
     pub fn update_statistics(&mut self, stats: Vec<serde_json::Value>) {
         self.statistics = stats.iter().map(IndexStatistics::from_value).collect();
@@ -172,11 +151,6 @@ impl IndexState {
     pub fn selected_statistics(&self) -> Option<&IndexStatistics> {
         let selected_name = self.indexes.get(self.selected_index)?;
         self.statistics.iter().find(|s| &s.name == selected_name)
-    }
-
-    /// Check if any index needs refresh (has keys but no statistics)
-    pub fn has_stale_indexes(&self) -> bool {
-        self.statistics.iter().any(|s| s.staleness_hint() == "red")
     }
 
     /// Count stale indexes

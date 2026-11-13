@@ -25,12 +25,6 @@ pub struct Config {
     /// Last opened database path
     pub last_db_path: Option<PathBuf>,
 
-    /// Claude API key (for natural language queries)
-    pub anthropic_api_key: Option<String>,
-
-    /// Recipes directory
-    pub recipes_dir: Option<PathBuf>,
-
     // === MCP Settings ===
     /// Transport mode (http or stdio)
     #[serde(default)]
@@ -60,8 +54,6 @@ impl Default for Config {
         Self {
             theme: ThemeName::Claude,
             last_db_path: None,
-            anthropic_api_key: None,
-            recipes_dir: None,
             transport: TransportMode::Http,
             mcp_url: default_mcp_url(),
             mcp_server_path: None,
@@ -75,11 +67,6 @@ impl Config {
     /// Get config file path
     pub fn config_path() -> Option<PathBuf> {
         dirs::config_dir().map(|p| p.join("ironbase-tui").join("config.toml"))
-    }
-
-    /// Get default recipes directory
-    pub fn default_recipes_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("ironbase-tui").join("recipes"))
     }
 
     /// Get default MCP server path (relative to workspace)
@@ -99,11 +86,6 @@ impl Config {
 
         // Fallback to default path
         PathBuf::from("./mcp-server/target/release/mcp-ironbase-server")
-    }
-
-    /// Load config from file (defaults on any error)
-    pub fn load() -> Self {
-        Self::try_load().unwrap_or_default()
     }
 
     /// Load config from file. A missing file is the default config; an
@@ -163,32 +145,11 @@ impl Config {
         Ok(())
     }
 
-    /// Get Anthropic API key from config or environment
-    pub fn get_api_key(&self) -> Option<String> {
-        self.anthropic_api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-    }
-
     /// Get MCP API key from config or environment
     pub fn get_mcp_api_key(&self) -> Option<String> {
         self.mcp_api_key
             .clone()
             .or_else(|| std::env::var("IRONBASE_API_KEY").ok())
-    }
-
-    /// Get recipes directory (creates if needed)
-    pub fn get_recipes_dir(&self) -> Option<PathBuf> {
-        let dir = self
-            .recipes_dir
-            .clone()
-            .or_else(Self::default_recipes_dir)?;
-
-        if !dir.exists() {
-            let _ = std::fs::create_dir_all(&dir);
-        }
-
-        Some(dir)
     }
 
     /// Get MCP server path (from config or default)
@@ -242,6 +203,37 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.mcp_url, config.mcp_url);
         assert_eq!(loaded.last_db_path, config.last_db_path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `anthropic_api_key` and `recipes_dir` were removed from `Config`; a
+    /// file written by an older version still has them and must still load
+    #[test]
+    fn test_config_with_removed_keys_still_loads() {
+        let path = temp_config_path("oldkeys");
+        std::fs::write(
+            &path,
+            r#"theme = "Claude"
+last_db_path = "/data/x.mlite"
+anthropic_api_key = "sk-old"
+recipes_dir = "/home/user/recipes"
+transport = "stdio"
+mcp_url = "https://db.example:9000/mcp"
+mcp_insecure = true
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.last_db_path, Some(PathBuf::from("/data/x.mlite")));
+        assert_eq!(config.transport, TransportMode::Stdio);
+        assert_eq!(config.mcp_url, "https://db.example:9000/mcp");
+        assert!(config.mcp_insecure);
+
+        // Saving drops the removed keys
+        config.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("anthropic_api_key"));
+        assert!(!saved.contains("recipes_dir"));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

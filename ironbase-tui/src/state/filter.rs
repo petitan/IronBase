@@ -280,35 +280,6 @@ impl FilterState {
         self.sort_direction = self.sort_direction.toggle();
     }
 
-    /// Clear sort
-    pub fn clear_sort(&mut self) {
-        self.sort_field = None;
-        self.sort_field_idx = 0;
-        self.sort_direction = SortDirection::Asc;
-    }
-
-    pub fn clear(&mut self) {
-        self.field_input.clear();
-        self.field_cursor = 0;
-        self.value_input.clear();
-        self.value_cursor = 0;
-        self.operator = FilterOperator::default();
-        self.operator_idx = 0;
-        self.filters.clear();
-        self.selected_filter = 0;
-        // Keep all_fields - they're from the collection schema
-        self.filtered_suggestions.clear();
-        self.suggestion_idx = 0;
-        self.show_suggestions = false;
-        self.results = None;
-        self.result_count = 0;
-        self.error = None;
-        // Clear sort too
-        self.sort_field = None;
-        self.sort_field_idx = 0;
-        self.sort_direction = SortDirection::Asc;
-    }
-
     pub fn next_focus(&mut self) {
         self.focus = match self.focus {
             FilterFocus::Field => {
@@ -612,21 +583,382 @@ impl FilterState {
             self.show_suggestions = false;
         }
     }
-
-    /// Toggle suggestions visibility
-    pub fn toggle_suggestions(&mut self) {
-        if self.focus == FilterFocus::Field {
-            self.show_suggestions = !self.show_suggestions;
-            if self.show_suggestions {
-                self.update_suggestions();
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn condition(field: &str, operator: FilterOperator, value: &str) -> FilterCondition {
+        FilterCondition {
+            field: field.to_string(),
+            operator,
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_query_per_operator() {
+        use FilterOperator::*;
+        let q = |op: FilterOperator, value: &str| op.to_query("f", value);
+
+        assert_eq!(q(Equals, "x"), json!({"f": "x"}));
+        assert_eq!(q(NotEquals, "x"), json!({"f": {"$ne": "x"}}));
+        assert_eq!(q(GreaterThan, "5"), json!({"f": {"$gt": 5}}));
+        assert_eq!(q(LessThan, "5"), json!({"f": {"$lt": 5}}));
+        assert_eq!(q(GreaterOrEq, "5"), json!({"f": {"$gte": 5}}));
+        assert_eq!(q(LessOrEq, "5"), json!({"f": {"$lte": 5}}));
+        // Regex operators take the text as typed: no escaping, no options
+        assert_eq!(q(Contains, "a.b"), json!({"f": {"$regex": "a.b"}}));
+        assert_eq!(q(StartsWith, "12"), json!({"f": {"$regex": "^12"}}));
+        // Exists: anything but "false" / "0" means true (also empty)
+        assert_eq!(q(Exists, ""), json!({"f": {"$exists": true}}));
+        assert_eq!(q(Exists, "true"), json!({"f": {"$exists": true}}));
+        assert_eq!(q(Exists, "false"), json!({"f": {"$exists": false}}));
+        assert_eq!(q(Exists, "0"), json!({"f": {"$exists": false}}));
+        // In: comma separated, trimmed, empty items skipped, each value guessed
+        assert_eq!(
+            q(In, "a, 2 ,,true, 1.5"),
+            json!({"f": {"$in": ["a", 2, true, 1.5]}})
+        );
+        assert_eq!(q(In, " , "), json!({"f": {"$in": []}}));
+    }
+
+    /// The value type is guessed from the text: integer, float, bool, null,
+    /// otherwise string (there is no way to ask for the string "5")
+    #[test]
+    fn test_value_type_guessing() {
+        let q = |value: &str| FilterOperator::Equals.to_query("f", value)["f"].clone();
+
+        assert_eq!(q("42"), json!(42));
+        assert_eq!(q("-7"), json!(-7));
+        assert_eq!(q("+7"), json!(7));
+        assert_eq!(q("007"), json!(7));
+        assert_eq!(q("1.5"), json!(1.5));
+        assert_eq!(q("1e3"), json!(1000.0));
+        assert_eq!(q("true"), json!(true));
+        assert_eq!(q("false"), json!(false));
+        assert_eq!(q("null"), json!(null));
+        assert_eq!(q("True"), json!("True"));
+        assert_eq!(q("abc"), json!("abc"));
+        assert_eq!(q(""), json!(""));
+        assert_eq!(q(" 5"), json!(" 5"));
+        assert_eq!(q("árvíz"), json!("árvíz"));
+    }
+
+    #[test]
+    fn test_build_query_combines_conditions_with_and() {
+        let mut state = FilterState::new();
+        assert_eq!(state.build_query(), json!({}));
+
+        state
+            .filters
+            .push(condition("age", FilterOperator::GreaterThan, "30"));
+        assert_eq!(state.build_query(), json!({"age": {"$gt": 30}}));
+
+        state
+            .filters
+            .push(condition("city", FilterOperator::Equals, "Győr"));
+        assert_eq!(
+            state.build_query(),
+            json!({"$and": [{"age": {"$gt": 30}}, {"city": "Győr"}]})
+        );
+    }
+
+    #[test]
+    fn test_condition_display() {
+        assert_eq!(
+            condition("age", FilterOperator::GreaterOrEq, "30").display(),
+            "age >= \"30\""
+        );
+        assert_eq!(
+            condition("email", FilterOperator::Exists, "").display(),
+            "email exists"
+        );
+    }
+
+    #[test]
+    fn test_sort_spec() {
+        let mut state = FilterState::new();
+        assert_eq!(state.build_sort(), None);
+        // No schema: nothing to choose from
+        state.next_sort_field();
+        assert_eq!(state.build_sort(), None);
+
+        state.set_fields(vec!["age".into(), "name".into()]);
+        state.next_sort_field();
+        assert_eq!(state.build_sort(), Some(json!({"age": 1})));
+        state.toggle_sort_direction();
+        assert_eq!(state.build_sort(), Some(json!({"age": -1})));
+        state.next_sort_field();
+        assert_eq!(state.build_sort(), Some(json!({"name": -1})));
+        // After the last field: "no sort", the direction is kept
+        state.next_sort_field();
+        assert_eq!(state.build_sort(), None);
+        assert_eq!(state.sort_direction, SortDirection::Desc);
+        state.prev_sort_field();
+        assert_eq!(state.build_sort(), Some(json!({"name": -1})));
+    }
+
+    #[test]
+    fn test_add_filter_takes_inputs_and_resets_the_form() {
+        let mut state = FilterState::new();
+        // Empty field: nothing is added
+        state.value_input = "x".to_string();
+        state.add_filter();
+        assert!(state.filters.is_empty());
+        assert_eq!(state.value_input, "x");
+
+        state.field_input = "age".to_string();
+        state.field_cursor = 3;
+        state.value_input = "30".to_string();
+        state.value_cursor = 2;
+        state.next_operator();
+        state.next_operator();
+        state.next_operator();
+        state.next_operator();
+        assert_eq!(state.operator, FilterOperator::GreaterThan);
+        state.focus = FilterFocus::Value;
+
+        state.add_filter();
+
+        assert_eq!(state.filters.len(), 1);
+        assert_eq!(state.build_query(), json!({"age": {"$gt": 30}}));
+        assert_eq!(state.field_input, "");
+        assert_eq!(state.value_input, "");
+        assert_eq!((state.field_cursor, state.value_cursor), (0, 0));
+        assert_eq!(state.operator, FilterOperator::Equals);
+        assert_eq!(state.operator_idx, 0);
+        assert_eq!(state.focus, FilterFocus::Field);
+    }
+
+    #[test]
+    fn test_operator_cycle_follows_the_displayed_order() {
+        let mut state = FilterState::new();
+        state.prev_operator();
+        assert_eq!(state.operator, FilterOperator::In);
+        state.next_operator();
+        assert_eq!(state.operator, FilterOperator::Equals);
+        let mut seen = Vec::new();
+        for _ in 0..FilterOperator::all().len() {
+            seen.push(state.operator);
+            state.next_operator();
+        }
+        assert_eq!(seen, FilterOperator::all());
+        assert_eq!(state.operator, FilterOperator::Equals);
+    }
+
+    #[test]
+    fn test_remove_selected_filter() {
+        let mut state = FilterState::new();
+        // Nothing to remove
+        state.remove_selected_filter();
+        for field in ["a", "b", "c"] {
+            state
+                .filters
+                .push(condition(field, FilterOperator::Equals, "1"));
+        }
+        state.selected_filter = 2;
+        state.focus = FilterFocus::Filters;
+
+        state.remove_selected_filter();
+        assert_eq!(state.filters.len(), 2);
+        assert_eq!(state.selected_filter, 1);
+        assert_eq!(state.focus, FilterFocus::Filters);
+
+        state.selected_filter = 0;
+        state.remove_selected_filter();
+        assert_eq!(state.filters[0].field, "b");
+        assert_eq!(state.selected_filter, 0);
+
+        // Last one removed: focus returns to the field input
+        state.remove_selected_filter();
+        assert!(state.filters.is_empty());
+        assert_eq!(state.focus, FilterFocus::Field);
+    }
+
+    /// Editing moves the condition out of the list into the form
+    #[test]
+    fn test_edit_selected_filter_loads_it_into_the_form() {
+        let mut state = FilterState::new();
+        state
+            .filters
+            .push(condition("a", FilterOperator::Equals, "1"));
+        state
+            .filters
+            .push(condition("város", FilterOperator::StartsWith, "Győ"));
+        state.selected_filter = 1;
+        state.focus = FilterFocus::Filters;
+
+        state.edit_selected_filter();
+
+        assert_eq!(state.filters.len(), 1);
+        assert_eq!(state.selected_filter, 0);
+        assert_eq!(state.field_input, "város");
+        assert_eq!(state.value_input, "Győ");
+        // Cursors are character positions
+        assert_eq!((state.field_cursor, state.value_cursor), (5, 3));
+        assert_eq!(state.operator, FilterOperator::StartsWith);
+        assert_eq!(FilterOperator::all()[state.operator_idx], state.operator);
+        assert_eq!(state.focus, FilterFocus::Field);
+
+        // Adding it back puts it at the end
+        state.add_filter();
+        assert_eq!(state.filters[1].field, "város");
+    }
+
+    #[test]
+    fn test_move_filter_up_and_down() {
+        let mut state = FilterState::new();
+        for field in ["a", "b", "c"] {
+            state
+                .filters
+                .push(condition(field, FilterOperator::Equals, "1"));
+        }
+        let order = |s: &FilterState| -> Vec<String> {
+            s.filters.iter().map(|f| f.field.clone()).collect()
+        };
+
+        state.move_filter_up();
+        assert_eq!(order(&state), ["a", "b", "c"]);
+        state.move_filter_down();
+        assert_eq!(order(&state), ["b", "a", "c"]);
+        assert_eq!(state.selected_filter, 1);
+        state.move_filter_down();
+        state.move_filter_down();
+        assert_eq!(order(&state), ["b", "c", "a"]);
+        assert_eq!(state.selected_filter, 2);
+        state.move_filter_up();
+        assert_eq!(order(&state), ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn test_input_editing_with_multibyte() {
+        let mut state = FilterState::new();
+        for c in "név".chars() {
+            state.insert_char(c);
+        }
+        assert_eq!((state.field_input.as_str(), state.field_cursor), ("név", 3));
+        state.cursor_left();
+        state.backspace();
+        assert_eq!((state.field_input.as_str(), state.field_cursor), ("nv", 1));
+        state.cursor_home();
+        state.backspace();
+        assert_eq!(state.field_input, "nv");
+        state.insert_char('ű');
+        assert_eq!(state.field_input, "űnv");
+        state.cursor_end();
+        state.cursor_right();
+        assert_eq!(state.field_cursor, 3);
+
+        // Operator focus: typing goes nowhere
+        state.focus = FilterFocus::Operator;
+        state.insert_char('x');
+        state.backspace();
+        assert_eq!(state.field_input, "űnv");
+
+        state.focus = FilterFocus::Value;
+        for c in "Győr".chars() {
+            state.insert_char(c);
+        }
+        state.cursor_left();
+        state.cursor_left();
+        state.backspace();
+        assert_eq!((state.value_input.as_str(), state.value_cursor), ("Gőr", 1));
+        state.cursor_left();
+        state.cursor_left();
+        assert_eq!(state.value_cursor, 0);
+    }
+
+    #[test]
+    fn test_suggestions_follow_the_field_input() {
+        let mut state = FilterState::new();
+        state.set_fields(vec!["name".into(), "Age".into(), "address.city".into()]);
+        assert!(state.show_suggestions);
+        assert_eq!(state.filtered_suggestions.len(), 3);
+
+        // Case-insensitive substring match
+        state.insert_char('a');
+        state.insert_char('G');
+        assert_eq!(state.filtered_suggestions, vec!["Age"]);
+        state.apply_suggestion();
+        assert_eq!((state.field_input.as_str(), state.field_cursor), ("Age", 3));
+        assert!(!state.show_suggestions);
+
+        // No match: the list is hidden
+        state.insert_char('z');
+        assert!(state.filtered_suggestions.is_empty());
+        assert!(!state.show_suggestions);
+
+        // Selection wraps
+        state.field_input.clear();
+        state.field_cursor = 0;
+        state.update_suggestions();
+        state.suggestion_up();
+        assert_eq!(state.suggestion_idx, 2);
+        state.suggestion_down();
+        assert_eq!(state.suggestion_idx, 0);
+    }
+
+    #[test]
+    fn test_focus_cycle_skips_the_empty_filter_list() {
+        let mut state = FilterState::new();
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            state.next_focus();
+            seen.push(state.focus);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                FilterFocus::Operator,
+                FilterFocus::Value,
+                FilterFocus::SortField,
+                FilterFocus::Field
+            ]
+        );
+        state.prev_focus();
+        assert_eq!(state.focus, FilterFocus::SortField);
+        state.prev_focus();
+        assert_eq!(state.focus, FilterFocus::Value);
+
+        state
+            .filters
+            .push(condition("a", FilterOperator::Equals, "1"));
+        state.next_focus();
+        assert_eq!(state.focus, FilterFocus::Filters);
+        state.next_focus();
+        assert_eq!(state.focus, FilterFocus::SortField);
+        state.prev_focus();
+        assert_eq!(state.focus, FilterFocus::Filters);
+    }
+
+    /// Reopening the modal keeps the conditions and the sort
+    #[test]
+    fn test_reset_inputs_keeps_filters_and_sort() {
+        let mut state = FilterState::new();
+        state.set_fields(vec!["a".into()]);
+        state
+            .filters
+            .push(condition("a", FilterOperator::Equals, "1"));
+        state.next_sort_field();
+        state.field_input = "x".to_string();
+        state.value_input = "y".to_string();
+        state.next_operator();
+        state.focus = FilterFocus::Value;
+        state.error = Some("hiba".to_string());
+
+        state.reset_inputs();
+
+        assert_eq!(state.field_input, "");
+        assert_eq!(state.value_input, "");
+        assert_eq!(state.operator, FilterOperator::Equals);
+        assert_eq!(state.focus, FilterFocus::Field);
+        assert_eq!(state.error, None);
+        assert_eq!(state.filters.len(), 1);
+        assert_eq!(state.sort_field.as_deref(), Some("a"));
+    }
 
     /// The schema is reloaded on every open; a sort index kept from a wider
     /// schema used to index `all_fields` out of bounds
