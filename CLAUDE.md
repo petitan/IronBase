@@ -219,6 +219,57 @@ Konvenciók: [naming, error, stb.]
 
 > **Nincs jogod módosítani amit nem te terveztél. Kérdezz. Mindig.**
 
+### Delegált döntések (2026-11)
+
+A fenti szabály alól a tulajdonos **egy szűk kivételt** adott: nem kell kérdezni, ha
+**mindhárom** feltétel teljesül.
+
+| Feltétel | Jelentés |
+|----------|----------|
+| Additív | Új stage/operátor/opció/mező; meglévő viselkedés, név, típus nem változik |
+| Visszafelé kompatibilis | Régi adatbázisfájl, régi kliens, régi konfiguráció változatlanul működik; nincs migráció |
+| A döntési elv eldönti | A **legkisebb technológiai adósság** és a **MongoDB-kompatibilitás** egyértelműen egy megoldásra mutat (ha a MongoDB-nek van saját megoldása, az a nyerő — nincs saját, nem szabványos kiterjesztés) |
+
+**Továbbra is KÉRDEZNI kell:**
+- Fájlformátum (`.mlite`, WAL, indexfájlok) változása, migráció
+- Törő változás: meglévő viselkedés, mezőnév/-típus, API-szignatúra módosítása vagy eltávolítása
+- Biztonsági döntés (hitelesítés, ACL, hálózat, titkok, személyes adat)
+- Visszafordíthatatlan művelet (history rewrite, adat/ág törlése)
+- Ha a két elv ütközik, vagy nem dönt egyértelműen
+- Ha nincs követhető minta a kódban (lásd *Kód Konzisztencia Protokoll*)
+
+A delegált döntést a PR leírásában indokolni kell (melyik elv döntött, mi volt az alternatíva).
+
+### Munkafolyamat (döntési fa)
+
+```
+Új tétel (issue / review-megjegyzés / hiba / funkció)
+├─ 1. Megértés
+│  ├─ Hiba: reprodukálható? root cause megvan? → különben NINCS kód
+│  ├─ 2 sikertelen kísérlet → megállás, elemzés
+│  ├─ Funkciókérés → tovább a 2. pontra
+│  └─ Sem hiba, sem funkció (az elvárt működés) → lezárás indoklással
+├─ 2. Döntési kapu
+│  ├─ Nem érint sémát, API-t, konfigurációt, publikus struktúrát → tovább a 3. pontra
+│  ├─ Érint, és szerepel a „Továbbra is KÉRDEZNI kell" listán → kérdezz
+│  ├─ Érint, és a delegált döntés mindhárom feltétele teljesül → dönts, indokold a PR-ban
+│  └─ Különben → kérdezz
+├─ 3. Megvalósítás
+│  ├─ Meglévő minta követése; nincs workaround, nincs kéretlen refaktor
+│  ├─ Minden kódút (git grep); duplikáció → közös helper
+│  ├─ Rust → az érintett belépési pontok (PyO3, C#, MCP szerver) → teszt
+│  │   (a regressziós teszt a javítás nélkül bukik; MCP: `cd mcp-server && cargo test`)
+│  └─ Verzióemelés + CHANGELOG (csak dokumentációt/tesztet érintő változásnál nem kell)
+│      + `just run-dev-checks`
+├─ 4. PR
+│  ├─ Piros CI → root cause; teszt kikapcsolása, üres commit TILOS
+│  ├─ Review-bot megjegyzés: kísérlettel/teszttel igazold → javítás VAGY indokolt válasz a szálon
+│  └─ Merge feltétele: zöld CI, minden review-szál megválaszolva,
+│      és nincs nyitott kifogás emberi reviewertől
+└─ 5. Túl nagy tétel → csak önmagában teljes és tesztelt rész megy be,
+    a maradék dokumentálva nyitott issue-ban
+```
+
 ---
 
 ## Hibakezelési Protokoll

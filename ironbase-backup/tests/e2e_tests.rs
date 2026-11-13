@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Path to the backup binary
+/// Path to the backup binary.
+///
+/// Cargo sets `CARGO_BIN_EXE_<name>` for integration tests; deriving the path from
+/// `current_exe()` assumed the `target/<profile>/deps/` layout, which newer Cargo
+/// versions no longer use for test binaries.
 fn backup_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove test binary name
-    path.pop(); // Remove deps
-    path.push("ironbase-backup");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_ironbase-backup"))
 }
 
 /// Run backup CLI command
