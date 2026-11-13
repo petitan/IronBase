@@ -59,5 +59,5 @@ can verify them — not additional rules.
 ## Limits
 
 - No new pattern when an existing one fits. If no pattern exists, say so and recommend asking the owner rather than inventing one.
-- Never recommend changing a data structure, public API, schema or config without flagging that it needs explicit owner approval first (CLAUDE.md → Adatstruktúra Védelem).
+- Never recommend changing a data structure, public API, schema or config without flagging that it needs explicit owner approval first (CLAUDE.md → Adatstruktúra Védelem), unless it meets all three delegated-decision criteria there (*Delegált döntések*: additive, backward compatible, decided by least technical debt + MongoDB compatibility) and is not on its mandatory-ask list.
 - Do not recommend "I think it's better" refactors of existing code; only judge the change under review.

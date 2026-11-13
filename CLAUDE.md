@@ -247,20 +247,27 @@ A delegált döntést a PR leírásában indokolni kell (melyik elv döntött, m
 ├─ 1. Megértés
 │  ├─ Hiba: reprodukálható? root cause megvan? → különben NINCS kód
 │  ├─ 2 sikertelen kísérlet → megállás, elemzés
-│  └─ Nem hiba → lezárás indoklással
-├─ 2. Döntési kapu (minden változtatásnál)
-│  ├─ Delegált döntés feltételei teljesülnek → dönts, indokold a PR-ban
+│  ├─ Funkciókérés → tovább a 2. pontra
+│  └─ Sem hiba, sem funkció (az elvárt működés) → lezárás indoklással
+├─ 2. Döntési kapu
+│  ├─ Nem érint sémát, API-t, konfigurációt, publikus struktúrát → tovább a 3. pontra
+│  ├─ Érint, és szerepel a „Továbbra is KÉRDEZNI kell" listán → kérdezz
+│  ├─ Érint, és a delegált döntés mindhárom feltétele teljesül → dönts, indokold a PR-ban
 │  └─ Különben → kérdezz
 ├─ 3. Megvalósítás
 │  ├─ Meglévő minta követése; nincs workaround, nincs kéretlen refaktor
 │  ├─ Minden kódút (git grep); duplikáció → közös helper
-│  ├─ Rust → PyO3 → C# → teszt (a regressziós teszt a javítás nélkül bukik)
-│  └─ Verzióemelés + CHANGELOG + `just run-dev-checks`
+│  ├─ Rust → az érintett belépési pontok (PyO3, C#, MCP szerver) → teszt
+│  │   (a regressziós teszt a javítás nélkül bukik; MCP: `cd mcp-server && cargo test`)
+│  └─ Verzióemelés + CHANGELOG (csak dokumentációt/tesztet érintő változásnál nem kell)
+│      + `just run-dev-checks`
 ├─ 4. PR
 │  ├─ Piros CI → root cause; teszt kikapcsolása, üres commit TILOS
 │  ├─ Review-bot megjegyzés: kísérlettel/teszttel igazold → javítás VAGY indokolt válasz a szálon
-│  └─ Merge feltétele: zöld CI ÉS minden review-szál megválaszolva
-└─ 5. Túl nagy tétel → a kész rész megy be, a maradék dokumentálva nyitott issue-ban
+│  └─ Merge feltétele: zöld CI, minden review-szál megválaszolva,
+│      és nincs nyitott kifogás emberi reviewertől
+└─ 5. Túl nagy tétel → csak önmagában teljes és tesztelt rész megy be,
+    a maradék dokumentálva nyitott issue-ban
 ```
 
 ---
