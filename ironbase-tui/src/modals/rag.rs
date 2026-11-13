@@ -70,7 +70,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         Span::raw(" Tabs  "),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Search  "),
-        Span::styled("[j/k]", Style::default().fg(theme.accent)),
+        Span::styled("[↑/↓]", Style::default().fg(theme.accent)),
         Span::raw(" Navigate  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
         Span::raw(" Close"),

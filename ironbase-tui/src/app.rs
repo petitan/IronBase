@@ -451,6 +451,91 @@ impl App {
         self.modal = Some(Modal::Confirm);
     }
 
+    /// Open drop confirmation for the selected index (index modal)
+    pub fn open_drop_index_confirm(&mut self) {
+        let Some(index_name) = self
+            .index_state
+            .indexes
+            .get(self.index_state.selected_index)
+            .cloned()
+        else {
+            return;
+        };
+
+        if self.index_state.is_primary_index(&index_name) {
+            self.index_state.error = Some(format!(
+                "Az elsodleges _id index nem torolheto: {}",
+                index_name
+            ));
+            return;
+        }
+
+        let collection = self.index_state.collection.clone();
+        self.confirm = ConfirmState::drop_index(collection, index_name);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open drop confirmation for the selected vector index (vector modal)
+    pub fn open_drop_vector_index_confirm(&mut self) {
+        let Some(index) = self
+            .vector_state
+            .indexes
+            .get(self.vector_state.selected_index)
+        else {
+            return;
+        };
+
+        let index_name = index.name.clone();
+        let collection = self.vector_state.collection.clone();
+        self.confirm = ConfirmState::drop_vector_index(collection, index_name);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open rollback confirmation for the selected script version (script history)
+    pub fn open_rollback_script_confirm(&mut self) {
+        let Some(version_info) = self
+            .script_state
+            .versions
+            .get(self.script_state.selected_version)
+        else {
+            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
+            return;
+        };
+
+        let version = version_info.version;
+        let name = self.script_state.name.clone();
+        self.confirm = ConfirmState::rollback_script(name, version);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for disabling auto-embed (RAG modal)
+    pub fn open_disable_auto_embed_confirm(&mut self) {
+        let collection = self.rag_state.collection.clone();
+        self.confirm = ConfirmState::disable_auto_embed(collection);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for clearing the embedding cache (RAG modal)
+    pub fn open_clear_embed_cache_confirm(&mut self) {
+        self.confirm = ConfirmState::clear_embed_cache();
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Open confirmation for cancelling the selected embed job (RAG modal)
+    pub fn open_cancel_embed_job_confirm(&mut self) {
+        let Some(job_id) = self.rag_state.selected_job_id() else {
+            return;
+        };
+
+        self.confirm = ConfirmState::cancel_embed_job(job_id);
+        self.modal = Some(Modal::Confirm);
+    }
+
+    /// Close the confirm dialog and return to the modal it was opened from (if any)
+    pub fn close_confirm(&mut self) {
+        self.modal = self.confirm.return_to.take();
+    }
+
     /// Toggle confirm dialog selection
     pub fn confirm_toggle(&mut self) {
         self.confirm.toggle_selection();
@@ -950,25 +1035,15 @@ impl App {
         }
     }
 
-    /// Rollback script to a specific version
-    pub async fn rollback_script_async(&mut self) {
-        let Some(version_info) = self
-            .script_state
-            .versions
-            .get(self.script_state.selected_version)
-        else {
-            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
-            return;
-        };
-        let target_version = version_info.version;
-        let script_name = self.script_state.name.clone();
-
+    /// Rollback script to a specific version - name/version are captured when the
+    /// confirm dialog opens
+    pub async fn rollback_script_async(&mut self, script_name: &str, target_version: u32) {
         let Some(db) = &self.db else {
             self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
             return;
         };
 
-        match db.script_rollback(&script_name, target_version).await {
+        match db.script_rollback(script_name, target_version).await {
             Ok(new_version) => {
                 self.script_state.message =
                     Some(format!("Rollback sikeres, új verzió: v{}", new_version));
@@ -1029,7 +1104,11 @@ impl App {
     // === Status ===
 
     /// Set status message with auto-clear timestamp
+    ///
+    /// Also drops a stale error: the status bar prefers `error_message`, so an
+    /// earlier error would otherwise hide every later success.
     pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.error_message = None;
         self.status_message = Some(msg.into());
         self.status_message_time = Some(std::time::Instant::now());
     }
@@ -1548,12 +1627,12 @@ impl App {
     /// Execute the confirmed action (async)
     pub async fn execute_confirm_action_async(&mut self) {
         if self.confirm.selected != ConfirmOption::Confirm {
-            self.close_modal();
+            self.close_confirm();
             return;
         }
 
         let action = self.confirm.on_confirm.clone();
-        self.close_modal();
+        self.close_confirm();
 
         match action {
             ConfirmAction::DeleteDocument { collection, doc_id } => {
@@ -1561,6 +1640,106 @@ impl App {
             }
             ConfirmAction::DeleteCollection { name } => {
                 self.do_delete_collection_async(&name).await;
+            }
+            ConfirmAction::DropIndex {
+                collection,
+                index_name,
+            } => {
+                self.execute_delete_index_async(&collection, &index_name)
+                    .await;
+            }
+            ConfirmAction::DropVectorIndex {
+                collection,
+                index_name,
+            } => {
+                self.do_drop_vector_index_async(&collection, &index_name)
+                    .await;
+            }
+            ConfirmAction::RollbackScript { name, version } => {
+                self.rollback_script_async(&name, version).await;
+            }
+            ConfirmAction::DisableAutoEmbed { collection } => {
+                self.do_disable_auto_embed_async(&collection).await;
+            }
+            ConfirmAction::ClearEmbedCache => {
+                self.do_clear_embed_cache_async().await;
+            }
+            ConfirmAction::CancelEmbedJob { job_id } => {
+                self.do_cancel_embed_job_async(&job_id).await;
+            }
+        }
+    }
+
+    /// Actually drop a vector index (async)
+    async fn do_drop_vector_index_async(&mut self, collection: &str, index_name: &str) {
+        if let Some(ref db) = self.db {
+            match db.drop_vector_index(collection, index_name).await {
+                Ok(()) => {
+                    self.vector_state.message = Some(format!("Index '{}' deleted!", index_name));
+
+                    // Refresh index list
+                    if let Ok(indexes) = db.list_vector_indexes(collection).await {
+                        self.vector_state.update_indexes(indexes);
+                        if self.vector_state.selected_index >= self.vector_state.indexes.len()
+                            && !self.vector_state.indexes.is_empty()
+                        {
+                            self.vector_state.selected_index = self.vector_state.indexes.len() - 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.vector_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually disable auto-embed for a collection (async)
+    async fn do_disable_auto_embed_async(&mut self, collection: &str) {
+        if let Some(ref db) = self.db {
+            match db.auto_embed_disable(collection).await {
+                Ok(_) => {
+                    self.rag_state.message = Some("Auto-embed disabled".to_string());
+                    self.rag_state.auto_embed_config = None;
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually clear the embedding cache (async)
+    async fn do_clear_embed_cache_async(&mut self) {
+        if let Some(ref db) = self.db {
+            match db.embed_cache_clear().await {
+                Ok(_) => {
+                    self.rag_state.cache_stats = None;
+                    self.rag_state.message = Some("Cache cleared".to_string());
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
+            }
+        }
+    }
+
+    /// Actually cancel an embed job (async)
+    async fn do_cancel_embed_job_async(&mut self, job_id: &str) {
+        if let Some(ref db) = self.db {
+            match db.embed_job_cancel(job_id).await {
+                Ok(_) => {
+                    self.rag_state.message = Some(format!("Job {} cancelled", job_id));
+                    // Refresh
+                    if let Ok(result) = db.embed_job_list(false).await {
+                        if let Some(jobs) = result.get("jobs").and_then(|v| v.as_array()) {
+                            self.rag_state.jobs = jobs.clone();
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.rag_state.error = Some(format!("{}", e));
+                }
             }
         }
     }
@@ -1735,23 +1914,17 @@ impl App {
         }
     }
 
-    /// Delete selected index (async)
-    pub async fn execute_delete_index_async(&mut self) {
-        if self.index_state.indexes.is_empty() {
-            return;
-        }
-
-        let index_name = self.index_state.indexes[self.index_state.selected_index].clone();
-        let collection = self.index_state.collection.clone();
-
+    /// Delete an index (async) - names are captured when the confirm dialog opens
+    pub async fn execute_delete_index_async(&mut self, collection: &str, index_name: &str) {
         let Some(db) = &self.db else {
             self.set_error("Nincs megnyitva adatbázis");
             return;
         };
 
-        match db.drop_index(&collection, &index_name).await {
+        match db.drop_index(collection, index_name).await {
             Ok(()) => {
                 self.index_state.message = Some(format!("Index törölve: {}", index_name));
+                self.index_state.error = None;
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Adjust selection after deletion
                 if self.index_state.indexes.is_empty() {
@@ -2183,5 +2356,125 @@ impl App {
                 self.export_state.error = Some(format!("Export hiba: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_status_clears_stale_error() {
+        let mut app = App::new(Config::default());
+        app.set_error("regi hiba");
+        app.set_status("Dokumentum törölve");
+        assert_eq!(app.error_message, None);
+        assert_eq!(app.status_message.as_deref(), Some("Dokumentum törölve"));
+
+        // A later error is shown again (and `e` opens its details)
+        app.set_error("uj hiba");
+        assert_eq!(app.error_message.as_deref(), Some("uj hiba"));
+    }
+
+    #[test]
+    fn test_drop_index_needs_confirm_and_returns_to_index_modal() {
+        let mut app = App::new(Config::default());
+        app.index_state = IndexState::new(
+            "users".to_string(),
+            vec!["users_id".to_string(), "users_age".to_string()],
+        );
+        app.index_state.selected_index = 1;
+        app.modal = Some(Modal::Index);
+
+        app.open_drop_index_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+        assert!(app.confirm.message.contains("users_age"));
+        assert!(app.confirm.message.contains("users"));
+        assert!(matches!(
+            &app.confirm.on_confirm,
+            ConfirmAction::DropIndex { collection, index_name }
+                if collection == "users" && index_name == "users_age"
+        ));
+
+        // Cancel: back in the index modal, state intact
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Index));
+        assert_eq!(app.index_state.selected_index, 1);
+        assert_eq!(app.index_state.indexes.len(), 2);
+    }
+
+    #[test]
+    fn test_primary_id_index_drop_is_refused() {
+        let mut app = App::new(Config::default());
+        app.index_state = IndexState::new("users".to_string(), vec!["users_id".to_string()]);
+        app.modal = Some(Modal::Index);
+
+        app.open_drop_index_confirm();
+        assert_eq!(app.modal, Some(Modal::Index));
+        assert!(app.index_state.error.is_some());
+    }
+
+    #[test]
+    fn test_rollback_confirm_names_script_and_version() {
+        let mut app = App::new(Config::default());
+        app.script_state.name = "cleanup".to_string();
+        app.script_state.versions = vec![ScriptVersion {
+            version: 3,
+            code: String::new(),
+            description: None,
+            created_at: String::new(),
+        }];
+        app.modal = Some(Modal::Script);
+
+        app.open_rollback_script_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("cleanup"));
+        assert!(app.confirm.message.contains("v3"));
+        assert!(matches!(
+            &app.confirm.on_confirm,
+            ConfirmAction::RollbackScript { name, version } if name == "cleanup" && *version == 3
+        ));
+
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Script));
+    }
+
+    #[test]
+    fn test_rag_destructive_actions_need_confirm_and_return_to_rag() {
+        let mut app = App::new(Config::default());
+        app.rag_state = RagState::new("kb".to_string());
+        app.rag_state.jobs = vec![serde_json::json!({"job_id": "job-1"})];
+
+        app.modal = Some(Modal::Rag);
+        app.open_disable_auto_embed_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("kb"));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+
+        app.open_clear_embed_cache_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(matches!(
+            app.confirm.on_confirm,
+            ConfirmAction::ClearEmbedCache
+        ));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+
+        app.open_cancel_embed_job_confirm();
+        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert!(app.confirm.message.contains("job-1"));
+        app.close_confirm();
+        assert_eq!(app.modal, Some(Modal::Rag));
+    }
+
+    #[test]
+    fn test_document_delete_confirm_closes_to_panes() {
+        let mut app = App::new(Config::default());
+        app.confirm = ConfirmState::delete_collection("users".to_string(), 0);
+        app.modal = Some(Modal::Confirm);
+        app.close_confirm();
+        assert_eq!(app.modal, None);
     }
 }

@@ -24,8 +24,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Format  "),
-        Span::styled("[Shift+J/C]", Style::default().fg(theme.accent)),
-        Span::raw(" JSON/CSV  "),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Exportalas  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),

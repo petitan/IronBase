@@ -77,7 +77,7 @@ fn render_confirm_dialog(
         Line::from(vec![
             Span::styled("[Y]", Style::default().fg(theme.success).bold()),
             Span::raw(" Igen  "),
-            Span::styled("[N/Esc]", Style::default().fg(theme.error).bold()),
+            Span::styled("[N/Enter/Esc]", Style::default().fg(theme.error).bold()),
             Span::raw(" Nem"),
         ]),
     ])

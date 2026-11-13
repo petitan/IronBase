@@ -396,20 +396,8 @@ impl AclState {
         self.mode = AclModalMode::Edit;
     }
 
-    /// Start editing existing ACL (from list)
-    pub fn start_edit_existing(&mut self) {
-        // Clone data before mutating
-        let (collection, rules, is_builtin) = match self.get_selected() {
-            Some(acl) => (acl.collection.clone(), acl.rules.clone(), acl.is_builtin),
-            None => return,
-        };
-
-        if is_builtin {
-            return;
-        }
-
-        self.edit_collection = collection;
-        // Convert existing rules to EditRule
+    /// Fill the editor with already stored rules (convert to EditRule)
+    pub fn load_edit_rules(&mut self, rules: &[AclRuleInfo]) {
         self.edit_rules = rules
             .iter()
             .map(|r| {
@@ -424,6 +412,22 @@ impl AclState {
                 }
             })
             .collect();
+    }
+
+    /// Start editing existing ACL (from list)
+    pub fn start_edit_existing(&mut self) {
+        // Clone data before mutating
+        let (collection, rules, is_builtin) = match self.get_selected() {
+            Some(acl) => (acl.collection.clone(), acl.rules.clone(), acl.is_builtin),
+            None => return,
+        };
+
+        if is_builtin {
+            return;
+        }
+
+        self.edit_collection = collection;
+        self.load_edit_rules(&rules);
         self.edit_selected_rule = 0;
         self.current_rule = EditRule::default();
         self.edit_field = EditField::PrincipalType;
@@ -1129,5 +1133,43 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
         format!("{}...", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Shift+P editor: the rules stored on the server must be in the editor,
+    /// otherwise saving (acl_set replaces the whole list) drops them.
+    #[test]
+    fn test_load_edit_rules_keeps_existing_rules() {
+        let stored = json!({
+            "collection": "users",
+            "rules": [
+                {
+                    "principal": {"type": "apikey", "value": "abc"},
+                    "permissions": {"read": true, "write": true, "admin": false}
+                },
+                {
+                    "principal": {"type": "iprange", "value": "10.0.0.0/8"},
+                    "permissions": {"read": true, "write": false, "admin": false}
+                }
+            ]
+        });
+        let info = CollectionAclInfo::from_value(&stored).unwrap();
+
+        let mut state = AclState::new();
+        state.start_edit("users".to_string());
+        state.load_edit_rules(&info.rules);
+
+        assert_eq!(
+            state.get_rules_json(),
+            vec![
+                json!({"principal": "apikey:abc", "permissions": "read,write"}),
+                json!({"principal": "iprange:10.0.0.0/8", "permissions": "read"}),
+            ]
+        );
     }
 }
