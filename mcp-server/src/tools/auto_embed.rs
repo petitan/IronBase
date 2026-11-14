@@ -13,6 +13,10 @@ use std::sync::Arc;
 
 use super::defaults::{effective_batch_size, is_allowed_system_collection, MAX_EMPTY_BATCHES};
 use super::params::ParseParams;
+use ironbase_mcp_types::responses::{
+    AutoEmbedChunking, AutoEmbedConfigView, AutoEmbedDisableResponse, AutoEmbedEnableResponse,
+    AutoEmbedEnabledConfig, AutoEmbedStatusResponse, Flag,
+};
 
 // Parameter structs: shared with clients, re-exported under their old path.
 pub use ironbase_mcp_types::params::{
@@ -338,47 +342,47 @@ fn handle_auto_embed_enable(
         None
     };
 
-    let mut response = json!({
-        "success": true,
-        "collection": p.collection,
-        "config": {
-            "enabled": config.enabled,
-            "source_field": config.source_field,
-            "target_field": config.target_field,
-            "provider": config.provider,
-            "model": config.model,
-            "dimension": config.dimension,
-            "skip_if_exists": config.skip_if_exists,
-            "chunking": config.chunking.map(|c| json!({
-                "mode": c.mode,
-                "chunk_size": c.chunk_size,
-                "overlap": c.overlap
-            }))
-        },
-        "existing_documents": existing_count
-    });
-
-    if space_changed {
-        response["reembed"] = json!(true);
-        response["message"] = json!(
+    let message = if space_changed {
+        Some(
             "Auto-embedding enabled with a different provider, model, preprocessing, dimension \
              or source field: all existing vectors are being re-embedded (retried on startup \
-             until done)."
-        );
-    }
-    if let Some(ref job_id) = backfill_job_id {
-        response["backfill_job_id"] = json!(job_id);
-        if !space_changed {
-            response["message"] =
-                json!("Auto-embedding enabled. Backfill job started for existing documents.");
-        }
-    }
+             until done).",
+        )
+    } else {
+        backfill_job_id
+            .as_ref()
+            .map(|_| "Auto-embedding enabled. Backfill job started for existing documents.")
+    };
+    Ok(serde_json::to_value(AutoEmbedEnableResponse {
+        success: true,
+        collection: p.collection,
+        config: AutoEmbedEnabledConfig {
+            enabled: config.enabled,
+            config: config_view(config),
+        },
+        existing_documents: existing_count,
+        reembed: space_changed.then_some(true),
+        backfill_job_id,
+        message: message.map(str::to_string),
+        warning: verbatim_warning,
+    })?)
+}
 
-    if let Some(msg) = verbatim_warning {
-        response["warning"] = json!(msg);
+/// A stored auto-embedding configuration as the auto-embed tools report it
+fn config_view(config: AutoEmbeddingConfig) -> AutoEmbedConfigView {
+    AutoEmbedConfigView {
+        source_field: config.source_field,
+        target_field: config.target_field,
+        provider: config.provider,
+        model: config.model,
+        dimension: config.dimension,
+        skip_if_exists: config.skip_if_exists,
+        chunking: config.chunking.map(|c| AutoEmbedChunking {
+            mode: c.mode,
+            chunk_size: c.chunk_size,
+            overlap: c.overlap,
+        }),
     }
-
-    Ok(response)
 }
 
 fn handle_auto_embed_disable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -387,11 +391,11 @@ fn handle_auto_embed_disable(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
     // Set config to None (disables auto-embedding)
     adapter.set_auto_embedding_config(&p.collection, None)?;
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "message": "Auto-embedding disabled"
-    }))
+    Ok(serde_json::to_value(AutoEmbedDisableResponse {
+        success: true,
+        collection: p.collection,
+        message: "Auto-embedding disabled".to_string(),
+    })?)
 }
 
 fn handle_auto_embed_status(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -399,43 +403,30 @@ fn handle_auto_embed_status(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 
     let config = adapter.get_auto_embedding_config(&p.collection)?;
 
-    match config {
+    let response = match config {
         Some(config) => {
             let requires_reconfiguration = config.provider == "fasttext";
-            let mut response = json!({
-                "collection": p.collection,
-                "enabled": config.enabled,
-                "config": {
-                    "source_field": config.source_field,
-                    "target_field": config.target_field,
-                    "provider": config.provider,
-                    "model": config.model,
-                    "dimension": config.dimension,
-                    "skip_if_exists": config.skip_if_exists,
-                    "chunking": config.chunking.map(|c| json!({
-                        "mode": c.mode,
-                        "chunk_size": c.chunk_size,
-                        "overlap": c.overlap
-                    }))
-                },
-                "reembed_pending": config.reembed_pending,
-                    "reembed_field": config.reembed_field
-            });
-            if requires_reconfiguration {
-                response["requires_reconfiguration"] = json!(true);
-                response["reconfiguration_reason"] = json!(
+            AutoEmbedStatusResponse::Configured {
+                collection: p.collection,
+                enabled: config.enabled,
+                reembed_pending: config.reembed_pending,
+                reembed_field: config.reembed_field.clone(),
+                config: Box::new(config_view(config)),
+                requires_reconfiguration: requires_reconfiguration.then_some(true),
+                reconfiguration_reason: requires_reconfiguration.then(|| {
                     "Provider 'fasttext' has been removed. Call auto_embed_enable with a \
                      supported provider (ollama, vllm, openai) to re-enable this collection."
-                );
+                        .to_string()
+                }),
             }
-            Ok(response)
         }
-        None => Ok(json!({
-            "collection": p.collection,
-            "enabled": false,
-            "config": null
-        })),
-    }
+        None => AutoEmbedStatusResponse::NotConfigured {
+            collection: p.collection,
+            enabled: Flag,
+            config: (),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 /// Helper: start an async backfill job for a collection.

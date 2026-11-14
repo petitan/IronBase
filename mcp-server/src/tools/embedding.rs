@@ -12,6 +12,10 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::params::ParseParams;
+use ironbase_mcp_types::responses::{
+    EmbedBatchResponse, EmbedCacheClearResponse, EmbedCacheStatsResponse, EmbedModelsListResponse,
+    EmbedTextResponse, Flag,
+};
 
 // Parameter structs: shared with clients, re-exported under their old path.
 pub use ironbase_mcp_types::params::{
@@ -81,14 +85,21 @@ fn handle_embed_text(params: Value, manager: &EmbeddingManager) -> Result<Value>
         .embed(&p.text, Some(&provider_name))
         .map_err(|e| McpError::internal(format!("Embedding failed: {}", e)))?;
 
-    Ok(json!({
-        "vector": vector,
-        "dimension": vector.len(),
-        "provider": provider_name,
-        "model": manager.get_provider(&provider_name)
-            .map(|p| p.model_name().to_string())
-            .unwrap_or_default()
-    }))
+    let model = model_name(manager, &provider_name);
+    Ok(serde_json::to_value(EmbedTextResponse {
+        dimension: vector.len(),
+        vector,
+        provider: provider_name,
+        model,
+    })?)
+}
+
+/// The model name of a provider (empty when it is not registered)
+fn model_name(manager: &EmbeddingManager, provider_name: &str) -> String {
+    manager
+        .get_provider(provider_name)
+        .map(|p| p.model_name().to_string())
+        .unwrap_or_default()
 }
 
 /// Resolve provider: explicit param > manager default. Errors if neither is set.
@@ -141,25 +152,24 @@ fn handle_embed_batch(params: Value, manager: &EmbeddingManager) -> Result<Value
 
     let dimension = vectors.first().map(|v| v.len()).unwrap_or(0);
 
-    Ok(json!({
-        "vectors": vectors,
-        "count": vectors.len(),
-        "dimension": dimension,
-        "provider": provider_name,
-        "model": manager.get_provider(&provider_name)
-            .map(|p| p.model_name().to_string())
-            .unwrap_or_default()
-    }))
+    let model = model_name(manager, &provider_name);
+    Ok(serde_json::to_value(EmbedBatchResponse {
+        count: vectors.len(),
+        vectors,
+        dimension,
+        provider: provider_name,
+        model,
+    })?)
 }
 
 fn handle_embed_list_models(manager: &EmbeddingManager) -> Result<Value> {
     let models = manager.list_models();
 
-    Ok(json!({
-        "models": models,
-        "count": models.len(),
-        "default_provider": manager.default_provider_name()
-    }))
+    Ok(serde_json::to_value(EmbedModelsListResponse {
+        count: models.len(),
+        models,
+        default_provider: manager.default_provider_name().to_string(),
+    })?)
 }
 
 fn handle_embed_document(
@@ -317,35 +327,37 @@ fn handle_embed_document(
 }
 
 fn handle_embed_cache_stats(manager: &EmbeddingManager) -> Result<Value> {
-    match manager.cache() {
-        Some(cache) => {
-            let stats = cache.stats();
-            Ok(json!({
-                "enabled": true,
-                "stats": stats
-            }))
-        }
-        None => Ok(json!({
-            "enabled": false,
-            "message": "Embedding cache is not enabled"
-        })),
-    }
+    let response = match manager.cache() {
+        Some(cache) => EmbedCacheStatsResponse::Enabled {
+            enabled: Flag,
+            stats: cache.stats(),
+        },
+        None => EmbedCacheStatsResponse::Disabled {
+            enabled: Flag,
+            message: CACHE_DISABLED.to_string(),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
+/// Message of the cache tools when the server runs without a cache
+const CACHE_DISABLED: &str = "Embedding cache is not enabled";
+
 fn handle_embed_cache_clear(manager: &EmbeddingManager) -> Result<Value> {
-    match manager.cache() {
+    let response = match manager.cache() {
         Some(cache) => {
             let entries_before = cache.len();
             cache.clear();
-            Ok(json!({
-                "success": true,
-                "entries_cleared": entries_before,
-                "message": format!("Cleared {} cache entries", entries_before)
-            }))
+            EmbedCacheClearResponse::Cleared {
+                success: Flag,
+                entries_cleared: entries_before,
+                message: format!("Cleared {} cache entries", entries_before),
+            }
         }
-        None => Ok(json!({
-            "success": false,
-            "message": "Embedding cache is not enabled"
-        })),
-    }
+        None => EmbedCacheClearResponse::Disabled {
+            success: Flag,
+            message: CACHE_DISABLED.to_string(),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }

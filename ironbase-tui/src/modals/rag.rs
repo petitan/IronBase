@@ -3,6 +3,10 @@
 use super::render_modal_frame;
 use crate::state::rag::{RagState, RagTab};
 use crate::theme::Theme;
+use ironbase_mcp_types::responses::{
+    AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, JobStatus,
+    JobType, ModelInfo,
+};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 
@@ -512,16 +516,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
                     Style::default().fg(theme.fg)
                 };
 
-                let provider = m.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
-                let dim = m.get("dimension").and_then(|v| v.as_u64()).unwrap_or(0);
-                let available = m
-                    .get("available")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let status = if available { "OK" } else { "N/A" };
-
-                let text = format!("  {} | dim:{} | {}", provider, dim, status);
-                ListItem::new(text).style(style)
+                ListItem::new(model_line(m)).style(style)
             })
             .collect();
 
@@ -538,27 +533,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Auto-Embed ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
-    let ae_text = if let Some(ref config) = state.auto_embed_config {
-        let enabled = config
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let source = config
-            .get("source_field")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
-        let provider = config
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
-        if enabled {
-            format!("Enabled: {} -> {}", source, provider)
-        } else {
-            "Disabled".to_string()
-        }
-    } else {
-        "Not loaded".to_string()
-    };
+    let ae_text = auto_embed_text(state.auto_embed_config.as_ref());
     let ae_para = Paragraph::new(ae_text)
         .block(ae_block)
         .style(Style::default().fg(theme.fg));
@@ -569,16 +544,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Cache ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
-    let cache_text = if let Some(ref stats) = state.cache_stats {
-        let entries = stats.get("entries").and_then(|v| v.as_u64()).unwrap_or(0);
-        let hit_rate = stats
-            .get("hit_rate")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        format!("{} entries | {:.1}% hit rate", entries, hit_rate * 100.0)
-    } else {
-        "Press [c] to load".to_string()
-    };
+    let cache_text = cache_text(state.cache_stats.as_ref());
     let cache_para = Paragraph::new(cache_text)
         .block(cache_block)
         .style(Style::default().fg(theme.fg));
@@ -623,30 +589,9 @@ fn render_embed_test(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Result ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
-    let result_text = if let Some(ref result) = state.embed_test_result {
-        let dim = result
-            .get("dimension")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let provider = result
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let vector_preview = result
-            .get("embedding")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                let preview: Vec<String> = arr
-                    .iter()
-                    .take(5)
-                    .map(|v| format!("{:.4}", v.as_f64().unwrap_or(0.0)))
-                    .collect();
-                format!("[{}...]", preview.join(", "))
-            })
-            .unwrap_or_else(|| "N/A".to_string());
-        format!("Provider: {} | Dim: {} | {}", provider, dim, vector_preview)
-    } else {
-        "No result yet".to_string()
+    let result_text = match state.embed_test_result {
+        Some(ref result) => embed_result_text(result),
+        None => "No result yet".to_string(),
     };
     let result_para = Paragraph::new(result_text)
         .block(result_block)
@@ -706,28 +651,7 @@ fn render_jobs_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Them
                 Style::default().fg(theme.fg)
             };
 
-            let job_id = j
-                .get("job_id")
-                .or_else(|| j.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let status = j.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-            let progress = j.get("progress").and_then(|v| v.as_u64());
-            let total = j.get("total").and_then(|v| v.as_u64());
-            let collection = j.get("collection").and_then(|v| v.as_str()).unwrap_or("");
-
-            let progress_str = match (progress, total) {
-                (Some(p), Some(t)) if t > 0 => format!(" {}/{}", p, t),
-                _ => String::new(),
-            };
-
-            let text = format!(
-                "  {} | {} | {}{}",
-                truncate_str(job_id, 12),
-                status,
-                collection,
-                progress_str
-            );
+            let text = job_line(j);
             ListItem::new(text).style(style)
         })
         .collect();
@@ -762,6 +686,111 @@ fn render_status(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme)
 
 // ==================== Helpers ====================
 
+/// A provider of the Models tab: name, model and dimension
+fn model_line(m: &ModelInfo) -> String {
+    let status = if m.available { "OK" } else { "N/A" };
+    format!(
+        "  {} | {} | dim:{} | {}",
+        m.provider, m.model, m.dimension, status
+    )
+}
+
+/// The collection's auto-embedding: source → target field and provider, and
+/// what still needs attention (a pending re-embed, a removed provider)
+fn auto_embed_text(status: Option<&AutoEmbedStatusResponse>) -> String {
+    match status {
+        None => "Not loaded".to_string(),
+        Some(AutoEmbedStatusResponse::NotConfigured { .. }) => "Disabled".to_string(),
+        Some(AutoEmbedStatusResponse::Configured {
+            enabled,
+            config,
+            reembed_pending,
+            requires_reconfiguration,
+            ..
+        }) => {
+            let mut text = format!(
+                "{}: {} -> {} ({})",
+                if *enabled {
+                    "Enabled"
+                } else {
+                    "Configured, off"
+                },
+                config.source_field,
+                config.target_field,
+                config.provider
+            );
+            if *reembed_pending {
+                text.push_str(" | re-embed pending");
+            }
+            if requires_reconfiguration.unwrap_or(false) {
+                text.push_str(" | provider removed: enable again");
+            }
+            text
+        }
+    }
+}
+
+/// The embedding cache: entries and hit rate (already a percentage)
+fn cache_text(stats: Option<&EmbedCacheStatsResponse>) -> String {
+    match stats {
+        None => "Press [c] to load".to_string(),
+        Some(EmbedCacheStatsResponse::Disabled { .. }) => "Disabled on the server".to_string(),
+        Some(EmbedCacheStatsResponse::Enabled { stats, .. }) => format!(
+            "{}/{} entries | {:.1}% hit rate ({} hits, {} misses)",
+            stats.entries, stats.max_entries, stats.hit_rate, stats.hits, stats.misses
+        ),
+    }
+}
+
+/// A test embedding: provider, model, dimension and the first values
+fn embed_result_text(result: &EmbedTextResponse) -> String {
+    let preview: Vec<String> = result
+        .vector
+        .iter()
+        .take(5)
+        .map(|v| format!("{:.4}", v))
+        .collect();
+    let more = if result.vector.len() > 5 { ", ..." } else { "" };
+    format!(
+        "Provider: {} ({}) | Dim: {} | [{}{}]",
+        result.provider,
+        result.model,
+        result.dimension,
+        preview.join(", "),
+        more
+    )
+}
+
+/// A job of the Jobs tab: id, state, what it works on and its progress
+fn job_line(job: &JobInfo) -> String {
+    let status = match &job.status {
+        JobStatus::Pending => "pending".to_string(),
+        JobStatus::Running { progress, .. } => format!("running {:.0}%", progress),
+        JobStatus::Completed { .. } => "completed".to_string(),
+        JobStatus::Failed { error } => format!("failed: {}", error),
+        JobStatus::Cancelled => "cancelled".to_string(),
+    };
+    let target = match &job.job_type {
+        JobType::EmbedBackfill { collection, .. } => format!("backfill {}", collection),
+        JobType::EmbedDocument { collection, doc_id } => {
+            format!("import {} / {}", collection, doc_id)
+        }
+        JobType::Compact => "compact".to_string(),
+        JobType::Custom { name } => name.clone(),
+    };
+    let progress = match job.items_total {
+        Some(total) if total > 0 => format!(" {}/{}", job.items_processed, total),
+        _ => String::new(),
+    };
+    format!(
+        "  {} | {} | {}{}",
+        truncate_str(&job.id, 12),
+        status,
+        target,
+        progress
+    )
+}
+
 fn truncate_str(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -772,5 +801,94 @@ fn truncate_str(s: &str, max: usize) -> &str {
             end -= 1;
         }
         &s[..end]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironbase_mcp_types::responses::{AutoEmbedConfigView, CacheStats, Flag};
+
+    fn configured(reembed_pending: bool, removed: bool) -> AutoEmbedStatusResponse {
+        AutoEmbedStatusResponse::Configured {
+            collection: "kb".to_string(),
+            enabled: true,
+            config: Box::new(AutoEmbedConfigView {
+                source_field: "content".to_string(),
+                target_field: "embedding".to_string(),
+                provider: "vllm".to_string(),
+                model: Some("bge-m3".to_string()),
+                dimension: Some(1024),
+                skip_if_exists: false,
+                chunking: None,
+            }),
+            reembed_pending,
+            reembed_field: None,
+            requires_reconfiguration: removed.then_some(true),
+            reconfiguration_reason: None,
+        }
+    }
+
+    /// The fields are read from the nested `config` (before: from the top
+    /// level, where they are not: "Enabled: - -> -")
+    #[test]
+    fn auto_embed_text_reads_the_nested_config() {
+        assert_eq!(
+            auto_embed_text(Some(&configured(false, false))),
+            "Enabled: content -> embedding (vllm)"
+        );
+        assert_eq!(
+            auto_embed_text(Some(&configured(true, true))),
+            "Enabled: content -> embedding (vllm) | re-embed pending | provider removed: enable again"
+        );
+        let none = AutoEmbedStatusResponse::NotConfigured {
+            collection: "kb".to_string(),
+            enabled: Flag,
+            config: (),
+        };
+        assert_eq!(auto_embed_text(Some(&none)), "Disabled");
+        assert_eq!(auto_embed_text(None), "Not loaded");
+    }
+
+    /// The stats are read from the nested `stats`, and the hit rate is
+    /// already a percentage (before: "0 entries | 0.0% hit rate" always, and
+    /// a real rate would have been multiplied by 100 again)
+    #[test]
+    fn cache_text_reads_the_nested_stats_as_a_percentage() {
+        let stats = EmbedCacheStatsResponse::Enabled {
+            enabled: Flag,
+            stats: CacheStats {
+                hits: 1,
+                misses: 1,
+                entries: 1,
+                max_entries: 100,
+                bytes_used: 84,
+                hit_rate: 50.0,
+            },
+        };
+        assert_eq!(
+            cache_text(Some(&stats)),
+            "1/100 entries | 50.0% hit rate (1 hits, 1 misses)"
+        );
+        let disabled = EmbedCacheStatsResponse::Disabled {
+            enabled: Flag,
+            message: "Embedding cache is not enabled".to_string(),
+        };
+        assert_eq!(cache_text(Some(&disabled)), "Disabled on the server");
+    }
+
+    /// The vector is read from `vector` (before: from `embedding`: "N/A")
+    #[test]
+    fn embed_result_text_previews_the_vector() {
+        let result = EmbedTextResponse {
+            vector: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            dimension: 6,
+            provider: "vllm".to_string(),
+            model: "bge-m3".to_string(),
+        };
+        assert_eq!(
+            embed_result_text(&result),
+            "Provider: vllm (bge-m3) | Dim: 6 | [0.1000, 0.2000, 0.3000, 0.4000, 0.5000, ...]"
+        );
     }
 }

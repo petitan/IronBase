@@ -16,6 +16,11 @@
 //!
 //! Search tool group: `fulltext_search`, `fulltext_analyze`, `fuzzy_search`,
 //! `vector_search`, `search`.
+//!
+//! Embedding tool group: `embed_text`, `embed_batch`, `embed_models_list`,
+//! `embed_cache_stats`, `embed_cache_clear`, `auto_embed_enable`,
+//! `auto_embed_disable`, `auto_embed_status`, `embed_job_list`,
+//! `embed_job_status`, `embed_job_cancel`.
 
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
@@ -1099,4 +1104,410 @@ pub struct SearchResponse {
     /// otherwise
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+}
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
+/// A JSON boolean that is always `B` on the wire. It tells the variants of an
+/// untagged response apart by the value of a flag field (`enabled`, `found`,
+/// `success`), the way the server's shapes differ: a `false` does not parse
+/// as `Flag<true>`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flag<const B: bool>;
+
+impl<const B: bool> Serialize for Flag<B> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(B)
+    }
+}
+
+impl<'de, const B: bool> Deserialize<'de> for Flag<B> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if bool::deserialize(deserializer)? == B {
+            Ok(Flag)
+        } else {
+            Err(D::Error::custom(format_args!("expected `{B}`")))
+        }
+    }
+}
+
+// ============================================================================
+// Embedding
+// ============================================================================
+
+/// `embed_text` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedTextResponse {
+    /// The text's embedding
+    pub vector: Vec<f32>,
+    /// `vector.len()`
+    pub dimension: usize,
+    /// The provider that embedded the text (the default one when none was given)
+    pub provider: String,
+    /// The provider's model name (empty when the provider is gone)
+    pub model: String,
+}
+
+/// `embed_batch` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedBatchResponse {
+    /// One embedding per text, in the request's order
+    pub vectors: Vec<Vec<f32>>,
+    /// `vectors.len()`
+    pub count: usize,
+    /// Length of the first vector (`0` when there is none)
+    pub dimension: usize,
+    pub provider: String,
+    pub model: String,
+}
+
+/// An embedding provider the server has configured
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// The name the provider is registered (and requested) under
+    pub provider: String,
+    /// The provider's model name
+    pub model: String,
+    /// Dimension of the vectors it returns
+    pub dimension: usize,
+    pub description: String,
+    /// Always `true` (only configured providers are listed)
+    pub available: bool,
+}
+
+/// `embed_models_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedModelsListResponse {
+    /// The configured providers, in the server's (unspecified) order
+    pub models: Vec<ModelInfo>,
+    /// `models.len()`
+    pub count: usize,
+    /// The provider used when a request names none (empty when none is configured)
+    pub default_provider: String,
+}
+
+/// Statistics of the server's embedding cache
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CacheStats {
+    /// Number of lookups that found a vector
+    pub hits: u64,
+    /// Number of lookups that found none (absent or expired)
+    pub misses: u64,
+    /// Current number of entries
+    pub entries: usize,
+    /// Capacity (least recently used entries are evicted beyond it)
+    pub max_entries: usize,
+    /// Approximate memory used by the entries, in bytes
+    pub bytes_used: usize,
+    /// `hits / (hits + misses)` as a percentage (0–100); `0` before any lookup
+    pub hit_rate: f64,
+}
+
+/// `embed_cache_stats` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbedCacheStatsResponse {
+    Enabled {
+        enabled: Flag<true>,
+        stats: CacheStats,
+    },
+    /// The server runs without an embedding cache
+    Disabled {
+        enabled: Flag<false>,
+        message: String,
+    },
+}
+
+/// `embed_cache_clear` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbedCacheClearResponse {
+    Cleared {
+        success: Flag<true>,
+        /// Number of entries the cache held
+        entries_cleared: usize,
+        message: String,
+    },
+    /// The server runs without an embedding cache: nothing was cleared
+    Disabled {
+        success: Flag<false>,
+        message: String,
+    },
+}
+
+// ============================================================================
+// Auto-embedding
+// ============================================================================
+
+/// Chunking of an auto-embedded source field
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoEmbedChunking {
+    pub mode: String,
+    pub chunk_size: usize,
+    pub overlap: usize,
+}
+
+/// A collection's auto-embedding configuration, as `auto_embed_status`
+/// reports it (`auto_embed_enable` adds `enabled` in front of it)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoEmbedConfigView {
+    /// The text field that is embedded
+    pub source_field: String,
+    /// The field the vector is written into
+    pub target_field: String,
+    pub provider: String,
+    /// The model of the stored vectors (`null` for a legacy configuration;
+    /// during a re-embed still the previous model)
+    pub model: Option<String>,
+    /// Vector dimension (`null` for a legacy configuration)
+    pub dimension: Option<usize>,
+    /// Documents that already have a vector are not re-embedded on insert
+    pub skip_if_exists: bool,
+    /// `null`: the whole source field is embedded as one text
+    pub chunking: Option<AutoEmbedChunking>,
+}
+
+/// The configuration `auto_embed_enable` stored
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoEmbedEnabledConfig {
+    /// Always `true`
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub config: AutoEmbedConfigView,
+}
+
+/// `auto_embed_enable` response
+///
+/// Serialized by hand: the server writes `message` right after `reembed` for a
+/// re-embed (before `backfill_job_id`), and after `backfill_job_id` for a
+/// plain backfill.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AutoEmbedEnableResponse {
+    pub success: bool,
+    pub collection: String,
+    pub config: AutoEmbedEnabledConfig,
+    /// Number of documents to embed: those without a vector, or every one
+    /// for a re-embed
+    pub existing_documents: u64,
+    /// `true` when the vectors already stored came from another provider,
+    /// model, preprocessing, dimension or source field and are all being
+    /// re-embedded; absent otherwise
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reembed: Option<bool>,
+    /// The job embedding the existing documents (`embed_job_status`); absent
+    /// when none was started (nothing to embed, or no job manager / capacity)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfill_job_id: Option<String>,
+    /// What was started (re-embed or backfill); absent when nothing was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Set when the collection holds chunk documents, whose import-time
+    /// vectors the verbatim auto-embedding will not reproduce
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+impl Serialize for AutoEmbedEnableResponse {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("success", &self.success)?;
+        map.serialize_entry("collection", &self.collection)?;
+        map.serialize_entry("config", &self.config)?;
+        map.serialize_entry("existing_documents", &self.existing_documents)?;
+        if let Some(reembed) = &self.reembed {
+            map.serialize_entry("reembed", reembed)?;
+        }
+        let message_first = self.reembed.is_some();
+        if message_first {
+            if let Some(message) = &self.message {
+                map.serialize_entry("message", message)?;
+            }
+        }
+        if let Some(job_id) = &self.backfill_job_id {
+            map.serialize_entry("backfill_job_id", job_id)?;
+        }
+        if !message_first {
+            if let Some(message) = &self.message {
+                map.serialize_entry("message", message)?;
+            }
+        }
+        if let Some(warning) = &self.warning {
+            map.serialize_entry("warning", warning)?;
+        }
+        map.end()
+    }
+}
+
+/// `auto_embed_disable` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoEmbedDisableResponse {
+    pub success: bool,
+    pub collection: String,
+    pub message: String,
+}
+
+/// `auto_embed_status` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutoEmbedStatusResponse {
+    Configured {
+        collection: String,
+        enabled: bool,
+        /// Boxed: the variant is much larger than [`Self::NotConfigured`]
+        config: Box<AutoEmbedConfigView>,
+        /// A re-embed into a new embedding space has not finished yet
+        /// (restarted at every server start until it has)
+        reembed_pending: bool,
+        /// The shadow field a running re-embed writes into (`<target>__next`)
+        reembed_field: Option<String>,
+        /// `true` when the configured provider was removed from the server
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requires_reconfiguration: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconfiguration_reason: Option<String>,
+    },
+    /// The collection has no auto-embedding configuration (or no collection
+    /// of that name exists)
+    NotConfigured {
+        collection: String,
+        enabled: Flag<false>,
+        /// Always `null`
+        config: (),
+    },
+}
+
+// ============================================================================
+// Embedding jobs
+// ============================================================================
+
+/// Identifier of a background job (`job_<n>`)
+pub type JobId = String;
+
+/// State of a background job; `status` names the state on the wire, next to
+/// its fields
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status")]
+pub enum JobStatus {
+    /// Job is waiting to be processed
+    #[serde(rename = "pending")]
+    Pending,
+
+    /// Job is currently running
+    #[serde(rename = "running")]
+    Running {
+        /// Progress percentage (0.0 - 100.0)
+        progress: f64,
+        /// Current status message
+        message: String,
+    },
+
+    /// Job completed successfully
+    #[serde(rename = "completed")]
+    Completed {
+        /// Job result
+        result: Value,
+    },
+
+    /// Job failed with error
+    #[serde(rename = "failed")]
+    Failed {
+        /// Error message
+        error: String,
+    },
+
+    /// Job was cancelled
+    #[serde(rename = "cancelled")]
+    Cancelled,
+}
+
+impl JobStatus {
+    /// Check if job is in a terminal state
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            JobStatus::Completed { .. } | JobStatus::Failed { .. } | JobStatus::Cancelled
+        )
+    }
+
+    /// Check if job is running
+    pub fn is_running(&self) -> bool {
+        matches!(self, JobStatus::Running { .. })
+    }
+}
+
+/// Kind of a background job (externally tagged: a unit kind is a bare
+/// string, e.g. `"Compact"`; the others an object under their name)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JobType {
+    /// Backfill embeddings for existing documents
+    EmbedBackfill {
+        collection: String,
+        provider: String,
+    },
+    /// Import and embed a document with chunking
+    EmbedDocument { collection: String, doc_id: String },
+    /// Database compaction (background, non-blocking)
+    Compact,
+    /// Custom job type
+    Custom { name: String },
+}
+
+/// A background job, as the job tools report it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobInfo {
+    /// Unique job identifier
+    pub id: JobId,
+    /// Job type
+    pub job_type: JobType,
+    /// Current status
+    pub status: JobStatus,
+    /// Seconds since the job was created (measured when it is reported)
+    pub created_at_secs: u64,
+    /// Seconds since the job was last updated (measured when it is reported)
+    pub updated_at_secs: u64,
+    /// Items processed so far
+    pub items_processed: usize,
+    /// Total items to process (if known)
+    pub items_total: Option<usize>,
+}
+
+/// `embed_job_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedJobListResponse {
+    /// The jobs, in the server's (unspecified) order; with `active_only`, the
+    /// running ones
+    pub jobs: Vec<JobInfo>,
+    /// `jobs.len()`
+    pub count: usize,
+    /// Number of running jobs (whether listed or not)
+    pub active_count: usize,
+}
+
+/// `embed_job_status` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbedJobStatusResponse {
+    Found {
+        found: Flag<true>,
+        job: JobInfo,
+    },
+    /// No job of that id (never existed, or removed after it finished)
+    NotFound {
+        found: Flag<false>,
+        message: String,
+    },
+}
+
+/// `embed_job_cancel` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedJobCancelResponse {
+    /// `false` when the job is unknown or already finished
+    pub success: bool,
+    pub job_id: String,
+    pub message: String,
+    /// The finished job's state; only when it was already terminal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<JobStatus>,
 }

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI embedding and job screens; embedding cache miss count; typed MCP responses for the embedding tools (ironbase-core 0.3.466, mcp-server 1.0.664)
+
+Phase 2e of the Tuti TUI overhaul. The server's response JSON keeps its shape.
+
+- **The embedding cache counts its misses.** `EmbeddingCache::get` returned early on an absent key without
+  counting it (only an expired entry counted, and no caller used `record_miss`), so `embed_cache_stats`
+  reported `misses: 0` and a 100% `hit_rate` after any hit. Every lookup that finds no vector now counts
+  as a miss; the counts and rate of `embed_cache_stats` change accordingly.
+- **`ironbase-mcp-types` gains response types for the embedding tools:** `embed_text`, `embed_batch`,
+  `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`, `auto_embed_enable`,
+  `auto_embed_disable`, `auto_embed_status`, `embed_job_list`, `embed_job_status`, `embed_job_cancel`
+  (markers added for the three argument-less ones). The job types (`JobInfo`, `JobStatus`, `JobType`),
+  `CacheStats` and `ModelInfo` move there; the server re-exports them under their old paths. Responses
+  whose shape depends on a flag (`enabled`, `found`, `success`) are enums told apart by the flag's value
+  (`Flag<true>` / `Flag<false>`). The response golden test grew from 260 to 321 cases (recorded on the
+  previous code, before the cache fix) and every recorded response of the group round-trips through the
+  shared types byte for byte.
+- **Tuti TUI RAG modal, Models and Jobs tabs** (all showed placeholders or wrong values):
+  - the auto-embed panel reads the configuration nested in `config` (it showed `Enabled: - -> -`) and
+    shows the target field, a pending re-embed and a removed provider;
+  - the cache panel reads the nested `stats` (it always showed 0 entries) and does not multiply the hit
+    rate, already a percentage, by 100 again; without a cache on the server it says so;
+  - the test embedding shows the `vector` (it read `embedding`: "N/A") and the model;
+  - the test embedding and auto-embed use the provider selected on the tab instead of a hard-coded
+    `ollama` (an error on a server without it); the list is sorted by provider and shows the model;
+  - enabling auto-embed reports what the server started (backfill job, re-embed) and its warning;
+  - jobs show their id, state, collection and item counters (all were `?` or empty), newest first, and
+    the selection stays on the same job across a refresh;
+  - clearing a server without a cache, or cancelling a job that already finished, shows the server's
+    reason as an error instead of "Cache cleared" / "Job … cancelled"; the job list is reloaded after a
+    cancel and its failure is reported;
+  - a failing provider list or auto-embed status is reported when the modal opens instead of being
+    ignored ("Loading models..." forever).
+- Known server quirks, pinned by the golden test and not changed here: `auto_embed_disable` succeeds for
+  a collection without a configuration (or without the collection); the `embed_text` failure message
+  repeats "Embedding failed:"; the "Provider not found. Available: [...]" error lists providers in
+  hash-map order; `embed_job_list` with `active_only` lists running jobs only, not pending ones.
+
 ### Fixed — Tuti TUI search screens; typed MCP responses for the search tools (ironbase-core 0.3.465, mcp-server 1.0.663)
 
 Phase 2d of the Tuti TUI overhaul. The server's response JSON is unchanged.

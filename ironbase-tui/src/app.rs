@@ -7,13 +7,15 @@ use crate::db::{CollectionInfo, DbWrapper};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
-    CollectionCreateParams, CollectionDropParams, CountParams, DeleteParams, ExplainParams,
-    FindParams, IndexCreateArgs, IndexCreateParams, IndexDropParams, IndexListParams,
-    InsertOneParams, NoParams, UpdateOneParams,
+    AutoEmbedDisableParams, CollectionCreateParams, CollectionDropParams, CountParams,
+    DeleteParams, ExplainParams, FindParams, IndexCreateArgs, IndexCreateParams, IndexDropParams,
+    IndexListParams, InsertOneParams, JobCancelParams, JobListParams, NoParams, UpdateOneParams,
 };
+use ironbase_mcp_types::responses::EmbedCacheClearResponse;
 use ironbase_mcp_types::tools::{
-    CollectionCreate, CollectionDrop, Count, DbStats, DeleteOne, Explain, Find, IndexCreate,
-    IndexDrop, IndexStatsRefresh, InsertOne, UpdateOne,
+    AutoEmbedDisable, CollectionCreate, CollectionDrop, Count, DbStats, DeleteOne, EmbedCacheClear,
+    EmbedJobCancel, EmbedJobList, Explain, Find, IndexCreate, IndexDrop, IndexStatsRefresh,
+    InsertOne, UpdateOne,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -1760,7 +1762,10 @@ impl App {
     /// Actually disable auto-embed for a collection (async)
     async fn do_disable_auto_embed_async(&mut self, collection: &str) {
         if let Some(ref db) = self.db {
-            match db.auto_embed_disable(collection).await {
+            let args = AutoEmbedDisableParams {
+                collection: collection.to_string(),
+            };
+            match db.call::<AutoEmbedDisable>(&args).await {
                 Ok(_) => {
                     self.rag_state.message = Some("Auto-embed disabled".to_string());
                     self.rag_state.auto_embed_config = None;
@@ -1775,10 +1780,14 @@ impl App {
     /// Actually clear the embedding cache (async)
     async fn do_clear_embed_cache_async(&mut self) {
         if let Some(ref db) = self.db {
-            match db.embed_cache_clear().await {
-                Ok(_) => {
+            match db.call::<EmbedCacheClear>(&NoParams {}).await {
+                Ok(EmbedCacheClearResponse::Cleared { message, .. }) => {
                     self.rag_state.cache_stats = None;
-                    self.rag_state.message = Some("Cache cleared".to_string());
+                    self.rag_state.message = Some(message);
+                }
+                // No cache on the server: nothing was cleared
+                Ok(EmbedCacheClearResponse::Disabled { message, .. }) => {
+                    self.rag_state.error = Some(message);
                 }
                 Err(e) => {
                     self.rag_state.error = Some(format!("{}", e));
@@ -1790,19 +1799,27 @@ impl App {
     /// Actually cancel an embed job (async)
     async fn do_cancel_embed_job_async(&mut self, job_id: &str) {
         if let Some(ref db) = self.db {
-            match db.embed_job_cancel(job_id).await {
-                Ok(_) => {
-                    self.rag_state.message = Some(format!("Job {} cancelled", job_id));
-                    // Refresh
-                    if let Ok(result) = db.embed_job_list(false).await {
-                        if let Some(jobs) = result.get("jobs").and_then(|v| v.as_array()) {
-                            self.rag_state.jobs = jobs.clone();
-                        }
-                    }
+            let args = JobCancelParams {
+                job_id: job_id.to_string(),
+            };
+            match db.call::<EmbedJobCancel>(&args).await {
+                Ok(response) if response.success => {
+                    self.rag_state.message = Some(response.message);
                 }
+                // Unknown or already finished: the server says which
+                Ok(response) => self.rag_state.error = Some(response.message),
                 Err(e) => {
                     self.rag_state.error = Some(format!("{}", e));
+                    return;
                 }
+            }
+            // The cancelled job's new state (or the finished one's)
+            match db
+                .call::<EmbedJobList>(&JobListParams { active_only: false })
+                .await
+            {
+                Ok(result) => self.rag_state.set_jobs(result.jobs),
+                Err(e) => self.rag_state.error = Some(format!("Jobs: {}", e)),
             }
         }
     }
@@ -2969,7 +2986,15 @@ mod tests {
     fn test_rag_destructive_actions_need_confirm_and_return_to_rag() {
         let mut app = App::new(Config::default());
         app.rag_state = RagState::new("kb".to_string());
-        app.rag_state.jobs = vec![serde_json::json!({"job_id": "job-1"})];
+        app.rag_state.jobs = vec![ironbase_mcp_types::responses::JobInfo {
+            id: "job-1".to_string(),
+            job_type: ironbase_mcp_types::responses::JobType::Compact,
+            status: ironbase_mcp_types::responses::JobStatus::Pending,
+            created_at_secs: 0,
+            updated_at_secs: 0,
+            items_processed: 0,
+            items_total: None,
+        }];
 
         app.modal = Some(Modal::Rag);
         app.open_disable_auto_embed_confirm();
