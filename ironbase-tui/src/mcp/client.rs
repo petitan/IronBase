@@ -1,11 +1,30 @@
 //! MCP Client - high-level API for IronBase MCP operations
 
+use crate::logging::redact_arguments;
 use crate::mcp::error::{McpError, McpResult};
 use crate::mcp::protocol::{JsonRpcRequest, ToolCallResult};
 use crate::mcp::transport::{HttpTransport, StdioTransport, Transport};
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Log how a request to the server ended: what was called, how long it took
+/// and, on failure, the error text
+fn log_outcome<T>(what: &str, tool: &str, started: Instant, result: &McpResult<T>) {
+    let duration_ms = started.elapsed().as_millis() as u64;
+    match result {
+        Ok(_) => tracing::info!(tool, duration_ms, outcome = "ok", "{}", what),
+        Err(e) => tracing::warn!(
+            tool,
+            duration_ms,
+            outcome = "error",
+            error = %crate::logging::redact_url_credentials(&e.to_string()),
+            "{}",
+            what
+        ),
+    }
+}
 
 /// MCP Client for IronBase operations
 pub struct McpClient {
@@ -51,19 +70,34 @@ impl McpClient {
 
     /// Initialize the MCP connection
     async fn initialize(&mut self) -> McpResult<()> {
+        let started = Instant::now();
         let request = JsonRpcRequest::initialize();
-        let response = self.transport.send(&request).await?;
-
-        if response.error.is_some() {
-            return Err(McpError::invalid_response("Initialize failed"));
-        }
+        let result = match self.transport.send(&request).await {
+            Ok(response) if response.error.is_some() => {
+                Err(McpError::invalid_response("Initialize failed"))
+            }
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        };
+        log_outcome("MCP initialize", "initialize", started, &result);
+        result?;
 
         self.initialized = true;
         Ok(())
     }
 
-    /// Call an MCP tool and get the result
+    /// Call an MCP tool and get the result. Every call is logged: name,
+    /// duration and outcome at info level, the (redacted) arguments only at
+    /// debug level - the result is never logged.
     async fn call_tool(&self, name: &str, arguments: Value) -> McpResult<Value> {
+        tracing::debug!(tool = name, arguments = %redact_arguments(&arguments), "MCP tool call started");
+        let started = Instant::now();
+        let result = self.call_tool_unlogged(name, arguments).await;
+        log_outcome("MCP tool call", name, started, &result);
+        result
+    }
+
+    async fn call_tool_unlogged(&self, name: &str, arguments: Value) -> McpResult<Value> {
         if !self.initialized {
             return Err(McpError::NotInitialized);
         }

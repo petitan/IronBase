@@ -46,6 +46,7 @@ Options:
   -k, --api-key <API_KEY>  API key [env: IRONBASE_API_KEY]
       --insecure           Accept self-signed TLS certificates
       --server <SERVER>    MCP server executable (stdio transport)
+      --log-file <LOG_FILE>  Log file path (see Logging)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -192,6 +193,18 @@ mcp_insecure = false
 # Theme: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
 ```
+
+## Logging
+
+The TUI logs to a file only (never to the terminal): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) or `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). `--log-file <path>` overrides the location.
+
+| Setting | Value |
+|---------|-------|
+| Level | `info` by default; `TUTI_TUI_LOG=debug` (off/error/warn/info/debug/trace) overrides it |
+| Content | Startup, connection, every MCP tool call (name, duration, outcome), errors shown in the UI, config load/save, shutdown |
+| Secrets | API key, admin key and headers are never logged; tool arguments only at `debug`, with secret fields redacted |
+| Size | A file over 5 MB is rotated to `tuti-tui.log.1` at startup (one previous generation is kept) |
+| Permissions | `0600` on Unix |
 
 ## Architecture
 

@@ -46,6 +46,7 @@ Options:
   -k, --api-key <API_KEY>  API key [env: IRONBASE_API_KEY]
       --insecure           Accept self-signed TLS certificates
       --server <SERVER>    MCP server executable (stdio transport)
+      --log-file <LOG_FILE>  Log file path (lásd: Naplózás)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -192,6 +193,18 @@ mcp_insecure = false
 # Téma: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
 ```
+
+## Naplózás
+
+A TUI csak fájlba naplóz (a terminálra soha): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) vagy `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). A `--log-file <path>` felülírja a helyet.
+
+| Beállítás | Érték |
+|-----------|-------|
+| Szint | Alapértelmezés `info`; a `TUTI_TUI_LOG=debug` (off/error/warn/info/debug/trace) felülírja |
+| Tartalom | Indulás, kapcsolódás, minden MCP tool hívás (név, időtartam, eredmény), a felületen megjelenő hibák, konfiguráció betöltése/mentése, leállás |
+| Titkok | API kulcs, admin kulcs és fejléc soha nem kerül a naplóba; tool argumentumok csak `debug` szinten, a titkos mezők kitakarva |
+| Méret | Az 5 MB-nál nagyobb fájl induláskor `tuti-tui.log.1` névre kerül (egy korábbi generáció marad meg) |
+| Jogosultság | Unixon `0600` |
 
 ## Architektúra
 

@@ -136,7 +136,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     let table = Table::new(rows, widths)
         .header(header)
-        .highlight_style(Style::default().fg(theme.bg).bg(theme.accent));
+        .row_highlight_style(Style::default().fg(theme.bg).bg(theme.accent));
 
     frame.render_widget(table, inner);
 }

@@ -1118,7 +1118,12 @@ impl App {
 
     /// Set error message
     pub fn set_error(&mut self, msg: impl Into<String>) {
-        self.error_message = Some(msg.into());
+        let msg = msg.into();
+        tracing::warn!(
+            error = %crate::logging::redact_url_credentials(&msg),
+            "Error shown to the user"
+        );
+        self.error_message = Some(msg);
     }
 
     /// Reset UI state for database switch (clear documents, filters, selections)
