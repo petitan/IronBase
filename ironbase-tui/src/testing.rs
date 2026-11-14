@@ -7,6 +7,12 @@ use crate::config::Config;
 use crate::db::DbWrapper;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpResult, Transport};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ironbase_mcp_types::responses::{
+    CollectionListResponse, CountResponse, FindResponse, IndexListAll, IndexListResponse,
+    TypedIndexList,
+};
+use ironbase_mcp_types::tools::{CollectionList, Count, Find, IndexList};
+use ironbase_mcp_types::Tool;
 use ratatui::{backend::TestBackend, Terminal};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -15,7 +21,8 @@ use std::sync::{Arc, Mutex};
 /// In-memory stand-in for the MCP server.
 ///
 /// Built in: just enough of collection_list / find / count / index_list /
-/// collection_drop over `collections`. Any tool can be scripted with
+/// collection_drop over `collections`; the first four answer with the shared
+/// response structs, so their shape is the server's. Any tool can be scripted with
 /// [`FakeServer::respond`] / [`FakeServer::fail`] (scripted answers win over
 /// the built-in ones); an unscripted, unknown tool is an error. Every call is
 /// logged.
@@ -105,12 +112,12 @@ impl FakeServer {
             return scripted.clone();
         }
         match name {
-            "collection_list" => {
+            CollectionList::NAME => {
                 let collections = self.collections.lock().unwrap();
-                let names: Vec<&String> = collections.iter().map(|(n, _)| n).collect();
-                Ok(serde_json::json!({ "collections": names }))
+                let collections = collections.iter().map(|(n, _)| n.clone()).collect();
+                to_result(CollectionListResponse { collections })
             }
-            "find" => {
+            Find::NAME => {
                 let collection = args["collection"].as_str().map(String::from);
                 if *self.failing_find.lock().unwrap() == collection {
                     return Err("find failed".to_string());
@@ -122,13 +129,29 @@ impl FakeServer {
                         docs.reverse();
                     }
                 }
+                let total = docs.len();
                 let skip = args["skip"].as_u64().unwrap_or(0) as usize;
                 let limit = args["limit"].as_u64().unwrap_or(u64::MAX) as usize;
-                let page: Vec<Value> = docs.into_iter().skip(skip).take(limit).collect();
-                Ok(serde_json::json!({ "documents": page }))
+                let documents: Vec<Value> = docs.into_iter().skip(skip).take(limit).collect();
+                to_result(FindResponse {
+                    count: documents.len(),
+                    documents,
+                    total: (args["include_total"] == true).then_some(total),
+                })
             }
-            "count" => Ok(serde_json::json!({ "count": self.matching(args).len() })),
-            "index_list" => Ok(serde_json::json!({ "btree_indexes": [] })),
+            Count::NAME => to_result(CountResponse {
+                count: self.matching(args).len() as u64,
+            }),
+            // No indexes: every subtype empty, or the asked one
+            IndexList::NAME => match args["type"].as_str() {
+                None => to_result(IndexListResponse::All(IndexListAll::new(
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                ))),
+                Some(_) => to_result(IndexListResponse::BTree(TypedIndexList::new(vec![]))),
+            },
             "collection_drop" => {
                 let name = args["collection"].as_str().unwrap_or_default();
                 self.collections.lock().unwrap().retain(|(n, _)| n != name);
@@ -162,6 +185,11 @@ impl Transport for FakeServer {
     async fn close(&self) -> McpResult<()> {
         Ok(())
     }
+}
+
+/// A built-in answer: the response struct as the server serializes it
+fn to_result<T: serde::Serialize>(response: T) -> Result<Value, String> {
+    serde_json::to_value(response).map_err(|e| e.to_string())
 }
 
 /// `count` documents: {"_id": i, "n": i, "even": i % 2 == 0}

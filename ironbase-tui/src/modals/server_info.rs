@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
+use ironbase_mcp_types::responses::{DbStatsResponse, DbStatsServer};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use serde_json::Value;
@@ -10,7 +11,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default)]
 pub struct ServerInfoState {
     /// Database statistics
-    pub db_stats: Option<Value>,
+    pub db_stats: Option<DbStatsResponse>,
     /// List of available tools
     pub tools: Vec<ToolInfo>,
     /// List of available prompts
@@ -48,7 +49,7 @@ impl ServerInfoState {
     }
 
     /// Update with data from MCP server
-    pub fn update(&mut self, db_stats: Value, tools: Vec<Value>, prompts: Vec<Value>) {
+    pub fn update(&mut self, db_stats: DbStatsResponse, tools: Vec<Value>, prompts: Vec<Value>) {
         self.db_stats = Some(db_stats);
 
         // Parse tools
@@ -159,79 +160,74 @@ pub fn render(
     )));
     lines.push(Line::from(""));
 
-    if let Some(ref stats) = state.db_stats {
-        // Server info section
-        if let Some(server) = stats.get("server") {
-            if let Some(protocol) = server.get("protocol").and_then(|v| v.as_str()) {
-                let host = server.get("host").and_then(|v| v.as_str()).unwrap_or("?");
-                let port = server.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-                lines.push(Line::from(vec![
-                    Span::styled("Szerver:            ", Style::default().fg(theme.accent)),
-                    Span::raw(format!("{}://{}:{}", protocol, host, port)),
-                ]));
-            }
-            if let Some(require_key) = server.get("require_api_key").and_then(|v| v.as_bool()) {
-                lines.push(Line::from(vec![
-                    Span::styled("API kulcs:          ", Style::default().fg(theme.accent)),
-                    Span::raw(if require_key {
-                        "Kotelezo"
-                    } else {
-                        "Nem szukseges"
-                    }),
-                ]));
-            }
+    if let Some(ref response) = state.db_stats {
+        let row = |label: &'static str, value: String| {
+            Line::from(vec![
+                Span::styled(label, Style::default().fg(theme.accent)),
+                Span::raw(value),
+            ])
+        };
+
+        // Server info section (an HTTP server; a stdio server has no address)
+        if let DbStatsServer::Http {
+            protocol,
+            host,
+            port,
+            require_api_key,
+            ..
+        } = &response.server
+        {
+            lines.push(row(
+                "Szerver:            ",
+                format!("{}://{}:{}", protocol, host, port),
+            ));
+            lines.push(row(
+                "API kulcs:          ",
+                if *require_api_key {
+                    "Kotelezo"
+                } else {
+                    "Nem szukseges"
+                }
+                .to_string(),
+            ));
         }
 
         // Database info section
-        if let Some(database) = stats.get("database") {
-            if let Some(path) = database.get("path").and_then(|v| v.as_str()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Adatbazis:          ", Style::default().fg(theme.accent)),
-                    Span::raw(path),
-                ]));
-            }
-            if let Some(size) = database.get("file_size").and_then(|v| v.as_str()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Fajlmeret:          ", Style::default().fg(theme.accent)),
-                    Span::raw(size),
-                ]));
-            }
-        }
+        let stats = &response.stats;
+        lines.push(row("Adatbazis:          ", stats.database.path.clone()));
+        lines.push(row(
+            "Fajlmeret:          ",
+            stats.database.file_size.clone(),
+        ));
 
         // Summary section
-        if let Some(summary) = stats.get("summary") {
-            if let Some(count) = summary.get("collection_count").and_then(|v| v.as_u64()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Kollekcio szam:     ", Style::default().fg(theme.accent)),
-                    Span::raw(count.to_string()),
-                ]));
-            }
-            if let Some(docs) = summary.get("total_documents").and_then(|v| v.as_u64()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Osszes dokumentum:  ", Style::default().fg(theme.accent)),
-                    Span::raw(docs.to_string()),
-                ]));
-            }
-            if let Some(indexes) = summary.get("total_indexes").and_then(|v| v.as_u64()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Osszes index:       ", Style::default().fg(theme.accent)),
-                    Span::raw(indexes.to_string()),
-                ]));
-            }
-        }
+        let summary = &stats.summary;
+        lines.push(row(
+            "Kollekcio szam:     ",
+            summary.collection_count.to_string(),
+        ));
+        lines.push(row(
+            "Osszes dokumentum:  ",
+            summary.total_documents.to_string(),
+        ));
+        lines.push(row(
+            "Osszes index:       ",
+            summary.total_btree_indexes.to_string(),
+        ));
+        lines.push(row(
+            // The engine's index list already contains the vector indexes:
+            // this line is a breakdown of the total above, not an addition
+            "  ebbol vektor:     ",
+            format!(
+                "{} ({} vektor)",
+                summary.total_vector_indexes, summary.total_vectors
+            ),
+        ));
 
-        // Collection names (new structure: array of objects with "name" field)
-        if let Some(collections) = stats.get("collections").and_then(|v| v.as_array()) {
-            let names: Vec<&str> = collections
-                .iter()
-                .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
-                .collect();
-            if !names.is_empty() {
-                lines.push(Line::from(vec![
-                    Span::styled("Kollekciok:         ", Style::default().fg(theme.accent)),
-                    Span::raw(names.join(", ")),
-                ]));
-            }
+        // Collection names
+        let names: Vec<&str> = stats.collections.iter().map(|c| c.name.as_str()).collect();
+        if !names.is_empty() {
+            lines.push(row("Kollekciok:         ", names.join(", ")));
         }
     }
 

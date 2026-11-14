@@ -8,6 +8,7 @@ use crate::compaction::{run_compact_job, CompactGuard};
 use crate::error::{McpError, Result};
 use crate::jobs::{JobManager, JobType};
 use crate::ServerInfo;
+use ironbase_mcp_types::responses::{DbStatsResponse, DbStatsServer, StorageWastage};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -60,57 +61,44 @@ fn handle_db_stats(
     adapter: &Arc<IronBaseAdapter>,
     server_info: Option<&ServerInfo>,
 ) -> Result<Value> {
-    let mut stats = adapter.stats();
-    // Add server info if available
-    if let Some(info) = server_info {
-        if let Some(obj) = stats.as_object_mut() {
-            obj.insert(
-                "server".to_string(),
-                json!({
-                    "version": crate::VERSION,
-                    "protocol": info.protocol,
-                    "host": info.host,
-                    "port": info.port,
-                    "require_api_key": info.require_api_key,
-                }),
-            );
-        }
-    } else {
+    let stats = adapter.stats();
+    let server = match server_info {
+        Some(info) => DbStatsServer::Http {
+            version: crate::VERSION.to_string(),
+            protocol: info.protocol.clone(),
+            host: info.host.clone(),
+            port: info.port,
+            require_api_key: info.require_api_key,
+        },
         // Stdio mode - no server info
-        if let Some(obj) = stats.as_object_mut() {
-            obj.insert(
-                "server".to_string(),
-                json!({
-                    "version": crate::VERSION,
-                    "mode": "stdio",
-                }),
-            );
-        }
-    }
+        None => DbStatsServer::Stdio {
+            version: crate::VERSION.to_string(),
+            mode: "stdio".to_string(),
+        },
+    };
 
-    // Add storage wastage section
+    // Storage wastage section
     let wastage = adapter.compute_wastage();
-    if let Some(obj) = stats.as_object_mut() {
-        obj.insert(
-            "storage_wastage".to_string(),
-            json!({
-                "file_size_bytes": wastage.file_size_bytes,
-                "file_size_mb": wastage.file_size_bytes / (1024 * 1024),
-                "estimated_live_bytes": wastage.estimated_live_bytes,
-                "estimated_live_mb": wastage.estimated_live_bytes / (1024 * 1024),
-                "bloat_ratio": if wastage.bloat_ratio.is_infinite() {
-                    "infinity (never compacted)".to_string()
-                } else {
-                    format!("{:.2}", wastage.bloat_ratio)
-                },
-                "total_writes": wastage.total_writes,
-                "total_live": wastage.total_live,
-                "dead_writes": wastage.dead_writes,
-            }),
-        );
-    }
+    let storage_wastage = StorageWastage {
+        file_size_bytes: wastage.file_size_bytes,
+        file_size_mb: wastage.file_size_bytes / (1024 * 1024),
+        estimated_live_bytes: wastage.estimated_live_bytes,
+        estimated_live_mb: wastage.estimated_live_bytes / (1024 * 1024),
+        bloat_ratio: if wastage.bloat_ratio.is_infinite() {
+            "infinity (never compacted)".to_string()
+        } else {
+            format!("{:.2}", wastage.bloat_ratio)
+        },
+        total_writes: wastage.total_writes,
+        total_live: wastage.total_live,
+        dead_writes: wastage.dead_writes,
+    };
 
-    Ok(stats)
+    Ok(serde_json::to_value(DbStatsResponse {
+        stats,
+        server,
+        storage_wastage,
+    })?)
 }
 
 fn handle_db_compact(

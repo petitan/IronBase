@@ -5,6 +5,11 @@ use crate::execution;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
 use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
+use ironbase_mcp_types::responses::{
+    BTreeIndexStats, DatabaseStats, DbStatsCollection, DbStatsDatabase, DbStatsSummary,
+    DbStatsVectorIndex, FulltextIndexInfo, FuzzyIndexInfo, HnswParams, VectorIndexInfo,
+    VectorMetric,
+};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -73,6 +78,24 @@ impl CollectionStats {
     fn clear(&self) {
         self.counts.write().clear();
     }
+}
+
+/// The wire metric of a core distance metric
+fn vector_metric(metric: ironbase_core::vector::DistanceMetric) -> VectorMetric {
+    use ironbase_core::vector::DistanceMetric;
+    match metric {
+        DistanceMetric::Cosine => VectorMetric::Cosine,
+        DistanceMetric::Euclidean => VectorMetric::Euclidean,
+        DistanceMetric::DotProduct => VectorMetric::DotProduct,
+    }
+}
+
+/// Serialize typed index infos for the callers that read them as JSON
+fn to_values<T: serde::Serialize>(items: Vec<T>) -> Result<Vec<Value>> {
+    items
+        .into_iter()
+        .map(|item| serde_json::to_value(item).map_err(McpError::from))
+        .collect()
 }
 
 /// Format bytes as human-readable string (e.g., "15.50 GB")
@@ -721,7 +744,7 @@ impl IronBaseAdapter {
     /// PERFORMANCE: Uses in-memory document counts instead of count_documents().
     /// This reduces lock time from ~89s to <100ms on large datasets (78K docs).
     /// Counts are initialized during warm_up() and updated by insert/delete operations.
-    pub fn stats(&self) -> Value {
+    pub fn stats(&self) -> DatabaseStats {
         let db = self.db.read();
         let db_path = self.db_path.read();
         let path_str = db_path.display().to_string();
@@ -735,7 +758,7 @@ impl IronBaseAdapter {
 
         // Get collection details with document counts from memory and indexes from DB
         // NOTE: We only hold the db lock briefly for list_collections and list_indexes
-        let collections: Vec<Value> = db
+        let collections: Vec<DbStatsCollection> = db
             .list_collections()
             .into_iter()
             .filter(|name| !name.starts_with("_system.")) // Hide system collections
@@ -776,73 +799,49 @@ impl IronBaseAdapter {
 
                 let vector_count: usize = vector_index_list.iter().map(|idx| idx.vector_count).sum();
 
-                // Convert VectorIndexMetadata to JSON for the response
-                let vector_indexes: Vec<Value> = vector_index_list
+                let vector_indexes: Vec<DbStatsVectorIndex> = vector_index_list
                     .iter()
-                    .map(|idx| {
-                        serde_json::json!({
-                            "name": idx.name,
-                            "field": idx.field,
-                            "dim": idx.config.dim,
-                            "metric": format!("{:?}", idx.config.metric).to_lowercase(),
-                            "vector_count": idx.vector_count,
-                        })
+                    .map(|idx| DbStatsVectorIndex {
+                        name: idx.name.clone(),
+                        field: idx.field.clone(),
+                        dim: idx.config.dim,
+                        metric: vector_metric(idx.config.metric),
+                        vector_count: idx.vector_count,
                     })
                     .collect();
 
-                serde_json::json!({
-                    "name": name,
-                    "document_count": doc_count,
-                    "btree_index_count": btree_indexes.len(),
-                    "btree_indexes": btree_indexes,
-                    "vector_index_count": vector_indexes.len(),
-                    "vector_indexes": vector_indexes,
-                    "total_vectors": vector_count,
-                })
+                DbStatsCollection {
+                    name,
+                    document_count: doc_count,
+                    btree_index_count: btree_indexes.len(),
+                    btree_indexes,
+                    vector_index_count: vector_indexes.len(),
+                    vector_indexes,
+                    total_vectors: vector_count,
+                }
             })
             .collect();
 
         drop(db); // Release db lock as soon as possible
 
         // Calculate totals (no lock needed - just iterating local Vec)
-        let total_documents: u64 = collections
-            .iter()
-            .filter_map(|c| c.get("document_count").and_then(|v| v.as_u64()))
-            .sum();
+        let summary = DbStatsSummary {
+            collection_count: collections.len(),
+            total_documents: collections.iter().map(|c| c.document_count).sum(),
+            total_btree_indexes: collections.iter().map(|c| c.btree_index_count).sum(),
+            total_vector_indexes: collections.iter().map(|c| c.vector_index_count).sum(),
+            total_vectors: collections.iter().map(|c| c.total_vectors).sum(),
+        };
 
-        let total_btree_indexes: usize = collections
-            .iter()
-            .filter_map(|c| c.get("btree_index_count").and_then(|v| v.as_u64()))
-            .map(|v| v as usize)
-            .sum();
-
-        let total_vector_indexes: usize = collections
-            .iter()
-            .filter_map(|c| c.get("vector_index_count").and_then(|v| v.as_u64()))
-            .map(|v| v as usize)
-            .sum();
-
-        let total_vectors: usize = collections
-            .iter()
-            .filter_map(|c| c.get("total_vectors").and_then(|v| v.as_u64()))
-            .map(|v| v as usize)
-            .sum();
-
-        serde_json::json!({
-            "database": {
-                "path": path_str,
-                "file_size_bytes": file_size,
-                "file_size": file_size_human,
+        DatabaseStats {
+            database: DbStatsDatabase {
+                path: path_str,
+                file_size_bytes: file_size,
+                file_size: file_size_human,
             },
-            "collections": collections,
-            "summary": {
-                "collection_count": collections.len(),
-                "total_documents": total_documents,
-                "total_btree_indexes": total_btree_indexes,
-                "total_vector_indexes": total_vector_indexes,
-                "total_vectors": total_vectors,
-            }
-        })
+            collections,
+            summary,
+        }
     }
 
     /// Get cached document count if available (no DB scan)
@@ -1402,28 +1401,22 @@ impl IronBaseAdapter {
     /// - distinct_count: Number of unique values
     /// - has_histogram: Whether histogram data is available
     /// - has_mcv: Whether MCV (Most Common Values) data is available
-    pub fn get_index_statistics(&self, collection: &str) -> Result<Vec<Value>> {
-        use serde_json::json;
-
+    pub fn get_index_statistics(&self, collection: &str) -> Result<Vec<BTreeIndexStats>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let stats = coll.get_index_statistics();
 
-        let result: Vec<Value> = stats
+        Ok(stats
             .into_iter()
-            .map(|s| {
-                json!({
-                    "name": s.name,
-                    "field": s.field,
-                    "num_keys": s.num_keys,
-                    "distinct_count": s.distinct_count,
-                    "has_histogram": s.has_histogram,
-                    "has_mcv": s.has_mcv
-                })
+            .map(|s| BTreeIndexStats {
+                name: s.name,
+                field: s.field,
+                num_keys: s.num_keys,
+                distinct_count: s.distinct_count,
+                has_histogram: s.has_histogram,
+                has_mcv: s.has_mcv,
             })
-            .collect();
-
-        Ok(result)
+            .collect())
     }
 
     /// Explain query execution plan (uses get_collection - no implicit creation)
@@ -1700,40 +1693,46 @@ impl IronBaseAdapter {
     /// List all fulltext indexes for a collection
     /// Uses get_collection - no implicit creation
     pub fn list_fulltext_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        to_values(self.fulltext_index_infos(collection)?)
+    }
+
+    /// Typed [`list_fulltext_indexes`](Self::list_fulltext_indexes)
+    pub fn fulltext_index_infos(&self, collection: &str) -> Result<Vec<FulltextIndexInfo>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let indexes = coll.list_fulltext_indexes()?;
         Ok(indexes
             .into_iter()
-            .map(|idx| {
-                serde_json::json!({
-                    "name": idx.name,
-                    "field": idx.field,
-                    "language": format!("{:?}", idx.language).to_lowercase(),
-                    "min_word_length": idx.min_word_length,
-                    "accent_folding": idx.accent_folding,
-                    "num_documents": idx.num_documents,
-                    "num_tokens": idx.num_tokens
-                })
+            .map(|idx| FulltextIndexInfo {
+                name: idx.name,
+                field: idx.field,
+                language: format!("{:?}", idx.language).to_lowercase(),
+                min_word_length: idx.min_word_length,
+                accent_folding: idx.accent_folding,
+                num_documents: idx.num_documents,
+                num_tokens: idx.num_tokens,
             })
             .collect())
     }
 
     /// List all fuzzy indexes on a collection (mirrors [`list_fulltext_indexes`]).
     pub fn list_fuzzy_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        to_values(self.fuzzy_index_infos(collection)?)
+    }
+
+    /// Typed [`list_fuzzy_indexes`](Self::list_fuzzy_indexes)
+    pub fn fuzzy_index_infos(&self, collection: &str) -> Result<Vec<FuzzyIndexInfo>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let indexes = coll.list_fuzzy_indexes()?;
         Ok(indexes
             .into_iter()
-            .map(|idx| {
-                serde_json::json!({
-                    "name": idx.name,
-                    "field": idx.field,
-                    "algorithm": format!("{:?}", idx.algorithm).to_lowercase(),
-                    "threshold": idx.threshold,
-                    "num_entries": idx.num_entries
-                })
+            .map(|idx| FuzzyIndexInfo {
+                name: idx.name,
+                field: idx.field,
+                algorithm: format!("{:?}", idx.algorithm).to_lowercase(),
+                threshold: idx.threshold,
+                num_entries: idx.num_entries,
             })
             .collect())
     }
@@ -2049,28 +2048,31 @@ impl IronBaseAdapter {
 
     /// List all vector indexes on a collection
     pub fn list_vector_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        to_values(self.vector_index_infos(collection)?)
+    }
+
+    /// Typed [`list_vector_indexes`](Self::list_vector_indexes)
+    pub fn vector_index_infos(&self, collection: &str) -> Result<Vec<VectorIndexInfo>> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let indexes = coll.list_vector_indexes()?;
 
         Ok(indexes
             .into_iter()
-            .map(|idx| {
-                serde_json::json!({
-                    "name": idx.name,
-                    "field": idx.field,
-                    "dim": idx.config.dim,
-                    "metric": format!("{:?}", idx.config.metric).to_lowercase(),
-                    "max_vectors": idx.config.max_vectors,
-                    "vector_count": idx.vector_count,
-                    "cache_file": idx.cache_file,
-                    "created_at": idx.created_at,
-                    "hnsw_params": {
-                        "m": idx.config.m,
-                        "ef_construction": idx.config.ef_construction,
-                        "ef_search": idx.config.ef_search
-                    }
-                })
+            .map(|idx| VectorIndexInfo {
+                name: idx.name,
+                field: idx.field,
+                dim: idx.config.dim,
+                metric: vector_metric(idx.config.metric),
+                max_vectors: idx.config.max_vectors,
+                vector_count: idx.vector_count,
+                cache_file: idx.cache_file,
+                created_at: idx.created_at,
+                hnsw_params: HnswParams {
+                    m: idx.config.m,
+                    ef_construction: idx.config.ef_construction,
+                    ef_search: idx.config.ef_search,
+                },
             })
             .collect())
     }

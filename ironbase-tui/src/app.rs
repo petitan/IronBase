@@ -6,6 +6,8 @@ use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
 use crate::theme::{Theme, ThemeName};
+use ironbase_mcp_types::params::{CountParams, ExplainParams, FindParams, NoParams};
+use ironbase_mcp_types::tools::{Count, DbStats, Explain, Find};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -378,7 +380,7 @@ impl App {
     /// Update server info state with data from MCP server
     pub fn update_server_info(
         &mut self,
-        db_stats: serde_json::Value,
+        db_stats: ironbase_mcp_types::responses::DbStatsResponse,
         tools: Vec<serde_json::Value>,
         prompts: Vec<serde_json::Value>,
     ) {
@@ -635,7 +637,7 @@ impl App {
             return;
         };
 
-        match db.list_indexes_typed(&collection).await {
+        match db.index_entries(&collection).await {
             Ok(entries) => {
                 self.index_state.indexes = entries.iter().map(|e| e.name.clone()).collect();
                 self.index_state.index_entries = entries;
@@ -1185,13 +1187,8 @@ impl App {
     /// This sets app.db_path from db_stats response
     pub async fn fetch_db_path_async(&mut self) -> anyhow::Result<()> {
         if let Some(db) = &self.db {
-            let stats = db.db_stats().await?;
-            // New structure: database.path
-            if let Some(database) = stats.get("database") {
-                if let Some(path_str) = database.get("path").and_then(|v| v.as_str()) {
-                    self.db_path = Some(std::path::PathBuf::from(path_str));
-                }
-            }
+            let stats = db.call::<DbStats>(&NoParams {}).await?;
+            self.db_path = Some(std::path::PathBuf::from(stats.stats.database.path));
         }
         Ok(())
     }
@@ -1311,21 +1308,21 @@ impl App {
 
             // Use active filter/sort if set
             let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
-            let docs = db
-                .find_with_sort(
-                    &coll_name,
-                    &query,
-                    skip,
-                    self.page_size,
-                    self.active_sort.as_ref(),
-                )
-                .await?;
+            let docs = find_page(
+                db,
+                &coll_name,
+                &query,
+                skip,
+                self.page_size,
+                self.active_sort.as_ref(),
+            )
+            .await?;
             self.documents = docs;
 
             // BUG FIX: Always refresh total_docs, not just when needs_details
             if let Some(filter) = &self.active_filter {
                 // When filter is active, count matching documents
-                let count = db.count_with_query(&coll_name, filter).await?;
+                let count = count_matching(db, &coll_name, filter).await?;
                 self.total_docs = count;
             } else {
                 // No filter - get total collection count
@@ -1362,7 +1359,11 @@ impl App {
     pub async fn get_current_indexes_async(&self) -> Vec<String> {
         if let Some(db) = &self.db {
             if let Some(coll) = self.collections.get(self.selected_collection) {
-                return db.list_indexes(&coll.name).await.unwrap_or_default();
+                return db
+                    .index_entries(&coll.name)
+                    .await
+                    .map(|entries| entries.into_iter().map(|e| e.name).collect())
+                    .unwrap_or_default();
             }
         }
         Vec::new()
@@ -1725,7 +1726,7 @@ impl App {
                     self.vector_state.message = Some(format!("Index '{}' deleted!", index_name));
 
                     // Refresh index list
-                    if let Ok(indexes) = db.list_vector_indexes(collection).await {
+                    if let Ok(indexes) = db.vector_indexes(collection).await {
                         self.vector_state.update_indexes(indexes);
                         if self.vector_state.selected_index >= self.vector_state.indexes.len()
                             && !self.vector_state.indexes.is_empty()
@@ -2004,7 +2005,7 @@ impl App {
         match db.refresh_index_stats(&collection).await {
             Ok(()) => {
                 // Load updated statistics
-                match db.get_index_statistics(&collection).await {
+                match db.btree_index_statistics(&collection).await {
                     Ok(stats) => {
                         self.index_state.update_statistics(stats);
                         self.index_state.message = Some("Index statistics frissítve!".to_string());
@@ -2030,7 +2031,7 @@ impl App {
             return;
         };
 
-        if let Ok(stats) = db.get_index_statistics(&collection).await {
+        if let Ok(stats) = db.btree_index_statistics(&collection).await {
             self.index_state.update_statistics(stats);
         }
     }
@@ -2056,10 +2057,7 @@ impl App {
             return;
         };
 
-        match db
-            .find_with_options(&collection, &query, 0, QUERY_LIMIT)
-            .await
-        {
+        match find_page(db, &collection, &query, 0, QUERY_LIMIT, None).await {
             Ok(docs) => {
                 let count = docs.len();
                 // Store total_count (may be more than returned if limit hit)
@@ -2096,7 +2094,12 @@ impl App {
             return;
         };
 
-        match db.explain(&collection, &query).await {
+        let args = ExplainParams { collection, query };
+        let explained = db
+            .call::<Explain>(&args)
+            .await
+            .and_then(|response| Ok(response.summary()?));
+        match explained {
             Ok(plan) => {
                 self.query_state.explain_result = Some(plan);
                 self.query_state.show_explain = true;
@@ -2163,7 +2166,7 @@ impl App {
         };
 
         // First get the total count matching the query
-        let total_count = match db.count_with_query(&collection, &query).await {
+        let total_count = match count_matching(db, &collection, &query).await {
             Ok(c) => c,
             Err(e) => {
                 self.filter_state.error = Some(format!("Szamlalas hiba: {}", e));
@@ -2183,10 +2186,7 @@ impl App {
         }
 
         // Load first page of results
-        match db
-            .find_with_sort(&collection, &query, 0, self.page_size, sort.as_ref())
-            .await
-        {
+        match find_page(db, &collection, &query, 0, self.page_size, sort.as_ref()).await {
             Ok(docs) => {
                 self.filter_state.result_count = total_count;
                 self.filter_state.results = Some(docs.clone());
@@ -2296,15 +2296,13 @@ impl App {
                 let mut offset = 0;
 
                 loop {
-                    let docs = match db
-                        .find_with_sort(&collection, &query, offset, BATCH_SIZE, sort)
-                        .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => {
-                            return Err(format!("Lekérdezés hiba: {}", e));
-                        }
-                    };
+                    let docs =
+                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return Err(format!("Lekérdezés hiba: {}", e));
+                            }
+                        };
 
                     if docs.is_empty() {
                         break;
@@ -2337,7 +2335,7 @@ impl App {
                 exported
             }
             ExportFormat::Csv => {
-                let sample = match db.find_with_sort(&collection, &query, 0, 100, sort).await {
+                let sample = match find_page(db, &collection, &query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
                         return Err(format!("Lekérdezés hiba: {}", e));
@@ -2367,15 +2365,13 @@ impl App {
                 let mut offset = 0;
 
                 loop {
-                    let docs = match db
-                        .find_with_sort(&collection, &query, offset, BATCH_SIZE, sort)
-                        .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => {
-                            return Err(format!("Lekérdezés hiba: {}", e));
-                        }
-                    };
+                    let docs =
+                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return Err(format!("Lekérdezés hiba: {}", e));
+                            }
+                        };
 
                     if docs.is_empty() {
                         break;
@@ -2424,6 +2420,36 @@ impl App {
 fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
     let name = target.file_name()?.to_string_lossy();
     Some(target.with_file_name(format!(".{}.{}.tmp", name, std::process::id())))
+}
+
+/// One page of `find`: `limit` documents after `skip`, optionally sorted
+async fn find_page(
+    db: &DbWrapper,
+    collection: &str,
+    query: &Value,
+    skip: usize,
+    limit: usize,
+    sort: Option<&Value>,
+) -> anyhow::Result<Vec<Value>> {
+    let args = FindParams {
+        collection: collection.to_string(),
+        query: query.clone(),
+        projection: None,
+        sort: sort.cloned(),
+        limit: Some(limit),
+        skip: Some(skip),
+        include_total: false,
+    };
+    Ok(db.call::<Find>(&args).await?.documents)
+}
+
+/// Number of documents of `collection` matching `query`
+async fn count_matching(db: &DbWrapper, collection: &str, query: &Value) -> anyhow::Result<usize> {
+    let args = CountParams {
+        collection: collection.to_string(),
+        query: query.clone(),
+    };
+    Ok(db.call::<Count>(&args).await?.count as usize)
 }
 
 #[cfg(test)]

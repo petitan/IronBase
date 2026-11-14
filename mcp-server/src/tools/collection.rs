@@ -6,6 +6,7 @@ use crate::acl::SYSTEM_ACL_COLLECTION;
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
 use crate::scripting::RAG_CONFIG_COLLECTION;
+use ironbase_mcp_types::responses::CollectionListResponse;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -33,7 +34,9 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 
 fn handle_collection_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collections = adapter.list_collections();
-    Ok(json!({"collections": collections}))
+    Ok(serde_json::to_value(CollectionListResponse {
+        collections,
+    })?)
 }
 
 fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

@@ -8,6 +8,7 @@ use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
+use ironbase_mcp_types::responses::{CountResponse, FindResponse};
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -420,14 +421,11 @@ fn handle_find(
     };
 
     let result = adapter.find(&p.collection, p.query, options)?;
-    let mut response = json!({
-        "documents": result.documents,
-        "count": result.documents.len()
-    });
-    if let Some(total) = result.total {
-        response["total"] = json!(total);
-    }
-    Ok(response)
+    Ok(serde_json::to_value(FindResponse {
+        count: result.documents.len(),
+        documents: result.documents,
+        total: result.total,
+    })?)
 }
 
 fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -610,7 +608,7 @@ fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     validate_collection_name(&p.collection)?;
 
     let count = adapter.count_documents(&p.collection, p.query)?;
-    Ok(json!({"count": count}))
+    Ok(serde_json::to_value(CountResponse { count })?)
 }
 
 fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

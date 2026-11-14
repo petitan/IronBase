@@ -3,7 +3,14 @@
 //! This module provides async database operations via MCP protocol.
 
 use crate::mcp::McpClient;
+use crate::state::index::IndexEntry;
 use anyhow::Result;
+use ironbase_mcp_types::params::{CountParams, FindParams, IndexListParams, NoParams};
+use ironbase_mcp_types::responses::{
+    BTreeIndexStats, IndexListResponse, IndexStatsResponse, VectorIndexInfo,
+};
+use ironbase_mcp_types::tools::{CollectionList, Count, Find, IndexList, IndexStats};
+use ironbase_mcp_types::Tool;
 use serde_json::Value;
 use std::path::Path;
 
@@ -72,9 +79,18 @@ impl DbWrapper {
         Ok(Self { client })
     }
 
+    /// Call the tool `T` with typed arguments (see [`McpClient::call`])
+    pub async fn call<T: Tool>(&self, args: &T::Args) -> Result<T::Resp> {
+        Ok(self.client.call::<T>(args).await?)
+    }
+
     /// List all collections (fast - names only, no counts)
     pub async fn list_collections(&self) -> Result<Vec<CollectionInfo>> {
-        let mut names = self.client.list_collections().await?;
+        let mut names = self
+            .client
+            .call::<CollectionList>(&NoParams {})
+            .await?
+            .collections;
         // The server lists collections in HashMap order: sort for a stable list
         names.sort();
 
@@ -87,27 +103,68 @@ impl DbWrapper {
     /// Load collection details (count + index names) - parallel requests
     /// Returns (doc_count, index_names)
     pub async fn load_collection_details(&self, name: &str) -> Result<(usize, Vec<String>)> {
-        // Empty query for count
-        let empty_query = serde_json::json!({});
+        let count_args = CountParams {
+            collection: name.to_string(),
+            query: serde_json::json!({}),
+        };
 
         // Parallel requests for count and indexes
         let (count_result, indexes_result) = tokio::join!(
-            self.client.count_documents(name, &empty_query),
-            self.client.list_indexes(name)
+            self.client.call::<Count>(&count_args),
+            self.index_entries(name)
         );
 
-        let doc_count = count_result? as usize;
-        let index_names = indexes_result?;
+        let doc_count = count_result?.count as usize;
+        let index_names = indexes_result?.into_iter().map(|e| e.name).collect();
 
         Ok((doc_count, index_names))
     }
 
-    /// Get database statistics
-    pub async fn db_stats(&self) -> Result<Value> {
-        self.client
-            .db_stats()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
+    /// Every index of a collection with its type (`index_list` without `type`)
+    pub async fn index_entries(&self, collection: &str) -> Result<Vec<IndexEntry>> {
+        let args = IndexListParams {
+            collection: collection.to_string(),
+            index_type: None,
+        };
+        match self.client.call::<IndexList>(&args).await? {
+            IndexListResponse::All(all) => Ok(IndexEntry::from_index_list(all)),
+            other => Err(anyhow::anyhow!(
+                "index_list: expected every index subtype, got {:?}",
+                other
+            )),
+        }
+    }
+
+    /// Vector indexes of a collection (`index_list` with `type: vector`)
+    pub async fn vector_indexes(&self, collection: &str) -> Result<Vec<VectorIndexInfo>> {
+        let args = IndexListParams {
+            collection: collection.to_string(),
+            index_type: Some("vector".to_string()),
+        };
+        match self.client.call::<IndexList>(&args).await? {
+            IndexListResponse::Vector(list) => Ok(list.indexes),
+            // An empty typed list has no item to tell its subtype by
+            IndexListResponse::BTree(list) if list.indexes.is_empty() => Ok(Vec::new()),
+            other => Err(anyhow::anyhow!(
+                "index_list: expected vector indexes, got {:?}",
+                other
+            )),
+        }
+    }
+
+    /// Statistics of the B+ tree indexes (`index_stats`, default `type`)
+    pub async fn btree_index_statistics(&self, collection: &str) -> Result<Vec<BTreeIndexStats>> {
+        let args = IndexListParams {
+            collection: collection.to_string(),
+            index_type: None,
+        };
+        match self.client.call::<IndexStats>(&args).await? {
+            IndexStatsResponse::BTree(list) => Ok(list.indexes),
+            other => Err(anyhow::anyhow!(
+                "index_stats: expected B+ tree statistics, got {:?}",
+                other
+            )),
+        }
     }
 
     /// Open or create a database file (switches the current database)
@@ -150,53 +207,22 @@ impl DbWrapper {
         Ok(version)
     }
 
-    /// Count documents matching a query
-    pub async fn count_with_query(&self, collection: &str, query: &Value) -> Result<usize> {
-        let count = self.client.count_documents(collection, query).await?;
-        Ok(count as usize)
-    }
-
-    /// Execute a query with options (skip, limit)
-    pub async fn find_with_options(
-        &self,
-        collection: &str,
-        query: &Value,
-        skip: usize,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
-        let docs = self
-            .client
-            .find(collection, query, Some(skip), Some(limit))
-            .await?;
-        Ok(docs)
-    }
-
-    /// Execute a query with sort
-    pub async fn find_with_sort(
-        &self,
-        collection: &str,
-        query: &Value,
-        skip: usize,
-        limit: usize,
-        sort: Option<&Value>,
-    ) -> Result<Vec<Value>> {
-        let docs = self
-            .client
-            .find_with_sort(collection, query, Some(skip), Some(limit), sort)
-            .await?;
-        Ok(docs)
-    }
-
     /// Get collection schema (field names and types from sample)
     pub async fn infer_schema(
         &self,
         collection: &str,
         sample_size: usize,
     ) -> Result<Vec<FieldInfo>> {
-        let docs = self
-            .client
-            .find(collection, &serde_json::json!({}), None, Some(sample_size))
-            .await?;
+        let args = FindParams {
+            collection: collection.to_string(),
+            query: serde_json::json!({}),
+            projection: None,
+            sort: None,
+            limit: Some(sample_size),
+            skip: None,
+            include_total: false,
+        };
+        let docs = self.client.call::<Find>(&args).await?.documents;
 
         let mut fields: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
@@ -212,21 +238,6 @@ impl DbWrapper {
 
         result.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(result)
-    }
-
-    /// Get indexes for a collection (names only)
-    pub async fn list_indexes(&self, collection: &str) -> Result<Vec<String>> {
-        let indexes = self.client.list_indexes(collection).await?;
-        Ok(indexes)
-    }
-
-    /// Get indexes with type information (btree/fulltext/vector)
-    pub async fn list_indexes_typed(
-        &self,
-        collection: &str,
-    ) -> Result<Vec<crate::state::index::IndexEntry>> {
-        let entries = self.client.list_indexes_typed(collection).await?;
-        Ok(entries)
     }
 
     /// Create a single-field index
@@ -270,28 +281,6 @@ impl DbWrapper {
     pub async fn refresh_index_stats(&self, collection: &str) -> Result<()> {
         self.client.refresh_index_stats(collection).await?;
         Ok(())
-    }
-
-    /// Get detailed index statistics for a collection
-    ///
-    /// Returns statistics for each index including num_keys, distinct_count,
-    /// has_histogram, has_mcv.
-    pub async fn get_index_statistics(&self, collection: &str) -> Result<Vec<Value>> {
-        let stats = self.client.get_index_statistics(collection).await?;
-        Ok(stats)
-    }
-
-    /// Explain query plan
-    ///
-    /// Returns the query execution plan including:
-    /// - plan_type: IndexScan, CollectionScan, etc.
-    /// - index_name: Which index is used (if any)
-    /// - estimated_rows: Estimated number of documents
-    /// - selectivity: Query selectivity estimate
-    /// - uses_mcv/uses_histogram: Whether statistics are used
-    pub async fn explain(&self, collection: &str, query: &Value) -> Result<Value> {
-        let plan = self.client.explain(collection, query).await?;
-        Ok(plan)
     }
 
     /// Delete a document by _id
@@ -529,12 +518,6 @@ impl DbWrapper {
             .create_vector_index(collection, field, dimension, metric)
             .await?;
         Ok(name)
-    }
-
-    /// List all vector indexes on a collection
-    pub async fn list_vector_indexes(&self, collection: &str) -> Result<Vec<Value>> {
-        let indexes = self.client.list_vector_indexes(collection).await?;
-        Ok(indexes)
     }
 
     /// Drop a vector index

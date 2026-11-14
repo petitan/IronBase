@@ -29,6 +29,9 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# MCP tool argument / response types (shared with the server)
+ironbase-mcp-types = { path = "../ironbase-mcp-types" }
+
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }

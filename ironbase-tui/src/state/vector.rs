@@ -1,5 +1,6 @@
 //! Vector search state
 
+use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric};
 use serde_json::Value;
 
 /// Distance metric for vector search
@@ -25,6 +26,17 @@ impl DistanceMetric {
             Self::Cosine => Self::Euclidean,
             Self::Euclidean => Self::DotProduct,
             Self::DotProduct => Self::Cosine,
+        }
+    }
+}
+
+/// The server reports `dotproduct`; the TUI names it as `index_create` takes it
+impl From<VectorMetric> for DistanceMetric {
+    fn from(metric: VectorMetric) -> Self {
+        match metric {
+            VectorMetric::Cosine => Self::Cosine,
+            VectorMetric::Euclidean => Self::Euclidean,
+            VectorMetric::DotProduct => Self::DotProduct,
         }
     }
 }
@@ -66,26 +78,14 @@ pub struct VectorIndexInfo {
     pub vector_count: usize,
 }
 
-impl VectorIndexInfo {
-    pub fn from_value(v: &Value) -> Self {
+impl From<&IndexInfo> for VectorIndexInfo {
+    fn from(idx: &IndexInfo) -> Self {
         Self {
-            name: v
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            field: v
-                .get("field")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            dimension: v.get("dimension").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-            metric: v
-                .get("metric")
-                .and_then(|v| v.as_str())
-                .unwrap_or("cosine")
-                .to_string(),
-            vector_count: v.get("vector_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            name: idx.name.clone(),
+            field: idx.field.clone(),
+            dimension: idx.dim,
+            metric: DistanceMetric::from(idx.metric).as_str().to_string(),
+            vector_count: idx.vector_count,
         }
     }
 }
@@ -170,8 +170,8 @@ impl VectorSearchState {
     }
 
     /// Update indexes from MCP response
-    pub fn update_indexes(&mut self, indexes: Vec<Value>) {
-        self.indexes = indexes.iter().map(VectorIndexInfo::from_value).collect();
+    pub fn update_indexes(&mut self, indexes: Vec<IndexInfo>) {
+        self.indexes = indexes.iter().map(VectorIndexInfo::from).collect();
         self.is_loading = false;
     }
 

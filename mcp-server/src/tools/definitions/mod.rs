@@ -162,8 +162,9 @@ mod tests {
             assert!(markers.insert(*name), "Duplicate Tool::NAME '{}'", name);
         }
 
-        // No typed argument struct yet: tools without arguments, and index_create
-        // (four argument shapes selected by `type`).
+        // No marker yet: tools without arguments (except collection_list and
+        // db_stats, which take `NoParams`), and index_create (four argument shapes
+        // selected by `type`).
         let mut without_marker: Vec<&str> = registered
             .iter()
             .copied()
@@ -175,10 +176,8 @@ mod tests {
             [
                 "acl_cleanup",
                 "acl_list",
-                "collection_list",
                 "db_checkpoint",
                 "db_compact",
-                "db_stats",
                 "embed_cache_clear",
                 "embed_cache_stats",
                 "embed_models_list",

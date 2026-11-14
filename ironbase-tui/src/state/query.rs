@@ -1,5 +1,6 @@
 //! Query builder state
 
+use ironbase_mcp_types::responses::QueryPlanSummary;
 use serde_json::Value;
 
 /// Query templates
@@ -34,7 +35,7 @@ pub struct QueryState {
     /// Total result count (may be > results.len() if truncated)
     pub total_count: usize,
     /// Query explain result (plan details)
-    pub explain_result: Option<Value>,
+    pub explain_result: Option<QueryPlanSummary>,
     /// Show explain panel instead of results
     pub show_explain: bool,
 }
@@ -371,7 +372,9 @@ mod tests {
         let mut state = QueryState::new("users".to_string());
         state.results = Some(vec![json!({"_id": 1}), json!({"_id": 2})]);
         state.total_count = 2;
-        state.explain_result = Some(json!({"plan": "scan"}));
+        state.explain_result = Some(
+            serde_json::from_value(json!({"chosenPlan": {"queryPlan": "CollectionScan"}})).unwrap(),
+        );
         state.show_explain = true;
         state.error = Some("hiba".to_string());
         state.result_down();
