@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI reports the real outcome of writes; typed MCP responses for the write tools (ironbase-core 0.3.464, mcp-server 1.0.662)
+
+Phase 2c of the Tuti TUI overhaul. The server's response JSON is unchanged.
+
+- **`ironbase-mcp-types` gains response types for the write and admin tools:** `insert_one`,
+  `insert_many`, `update_one`, `update_many`, `delete_one`, `delete_many`, `collection_create`,
+  `collection_drop`, `index_create` (an untagged enum over the B+ tree, compound, fulltext, fuzzy and vector
+  variants), `index_drop` and `index_stats_refresh`.
+- **`index_create` now has typed arguments** (`IndexCreateArgs`, routed by `type`; no or non-string `type`
+  means B+ tree). The server parses through it, so the routing lives in one place; argument errors are
+  unchanged.
+- **The server builds these responses from the shared structs.** The response golden test grew from 40
+  to 171 cases (recorded on the previous code; all pass there too). The write responses needed no
+  normalisation.
+- **Tuti TUI writes through the typed call** and now reports what the server actually did:
+  - saving an unchanged document says "változatlan" instead of "frissítve";
+  - a field removed in the editor is now actually removed (`$unset`; the editor only sent `$set`, so the
+    removal was silently ignored);
+  - a failed re-embed after an update is reported (the update is stored, the vector is stale);
+  - the inserted `_id` is shown as sent, not JSON-quoted;
+  - index creation names the index the server created;
+  - a response of the wrong shape is an error instead of a silent success;
+  - a successful vector index creation showed no message (it was cleared right after being set).
+
 ### Fixed — Tuti TUI shows real explain, index and server values; typed MCP responses for the read tools (ironbase-core 0.3.463, mcp-server 1.0.661)
 
 Phase 2b of the Tuti TUI overhaul. The server's response JSON is unchanged.

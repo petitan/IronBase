@@ -9,6 +9,10 @@
 //!
 //! Read-side tool group: `collection_list`, `find`, `count`, `index_list`,
 //! `index_stats`, `explain`, `db_stats`.
+//!
+//! Write/admin tool group: `insert_one`, `insert_many`, `update_one`,
+//! `update_many`, `delete_one`, `delete_many`, `collection_create`,
+//! `collection_drop`, `index_create`, `index_drop`, `index_stats_refresh`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -363,4 +367,206 @@ pub struct DbStatsResponse {
     pub stats: DatabaseStats,
     pub server: DbStatsServer,
     pub storage_wastage: StorageWastage,
+}
+
+// ============================================================================
+// Document writes
+// ============================================================================
+
+/// `insert_one` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InsertOneResponse {
+    /// `_id` of the inserted document as a string, whatever its type (an
+    /// integer `_id` too, e.g. `"10"`); a generated `_id` is the next integer
+    pub inserted_id: String,
+    /// `true` when auto-embedding wrote the document's vector; absent otherwise
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embedded: Option<bool>,
+}
+
+/// `insert_many` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InsertManyResponse {
+    /// `_id`s of the inserted documents as strings, in input order
+    pub inserted_ids: Vec<String>,
+    /// `inserted_ids.len()`
+    pub inserted_count: usize,
+    /// Number of documents auto-embedding wrote a vector into; absent when none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embedded_count: Option<usize>,
+}
+
+/// `update_one` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateOneResponse {
+    /// Number of documents the filter matched (0 or 1)
+    pub matched_count: u64,
+    /// Number of documents changed (0 when the update left the match as it was)
+    pub modified_count: u64,
+    /// `_id` (as a string) of the document an upsert inserted; absent otherwise
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upserted_id: Option<String>,
+    /// `true` when auto-embedding wrote the upserted document's vector
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embedded: Option<bool>,
+    /// Number of documents re-embedded after the update (absent when none)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embedded_count: Option<usize>,
+    /// Why re-embedding after the stored update failed (absent when it did not)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embed_error: Option<String>,
+}
+
+/// `update_many` response (no upsert: `update_many` ignores `upsert`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateManyResponse {
+    /// Number of documents the filter matched
+    pub matched_count: u64,
+    /// Number of documents changed
+    pub modified_count: u64,
+    /// Number of documents re-embedded after the update (absent when none)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embedded_count: Option<usize>,
+    /// Why re-embedding after the stored update failed (absent when it did not)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_embed_error: Option<String>,
+}
+
+/// `delete_one` / `delete_many` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeleteResponse {
+    /// Number of documents deleted (`delete_one`: 0 or 1)
+    pub deleted_count: u64,
+}
+
+// ============================================================================
+// Collection management
+// ============================================================================
+
+/// `collection_create` response. Creating an existing collection is not an
+/// error: the response is the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionCreateResponse {
+    /// Always `true` (a failure is a tool error)
+    pub success: bool,
+    pub collection: String,
+}
+
+/// `collection_drop` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionDropResponse {
+    /// Always `true` (a failure, e.g. a missing collection, is a tool error)
+    pub success: bool,
+    /// The dropped collection
+    pub dropped: String,
+    /// Whether the collection's ACL entry was deleted with it
+    pub acl_deleted: bool,
+}
+
+// ============================================================================
+// Index management
+// ============================================================================
+
+/// `index_create` response of a single-field B+ tree index
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BTreeIndexCreated {
+    pub index_name: String,
+    pub field: String,
+    pub unique: bool,
+    pub sparse: bool,
+}
+
+/// `index_create` response of a compound B+ tree index (`fields` given)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompoundIndexCreated {
+    pub index_name: String,
+    pub fields: Vec<String>,
+    pub unique: bool,
+    pub sparse: bool,
+}
+
+/// `index_create` response of a fulltext index (`type: fulltext`); the
+/// effective settings, defaults filled in
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FulltextIndexCreated {
+    pub index_name: String,
+    pub field: String,
+    /// The `language` argument as given (default `none`)
+    pub language: String,
+    pub min_word_length: usize,
+    pub accent_folding: bool,
+}
+
+/// `index_create` response of a fuzzy index (`type: fuzzy`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FuzzyIndexCreated {
+    pub index_name: String,
+    pub field: String,
+    /// The `algorithm` argument as given (default `jaro_winkler`); not the
+    /// `index_list` spelling
+    pub algorithm: String,
+    pub threshold: f64,
+}
+
+/// `index_create` response of a vector index (`type: vector`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorIndexCreated {
+    pub index_name: String,
+    pub field: String,
+    pub dim: usize,
+    /// The `metric` argument as given (`cosine`, `euclidean`, `dot_product`):
+    /// a string, not [`VectorMetric`], whose `index_list` spelling is `dotproduct`
+    pub metric: String,
+    pub max_vectors: usize,
+    pub hnsw_params: HnswParams,
+}
+
+/// `index_create` response.
+///
+/// One tool, five shapes, selected by the request (`type`, and `field` vs.
+/// `fields` for B+ tree indexes). The wire has no tag, so the enum is untagged.
+/// The compound, fulltext, fuzzy and vector variants each require a field no
+/// other variant has (`fields`, `language`, `algorithm`, `dim`); the B+ tree
+/// variant has no such field of its own, only the *combination* `field` +
+/// `unique`, which no other shape carries together, so every other response
+/// fails it. A real response therefore parses as exactly one variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IndexCreateResponse {
+    BTree(BTreeIndexCreated),
+    Compound(CompoundIndexCreated),
+    Fulltext(FulltextIndexCreated),
+    Fuzzy(FuzzyIndexCreated),
+    Vector(VectorIndexCreated),
+}
+
+impl IndexCreateResponse {
+    /// Name of the created index
+    pub fn index_name(&self) -> &str {
+        match self {
+            Self::BTree(r) => &r.index_name,
+            Self::Compound(r) => &r.index_name,
+            Self::Fulltext(r) => &r.index_name,
+            Self::Fuzzy(r) => &r.index_name,
+            Self::Vector(r) => &r.index_name,
+        }
+    }
+}
+
+/// `index_drop` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexDropResponse {
+    /// Always `true` (a failure, e.g. a missing index, is a tool error)
+    pub success: bool,
+    /// The dropped index
+    pub dropped: String,
+}
+
+/// `index_stats_refresh` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexStatsRefreshResponse {
+    /// Always `true` (a failure is a tool error)
+    pub success: bool,
+    /// Human-readable confirmation naming the collection
+    pub message: String,
 }

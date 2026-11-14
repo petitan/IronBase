@@ -1,8 +1,13 @@
-//! Wire-format safety net for MCP tool responses (read-side tool group).
+//! Wire-format safety net for MCP tool responses.
 //!
-//! `collection_list`, `find`, `count`, `index_list`, `index_stats`, `explain` and
-//! `db_stats` run through the real `dispatch_tool` against a seeded temporary
-//! database; the exact serialized JSON of each response (or the exact error) is
+//! Read-side group (`collection_list`, `find`, `count`, `index_list`,
+//! `index_stats`, `explain`, `db_stats`) against a seeded temporary database, then
+//! the write/admin group (`insert_one`, `insert_many`, `update_one`,
+//! `update_many`, `delete_one`, `delete_many`, `collection_create`,
+//! `collection_drop`, `index_create` with every `type`, `index_drop`,
+//! `index_stats_refresh`) against a second one, in call order (each case sees the
+//! previous cases' writes). Every call runs through the real `dispatch_tool`; the
+//! exact serialized JSON of each response (or the exact error) is
 //! compared with `tests/golden/response_wire.txt`. Any change in what the server
 //! sends — a renamed or reordered field, `null` vs. absent, a number format —
 //! fails here.
@@ -19,10 +24,19 @@
 //! - the order of `collection_list.collections` and `db_stats.collections` (the
 //!   server lists collections in hash-map order): sorted by name
 //!
+//! The write/admin group needs no normalisation: generated `_id`s are
+//! auto-increment integers (deterministic in a fresh database) and no response
+//! carries a timestamp or a path. Its auto-embedding fields (`auto_embedded`,
+//! `auto_embedded_count`, `auto_embed_error`) come from a deterministic in-test
+//! embedding provider.
+//!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
 
-use mcp_ironbase::{dispatch_tool, IronBaseAdapter, ServerInfo};
+use mcp_ironbase::embedding::EmbeddingResult;
+use mcp_ironbase::{
+    dispatch_tool, EmbeddingError, EmbeddingManager, EmbeddingProvider, IronBaseAdapter, ServerInfo,
+};
 use serde_json::{json, Value};
 use std::fmt::Write;
 use std::sync::Arc;
@@ -117,6 +131,18 @@ fn record(
     label: &str,
     args: Value,
 ) {
+    record_with(out, adapter, server_info, &None, tool, label, args);
+}
+
+fn record_with(
+    out: &mut String,
+    adapter: &Arc<IronBaseAdapter>,
+    server_info: Option<&ServerInfo>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    tool: &str,
+    label: &str,
+    args: Value,
+) {
     writeln!(out, "## {tool} / {label}").unwrap();
     writeln!(out, "in:  {args}").unwrap();
     match dispatch_tool(
@@ -127,7 +153,7 @@ fn record(
         server_info,
         None,
         None,
-        &None,
+        embedding_manager,
         &None,
     ) {
         Ok(mut v) => {
@@ -258,7 +284,278 @@ fn render() -> String {
         json!({}),
     );
 
+    render_write_group(&mut out);
     out
+}
+
+/// "w": three documents with an `age` index; "u": two documents with distinct
+/// `email`s, a shared `grp` and a `bio`; "drop_me": one document
+fn seed_write_group(adapter: &Arc<IronBaseAdapter>) {
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "w", "documents": [
+            {"_id": 1, "name": "Anna", "age": 30, "team": "x", "tags": ["a"]},
+            {"_id": 2, "name": "Béla", "age": 30, "team": "x"},
+            {"_id": 3, "name": "Cili", "age": 41, "team": "x"},
+        ]}),
+    );
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "u", "documents": [
+            {"_id": 1, "email": "a@x.hu", "grp": 1, "bio": "Király kódoló"},
+            {"_id": 2, "email": "b@x.hu", "grp": 1, "bio": "Adatbázis gazda"},
+        ]}),
+    );
+    dispatch_ok(
+        adapter,
+        "index_create",
+        json!({"collection": "w", "field": "age"}),
+    );
+    dispatch_ok(
+        adapter,
+        "insert_one",
+        json!({"collection": "drop_me", "document": {"_id": 1}}),
+    );
+}
+
+/// The write/admin tool group, on its own database (cases run in order)
+fn render_write_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    seed_write_group(&adapter);
+    let mut out_local = String::new();
+    let out_ref = &mut out_local;
+    macro_rules! case {
+        ($tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record(out_ref, &adapter, None, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!("insert_one",
+        "int _id" => {"collection": "w", "document": {"_id": 10, "name": "Dani"}},
+        "string _id" => {"collection": "w", "document": {"_id": "e-1", "name": "Edit"}},
+        "ObjectId-like _id" => {"collection": "w", "document": {"_id": {"$oid": "507f1f77bcf86cd799439011"}, "name": "Feri"}},
+        "object _id" => {"collection": "w", "document": {"_id": {"k": 1}, "name": "Gizi"}},
+        "no _id" => {"collection": "w", "document": {"name": "Hugó"}},
+        "no _id again" => {"collection": "w", "document": {"name": "Ilona"}},
+        "null _id" => {"collection": "w", "document": {"_id": null, "name": "Jani"}},
+        "duplicate _id" => {"collection": "w", "document": {"_id": 1, "name": "Anna2"}},
+        "new collection" => {"collection": "fresh", "document": {"a": 1}},
+        "empty document" => {"collection": "w", "document": {}},
+        "non-object document" => {"collection": "w", "document": [1, 2]},
+        "missing document" => {"collection": "w"},
+        "empty collection name" => {"collection": "", "document": {"a": 1}},
+        "invalid collection name" => {"collection": "a$b", "document": {"a": 1}},
+    );
+    case!("insert_many",
+        "mixed _ids" => {"collection": "w", "documents": [{"_id": 20, "n": 1}, {"_id": "s-21", "n": 2}, {"n": 3}]},
+        "single" => {"collection": "w", "documents": [{"_id": 22}]},
+        "empty list" => {"collection": "w", "documents": []},
+        "duplicate _id in batch" => {"collection": "w", "documents": [{"_id": 30}, {"_id": 30}]},
+        "duplicate existing _id" => {"collection": "w", "documents": [{"_id": 31}, {"_id": 1}]},
+        "non-object item" => {"collection": "w", "documents": [{"_id": 32}, 5]},
+        "documents not array" => {"collection": "w", "documents": {"_id": 33}},
+        "missing documents" => {"collection": "w"},
+    );
+    case!("update_one",
+        "matched and modified" => {"collection": "w", "filter": {"_id": 1}, "update": {"$set": {"age": 31}}},
+        "matched, not modified" => {"collection": "w", "filter": {"_id": 1}, "update": {"$set": {"age": 31}}},
+        "query alias" => {"collection": "w", "query": {"_id": 2}, "update": {"$inc": {"age": 1}}},
+        "no match" => {"collection": "w", "filter": {"_id": 999}, "update": {"$set": {"x": 1}}},
+        "upsert inserts" => {"collection": "w", "filter": {"name": "Upsert"}, "update": {"$set": {"age": 5}}, "upsert": true},
+        "upsert with _id inserts" => {"collection": "w", "filter": {"_id": "u-1"}, "update": {"$set": {"age": 6}}, "upsert": true},
+        "upsert matches" => {"collection": "w", "filter": {"name": "Upsert"}, "update": {"$set": {"age": 7}}, "upsert": true},
+        "multiple matches updates one" => {"collection": "w", "filter": {"team": "x"}, "update": {"$set": {"flag": true}}},
+        "missing collection" => {"collection": "nope", "filter": {"_id": 1}, "update": {"$set": {"x": 1}}},
+        "replacement document" => {"collection": "w", "filter": {"_id": 1}, "update": {"age": 1}},
+        "unknown operator" => {"collection": "w", "filter": {"_id": 1}, "update": {"$bogus": {"age": 1}}},
+        "empty update" => {"collection": "w", "filter": {"_id": 1}, "update": {}},
+        "missing update" => {"collection": "w", "filter": {"_id": 1}},
+        "update _id" => {"collection": "w", "filter": {"_id": 1}, "update": {"$set": {"_id": 99}}},
+    );
+    case!("update_many",
+        "matched and modified" => {"collection": "w", "filter": {"age": {"$gte": 30}}, "update": {"$set": {"seen": true}}},
+        "matched, not modified" => {"collection": "w", "filter": {"age": {"$gte": 30}}, "update": {"$set": {"seen": true}}},
+        "no match" => {"collection": "w", "filter": {"age": 1000}, "update": {"$set": {"x": 1}}},
+        "empty filter" => {"collection": "w", "filter": {}, "update": {"$inc": {"v": 1}}},
+        "upsert ignored" => {"collection": "w", "filter": {"name": "Nobody"}, "update": {"$set": {"x": 1}}, "upsert": true},
+        "missing collection" => {"collection": "nope", "filter": {}, "update": {"$set": {"x": 1}}},
+        "replacement document" => {"collection": "w", "filter": {}, "update": {"x": 1}},
+    );
+    case!("delete_one",
+        "deleted" => {"collection": "w", "filter": {"_id": 10}},
+        "not found" => {"collection": "w", "filter": {"_id": 10}},
+        "query alias" => {"collection": "w", "query": {"_id": "e-1"}},
+        "string _id" => {"collection": "w", "filter": {"_id": "s-21"}},
+        "multiple matches deletes one" => {"collection": "w", "filter": {"seen": true}},
+        "missing collection" => {"collection": "nope", "filter": {"_id": 1}},
+        "invalid filter" => {"collection": "w", "filter": {"$bogus": 1}},
+    );
+    case!("delete_many",
+        "deleted" => {"collection": "w", "filter": {"seen": true}},
+        "not found" => {"collection": "w", "filter": {"seen": true}},
+        "missing collection" => {"collection": "nope", "filter": {}},
+    );
+    case!("collection_create",
+        "new" => {"collection": "c1"},
+        "already exists" => {"collection": "c1"},
+        "existing with documents" => {"collection": "w"},
+        "empty name" => {"collection": ""},
+        "invalid name" => {"collection": "bad name!"},
+        "system prefix" => {"collection": "_system_x"},
+        "missing collection" => {},
+    );
+    case!("collection_drop",
+        "existing" => {"collection": "drop_me"},
+        "not found" => {"collection": "drop_me"},
+        "empty collection" => {"collection": "c1"},
+        "missing collection" => {},
+    );
+    case!("index_create",
+        "btree single" => {"collection": "w", "field": "name"},
+        "btree explicit type" => {"type": "btree", "collection": "w", "field": "n"},
+        "btree unique" => {"collection": "u", "field": "email", "unique": true},
+        "unique on a field most documents lack" => {"collection": "w", "field": "uniq_field", "unique": true},
+        "btree sparse" => {"collection": "w", "field": "tags", "sparse": true},
+        "btree unique sparse" => {"collection": "w", "field": "code", "unique": true, "sparse": true},
+        "compound" => {"collection": "w", "fields": ["name", "age"]},
+        "compound unique sparse" => {"collection": "w", "fields": ["age", "flag"], "unique": true, "sparse": true},
+        "fields wins over field" => {"collection": "w", "field": "x", "fields": ["v", "age"]},
+        "single-item fields" => {"collection": "w", "fields": ["v"]},
+        "duplicate single" => {"collection": "w", "field": "name"},
+        "duplicate compound" => {"collection": "w", "fields": ["name", "age"]},
+        "unique on duplicate data" => {"collection": "u", "field": "grp", "unique": true},
+        "empty fields" => {"collection": "w", "fields": []},
+        "neither field nor fields" => {"collection": "w"},
+        "new collection" => {"collection": "idx_new", "field": "a"},
+        "fulltext defaults" => {"type": "fulltext", "collection": "w", "field": "name"},
+        "fulltext full" => {"type": "fulltext", "collection": "u", "field": "bio", "language": "hungarian", "min_word_length": 3, "accent_folding": false},
+        "fulltext on a field without text" => {"type": "fulltext", "collection": "w", "field": "no_text"},
+        "fulltext duplicate" => {"type": "fulltext", "collection": "w", "field": "name"},
+        "fulltext missing field" => {"type": "fulltext", "collection": "w"},
+        "fuzzy defaults" => {"type": "fuzzy", "collection": "w", "field": "name"},
+        "fuzzy full" => {"type": "fuzzy", "collection": "w", "field": "nick", "algorithm": "levenshtein", "threshold": 0.65},
+        "fuzzy integer threshold" => {"type": "fuzzy", "collection": "w", "field": "city", "threshold": 1},
+        "fuzzy duplicate" => {"type": "fuzzy", "collection": "w", "field": "name"},
+        "vector defaults" => {"type": "vector", "collection": "w", "field": "emb", "dim": 3},
+        "vector full" => {"type": "vector", "collection": "w", "field": "emb2", "dim": 4, "metric": "dot_product",
+                          "max_vectors": 500, "m": 8, "ef_construction": 100, "ef_search": 20},
+        "vector euclidean" => {"type": "vector", "collection": "w", "field": "emb3", "dim": 2, "metric": "euclidean"},
+        "vector duplicate" => {"type": "vector", "collection": "w", "field": "emb", "dim": 3},
+        "vector unknown metric" => {"type": "vector", "collection": "w", "field": "emb4", "dim": 3, "metric": "manhattan"},
+        "vector zero dim" => {"type": "vector", "collection": "w", "field": "emb5", "dim": 0},
+        "vector missing dim" => {"type": "vector", "collection": "w", "field": "emb6"},
+        "unknown type" => {"type": "hash", "collection": "w", "field": "name"},
+        "non-string type" => {"type": 7, "collection": "w", "field": "type7"},
+        "empty collection name" => {"collection": "", "field": "a"},
+        "wrong-typed field" => {"collection": 5, "field": "a"},
+        "vector wrong-typed dim" => {"type": "vector", "collection": "w", "field": "e", "dim": "3"},
+        "not an object" => "w",
+        "null" => null,
+    );
+    case!("index_drop",
+        "btree" => {"collection": "w", "index_name": "w_name"},
+        "compound" => {"collection": "w", "index_name": "w_name_age"},
+        "fulltext" => {"collection": "w", "index_name": "w_name_fts"},
+        "fuzzy" => {"collection": "w", "index_name": "w_name_fuzzy"},
+        "vector" => {"collection": "w", "index_name": "w_vec_emb"},
+        "primary _id index" => {"collection": "w", "index_name": "w_id"},
+        "not found" => {"collection": "w", "index_name": "w_name"},
+        "missing collection" => {"collection": "nope", "index_name": "nope_age"},
+        "missing index_name" => {"collection": "w"},
+    );
+    case!("index_stats_refresh",
+        "collection" => {"collection": "w"},
+        "type ignored" => {"collection": "w", "type": "vector"},
+        "collection without documents" => {"collection": "c2_missing"},
+        "missing collection param" => {},
+    );
+    out.push_str(&out_local);
+    render_auto_embed_group(out);
+}
+
+/// Embeds a text as `[character count, 1.0]`; fails on a text containing `fail`
+struct LengthProvider;
+
+impl EmbeddingProvider for LengthProvider {
+    fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
+        if text.contains("fail") {
+            return Err(EmbeddingError::EmbeddingFailed(format!(
+                "cannot embed '{text}'"
+            )));
+        }
+        Ok(vec![text.chars().count() as f32, 1.0])
+    }
+    fn dimension(&self) -> usize {
+        2
+    }
+    fn model_name(&self) -> &str {
+        "length"
+    }
+    fn provider_name(&self) -> &str {
+        "length"
+    }
+}
+
+/// The write tools' auto-embedding fields: "kb" auto-embeds `content` into
+/// `embedding` (skip_if_exists) with [`LengthProvider`]
+fn render_auto_embed_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    let mut manager = EmbeddingManager::new();
+    manager.register_provider("length", Arc::new(LengthProvider));
+    let manager = Some(Arc::new(manager));
+    dispatch_ok(
+        &adapter,
+        "insert_many",
+        json!({"collection": "kb", "documents": [
+            {"_id": 1, "group": "g", "content": "abc", "embedding": [0.0, 0.0]},
+            {"_id": 2, "group": "g", "content": "abcd", "embedding": [0.0, 0.0]},
+        ]}),
+    );
+    adapter
+        .set_auto_embedding_config(
+            "kb",
+            Some(ironbase_core::storage::AutoEmbeddingConfig {
+                enabled: true,
+                source_field: "content".to_string(),
+                target_field: "embedding".to_string(),
+                provider: "length".to_string(),
+                dimension: Some(2),
+                skip_if_exists: true,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    macro_rules! case {
+        ($tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record_with(out, &adapter, None, &manager, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!("insert_one",
+        "auto-embedded" => {"collection": "kb", "document": {"_id": 10, "content": "hello"}},
+        "vector given" => {"collection": "kb", "document": {"_id": 11, "content": "hi", "embedding": [9.0, 9.0]}},
+        "no source field" => {"collection": "kb", "document": {"_id": 12}},
+        "embedding fails" => {"collection": "kb", "document": {"_id": 13, "content": "fail"}},
+    );
+    case!("insert_many",
+        "auto-embedded" => {"collection": "kb", "documents": [{"_id": 20, "content": "a"}, {"_id": 21, "content": "bb"}, {"_id": 22}]},
+        "none embedded" => {"collection": "kb", "documents": [{"_id": 23}]},
+        "embedding fails" => {"collection": "kb", "documents": [{"_id": 24, "content": "fail"}]},
+    );
+    case!("update_one",
+        "re-embedded" => {"collection": "kb", "filter": {"_id": 1}, "update": {"$set": {"content": "abcdef"}}},
+        "source untouched" => {"collection": "kb", "filter": {"_id": 1}, "update": {"$set": {"group": "h"}}},
+        "re-embedding fails" => {"collection": "kb", "filter": {"_id": 2}, "update": {"$set": {"content": "fail now"}}},
+        "upsert auto-embedded" => {"collection": "kb", "filter": {"_id": 30}, "update": {"$set": {"content": "new"}}, "upsert": true},
+        "no match" => {"collection": "kb", "filter": {"_id": 999}, "update": {"$set": {"content": "x"}}},
+    );
+    case!("update_many",
+        "re-embedded" => {"collection": "kb", "filter": {"group": "g"}, "update": {"$set": {"content": "same"}}},
+        "re-embedding fails" => {"collection": "kb", "filter": {"group": "g"}, "update": {"$set": {"content": "fail all"}}},
+        "no match" => {"collection": "kb", "filter": {"group": "none"}, "update": {"$set": {"content": "x"}}},
+    );
 }
 
 #[test]

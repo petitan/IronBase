@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::helpers::{parse_projection_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::ParseParams;
+use ironbase_mcp_types::responses::{HnswParams, IndexCreateResponse, VectorIndexCreated};
 
 // Parameter structs: shared with clients, re-exported under their old path.
 pub use ironbase_mcp_types::params::{VectorIndexCreateParams, VectorSearchParams};
@@ -35,13 +36,12 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 /// Create a vector (HNSW) index. Invoked by the generic `index_create` tool when
 /// `type: "vector"`.
 pub(super) fn handle_index_create_vector(
-    params: Value,
+    p: VectorIndexCreateParams,
     adapter: &Arc<IronBaseAdapter>,
-) -> Result<Value> {
-    let p: VectorIndexCreateParams = VectorIndexCreateParams::parse(params)?;
+) -> Result<IndexCreateResponse> {
     validate_collection_name(&p.collection)?;
 
-    let name = adapter.create_vector_index(
+    let index_name = adapter.create_vector_index(
         &p.collection,
         &p.field,
         p.dim,
@@ -52,17 +52,17 @@ pub(super) fn handle_index_create_vector(
         p.ef_search,
     )?;
 
-    Ok(json!({
-        "index_name": name,
-        "field": p.field,
-        "dim": p.dim,
-        "metric": p.metric,
-        "max_vectors": p.max_vectors,
-        "hnsw_params": {
-            "m": p.m,
-            "ef_construction": p.ef_construction,
-            "ef_search": p.ef_search
-        }
+    Ok(IndexCreateResponse::Vector(VectorIndexCreated {
+        index_name,
+        field: p.field,
+        dim: p.dim,
+        metric: p.metric,
+        max_vectors: p.max_vectors,
+        hnsw_params: HnswParams {
+            m: p.m,
+            ef_construction: p.ef_construction,
+            ef_search: p.ef_search,
+        },
     }))
 }
 

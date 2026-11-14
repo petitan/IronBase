@@ -2,6 +2,8 @@
 
 use crate::app::{App, Modal, VectorSearchState};
 use crossterm::event::{KeyCode, KeyModifiers};
+use ironbase_mcp_types::params::{IndexCreateArgs, VectorIndexCreateParams};
+use ironbase_mcp_types::tools::IndexCreate;
 
 /// Open vector search modal
 pub(crate) async fn handle_vector_open(app: &mut App) {
@@ -159,13 +161,18 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
             app.vector_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db
-                    .create_vector_index(&collection, &field, dimension, &metric)
-                    .await
-                {
-                    Ok(name) => {
-                        app.vector_state.message = Some(format!("Index '{}' created!", name));
+                let args = IndexCreateArgs::Vector(VectorIndexCreateParams::new(
+                    collection.clone(),
+                    field,
+                    dimension,
+                    metric,
+                ));
+                match db.call::<IndexCreate>(&args).await {
+                    Ok(created) => {
+                        // After clearing the form, which also clears the message
                         app.vector_state.clear_create_form();
+                        app.vector_state.message =
+                            Some(format!("Index '{}' created!", created.index_name()));
 
                         // Refresh index list
                         if let Ok(indexes) = db.vector_indexes(&collection).await {

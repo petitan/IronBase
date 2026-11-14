@@ -13,6 +13,10 @@ pub struct InsertState {
     pub error: Option<String>,
     pub mode: EditorMode,
     pub original_doc_id: Option<Value>,
+    /// Top-level field names of the document as it was opened for editing.
+    /// A field missing from the saved text was removed by the user and must
+    /// be `$unset`; `$set` alone would leave it in place.
+    pub original_fields: Vec<String>,
 }
 
 impl Default for InsertState {
@@ -25,6 +29,7 @@ impl Default for InsertState {
             error: None,
             mode: EditorMode::Insert,
             original_doc_id: None,
+            original_fields: Vec::new(),
         }
     }
 }
@@ -53,6 +58,7 @@ impl InsertState {
             error: None,
             mode: EditorMode::Insert,
             original_doc_id: None,
+            original_fields: Vec::new(),
         }
     }
 
@@ -61,6 +67,10 @@ impl InsertState {
         let json_str = serde_json::to_string_pretty(doc).unwrap_or_else(|_| "{}".to_string());
         let lines: Vec<String> = json_str.lines().map(String::from).collect();
         let doc_id = doc.get("_id").cloned();
+        let original_fields = doc
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
 
         Self {
             lines,
@@ -70,6 +80,25 @@ impl InsertState {
             error: None,
             mode: EditorMode::Edit,
             original_doc_id: doc_id,
+            original_fields,
+        }
+    }
+
+    /// The update for saving `doc` over the document opened for editing:
+    /// `$set` of the edited document plus `$unset` of the top-level fields the
+    /// user removed (sent only when there are any, so an edit that removes
+    /// nothing sends the same request as before).
+    pub fn edit_update(&self, doc: &Value) -> Value {
+        let removed: serde_json::Map<String, Value> = self
+            .original_fields
+            .iter()
+            .filter(|field| doc.get(field.as_str()).is_none())
+            .map(|field| (field.clone(), Value::String(String::new())))
+            .collect();
+        if removed.is_empty() {
+            serde_json::json!({"$set": doc})
+        } else {
+            serde_json::json!({"$set": doc, "$unset": removed})
         }
     }
 

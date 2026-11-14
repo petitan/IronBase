@@ -240,74 +240,6 @@ impl DbWrapper {
         Ok(result)
     }
 
-    /// Create a single-field index
-    pub async fn create_index(
-        &self,
-        collection: &str,
-        field: &str,
-        unique: bool,
-        sparse: bool,
-    ) -> Result<()> {
-        self.client
-            .create_index(collection, field, unique, sparse)
-            .await?;
-        Ok(())
-    }
-
-    /// Create a compound index (multiple fields)
-    pub async fn create_compound_index(
-        &self,
-        collection: &str,
-        fields: &[String],
-        unique: bool,
-        sparse: bool,
-    ) -> Result<()> {
-        self.client
-            .create_compound_index(collection, fields, unique, sparse)
-            .await?;
-        Ok(())
-    }
-
-    /// Drop an index
-    pub async fn drop_index(&self, collection: &str, name: &str) -> Result<()> {
-        self.client.drop_index(collection, name).await?;
-        Ok(())
-    }
-
-    /// Refresh index statistics for a collection
-    ///
-    /// Recomputes statistics (distinct_count, histograms, MCV) for all indexes.
-    /// Run this after bulk inserts for optimal query plans.
-    pub async fn refresh_index_stats(&self, collection: &str) -> Result<()> {
-        self.client.refresh_index_stats(collection).await?;
-        Ok(())
-    }
-
-    /// Delete a document by _id
-    pub async fn delete_document(&self, collection: &str, doc_id: &Value) -> Result<usize> {
-        let query = serde_json::json!({"_id": doc_id});
-        let deleted = self.client.delete_one(collection, &query).await?;
-        Ok(deleted as usize)
-    }
-
-    /// Insert a new document
-    pub async fn insert_document(&self, collection: &str, doc: &Value) -> Result<Value> {
-        let inserted_id = self.client.insert_one(collection, doc).await?;
-        Ok(inserted_id)
-    }
-
-    /// Update a document
-    pub async fn update_document(
-        &self,
-        collection: &str,
-        doc_id: &Value,
-        update: &Value,
-    ) -> Result<usize> {
-        let query = serde_json::json!({"_id": doc_id});
-        let (matched, _modified) = self.client.update_one(collection, &query, update).await?;
-        Ok(matched as usize)
-    }
-
     /// Search collections by name (case-insensitive substring match)
     pub async fn search_collections(&self, query: &str) -> Result<Vec<CollectionInfo>> {
         let query_lower = query.to_lowercase();
@@ -319,18 +251,6 @@ impl DbWrapper {
             .collect();
 
         Ok(filtered)
-    }
-
-    /// Create a new empty collection
-    pub async fn create_collection(&self, name: &str) -> Result<()> {
-        self.client.create_collection(name).await?;
-        Ok(())
-    }
-
-    /// Drop a collection
-    pub async fn drop_collection(&self, name: &str) -> Result<()> {
-        self.client.drop_collection(name).await?;
-        Ok(())
     }
 
     /// Close the connection
@@ -503,30 +423,7 @@ impl DbWrapper {
         Ok(success)
     }
 
-    // === Vector Index and Search ===
-
-    /// Create a vector index for similarity search
-    pub async fn create_vector_index(
-        &self,
-        collection: &str,
-        field: &str,
-        dimension: usize,
-        metric: &str,
-    ) -> Result<String> {
-        let name = self
-            .client
-            .create_vector_index(collection, field, dimension, metric)
-            .await?;
-        Ok(name)
-    }
-
-    /// Drop a vector index
-    pub async fn drop_vector_index(&self, collection: &str, index_name: &str) -> Result<()> {
-        self.client
-            .drop_vector_index(collection, index_name)
-            .await?;
-        Ok(())
-    }
+    // === Vector Search ===
 
     /// Perform vector similarity search
     pub async fn vector_search(

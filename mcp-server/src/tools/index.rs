@@ -8,7 +8,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use ironbase_mcp_types::responses::{
-    ExplainResponse, IndexListAll, IndexListResponse, IndexStatsResponse, TypedIndexList,
+    BTreeIndexCreated, CompoundIndexCreated, ExplainResponse, FulltextIndexCreated,
+    FuzzyIndexCreated, IndexCreateResponse, IndexDropResponse, IndexListAll, IndexListResponse,
+    IndexStatsRefreshResponse, IndexStatsResponse, TypedIndexList,
 };
 
 use super::fusion::apply_document_qualification;
@@ -17,8 +19,8 @@ use super::helpers::{
 };
 use super::params::{
     ExplainParams, FindWithHintParams, FulltextAnalyzeParams, FulltextIndexParams,
-    FulltextSearchParams, FuzzyIndexParams, FuzzySearchParams, IndexCreateParams, IndexDropParams,
-    IndexListParams, ParseParams,
+    FulltextSearchParams, FuzzyIndexParams, FuzzySearchParams, IndexCreateArgs, IndexCreateParams,
+    IndexDropParams, IndexListParams, ParseParams,
 };
 
 /// Dispatch index tool calls
@@ -42,27 +44,22 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 }
 
 /// Create an index of any type, routed by the `type` discriminator
-/// (default `btree`). Per-type params are re-parsed from the raw value into the
-/// matching typed struct; serde ignores the unrelated fields.
+/// (default `btree`; see [`IndexCreateArgs`]): each type parses into its own
+/// typed struct, which ignores the unrelated fields.
 fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let index_type = params
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("btree");
-    match index_type {
-        "btree" => handle_index_create_btree(params, adapter),
-        "fulltext" => handle_index_create_fulltext(params, adapter),
-        "fuzzy" => handle_index_create_fuzzy(params, adapter),
-        "vector" => super::vector::handle_index_create_vector(params, adapter),
-        other => Err(McpError::invalid_params(format!(
-            "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
-            other
-        ))),
-    }
+    let response = match IndexCreateArgs::parse(params)? {
+        IndexCreateArgs::BTree(p) => handle_index_create_btree(p, adapter)?,
+        IndexCreateArgs::Fulltext(p) => handle_index_create_fulltext(p, adapter)?,
+        IndexCreateArgs::Fuzzy(p) => handle_index_create_fuzzy(p, adapter)?,
+        IndexCreateArgs::Vector(p) => super::vector::handle_index_create_vector(p, adapter)?,
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
-fn handle_index_create_btree(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexCreateParams = IndexCreateParams::parse(params)?;
+fn handle_index_create_btree(
+    p: IndexCreateParams,
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<IndexCreateResponse> {
     validate_collection_name(&p.collection)?;
 
     // Check for compound index (fields takes priority)
@@ -70,21 +67,22 @@ fn handle_index_create_btree(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
         if fields.is_empty() {
             return Err(McpError::invalid_params("fields array is empty"));
         }
-        let name = adapter.create_compound_index(&p.collection, &fields, p.unique, p.sparse)?;
-        Ok(json!({
-            "index_name": name,
-            "fields": fields,
-            "unique": p.unique,
-            "sparse": p.sparse
+        let index_name =
+            adapter.create_compound_index(&p.collection, &fields, p.unique, p.sparse)?;
+        Ok(IndexCreateResponse::Compound(CompoundIndexCreated {
+            index_name,
+            fields,
+            unique: p.unique,
+            sparse: p.sparse,
         }))
     } else if let Some(field) = p.field {
         // Single field index
-        let name = adapter.create_index(&p.collection, &field, p.unique, p.sparse)?;
-        Ok(json!({
-            "index_name": name,
-            "field": field,
-            "unique": p.unique,
-            "sparse": p.sparse
+        let index_name = adapter.create_index(&p.collection, &field, p.unique, p.sparse)?;
+        Ok(IndexCreateResponse::BTree(BTreeIndexCreated {
+            index_name,
+            field,
+            unique: p.unique,
+            sparse: p.sparse,
         }))
     } else {
         Err(McpError::invalid_params(
@@ -140,36 +138,41 @@ fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     Ok(serde_json::to_value(response)?)
 }
 
-fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: FuzzyIndexParams = FuzzyIndexParams::parse(params)?;
+fn handle_index_create_fuzzy(
+    p: FuzzyIndexParams,
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<IndexCreateResponse> {
     validate_collection_name(&p.collection)?;
 
-    let name = adapter.create_fuzzy_index(&p.collection, &p.field, &p.algorithm, p.threshold)?;
-    Ok(json!({
-        "index_name": name,
-        "field": p.field,
-        "algorithm": p.algorithm,
-        "threshold": p.threshold
+    let index_name =
+        adapter.create_fuzzy_index(&p.collection, &p.field, &p.algorithm, p.threshold)?;
+    Ok(IndexCreateResponse::Fuzzy(FuzzyIndexCreated {
+        index_name,
+        field: p.field,
+        algorithm: p.algorithm,
+        threshold: p.threshold,
     }))
 }
 
-fn handle_index_create_fulltext(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: FulltextIndexParams = FulltextIndexParams::parse(params)?;
+fn handle_index_create_fulltext(
+    p: FulltextIndexParams,
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<IndexCreateResponse> {
     validate_collection_name(&p.collection)?;
 
-    let name = adapter.create_fulltext_index(
+    let index_name = adapter.create_fulltext_index(
         &p.collection,
         &p.field,
         &p.language,
         p.min_word_length,
         p.accent_folding,
     )?;
-    Ok(json!({
-        "index_name": name,
-        "field": p.field,
-        "language": p.language,
-        "min_word_length": p.min_word_length.unwrap_or(2),
-        "accent_folding": p.accent_folding.unwrap_or(true)
+    Ok(IndexCreateResponse::Fulltext(FulltextIndexCreated {
+        index_name,
+        field: p.field,
+        language: p.language,
+        min_word_length: p.min_word_length.unwrap_or(2),
+        accent_folding: p.accent_folding.unwrap_or(true),
     }))
 }
 
@@ -194,7 +197,10 @@ fn handle_index_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     } else {
         adapter.drop_index(&p.collection, &p.index_name)?;
     }
-    Ok(json!({"success": true, "dropped": p.index_name}))
+    Ok(serde_json::to_value(IndexDropResponse {
+        success: true,
+        dropped: p.index_name,
+    })?)
 }
 
 /// Refresh statistics for all B+ tree indexes in a collection.
@@ -206,10 +212,13 @@ fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
     validate_collection_name(&p.collection)?;
 
     adapter.refresh_index_stats(&p.collection)?;
-    Ok(json!({
-        "success": true,
-        "message": format!("Index statistics refreshed for collection '{}'", p.collection)
-    }))
+    Ok(serde_json::to_value(IndexStatsRefreshResponse {
+        success: true,
+        message: format!(
+            "Index statistics refreshed for collection '{}'",
+            p.collection
+        ),
+    })?)
 }
 
 /// Get detailed statistics for all B+ tree indexes in a collection.

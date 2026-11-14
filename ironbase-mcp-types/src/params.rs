@@ -247,6 +247,48 @@ fn default_language() -> String {
     "none".to_string()
 }
 
+/// Arguments of `index_create`: one argument struct per index `type`.
+///
+/// Serialized with `type` first, then the variant's fields
+/// (`{"type": "vector", "collection": ..., "dim": ...}`). Parsed the way the tool
+/// routes: `type` selects the variant, an absent or non-string `type` is
+/// `btree`, any other string is an error, and the remaining fields parse as that
+/// variant's struct (which ignores `type`). The server parses its arguments with
+/// this enum, so the routing exists once.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type")]
+pub enum IndexCreateArgs {
+    /// `type: btree` (or no `type`): a single-field or compound B+ tree index
+    #[serde(rename = "btree")]
+    BTree(IndexCreateParams),
+    #[serde(rename = "fulltext")]
+    Fulltext(FulltextIndexParams),
+    #[serde(rename = "fuzzy")]
+    Fuzzy(FuzzyIndexParams),
+    #[serde(rename = "vector")]
+    Vector(VectorIndexCreateParams),
+}
+
+impl<'de> Deserialize<'de> for IndexCreateArgs {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = Value::deserialize(deserializer)?;
+        let parsed = match value.get("type").and_then(Value::as_str).unwrap_or("btree") {
+            "btree" => serde_json::from_value(value).map(Self::BTree),
+            "fulltext" => serde_json::from_value(value).map(Self::Fulltext),
+            "fuzzy" => serde_json::from_value(value).map(Self::Fuzzy),
+            "vector" => serde_json::from_value(value).map(Self::Vector),
+            other => {
+                return Err(D::Error::custom(format!(
+                    "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
+                    other
+                )))
+            }
+        };
+        parsed.map_err(D::Error::custom)
+    }
+}
+
 /// Parameters for `fuzzy_search` tool
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FuzzySearchParams {
@@ -954,6 +996,23 @@ pub struct VectorIndexCreateParams {
     pub ef_construction: usize,
     #[serde(default = "default_ef_search")]
     pub ef_search: usize,
+}
+
+impl VectorIndexCreateParams {
+    /// Arguments for a vector index on `field` with the server's defaults for
+    /// `max_vectors` and the HNSW parameters
+    pub fn new(collection: String, field: String, dim: usize, metric: String) -> Self {
+        Self {
+            collection,
+            field,
+            dim,
+            metric,
+            max_vectors: default_max_vectors(),
+            m: default_m(),
+            ef_construction: default_ef_construction(),
+            ef_search: default_ef_search(),
+        }
+    }
 }
 
 fn default_metric() -> String {

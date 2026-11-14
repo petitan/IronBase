@@ -6,7 +6,9 @@ use crate::acl::SYSTEM_ACL_COLLECTION;
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
 use crate::scripting::RAG_CONFIG_COLLECTION;
-use ironbase_mcp_types::responses::CollectionListResponse;
+use ironbase_mcp_types::responses::{
+    CollectionCreateResponse, CollectionDropResponse, CollectionListResponse,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -43,7 +45,10 @@ fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     let p: CollectionCreateParams = CollectionCreateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
     adapter.create_collection(&p.collection)?;
-    Ok(json!({"success": true, "collection": p.collection}))
+    Ok(serde_json::to_value(CollectionCreateResponse {
+        success: true,
+        collection: p.collection,
+    })?)
 }
 
 fn handle_collection_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -56,11 +61,11 @@ fn handle_collection_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         .unwrap_or(0)
         > 0;
 
-    Ok(json!({
-        "success": true,
-        "dropped": p.collection,
-        "acl_deleted": acl_deleted
-    }))
+    Ok(serde_json::to_value(CollectionDropResponse {
+        success: true,
+        dropped: p.collection,
+        acl_deleted,
+    })?)
 }
 
 fn handle_collection_rename(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
