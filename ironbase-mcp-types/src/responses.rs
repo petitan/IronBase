@@ -1535,10 +1535,12 @@ pub struct RagCreatedConfig {
     pub dimension: usize,
 }
 
-/// What `rag_collection_create` created; an existing collection or index is
-/// kept (`false` / not counted)
+/// What `rag_collection_create` created; an existing index is kept (`false` /
+/// not counted)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RagCreatedIndexes {
+    /// Always `true`: the server opens an existing collection or creates it,
+    /// and does not tell the two apart
     pub collection_created: bool,
     pub vector_created: bool,
     /// Number of fulltext indexes created (one per new text field)

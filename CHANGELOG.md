@@ -24,13 +24,16 @@ Phase 2f of the Tuti TUI overhaul. The server's response JSON is unchanged.
   - the import reports the stored `doc_id`, the chunks created and replaced, a skipped `doc_id`, content
     without chunks and an ignored `language`, instead of "Import OK: N chunks" for all of them; a failed
     import no longer leaves the previous result on screen;
-  - creating a RAG collection says which of the collection and its indexes already existed and the
-    vector dimension, instead of "created!" for an existing one.
+  - creating a RAG collection says which of its indexes already existed and the vector dimension,
+    instead of "created!" (the server reports `collection_created: true` for an existing collection
+    too, so the message does not claim either).
 - Known server behaviour, pinned by the golden test and not changed here: merging adjacent chunks
   (`rag_chunks_load`, and the `merge_chunks` of `search`) joins chunks separated by a gap, such as a
   paragraph break the chunker dropped, without any separator ("várról.Második"); `embed_document`
   reports `provider: null` when the default provider embedded the chunks, and its `inserted_ids` are
-  strings; `rag_collection_stats` of a missing collection answers with zero counts instead of an error.
+  strings; `rag_collection_stats` of a missing collection creates it (the index listing opens the
+  collection with the creating accessor) and answers with zero counts instead of an error;
+  `rag_collection_create` always reports `collection_created: true`.
 
 ### Fixed — Tuti TUI embedding and job screens; embedding cache miss count; typed MCP responses for the embedding tools (ironbase-core 0.3.466, mcp-server 1.0.664)
 

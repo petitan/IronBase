@@ -2089,6 +2089,6 @@ async fn test_rag_create_reports_existing_indexes() {
     );
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("RAG collection 'kb': collection created, vector index already existed, 0 fulltext index(es) created (768 dims, ollama)")
+        Some("RAG collection 'kb' ready: vector index already existed, 0 fulltext index(es) created (768 dims, ollama)")
     );
 }

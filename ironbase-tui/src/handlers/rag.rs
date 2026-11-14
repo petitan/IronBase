@@ -632,13 +632,13 @@ async fn load_rag_stats(
     .await
 }
 
-/// What `rag_collection_create` did: an existing collection or index is kept
+/// What `rag_collection_create` did: an existing index is kept (the server
+/// does not report whether the collection itself existed)
 fn rag_created_message(response: &RagCollectionCreateResponse) -> String {
     let created = |yes: bool| if yes { "created" } else { "already existed" };
     format!(
-        "RAG collection '{}': collection {}, vector index {}, {} fulltext index(es) created ({} dims, {})",
+        "RAG collection '{}' ready: vector index {}, {} fulltext index(es) created ({} dims, {})",
         response.collection,
-        created(response.indexes.collection_created),
         created(response.indexes.vector_created),
         response.indexes.fulltext_created,
         response.config.dimension,
