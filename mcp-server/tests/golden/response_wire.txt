@@ -1,0 +1,160 @@
+## collection_list / all
+in:  {}
+out: {"collections":["empty","users"]}
+
+## find / all
+in:  {"collection":"users"}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63},"zip":"9021"},"age":30,"bio":"Rust fejlesztő és király","city":"Győr","email":"almos@example.hu","emb":[0.1,0.2,0.3],"name":"Álmos","nick":null,"tags":["rust","db"]},{"_id":2,"address":{"zip":"7621"},"age":25,"bio":"Adatbázis szakértő","city":"Pécs","email":"bea@example.com","emb":[0.3,0.2,0.1],"name":"Bea","nick":"B","tags":[]},{"_id":3,"address":null,"age":41,"bio":"Király a backendben","city":"Győr","email":"csaba@example.com","emb":[0.0,1.0,0.0],"name":"Csaba","tags":["go"]},{"_id":4,"age":25.5,"email":"dora@example.com","meta":{"active":true,"note":"ünnep"},"name":"Dóra","scores":[1,2.5,-3]}],"count":4}
+
+## find / empty collection
+in:  {"collection":"empty"}
+out: {"documents":[],"count":0}
+
+## find / nested filter
+in:  {"collection":"users","query":{"address.zip":"9021"}}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63},"zip":"9021"},"age":30,"bio":"Rust fejlesztő és király","city":"Győr","email":"almos@example.hu","emb":[0.1,0.2,0.3],"name":"Álmos","nick":null,"tags":["rust","db"]}],"count":1}
+
+## find / null filter
+in:  {"collection":"users","filter":{"nick":null}}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63},"zip":"9021"},"age":30,"bio":"Rust fejlesztő és király","city":"Győr","email":"almos@example.hu","emb":[0.1,0.2,0.3],"name":"Álmos","nick":null,"tags":["rust","db"]},{"_id":3,"address":null,"age":41,"bio":"Király a backendben","city":"Győr","email":"csaba@example.com","emb":[0.0,1.0,0.0],"name":"Csaba","tags":["go"]},{"_id":4,"age":25.5,"email":"dora@example.com","meta":{"active":true,"note":"ünnep"},"name":"Dóra","scores":[1,2.5,-3]}],"count":3}
+
+## find / no match
+in:  {"collection":"users","query":{"age":{"$gt":100}}}
+out: {"documents":[],"count":0}
+
+## find / sort skip limit
+in:  {"collection":"users","sort":{"age":-1},"skip":1,"limit":2}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63},"zip":"9021"},"age":30,"bio":"Rust fejlesztő és király","city":"Győr","email":"almos@example.hu","emb":[0.1,0.2,0.3],"name":"Álmos","nick":null,"tags":["rust","db"]},{"_id":4,"age":25.5,"email":"dora@example.com","meta":{"active":true,"note":"ünnep"},"name":"Dóra","scores":[1,2.5,-3]}],"count":2}
+
+## find / projection
+in:  {"collection":"users","projection":{"name":1,"address.geo":1}}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63}},"name":"Álmos"},{"_id":2,"name":"Bea"},{"_id":3,"name":"Csaba"},{"_id":4,"name":"Dóra"}],"count":4}
+
+## find / include_total
+in:  {"collection":"users","query":{"city":"Győr"},"limit":1,"include_total":true}
+out: {"documents":[{"_id":1,"address":{"geo":{"lat":47.68,"lon":17.63},"zip":"9021"},"age":30,"bio":"Rust fejlesztő és király","city":"Győr","email":"almos@example.hu","emb":[0.1,0.2,0.3],"name":"Álmos","nick":null,"tags":["rust","db"]}],"count":1,"total":2}
+
+## find / include_total empty
+in:  {"collection":"empty","include_total":true}
+out: {"documents":[],"count":0,"total":0}
+
+## find / missing collection
+in:  {"collection":"nope"}
+err: CollectionNotFound Collection 'nope' not found
+
+## count / all
+in:  {"collection":"users"}
+out: {"count":4}
+
+## count / filtered
+in:  {"collection":"users","query":{"city":"Győr"}}
+out: {"count":2}
+
+## count / empty collection
+in:  {"collection":"empty"}
+out: {"count":0}
+
+## count / missing collection
+in:  {"collection":"nope"}
+err: CollectionNotFound Collection 'nope' not found
+
+## index_list / all types
+in:  {"collection":"users"}
+out: {"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"fulltext_indexes":[{"name":"users_bio_fts","field":"bio","language":"hungarian","min_word_length":2,"accent_folding":true,"num_documents":3,"num_tokens":6}],"fuzzy_indexes":[{"name":"users_name_fuzzy","field":"name","algorithm":"jarowinkler","threshold":0.8,"num_entries":4}],"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","max_vectors":100000,"vector_count":3,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}],"summary":{"btree_count":7,"fulltext_count":1,"fuzzy_count":1,"vector_count":1,"total":10}}
+
+## index_list / btree
+in:  {"collection":"users","type":"btree"}
+out: {"indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"count":7}
+
+## index_list / fulltext
+in:  {"collection":"users","type":"fulltext"}
+out: {"indexes":[{"name":"users_bio_fts","field":"bio","language":"hungarian","min_word_length":2,"accent_folding":true,"num_documents":3,"num_tokens":6}],"count":1}
+
+## index_list / fuzzy
+in:  {"collection":"users","type":"fuzzy"}
+out: {"indexes":[{"name":"users_name_fuzzy","field":"name","algorithm":"jarowinkler","threshold":0.8,"num_entries":4}],"count":1}
+
+## index_list / vector
+in:  {"collection":"users","type":"vector"}
+out: {"indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","max_vectors":100000,"vector_count":3,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}],"count":1}
+
+## index_list / empty collection
+in:  {"collection":"empty"}
+out: {"btree_indexes":["empty_id"],"fulltext_indexes":[],"fuzzy_indexes":[],"vector_indexes":[],"summary":{"btree_count":1,"fulltext_count":0,"fuzzy_count":0,"vector_count":0,"total":1}}
+
+## index_list / empty collection vector
+in:  {"collection":"empty","type":"vector"}
+out: {"indexes":[],"count":0}
+
+## index_list / unknown type
+in:  {"collection":"users","type":"hash"}
+err: InvalidParams Unknown index type 'hash'. Use one of: btree, fulltext, fuzzy, vector
+
+## index_stats / default
+in:  {"collection":"users"}
+out: {"type":"btree","indexes":[{"name":"users_age","field":"age","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false},{"name":"users_city_age","field":"city","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false},{"name":"users_email","field":"email","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false}],"count":3}
+
+## index_stats / btree
+in:  {"collection":"users","type":"btree"}
+out: {"type":"btree","indexes":[{"name":"users_age","field":"age","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false},{"name":"users_city_age","field":"city","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false},{"name":"users_email","field":"email","num_keys":4,"distinct_count":4,"has_histogram":false,"has_mcv":false}],"count":3}
+
+## index_stats / fulltext
+in:  {"collection":"users","type":"fulltext"}
+out: {"type":"fulltext","indexes":[{"name":"users_bio_fts","field":"bio","language":"hungarian","min_word_length":2,"accent_folding":true,"num_documents":3,"num_tokens":6}],"count":1}
+
+## index_stats / fuzzy
+in:  {"collection":"users","type":"fuzzy"}
+out: {"type":"fuzzy","indexes":[{"name":"users_name_fuzzy","field":"name","algorithm":"jarowinkler","threshold":0.8,"num_entries":4}],"count":1}
+
+## index_stats / vector
+in:  {"collection":"users","type":"vector"}
+out: {"type":"vector","indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","max_vectors":100000,"vector_count":3,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}],"count":1}
+
+## index_stats / empty collection
+in:  {"collection":"empty"}
+out: {"type":"btree","indexes":[],"count":0}
+
+## index_stats / unknown type
+in:  {"collection":"users","type":"hash"}
+err: InvalidParams Unknown index type 'hash'. Use one of: btree, fulltext, fuzzy, vector
+
+## explain / indexed equality
+in:  {"collection":"users","query":{"email":"bea@example.com"}}
+out: {"plan":{"chosenPlan":{"queryPlan":"IndexScan","indexUsed":"users_email","field":"email","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"String(\"bea@example.com\")","estimatedCost":"O(log n)"},"selectionReason":"Index users_email on field email (selectivity: 0.2500, method: uniform, est. rows: 1)","estimatedRows":1.0,"candidates":[{"plan":{"queryPlan":"IndexScan","indexUsed":"users_email","field":"email","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"String(\"bea@example.com\")","estimatedCost":"O(log n)"},"field":"email","estimatedRows":1.0,"reason":"Index users_email on field email (selectivity: 0.2500, method: uniform, est. rows: 1)"}],"candidateCount":1}}
+
+## explain / indexed range
+in:  {"collection":"users","query":{"age":{"$gte":25,"$lt":40}}}
+out: {"plan":{"chosenPlan":{"queryPlan":"IndexRangeScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"range","range":{"start":"Some(Int(25))","end":"Some(Int(40))","inclusiveStart":true,"inclusiveEnd":false},"estimatedCost":"O(log n + k)"},"selectionReason":"Index users_age on field age (range, sel: 33.0%, est. rows: 1, method: uniform)","estimatedRows":1.32,"candidates":[{"plan":{"queryPlan":"IndexRangeScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"range","range":{"start":"Some(Int(25))","end":"Some(Int(40))","inclusiveStart":true,"inclusiveEnd":false},"estimatedCost":"O(log n + k)"},"field":"age","estimatedRows":1.32,"reason":"Index users_age on field age (range, sel: 33.0%, est. rows: 1, method: uniform)"}],"candidateCount":1}}
+
+## explain / compound prefix
+in:  {"collection":"users","query":{"city":"Győr","age":30}}
+out: {"plan":{"chosenPlan":{"queryPlan":"CompoundIndexScan","indexUsed":"users_city_age","field":"city","stage":"FETCH_WITH_INDEX","indexType":"compound_prefix","searchKey":"String(\"Győr\")","estimatedCost":"O(log n)"},"selectionReason":"Index users_city_age on field city (selectivity: 0.2500, method: uniform, est. rows: 1)","estimatedRows":1.0,"candidates":[{"plan":{"queryPlan":"CompoundIndexScan","indexUsed":"users_city_age","field":"city","stage":"FETCH_WITH_INDEX","indexType":"compound_prefix","searchKey":"String(\"Győr\")","estimatedCost":"O(log n)"},"field":"city","estimatedRows":1.0,"reason":"Index users_city_age on field city (selectivity: 0.2500, method: uniform, est. rows: 1)"},{"plan":{"queryPlan":"IndexScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"Int(30)","estimatedCost":"O(log n)"},"field":"age","estimatedRows":1.0,"reason":"Index users_age on field age (selectivity: 0.2500, method: uniform, est. rows: 1)"}],"candidateCount":2}}
+
+## explain / indexed $in
+in:  {"collection":"users","query":{"age":{"$in":[25,30]}}}
+out: {"plan":{"chosenPlan":{"queryPlan":"MultiValueScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"multi_value_in","keyCount":2,"description":"$in query optimized with index lookups","estimatedCost":"O(k * log n)"},"selectionReason":"Multi-value scan on users_age (2 keys)","estimatedRows":4.0,"candidates":[{"plan":{"queryPlan":"MultiValueScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"multi_value_in","keyCount":2,"description":"$in query optimized with index lookups","estimatedCost":"O(k * log n)"},"field":"age","estimatedRows":4.0,"reason":"Multi-value scan on users_age (2 keys)"}],"candidateCount":1}}
+
+## explain / unindexed
+in:  {"collection":"users","query":{"name":"Bea"}}
+out: {"plan":{"chosenPlan":{"queryPlan":"CollectionScan","indexUsed":null,"stage":"FULL_SCAN","estimatedCost":"O(n)"},"selectionReason":"No suitable index found for query","candidates":[],"candidateCount":0,"availableIndexes":["users_age","users_city_age","users_email"]}}
+
+## explain / empty query
+in:  {"collection":"users","query":{}}
+out: {"plan":{"chosenPlan":{"queryPlan":"CollectionScan","indexUsed":null,"stage":"FULL_SCAN","estimatedCost":"O(n)"},"selectionReason":"No suitable index found for query","candidates":[],"candidateCount":0,"availableIndexes":["users_age","users_city_age","users_email"]}}
+
+## explain / $or
+in:  {"collection":"users","query":{"$or":[{"age":25},{"name":"Bea"}]}}
+out: {"plan":{"chosenPlan":{"queryPlan":"LogicalIndexScan","operator":"$or","clauseCount":2},"selectionReason":"Logical operator planning","clauses":[{"clause":{"age":25},"chosenPlan":{"queryPlan":"IndexScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"Int(25)","estimatedCost":"O(log n)"},"selectionReason":"Index users_age on field age (selectivity: 0.2500, method: uniform, est. rows: 1)","candidates":[{"plan":{"queryPlan":"IndexScan","indexUsed":"users_age","field":"age","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"Int(25)","estimatedCost":"O(log n)"},"field":"age","estimatedRows":1.0,"reason":"Index users_age on field age (selectivity: 0.2500, method: uniform, est. rows: 1)"}]},{"clause":{"name":"Bea"},"chosenPlan":null,"selectionReason":null,"candidates":[]}],"candidateCount":1}}
+
+## explain / empty collection
+in:  {"collection":"empty","query":{"a":1}}
+out: {"plan":{"chosenPlan":{"queryPlan":"CollectionScan","indexUsed":null,"stage":"FULL_SCAN","estimatedCost":"O(n)"},"selectionReason":"No suitable index found for query","candidates":[],"candidateCount":0,"availableIndexes":[]}}
+
+## db_stats / stdio
+in:  {}
+out: {"database":{"path":"<path>","file_size_bytes":"<file_size_bytes>","file_size":"<file_size>"},"collections":[{"name":"empty","document_count":0,"btree_index_count":1,"btree_indexes":["empty_id"],"vector_index_count":0,"vector_indexes":[],"total_vectors":0},{"name":"users","document_count":4,"btree_index_count":7,"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"vector_index_count":1,"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","vector_count":3}],"total_vectors":3}],"summary":{"collection_count":2,"total_documents":4,"total_btree_indexes":8,"total_vector_indexes":1,"total_vectors":3},"server":{"version":"<version>","mode":"stdio"},"storage_wastage":{"file_size_bytes":"<file_size_bytes>","file_size_mb":"<file_size_mb>","estimated_live_bytes":"<estimated_live_bytes>","estimated_live_mb":"<estimated_live_mb>","bloat_ratio":"infinity (never compacted)","total_writes":4,"total_live":4,"dead_writes":0}}
+
+## db_stats / http
+in:  {}
+out: {"database":{"path":"<path>","file_size_bytes":"<file_size_bytes>","file_size":"<file_size>"},"collections":[{"name":"empty","document_count":0,"btree_index_count":1,"btree_indexes":["empty_id"],"vector_index_count":0,"vector_indexes":[],"total_vectors":0},{"name":"users","document_count":4,"btree_index_count":7,"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"vector_index_count":1,"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","vector_count":3}],"total_vectors":3}],"summary":{"collection_count":2,"total_documents":4,"total_btree_indexes":8,"total_vector_indexes":1,"total_vectors":3},"server":{"version":"<version>","protocol":"http","host":"127.0.0.1","port":8080,"require_api_key":true},"storage_wastage":{"file_size_bytes":"<file_size_bytes>","file_size_mb":"<file_size_mb>","estimated_live_bytes":"<estimated_live_bytes>","estimated_live_mb":"<estimated_live_mb>","bloat_ratio":"infinity (never compacted)","total_writes":4,"total_live":4,"dead_writes":0}}
+

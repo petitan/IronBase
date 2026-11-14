@@ -2,17 +2,20 @@
 //!
 //! A marker ties a tool's registered name to its argument and response types, so
 //! a client calls `Find` with `FindParams` instead of a hand-built JSON object.
-//! `Resp` is `serde_json::Value` until the tool's response gets its own struct.
+//! `Resp` is `serde_json::Value` until the tool's response gets its own struct
+//! (`crate::responses`).
 //!
-//! Only tools whose handler parses a typed argument struct have a marker; tools
-//! without arguments and `index_create` (four argument shapes selected by `type`)
-//! do not have one yet.
+//! Tools whose handler parses a typed argument struct have a marker, and so do
+//! the argument-less read tools a client needs (`collection_list`, `db_stats`,
+//! with [`NoParams`]); the other argument-less tools and `index_create` (four
+//! argument shapes selected by `type`) do not have one yet.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::params::*;
+use crate::responses::*;
 
 /// An MCP tool: its registered name, its arguments and its response.
 pub trait Tool {
@@ -24,8 +27,18 @@ pub trait Tool {
     type Resp: Serialize + DeserializeOwned;
 }
 
+/// The response type of a marker: the given one, or `Value` when none is given
+macro_rules! resp_type {
+    () => {
+        Value
+    };
+    ($resp:ty) => {
+        $resp
+    };
+}
+
 macro_rules! tools {
-    ($($(#[$meta:meta])* $marker:ident => $name:literal, $args:ty;)+) => {
+    ($($(#[$meta:meta])* $marker:ident => $name:literal, $args:ty $(=> $resp:ty)?;)+) => {
         $(
             $(#[$meta])*
             #[doc = concat!("`", $name, "` tool")]
@@ -35,7 +48,7 @@ macro_rules! tools {
             impl Tool for $marker {
                 const NAME: &'static str = $name;
                 type Args = $args;
-                type Resp = Value;
+                type Resp = resp_type!($($resp)?);
             }
         )+
 
@@ -48,28 +61,29 @@ tools! {
     // Document CRUD
     InsertOne => "insert_one", InsertOneParams;
     InsertMany => "insert_many", InsertManyParams;
-    Find => "find", FindParams;
+    Find => "find", FindParams => FindResponse;
     FindOne => "find_one", FindOneParams;
     UpdateOne => "update_one", UpdateOneParams;
     UpdateMany => "update_many", UpdateManyParams;
     DeleteOne => "delete_one", DeleteParams;
     DeleteMany => "delete_many", DeleteParams;
-    Count => "count", CountParams;
+    Count => "count", CountParams => CountResponse;
     Distinct => "distinct", DistinctParams;
     Aggregate => "aggregate", AggregateParams;
 
     // Index management & search
-    IndexList => "index_list", IndexListParams;
+    IndexList => "index_list", IndexListParams => IndexListResponse;
     IndexDrop => "index_drop", IndexDropParams;
-    IndexStats => "index_stats", IndexListParams;
+    IndexStats => "index_stats", IndexListParams => IndexStatsResponse;
     IndexStatsRefresh => "index_stats_refresh", IndexListParams;
     FuzzySearch => "fuzzy_search", FuzzySearchParams;
     FulltextSearch => "fulltext_search", FulltextSearchParams;
     FulltextAnalyze => "fulltext_analyze", FulltextAnalyzeParams;
-    Explain => "explain", ExplainParams;
+    Explain => "explain", ExplainParams => ExplainResponse;
     FindWithHint => "find_with_hint", FindWithHintParams;
 
     // Collection & schema
+    CollectionList => "collection_list", NoParams => CollectionListResponse;
     CollectionCreate => "collection_create", CollectionCreateParams;
     CollectionDrop => "collection_drop", CollectionDropParams;
     CollectionRename => "collection_rename", CollectionRenameParams;
@@ -110,6 +124,7 @@ tools! {
     ListenerDisable => "listener_disable", ListenerIdParams;
 
     // Database & admin
+    DbStats => "db_stats", NoParams => DbStatsResponse;
     DbOpen => "db_open", DbOpenParams;
     AdminCollectionList => "admin_collection_list", AdminKeyParams;
     AdminCollectionCreateSystem => "admin_collection_create_system", AdminCollectionParams;

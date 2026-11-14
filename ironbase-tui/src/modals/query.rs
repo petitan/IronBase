@@ -260,115 +260,56 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
     ))];
 
     if let Some(ref explain) = state.explain_result {
-        // Extract plan details
-        let plan_type = explain
-            .get("plan_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown");
-
-        let index_name = explain
-            .get("index_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
-
+        let plan = &explain.chosen_plan;
+        let plan_type = plan.query_plan.as_str();
+        let index_name = plan.index_used.as_deref().unwrap_or("-");
         let estimated_rows = explain
-            .get("estimated_rows")
-            .and_then(|v| v.as_u64())
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "?".to_string());
-
-        let selectivity = explain
-            .get("selectivity")
-            .and_then(|v| v.as_f64())
-            .map(|s| format!("{:.4}", s))
-            .unwrap_or_else(|| "?".to_string());
-
-        let uses_mcv = explain
-            .get("uses_mcv")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let uses_histogram = explain
-            .get("uses_histogram")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .estimated_rows
+            .map(|n| format!("{}", n))
+            .unwrap_or_else(|| "-".to_string());
+        let stage = plan.stage.as_deref().unwrap_or("-");
+        let cost = plan.estimated_cost.as_deref().unwrap_or("-");
 
         // Plan type line with icon
         let plan_icon = match plan_type {
-            "IndexScan" | "SparseIndexScan" => "🔍",
+            "IndexScan" | "SparseIndexScan" | "IndexRangeScan" | "MultiValueScan" => "🔍",
             "CollectionScan" => "📋",
             "CompoundIndexScan" => "🔎",
             _ => "❓",
         };
 
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled("Plan: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{} {}", plan_icon, plan_type),
-                Style::default().fg(theme.fg).bold(),
-            ),
-        ]));
-
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled("Index: ", Style::default().fg(theme.muted)),
-            Span::styled(
-                index_name,
-                if index_name == "-" {
-                    Style::default().fg(theme.warning)
-                } else {
-                    Style::default().fg(theme.success)
-                },
-            ),
-        ]));
-
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled("Est. rows: ", Style::default().fg(theme.muted)),
-            Span::styled(estimated_rows, Style::default().fg(theme.fg)),
-        ]));
-
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled("Selectivity: ", Style::default().fg(theme.muted)),
-            Span::styled(selectivity, Style::default().fg(theme.fg)),
-        ]));
-
-        // Statistics usage
-        let stats_info = match (uses_mcv, uses_histogram) {
-            (true, true) => "MCV + Histogram",
-            (true, false) => "MCV",
-            (false, true) => "Histogram",
-            (false, false) => "Basic",
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled("Statistics: ", Style::default().fg(theme.muted)),
-            Span::styled(stats_info, Style::default().fg(theme.fg)),
-        ]));
-
-        // Show raw JSON if available (for debugging)
-        if let Some(raw) = explain.get("raw") {
-            let raw_str = serde_json::to_string_pretty(raw).unwrap_or_default();
-            lines.push(Line::from(Span::styled(
-                "│",
-                Style::default().fg(theme.accent),
-            )));
-            lines.push(Line::from(vec![
+        let field = |label: &'static str, value: String, style: Style| {
+            Line::from(vec![
                 Span::styled("│ ", Style::default().fg(theme.accent)),
-                Span::styled("Raw: ", Style::default().fg(theme.muted)),
-            ]));
-            for raw_line in raw_str.lines().take(5) {
-                lines.push(Line::from(vec![
-                    Span::styled("│   ", Style::default().fg(theme.accent)),
-                    Span::styled(
-                        truncate(raw_line, area.width.saturating_sub(6) as usize),
-                        Style::default().fg(theme.muted),
-                    ),
-                ]));
-            }
+                Span::styled(label, Style::default().fg(theme.muted)),
+                Span::styled(value, style),
+            ])
+        };
+        let plain = Style::default().fg(theme.fg);
+
+        lines.push(field(
+            "Plan: ",
+            format!("{} {}", plan_icon, plan_type),
+            plain.bold(),
+        ));
+        lines.push(field(
+            "Index: ",
+            index_name.to_string(),
+            if index_name == "-" {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.success)
+            },
+        ));
+        lines.push(field("Est. rows: ", estimated_rows, plain));
+        lines.push(field("Stage: ", stage.to_string(), plain));
+        lines.push(field("Cost: ", cost.to_string(), plain));
+        if let Some(ref reason) = explain.selection_reason {
+            lines.push(field(
+                "Reason: ",
+                truncate(reason, area.width.saturating_sub(10) as usize),
+                Style::default().fg(theme.muted),
+            ));
         }
     } else {
         lines.push(Line::from(vec![

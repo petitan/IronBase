@@ -26,7 +26,7 @@ pub(crate) async fn handle_vector_open(app: &mut App) {
 
     // Load vector indexes for this collection
     if let Some(ref db) = app.db {
-        if let Ok(indexes) = db.list_vector_indexes(&collection).await {
+        if let Ok(indexes) = db.vector_indexes(&collection).await {
             app.vector_state.update_indexes(indexes);
 
             // Pre-fill search field if we have an index
@@ -168,7 +168,7 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
                         app.vector_state.clear_create_form();
 
                         // Refresh index list
-                        if let Ok(indexes) = db.list_vector_indexes(&collection).await {
+                        if let Ok(indexes) = db.vector_indexes(&collection).await {
                             app.vector_state.update_indexes(indexes);
                         }
                     }

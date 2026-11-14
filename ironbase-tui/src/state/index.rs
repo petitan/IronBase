@@ -1,5 +1,8 @@
 //! Index management state
 
+use crate::state::vector::DistanceMetric;
+use ironbase_mcp_types::responses::{BTreeIndexStats, IndexListAll};
+
 /// Index statistics for a single index
 #[derive(Debug, Clone, Default)]
 pub struct IndexStatistics {
@@ -17,33 +20,20 @@ pub struct IndexStatistics {
     pub has_mcv: bool,
 }
 
-impl IndexStatistics {
-    /// Parse from JSON value returned by MCP
-    pub fn from_value(v: &serde_json::Value) -> Self {
+impl From<BTreeIndexStats> for IndexStatistics {
+    fn from(s: BTreeIndexStats) -> Self {
         Self {
-            name: v
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            field: v
-                .get("field")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            num_keys: v.get("num_keys").and_then(|v| v.as_u64()).unwrap_or(0),
-            distinct_count: v
-                .get("distinct_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0),
-            has_histogram: v
-                .get("has_histogram")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            has_mcv: v.get("has_mcv").and_then(|v| v.as_bool()).unwrap_or(false),
+            name: s.name,
+            field: s.field,
+            num_keys: s.num_keys,
+            distinct_count: s.distinct_count,
+            has_histogram: s.has_histogram,
+            has_mcv: s.has_mcv,
         }
     }
+}
 
+impl IndexStatistics {
     /// Calculate staleness indicator (rough estimate)
     /// Returns a color hint: "green" (good), "yellow" (stale), "red" (very stale)
     pub fn staleness_hint(&self) -> &'static str {
@@ -71,11 +61,64 @@ pub struct IndexEntry {
     pub detail: String,
 }
 
+impl IndexEntry {
+    /// Entries of an `index_list` without `type`: the B+ tree names, with each
+    /// fulltext, fuzzy and vector index (which the engine also lists among the
+    /// B+ tree names) moved to the end under its own kind
+    pub fn from_index_list(list: IndexListAll) -> Vec<Self> {
+        let mut entries: Vec<Self> = list
+            .btree_indexes
+            .into_iter()
+            .map(|name| Self {
+                name,
+                kind: IndexKind::BTree,
+                detail: String::new(),
+            })
+            .collect();
+        let typed = list
+            .fulltext_indexes
+            .into_iter()
+            .map(|idx| Self {
+                detail: format!(
+                    "{} ({}, {} docs)",
+                    idx.field, idx.language, idx.num_documents
+                ),
+                name: idx.name,
+                kind: IndexKind::Fulltext,
+            })
+            .chain(list.fuzzy_indexes.into_iter().map(|idx| Self {
+                detail: format!(
+                    "{} ({}, {}, {} entries)",
+                    idx.field, idx.algorithm, idx.threshold, idx.num_entries
+                ),
+                name: idx.name,
+                kind: IndexKind::Fuzzy,
+            }))
+            .chain(list.vector_indexes.into_iter().map(|idx| Self {
+                detail: format!(
+                    "{} ({}d, {}, {} vecs)",
+                    idx.field,
+                    idx.dim,
+                    DistanceMetric::from(idx.metric).as_str(),
+                    idx.vector_count
+                ),
+                name: idx.name,
+                kind: IndexKind::Vector,
+            }));
+        for entry in typed {
+            entries.retain(|e| e.name != entry.name);
+            entries.push(entry);
+        }
+        entries
+    }
+}
+
 /// Index type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     BTree,
     Fulltext,
+    Fuzzy,
     Vector,
 }
 
@@ -84,6 +127,7 @@ impl IndexKind {
         match self {
             IndexKind::BTree => "B+",
             IndexKind::Fulltext => "FT",
+            IndexKind::Fuzzy => "FZ",
             IndexKind::Vector => "VEC",
         }
     }
@@ -141,9 +185,9 @@ impl IndexState {
         }
     }
 
-    /// Update statistics from MCP response
-    pub fn update_statistics(&mut self, stats: Vec<serde_json::Value>) {
-        self.statistics = stats.iter().map(IndexStatistics::from_value).collect();
+    /// Update statistics from the `index_stats` response
+    pub fn update_statistics(&mut self, stats: Vec<BTreeIndexStats>) {
+        self.statistics = stats.into_iter().map(IndexStatistics::from).collect();
         self.is_analyzing = false;
     }
 

@@ -2,6 +2,8 @@
 
 use crate::app::App;
 use crossterm::event::KeyCode;
+use ironbase_mcp_types::params::NoParams;
+use ironbase_mcp_types::tools::DbStats;
 
 /// Server info modal key handler with scrolling support
 pub(crate) fn handle_server_info_key(app: &mut App, key: KeyCode) {
@@ -40,8 +42,11 @@ pub(crate) async fn handle_server_info_open(app: &mut App) {
     // Load data from MCP server
     if let Some(ref db) = app.db {
         // Fetch all three in parallel
-        let (stats_result, tools_result, prompts_result) =
-            tokio::join!(db.db_stats(), db.tools_list(), db.prompts_list());
+        let (stats_result, tools_result, prompts_result) = tokio::join!(
+            db.call::<DbStats>(&NoParams {}),
+            db.tools_list(),
+            db.prompts_list()
+        );
 
         match (stats_result, tools_result, prompts_result) {
             (Ok(stats), Ok(tools), Ok(prompts)) => {

@@ -48,6 +48,10 @@ where
     Ok(v.and_then(|val| val.as_str().map(str::to_string)))
 }
 
+/// Arguments of a tool that takes none (`collection_list`, `db_stats`): `{}`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoParams {}
+
 // ============================================================================
 // CRUD Tool Parameters
 // ============================================================================

@@ -11,7 +11,11 @@ use crate::testing::{
     app_with_server, numbered_docs, press, press_with, render_to_string, type_text, FakeServer,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
-use serde_json::json;
+use ironbase_mcp_types::responses::{
+    FulltextIndexInfo, FuzzyIndexInfo, HnswParams, IndexListAll, IndexListResponse,
+    IndexStatsResponse, TypedIndexList, VectorIndexInfo, VectorMetric,
+};
+use serde_json::{json, to_value};
 use std::sync::Arc;
 
 /// "users" (30 docs) and "visits" (5 docs)
@@ -20,6 +24,39 @@ fn two_collections() -> Arc<FakeServer> {
         ("users", numbered_docs(30)),
         ("visits", numbered_docs(5)),
     ])
+}
+
+/// An `index_list` answer without `type`, as the server serializes it
+fn index_list(
+    btree: Vec<&str>,
+    fulltext: Vec<FulltextIndexInfo>,
+    fuzzy: Vec<FuzzyIndexInfo>,
+    vector: Vec<VectorIndexInfo>,
+) -> serde_json::Value {
+    let btree = btree.into_iter().map(String::from).collect();
+    to_value(IndexListResponse::All(IndexListAll::new(
+        btree, fulltext, fuzzy, vector,
+    )))
+    .unwrap()
+}
+
+/// A 3-dimensional vector index with 2 vectors
+fn vector_index(name: &str, field: &str, metric: VectorMetric) -> VectorIndexInfo {
+    VectorIndexInfo {
+        name: name.into(),
+        field: field.into(),
+        dim: 3,
+        metric,
+        max_vectors: 100_000,
+        vector_count: 2,
+        cache_file: format!("{name}.hnsw"),
+        created_at: "2026-11-14T10:00:00Z".into(),
+        hnsw_params: HnswParams {
+            m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+        },
+    }
 }
 
 async fn shift(app: &mut App, c: char) {
@@ -206,9 +243,12 @@ async fn test_index_list_drop_flow() {
     let server = two_collections();
     server.respond(
         "index_list",
-        json!({"btree_indexes": ["users_id", "users_age"]}),
+        index_list(vec!["users_id", "users_age"], vec![], vec![], vec![]),
     );
-    server.respond("index_stats", json!({"indexes": []}));
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
     server.respond("index_drop", json!({"success": true}));
     let mut app = app_with_server(&server).await;
 
@@ -253,12 +293,16 @@ async fn test_index_list_drop_flow() {
 #[tokio::test]
 async fn test_vector_index_drop_executes_with_captured_names() {
     let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    // Scripted after loading: only the vector modal asks `index_list` with `type: vector`
     server.respond(
         "index_list",
-        json!({"btree_indexes": [], "indexes": [{"name": "users_emb_vec", "field": "emb", "dimension": 3}]}),
+        to_value(IndexListResponse::Vector(TypedIndexList::new(vec![
+            vector_index("users_emb_vec", "emb", VectorMetric::Cosine),
+        ])))
+        .unwrap(),
     );
     server.respond("index_drop", json!({"success": true}));
-    let mut app = app_with_server(&server).await;
 
     shift(&mut app, 'V').await;
     assert_eq!(app.modal, Some(Modal::VectorSearch));
@@ -656,10 +700,20 @@ async fn test_j_and_k_go_into_fulltext_query() {
     let server = two_collections();
     server.respond(
         "index_list",
-        json!({
-            "btree_indexes": [],
-            "fulltext_indexes": [{"name": "users_bio_fts", "field": "bio", "language": "english"}]
-        }),
+        index_list(
+            vec!["users_bio_fts", "users_id"],
+            vec![FulltextIndexInfo {
+                name: "users_bio_fts".into(),
+                field: "bio".into(),
+                language: "english".into(),
+                min_word_length: 2,
+                accent_folding: true,
+                num_documents: 0,
+                num_tokens: 0,
+            }],
+            vec![],
+            vec![],
+        ),
     );
     let mut app = app_with_server(&server).await;
 
@@ -846,4 +900,132 @@ async fn test_modals_opened_by_keys_render_at_all_sizes() {
             render_to_string(&app, width, height);
         }
     }
+}
+
+// === Read-side responses: the server's real shapes (mcp-server/tests/golden/response_wire.txt) ===
+
+/// `index_list` without `type`, as the server sends it (golden "all types")
+const INDEX_LIST_ALL: &str = r#"{"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"fulltext_indexes":[{"name":"users_bio_fts","field":"bio","language":"hungarian","min_word_length":2,"accent_folding":true,"num_documents":3,"num_tokens":6}],"fuzzy_indexes":[{"name":"users_name_fuzzy","field":"name","algorithm":"jarowinkler","threshold":0.8,"num_entries":4}],"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","max_vectors":100000,"vector_count":3,"cache_file":"users_vec_emb.hnsw","created_at":"2026-11-14T10:00:00Z","hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}],"summary":{"btree_count":7,"fulltext_count":1,"fuzzy_count":1,"vector_count":1,"total":10}}"#;
+
+fn wire(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap()
+}
+
+/// The line of `screen` that contains `needle`
+fn line_with<'a>(screen: &'a str, needle: &str) -> &'a str {
+    screen
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{screen}"))
+}
+
+#[tokio::test]
+async fn test_explain_modal_shows_real_plan_fields() {
+    let server = two_collections();
+    server.respond(
+        "explain",
+        wire(
+            r#"{"plan":{"chosenPlan":{"queryPlan":"IndexScan","indexUsed":"users_email","field":"email","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"String(\"bea@example.com\")","estimatedCost":"O(log n)"},"selectionReason":"Index users_email on field email (selectivity: 0.2500, method: uniform, est. rows: 1)","estimatedRows":1.0,"candidates":[],"candidateCount":1}}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+
+    press(&mut app, KeyCode::Char('a')).await;
+    press(&mut app, KeyCode::Char('r')).await;
+    assert_eq!(app.modal, Some(Modal::Query));
+    press_with(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+
+    assert_eq!(server.calls_to("explain").len(), 1);
+    let screen = render_to_string(&app, 140, 45);
+    assert!(
+        line_with(&screen, "Plan:").contains("IndexScan"),
+        "{screen}"
+    );
+    assert!(
+        line_with(&screen, "Index:").contains("users_email"),
+        "{screen}"
+    );
+    assert!(line_with(&screen, "Est. rows:").contains('1'), "{screen}");
+    assert!(
+        line_with(&screen, "Stage:").contains("FETCH_WITH_INDEX"),
+        "{screen}"
+    );
+    assert!(line_with(&screen, "Cost:").contains("O(log n)"), "{screen}");
+    assert!(!screen.contains("Unknown"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_server_info_shows_index_totals() {
+    let server = two_collections();
+    server.respond(
+        "db_stats",
+        wire(
+            r#"{"database":{"path":"/data/test.mlite","file_size_bytes":71483,"file_size":"69.81 KB"},"collections":[{"name":"users","document_count":4,"btree_index_count":7,"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"vector_index_count":1,"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","vector_count":3}],"total_vectors":3}],"summary":{"collection_count":1,"total_documents":4,"total_btree_indexes":7,"total_vector_indexes":1,"total_vectors":3},"server":{"version":"1.0.0","protocol":"http","host":"127.0.0.1","port":8080,"require_api_key":true},"storage_wastage":{"file_size_bytes":71483,"file_size_mb":0,"estimated_live_bytes":0,"estimated_live_mb":0,"bloat_ratio":"infinity (never compacted)","total_writes":4,"total_live":4,"dead_writes":0}}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+
+    shift(&mut app, 'I').await;
+
+    assert_eq!(app.modal, Some(Modal::ServerInfo));
+    let screen = render_to_string(&app, 140, 45);
+    assert!(
+        line_with(&screen, "Osszes index:").contains('7'),
+        "{screen}"
+    );
+    assert!(
+        line_with(&screen, "Vektor index:").contains("1 (3 vektor)"),
+        "{screen}"
+    );
+    assert!(
+        line_with(&screen, "Szerver:").contains("http://127.0.0.1:8080"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn test_index_list_shows_fuzzy_and_vector_indexes() {
+    let server = two_collections();
+    server.respond("index_list", wire(INDEX_LIST_ALL));
+    let mut app = app_with_server(&server).await;
+
+    press(&mut app, KeyCode::Char('a')).await;
+    press(&mut app, KeyCode::Char('x')).await;
+
+    assert_eq!(app.modal, Some(Modal::Index));
+    let screen = render_to_string(&app, 140, 45);
+    let fuzzy = line_with(&screen, "users_name_fuzzy");
+    assert!(fuzzy.contains("[FZ]"), "{fuzzy}");
+    assert!(
+        fuzzy.contains("name (jarowinkler, 0.8, 4 entries)"),
+        "{fuzzy}"
+    );
+    let vector = line_with(&screen, "users_vec_emb");
+    assert!(vector.contains("[VEC]"), "{vector}");
+    assert!(vector.contains("emb (3d, dot_product, 3 vecs)"), "{vector}");
+}
+
+#[tokio::test]
+async fn test_vector_index_list_shows_dim_and_metric() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    // `index_list` with `type: vector`, as the server sends it (golden "vector")
+    server.respond(
+        "index_list",
+        wire(
+            r#"{"indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","max_vectors":100000,"vector_count":3,"cache_file":"users_vec_emb.hnsw","created_at":"2026-11-14T10:00:00Z","hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}],"count":1}"#,
+        ),
+    );
+
+    shift(&mut app, 'V').await;
+    press(&mut app, KeyCode::Tab).await;
+    press(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.vector_state.active_tab, VectorTab::ListIndexes);
+
+    let screen = render_to_string(&app, 140, 45);
+    let line = line_with(&screen, "users_vec_emb");
+    assert!(
+        line.contains("users_vec_emb | emb | dim:3 | dot_product | 3 vectors"),
+        "{line}"
+    );
 }

@@ -7,6 +7,10 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use ironbase_mcp_types::responses::{
+    ExplainResponse, IndexListAll, IndexListResponse, IndexStatsResponse, TypedIndexList,
+};
+
 use super::fusion::apply_document_qualification;
 use super::helpers::{
     parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT,
@@ -95,58 +99,45 @@ fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     let p: IndexListParams = IndexListParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let index_type = p.index_type.as_deref();
-
-    match index_type {
+    let response = match p.index_type.as_deref() {
         Some("btree") => {
-            let indexes = adapter.list_indexes(&p.collection)?;
-            Ok(json!({"indexes": indexes, "count": indexes.len()}))
+            IndexListResponse::BTree(TypedIndexList::new(adapter.list_indexes(&p.collection)?))
         }
-        Some("fulltext") => {
-            let indexes = adapter.list_fulltext_indexes(&p.collection)?;
-            Ok(json!({"indexes": indexes, "count": indexes.len()}))
+        Some("fulltext") => IndexListResponse::Fulltext(TypedIndexList::new(
+            adapter.fulltext_index_infos(&p.collection)?,
+        )),
+        Some("fuzzy") => IndexListResponse::Fuzzy(TypedIndexList::new(
+            adapter.fuzzy_index_infos(&p.collection)?,
+        )),
+        Some("vector") => IndexListResponse::Vector(TypedIndexList::new(
+            adapter.vector_index_infos(&p.collection)?,
+        )),
+        Some(other) => {
+            return Err(McpError::invalid_params(format!(
+                "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
+                other
+            )))
         }
-        Some("fuzzy") => {
-            let indexes = adapter.list_fuzzy_indexes(&p.collection)?;
-            Ok(json!({"indexes": indexes, "count": indexes.len()}))
-        }
-        Some("vector") => {
-            let indexes = adapter.list_vector_indexes(&p.collection)?;
-            Ok(json!({"indexes": indexes, "count": indexes.len()}))
-        }
-        Some(other) => Err(McpError::invalid_params(format!(
-            "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
-            other
-        ))),
         None => {
             // No filter: list all subtypes (fuzzy now included — was missing before)
             let btree_indexes = adapter.list_indexes(&p.collection)?;
             let fulltext_indexes = adapter
-                .list_fulltext_indexes(&p.collection)
+                .fulltext_index_infos(&p.collection)
                 .unwrap_or_default();
-            let fuzzy_indexes = adapter
-                .list_fuzzy_indexes(&p.collection)
-                .unwrap_or_default();
+            let fuzzy_indexes = adapter.fuzzy_index_infos(&p.collection).unwrap_or_default();
             let vector_indexes = adapter
-                .list_vector_indexes(&p.collection)
+                .vector_index_infos(&p.collection)
                 .unwrap_or_default();
 
-            Ok(json!({
-                "btree_indexes": btree_indexes,
-                "fulltext_indexes": fulltext_indexes,
-                "fuzzy_indexes": fuzzy_indexes,
-                "vector_indexes": vector_indexes,
-                "summary": {
-                    "btree_count": btree_indexes.len(),
-                    "fulltext_count": fulltext_indexes.len(),
-                    "fuzzy_count": fuzzy_indexes.len(),
-                    "vector_count": vector_indexes.len(),
-                    "total": btree_indexes.len() + fulltext_indexes.len()
-                        + fuzzy_indexes.len() + vector_indexes.len()
-                }
-            }))
+            IndexListResponse::All(IndexListAll::new(
+                btree_indexes,
+                fulltext_indexes,
+                fuzzy_indexes,
+                vector_indexes,
+            ))
         }
-    }
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -228,13 +219,19 @@ fn handle_index_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
     let p: IndexListParams = IndexListParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let index_type = p.index_type.as_deref().unwrap_or("btree");
-
-    let stats = match index_type {
-        "btree" => adapter.get_index_statistics(&p.collection)?,
-        "fulltext" => adapter.list_fulltext_indexes(&p.collection)?,
-        "fuzzy" => adapter.list_fuzzy_indexes(&p.collection)?,
-        "vector" => adapter.list_vector_indexes(&p.collection)?,
+    let response = match p.index_type.as_deref().unwrap_or("btree") {
+        "btree" => IndexStatsResponse::BTree(TypedIndexList::new(
+            adapter.get_index_statistics(&p.collection)?,
+        )),
+        "fulltext" => IndexStatsResponse::Fulltext(TypedIndexList::new(
+            adapter.fulltext_index_infos(&p.collection)?,
+        )),
+        "fuzzy" => IndexStatsResponse::Fuzzy(TypedIndexList::new(
+            adapter.fuzzy_index_infos(&p.collection)?,
+        )),
+        "vector" => IndexStatsResponse::Vector(TypedIndexList::new(
+            adapter.vector_index_infos(&p.collection)?,
+        )),
         other => {
             return Err(McpError::invalid_params(format!(
                 "Unknown index type '{}'. Use one of: btree, fulltext, fuzzy, vector",
@@ -242,11 +239,7 @@ fn handle_index_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
             )))
         }
     };
-    Ok(json!({
-        "type": index_type,
-        "indexes": stats,
-        "count": stats.len()
-    }))
+    Ok(serde_json::to_value(response)?)
 }
 
 fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -441,7 +434,7 @@ fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
     validate_collection_name(&p.collection)?;
 
     let plan = adapter.explain(&p.collection, p.query)?;
-    Ok(json!({"plan": plan}))
+    Ok(serde_json::to_value(ExplainResponse { plan })?)
 }
 
 fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

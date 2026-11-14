@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI shows real explain, index and server values; typed MCP responses for the read tools (ironbase-core 0.3.463, mcp-server 1.0.661)
+
+Phase 2b of the Tuti TUI overhaul. The server's response JSON is unchanged.
+
+- **`ironbase-mcp-types` gains response types** for `collection_list`, `find`, `count`, `index_list`,
+  `index_stats`, `explain` and `db_stats` (`responses` module); each tool marker's `Resp` is now its
+  struct. `index_list` is an untagged enum (its shape depends on `type`), `index_stats` is tagged by
+  `type`, and the engine's query plan in `explain` stays open JSON with a typed `summary()` view.
+- **The server builds these seven responses from the shared structs.** A new golden test
+  (`mcp-server/tests/response_wire_golden.rs`, 41 cases) was recorded on the previous code and is
+  reproduced byte for byte; it normalises only file sizes, paths, timestamps, the server version and
+  hash-map ordering.
+- **Tuti TUI reads them through one typed call** (`McpClient::call::<T>()`); a missing field is now an
+  error instead of a silent `0` / `"?"`. Fixed with it:
+  - the explain modal always showed "Unknown" (it read field names the server never sends); it now shows
+    the plan, index, estimated rows, stage, cost and reason;
+  - server info never showed index totals;
+  - fuzzy indexes were missing from the index list (now shown as `[FZ]`);
+  - vector index dimension showed 0 (`dimension` vs the server's `dim`) and the `dotproduct` metric was
+    not recognised.
+- The TUI test server now produces its canned answers from the same structs, so a test can no longer
+  pin a response shape the real server does not send.
+
 ### Added — `ironbase-mcp-types`: shared MCP tool argument types (ironbase-core 0.3.462, mcp-server 1.0.660)
 
 Phase 2a of the Tuti TUI overhaul. No change to the wire format or to server behaviour.

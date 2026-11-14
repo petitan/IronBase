@@ -19,12 +19,13 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
 
     // Get list of fulltext indexes for this collection
     let indexed_fields = if let Some(ref db) = app.db {
-        match db.list_indexes(collection).await {
-            Ok(indexes) => {
+        match db.index_entries(collection).await {
+            Ok(entries) => {
                 // Filter to only fulltext indexes (format: "{collection}_{field}_fts")
                 let prefix = format!("{}_", collection);
-                indexes
+                entries
                     .into_iter()
+                    .map(|e| e.name)
                     .filter(|idx| idx.ends_with("_fts"))
                     .filter_map(|idx| {
                         // Extract field name: remove "_fts" suffix and collection prefix

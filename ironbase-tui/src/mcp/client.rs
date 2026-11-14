@@ -4,6 +4,7 @@ use crate::logging::{redact_arguments, sanitize_for_log};
 use crate::mcp::error::{McpError, McpResult};
 use crate::mcp::protocol::{JsonRpcRequest, ToolCallResult};
 use crate::mcp::transport::{HttpTransport, StdioTransport, Transport};
+use ironbase_mcp_types::Tool;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
@@ -134,26 +135,20 @@ impl McpClient {
         Ok(value)
     }
 
+    /// Call the tool `T` with typed arguments. The result must parse as
+    /// `T::Resp`: a missing or wrong-typed field is an error, never a default.
+    pub async fn call<T: Tool>(&self, args: &T::Args) -> McpResult<T::Resp> {
+        let result = self.call_tool(T::NAME, serde_json::to_value(args)?).await?;
+        serde_json::from_value(result)
+            .map_err(|e| McpError::invalid_response(format!("{}: {}", T::NAME, e)))
+    }
+
     /// Close the connection
     pub async fn close(&self) -> McpResult<()> {
         self.transport.close().await
     }
 
     // === High-level database operations ===
-
-    /// List all collections
-    pub async fn list_collections(&self) -> McpResult<Vec<String>> {
-        let result = self
-            .call_tool("collection_list", serde_json::json!({}))
-            .await?;
-
-        // Result is {"collections": ["name1", "name2", ...]}
-        let names: Vec<String> = result
-            .get("collections")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(names)
-    }
 
     /// Create a new collection
     pub async fn create_collection(&self, name: &str) -> McpResult<()> {
@@ -171,64 +166,6 @@ impl McpClient {
         });
         self.call_tool("collection_drop", args).await?;
         Ok(())
-    }
-
-    /// Find documents in a collection
-    pub async fn find(
-        &self,
-        collection: &str,
-        query: &Value,
-        skip: Option<usize>,
-        limit: Option<usize>,
-    ) -> McpResult<Vec<Value>> {
-        self.find_with_sort(collection, query, skip, limit, None)
-            .await
-    }
-
-    /// Find documents with optional sort
-    pub async fn find_with_sort(
-        &self,
-        collection: &str,
-        query: &Value,
-        skip: Option<usize>,
-        limit: Option<usize>,
-        sort: Option<&Value>,
-    ) -> McpResult<Vec<Value>> {
-        let mut args = serde_json::json!({
-            "collection": collection,
-            "query": query
-        });
-
-        if let Some(s) = skip {
-            args["skip"] = serde_json::json!(s);
-        }
-        if let Some(l) = limit {
-            args["limit"] = serde_json::json!(l);
-        }
-        if let Some(sort_obj) = sort {
-            args["sort"] = sort_obj.clone();
-        }
-
-        let result = self.call_tool("find", args).await?;
-        // Result is {"count": N, "documents": [...]}
-        let docs: Vec<Value> = result
-            .get("documents")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(docs)
-    }
-
-    /// Count documents matching a query
-    pub async fn count_documents(&self, collection: &str, query: &Value) -> McpResult<u64> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "query": query
-        });
-
-        let result = self.call_tool("count", args).await?;
-        // Result is {"count": 123}
-        let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-        Ok(count)
     }
 
     /// Insert one document
@@ -285,97 +222,6 @@ impl McpClient {
             .unwrap_or(0);
 
         Ok(count)
-    }
-
-    /// Explain query plan
-    pub async fn explain(&self, collection: &str, query: &Value) -> McpResult<Value> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "query": query
-        });
-
-        let result = self.call_tool("explain", args).await?;
-        Ok(result
-            .get("plan")
-            .cloned()
-            .unwrap_or(serde_json::json!(null)))
-    }
-
-    /// List indexes for a collection (names only, for backward compat)
-    pub async fn list_indexes(&self, collection: &str) -> McpResult<Vec<String>> {
-        let entries = self.list_indexes_typed(collection).await?;
-        Ok(entries.into_iter().map(|e| e.name).collect())
-    }
-
-    /// List indexes with type information (btree/fulltext/vector)
-    pub async fn list_indexes_typed(
-        &self,
-        collection: &str,
-    ) -> McpResult<Vec<crate::state::index::IndexEntry>> {
-        use crate::state::index::{IndexEntry, IndexKind};
-
-        let args = serde_json::json!({
-            "collection": collection
-        });
-
-        let result = self.call_tool("index_list", args).await?;
-        let mut entries = Vec::new();
-
-        // B+ tree indexes (simple string names)
-        if let Some(btree) = result.get("btree_indexes").and_then(|v| v.as_array()) {
-            for idx in btree {
-                if let Some(name) = idx.as_str() {
-                    entries.push(IndexEntry {
-                        name: name.to_string(),
-                        kind: IndexKind::BTree,
-                        detail: String::new(),
-                    });
-                }
-            }
-        }
-
-        // Fulltext indexes (objects with name, field, language, etc.)
-        if let Some(ft) = result.get("fulltext_indexes").and_then(|v| v.as_array()) {
-            for idx in ft {
-                let name = idx.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
-                let lang = idx.get("language").and_then(|v| v.as_str()).unwrap_or("");
-                let docs = idx
-                    .get("num_documents")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                // Remove from btree list if present (server includes fts in both)
-                entries.retain(|e| e.name != name);
-                entries.push(IndexEntry {
-                    name: name.to_string(),
-                    kind: IndexKind::Fulltext,
-                    detail: format!("{} ({}, {} docs)", field, lang, docs),
-                });
-            }
-        }
-
-        // Vector indexes (objects with name, field, dim, metric, etc.)
-        if let Some(vi) = result.get("vector_indexes").and_then(|v| v.as_array()) {
-            for idx in vi {
-                let name = idx.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
-                let dim = idx.get("dim").and_then(|v| v.as_u64()).unwrap_or(0);
-                let metric = idx.get("metric").and_then(|v| v.as_str()).unwrap_or("");
-                let count = idx
-                    .get("vector_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                // Remove from btree list if present
-                entries.retain(|e| e.name != name);
-                entries.push(IndexEntry {
-                    name: name.to_string(),
-                    kind: IndexKind::Vector,
-                    detail: format!("{} ({}d, {}, {} vecs)", field, dim, metric, count),
-                });
-            }
-        }
-
-        Ok(entries)
     }
 
     /// Create a single-field index
@@ -438,35 +284,6 @@ impl McpClient {
 
         self.call_tool("index_stats_refresh", args).await?;
         Ok(())
-    }
-
-    /// Get detailed index statistics for a collection
-    ///
-    /// Returns statistics for each index including:
-    /// - name: Index name
-    /// - field: Primary field
-    /// - num_keys: Total keys in the index
-    /// - distinct_count: Number of unique values
-    /// - has_histogram: Whether histogram data is available
-    /// - has_mcv: Whether MCV data is available
-    pub async fn get_index_statistics(&self, collection: &str) -> McpResult<Vec<Value>> {
-        let args = serde_json::json!({
-            "collection": collection
-        });
-
-        let result = self.call_tool("index_stats", args).await?;
-        // Result is {"indexes": [...], "count": N}
-        let indexes: Vec<Value> = result
-            .get("indexes")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(indexes)
-    }
-
-    /// Get database statistics
-    pub async fn db_stats(&self) -> McpResult<Value> {
-        let result = self.call_tool("db_stats", serde_json::json!({})).await?;
-        Ok(result)
     }
 
     /// Open or create a database file (switches the current database)
@@ -897,20 +714,6 @@ impl McpClient {
             .unwrap_or("")
             .to_string();
         Ok(name)
-    }
-
-    /// List all vector indexes on a collection
-    pub async fn list_vector_indexes(&self, collection: &str) -> McpResult<Vec<Value>> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "type": "vector"
-        });
-        let result = self.call_tool("index_list", args).await?;
-        let indexes: Vec<Value> = result
-            .get("indexes")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(indexes)
     }
 
     /// Drop a vector index
