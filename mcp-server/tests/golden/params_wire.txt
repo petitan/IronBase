@@ -1,0 +1,956 @@
+## FindParams / minimal
+in:  {"collection":"users"}
+ok:  FindParams { collection: "users", query: Object {}, projection: None, sort: None, limit: None, skip: None, include_total: false }
+
+## FindParams / full
+in:  {"collection":"users","query":{"age":{"$gt":18}},"projection":{"name":1},"sort":{"age":-1},"limit":10,"skip":5,"include_total":true}
+ok:  FindParams { collection: "users", query: Object {"age": Object {"$gt": Number(18)}}, projection: Some(Object {"name": Number(1)}), sort: Some(Object {"age": Number(-1)}), limit: Some(10), skip: Some(5), include_total: true }
+
+## FindParams / filter alias
+in:  {"collection":"users","filter":{"a":1}}
+ok:  FindParams { collection: "users", query: Object {"a": Number(1)}, projection: None, sort: None, limit: None, skip: None, include_total: false }
+
+## FindParams / query and filter
+in:  {"collection":"users","query":{"a":1},"filter":{"b":2}}
+err: InvalidParams duplicate field `query`
+
+## FindParams / null optionals
+in:  {"collection":"users","projection":null,"limit":null}
+ok:  FindParams { collection: "users", query: Object {}, projection: None, sort: None, limit: None, skip: None, include_total: false }
+
+## FindParams / unknown field ignored
+in:  {"collection":"users","bogus":1}
+ok:  FindParams { collection: "users", query: Object {}, projection: None, sort: None, limit: None, skip: None, include_total: false }
+
+## FindParams / missing collection
+in:  {"query":{}}
+err: InvalidParams missing field `collection`
+
+## FindParams / wrong type
+in:  {"collection":5}
+err: InvalidParams invalid type: integer `5`, expected a string
+
+## FindParams / negative limit
+in:  {"collection":"users","limit":-1}
+err: InvalidParams invalid value: integer `-1`, expected usize
+
+## FindParams / not an object
+in:  "users"
+err: InvalidParams invalid type: string "users", expected struct FindParams
+
+## FindParams / null
+in:  null
+err: InvalidParams invalid type: null, expected struct FindParams
+
+## FindParams / array
+in:  ["users"]
+err: InvalidParams invalid length 2, expected struct FindParams with 7 elements
+
+## FindOneParams / minimal
+in:  {"collection":"users"}
+ok:  FindOneParams { collection: "users", query: Object {}, projection: None }
+
+## FindOneParams / full
+in:  {"collection":"users","query":{"_id":1},"projection":{"name":1}}
+ok:  FindOneParams { collection: "users", query: Object {"_id": Number(1)}, projection: Some(Object {"name": Number(1)}) }
+
+## FindOneParams / filter alias
+in:  {"collection":"users","filter":{"_id":1}}
+ok:  FindOneParams { collection: "users", query: Object {"_id": Number(1)}, projection: None }
+
+## FindOneParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## InsertOneParams / minimal
+in:  {"collection":"users","document":{"name":"Alice"}}
+ok:  InsertOneParams { collection: "users", document: Object {"name": String("Alice")} }
+
+## InsertOneParams / non-object document
+in:  {"collection":"users","document":5}
+ok:  InsertOneParams { collection: "users", document: Number(5) }
+
+## InsertOneParams / missing document
+in:  {"collection":"users"}
+err: InvalidParams missing field `document`
+
+## InsertOneParams / missing collection
+in:  {"document":{}}
+err: InvalidParams missing field `collection`
+
+## InsertManyParams / minimal
+in:  {"collection":"users","documents":[]}
+ok:  InsertManyParams { collection: "users", documents: [] }
+
+## InsertManyParams / full
+in:  {"collection":"users","documents":[{"a":1},{"a":2}]}
+ok:  InsertManyParams { collection: "users", documents: [Object {"a": Number(1)}, Object {"a": Number(2)}] }
+
+## InsertManyParams / missing documents
+in:  {"collection":"users"}
+err: InvalidParams missing field `documents`
+
+## InsertManyParams / documents not array
+in:  {"collection":"users","documents":{"a":1}}
+err: InvalidParams invalid type: map, expected a sequence
+
+## UpdateOneParams / minimal
+in:  {"collection":"users","filter":{"a":1},"update":{"$set":{"b":2}}}
+ok:  UpdateOneParams { collection: "users", filter: Object {"a": Number(1)}, update: Object {"$set": Object {"b": Number(2)}}, upsert: false }
+
+## UpdateOneParams / full
+in:  {"collection":"users","filter":{"a":1},"update":{"$set":{"b":2}},"upsert":true}
+ok:  UpdateOneParams { collection: "users", filter: Object {"a": Number(1)}, update: Object {"$set": Object {"b": Number(2)}}, upsert: true }
+
+## UpdateOneParams / query alias
+in:  {"collection":"users","query":{"a":1},"update":{}}
+ok:  UpdateOneParams { collection: "users", filter: Object {"a": Number(1)}, update: Object {}, upsert: false }
+
+## UpdateOneParams / missing filter
+in:  {"collection":"users","update":{}}
+err: InvalidParams missing field `filter`
+
+## UpdateOneParams / missing update
+in:  {"collection":"users","filter":{}}
+err: InvalidParams missing field `update`
+
+## UpdateOneParams / upsert wrong type
+in:  {"collection":"users","filter":{},"update":{},"upsert":"yes"}
+err: InvalidParams invalid type: string "yes", expected a boolean
+
+## UpdateManyParams / minimal
+in:  {"collection":"users","filter":{"a":1},"update":{"$set":{"b":2}}}
+ok:  UpdateManyParams { collection: "users", filter: Object {"a": Number(1)}, update: Object {"$set": Object {"b": Number(2)}} }
+
+## UpdateManyParams / query alias, upsert ignored
+in:  {"collection":"users","query":{},"update":{},"upsert":true}
+ok:  UpdateManyParams { collection: "users", filter: Object {}, update: Object {} }
+
+## UpdateManyParams / missing filter
+in:  {"collection":"users","update":{}}
+err: InvalidParams missing field `filter`
+
+## DeleteParams / minimal
+in:  {"collection":"users","filter":{"a":1}}
+ok:  DeleteParams { collection: "users", filter: Object {"a": Number(1)} }
+
+## DeleteParams / query alias
+in:  {"collection":"users","query":{"a":1}}
+ok:  DeleteParams { collection: "users", filter: Object {"a": Number(1)} }
+
+## DeleteParams / missing filter
+in:  {"collection":"users"}
+err: InvalidParams missing field `filter`
+
+## CountParams / minimal
+in:  {"collection":"users"}
+ok:  CountParams { collection: "users", query: Object {} }
+
+## CountParams / full
+in:  {"collection":"users","query":{"a":1}}
+ok:  CountParams { collection: "users", query: Object {"a": Number(1)} }
+
+## CountParams / filter alias
+in:  {"collection":"users","filter":{"a":1}}
+ok:  CountParams { collection: "users", query: Object {"a": Number(1)} }
+
+## CountParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## DistinctParams / minimal
+in:  {"collection":"users","field":"city"}
+ok:  DistinctParams { collection: "users", field: "city", query: Object {}, limit: None }
+
+## DistinctParams / full
+in:  {"collection":"users","field":"city","query":{"a":1},"limit":100}
+ok:  DistinctParams { collection: "users", field: "city", query: Object {"a": Number(1)}, limit: Some(100) }
+
+## DistinctParams / filter alias
+in:  {"collection":"users","field":"city","filter":{"a":1}}
+ok:  DistinctParams { collection: "users", field: "city", query: Object {"a": Number(1)}, limit: None }
+
+## DistinctParams / missing field
+in:  {"collection":"users"}
+err: InvalidParams missing field `field`
+
+## AggregateParams / minimal
+in:  {"collection":"users","pipeline":[]}
+ok:  AggregateParams { collection: "users", pipeline: [] }
+
+## AggregateParams / full
+in:  {"collection":"users","pipeline":[{"$match":{"a":1}},{"$limit":5}]}
+ok:  AggregateParams { collection: "users", pipeline: [Object {"$match": Object {"a": Number(1)}}, Object {"$limit": Number(5)}] }
+
+## AggregateParams / missing pipeline
+in:  {"collection":"users"}
+err: InvalidParams missing field `pipeline`
+
+## AggregateParams / pipeline not array
+in:  {"collection":"users","pipeline":{"$match":{}}}
+err: InvalidParams invalid type: map, expected a sequence
+
+## IndexCreateParams / minimal
+in:  {"collection":"users"}
+ok:  IndexCreateParams { collection: "users", field: None, fields: None, unique: false, sparse: false }
+
+## IndexCreateParams / field
+in:  {"collection":"users","field":"age"}
+ok:  IndexCreateParams { collection: "users", field: Some("age"), fields: None, unique: false, sparse: false }
+
+## IndexCreateParams / full
+in:  {"collection":"users","field":"age","fields":["a","b"],"unique":true,"sparse":true}
+ok:  IndexCreateParams { collection: "users", field: Some("age"), fields: Some(["a", "b"]), unique: true, sparse: true }
+
+## IndexCreateParams / type ignored
+in:  {"collection":"users","field":"age","type":"btree"}
+ok:  IndexCreateParams { collection: "users", field: Some("age"), fields: None, unique: false, sparse: false }
+
+## IndexCreateParams / missing collection
+in:  {"field":"age"}
+err: InvalidParams missing field `collection`
+
+## IndexCreateParams / fields wrong type
+in:  {"collection":"users","fields":"age"}
+err: InvalidParams invalid type: string "age", expected a sequence
+
+## IndexListParams / minimal
+in:  {"collection":"users"}
+ok:  IndexListParams { collection: "users" }
+
+## IndexListParams / type ignored
+in:  {"collection":"users","type":"vector"}
+ok:  IndexListParams { collection: "users" }
+
+## IndexListParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## IndexDropParams / minimal
+in:  {"collection":"users","index_name":"users_age"}
+ok:  IndexDropParams { collection: "users", index_name: "users_age" }
+
+## IndexDropParams / missing index_name
+in:  {"collection":"users"}
+err: InvalidParams missing field `index_name`
+
+## FuzzyIndexParams / minimal
+in:  {"collection":"users","field":"name"}
+ok:  FuzzyIndexParams { collection: "users", field: "name", algorithm: "jaro_winkler", threshold: 0.8 }
+
+## FuzzyIndexParams / full
+in:  {"collection":"users","field":"name","algorithm":"levenshtein","threshold":0.65}
+ok:  FuzzyIndexParams { collection: "users", field: "name", algorithm: "levenshtein", threshold: 0.65 }
+
+## FuzzyIndexParams / integer threshold
+in:  {"collection":"users","field":"name","threshold":1}
+ok:  FuzzyIndexParams { collection: "users", field: "name", algorithm: "jaro_winkler", threshold: 1.0 }
+
+## FuzzyIndexParams / missing field
+in:  {"collection":"users"}
+err: InvalidParams missing field `field`
+
+## FulltextIndexParams / minimal
+in:  {"collection":"docs","field":"content"}
+ok:  FulltextIndexParams { collection: "docs", field: "content", language: "none", min_word_length: None, accent_folding: None }
+
+## FulltextIndexParams / full
+in:  {"collection":"docs","field":"content","language":"hungarian","min_word_length":3,"accent_folding":false}
+ok:  FulltextIndexParams { collection: "docs", field: "content", language: "hungarian", min_word_length: Some(3), accent_folding: Some(false) }
+
+## FulltextIndexParams / missing field
+in:  {"collection":"docs"}
+err: InvalidParams missing field `field`
+
+## FuzzySearchParams / minimal
+in:  {"collection":"users","field":"name","query":"jon"}
+ok:  FuzzySearchParams { collection: "users", field: "name", query: "jon", threshold: None, algorithm: None, limit: None, skip: None, projection: None, filter: None, highlight: false }
+
+## FuzzySearchParams / full
+in:  {"collection":"users","field":"name","query":"jon","threshold":0.7,"algorithm":"jaro_winkler","limit":5,"skip":1,"projection":{"name":1},"filter":{"active":true},"highlight":true}
+ok:  FuzzySearchParams { collection: "users", field: "name", query: "jon", threshold: Some(0.7), algorithm: Some("jaro_winkler"), limit: Some(5), skip: Some(1), projection: Some(Object {"name": Number(1)}), filter: Some(Object {"active": Bool(true)}), highlight: true }
+
+## FuzzySearchParams / empty filter is none
+in:  {"collection":"users","field":"name","query":"jon","filter":{}}
+ok:  FuzzySearchParams { collection: "users", field: "name", query: "jon", threshold: None, algorithm: None, limit: None, skip: None, projection: None, filter: None, highlight: false }
+
+## FuzzySearchParams / null filter
+in:  {"collection":"users","field":"name","query":"jon","filter":null}
+ok:  FuzzySearchParams { collection: "users", field: "name", query: "jon", threshold: None, algorithm: None, limit: None, skip: None, projection: None, filter: None, highlight: false }
+
+## FuzzySearchParams / non-object filter kept
+in:  {"collection":"users","field":"name","query":"jon","filter":[]}
+ok:  FuzzySearchParams { collection: "users", field: "name", query: "jon", threshold: None, algorithm: None, limit: None, skip: None, projection: None, filter: Some(Array []), highlight: false }
+
+## FuzzySearchParams / missing query
+in:  {"collection":"users","field":"name"}
+err: InvalidParams missing field `query`
+
+## FulltextSearchParams / minimal
+in:  {"collection":"docs","query":"rust"}
+ok:  FulltextSearchParams { collection: "docs", field: "content", fields: None, query: "rust", limit: None, skip: None, min_score: None, projection: None, mode: None, match_scope: None, filter: None, highlight: false, highlight_context: None, highlight_max_snippets: None }
+
+## FulltextSearchParams / full
+in:  {"collection":"docs","field":"title","fields":["title","content"],"query":"rust","limit":5,"skip":2,"min_score":0.5,"projection":{"title":1},"mode":"and","match_scope":"chunk","filter":{"status":"published"},"highlight":true,"highlight_context":200,"highlight_max_snippets":5}
+ok:  FulltextSearchParams { collection: "docs", field: "title", fields: Some(["title", "content"]), query: "rust", limit: Some(5), skip: Some(2), min_score: Some(0.5), projection: Some(Object {"title": Number(1)}), mode: Some("and"), match_scope: Some("chunk"), filter: Some(Object {"status": String("published")}), highlight: true, highlight_context: Some(200), highlight_max_snippets: Some(5) }
+
+## FulltextSearchParams / empty filter is none
+in:  {"collection":"docs","query":"rust","filter":{}}
+ok:  FulltextSearchParams { collection: "docs", field: "content", fields: None, query: "rust", limit: None, skip: None, min_score: None, projection: None, mode: None, match_scope: None, filter: None, highlight: false, highlight_context: None, highlight_max_snippets: None }
+
+## FulltextSearchParams / missing query
+in:  {"collection":"docs"}
+err: InvalidParams missing field `query`
+
+## FulltextSearchParams / missing collection
+in:  {"query":"rust"}
+err: InvalidParams missing field `collection`
+
+## FulltextAnalyzeParams / minimal
+in:  {"text":"A király"}
+ok:  FulltextAnalyzeParams { text: "A király", language: "none", accent_folding: true, min_word_length: None, collection: None, field: None }
+
+## FulltextAnalyzeParams / full
+in:  {"text":"A király","language":"hungarian","accent_folding":false,"min_word_length":3,"collection":"docs","field":"content"}
+ok:  FulltextAnalyzeParams { text: "A király", language: "hungarian", accent_folding: false, min_word_length: Some(3), collection: Some("docs"), field: Some("content") }
+
+## FulltextAnalyzeParams / missing text
+in:  {"language":"hungarian"}
+err: InvalidParams missing field `text`
+
+## ExplainParams / minimal
+in:  {"collection":"users"}
+ok:  ExplainParams { collection: "users", query: Object {} }
+
+## ExplainParams / full
+in:  {"collection":"users","query":{"age":3}}
+ok:  ExplainParams { collection: "users", query: Object {"age": Number(3)} }
+
+## ExplainParams / filter is not an alias
+in:  {"collection":"users","filter":{"age":3}}
+ok:  ExplainParams { collection: "users", query: Object {} }
+
+## ExplainParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## FindWithHintParams / minimal
+in:  {"collection":"users","hint":"users_age"}
+ok:  FindWithHintParams { collection: "users", query: Object {}, hint: "users_age", projection: None, sort: None, limit: None, skip: None }
+
+## FindWithHintParams / full
+in:  {"collection":"users","query":{"age":3},"hint":"users_age","projection":{"age":1},"sort":{"age":1},"limit":3,"skip":1}
+ok:  FindWithHintParams { collection: "users", query: Object {"age": Number(3)}, hint: "users_age", projection: Some(Object {"age": Number(1)}), sort: Some(Object {"age": Number(1)}), limit: Some(3), skip: Some(1) }
+
+## FindWithHintParams / missing hint
+in:  {"collection":"users"}
+err: InvalidParams missing field `hint`
+
+## ListCollectionsParams / minimal
+in:  {}
+ok:  ListCollectionsParams
+
+## ListCollectionsParams / unknown field ignored
+in:  {"x":1}
+ok:  ListCollectionsParams
+
+## ListCollectionsParams / null
+in:  null
+err: InvalidParams invalid type: null, expected struct ListCollectionsParams
+
+## CollectionCreateParams / minimal
+in:  {"collection":"users"}
+ok:  CollectionCreateParams { collection: "users" }
+
+## CollectionCreateParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## CollectionDropParams / minimal
+in:  {"collection":"users"}
+ok:  CollectionDropParams { collection: "users" }
+
+## CollectionDropParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## CollectionRenameParams / minimal
+in:  {"old_collection":"a","new_collection":"b"}
+ok:  CollectionRenameParams { old_collection: "a", new_collection: "b" }
+
+## CollectionRenameParams / missing new_collection
+in:  {"old_collection":"a"}
+err: InvalidParams missing field `new_collection`
+
+## CollectionRenameParams / missing old_collection
+in:  {"new_collection":"b"}
+err: InvalidParams missing field `old_collection`
+
+## CollectionStatsParams / minimal
+in:  {"collection":"users"}
+ok:  CollectionStatsParams { collection: "users" }
+
+## CollectionStatsParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## SchemaSetParams / minimal
+in:  {"collection":"users"}
+ok:  SchemaSetParams { collection: "users", schema: None }
+
+## SchemaSetParams / full
+in:  {"collection":"users","schema":{"type":"object"}}
+ok:  SchemaSetParams { collection: "users", schema: Some(Object {"type": String("object")}) }
+
+## SchemaSetParams / null schema
+in:  {"collection":"users","schema":null}
+ok:  SchemaSetParams { collection: "users", schema: None }
+
+## SchemaSetParams / missing collection
+in:  {"schema":{}}
+err: InvalidParams missing field `collection`
+
+## SchemaGetParams / minimal
+in:  {"collection":"users"}
+ok:  SchemaGetParams { collection: "users" }
+
+## SchemaGetParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## TransactionIdParams / minimal
+in:  {"transaction_id":"42"}
+ok:  TransactionIdParams { transaction_id: "42" }
+
+## TransactionIdParams / numeric id rejected
+in:  {"transaction_id":42}
+err: InvalidParams invalid type: integer `42`, expected a string
+
+## TransactionIdParams / missing transaction_id
+in:  {}
+err: InvalidParams missing field `transaction_id`
+
+## TransactionInsertParams / minimal
+in:  {"transaction_id":"42","collection":"users","document":{"a":1}}
+ok:  TransactionInsertParams { transaction_id: "42", collection: "users", document: Object {"a": Number(1)} }
+
+## TransactionInsertParams / missing document
+in:  {"transaction_id":"42","collection":"users"}
+err: InvalidParams missing field `document`
+
+## TransactionInsertParams / missing transaction_id
+in:  {"collection":"users","document":{}}
+err: InvalidParams missing field `transaction_id`
+
+## TransactionUpdateParams / minimal
+in:  {"transaction_id":"42","collection":"users","filter":{"a":1},"update":{"$set":{"a":2}}}
+ok:  TransactionUpdateParams { transaction_id: "42", collection: "users", filter: Object {"a": Number(1)}, update: Object {"$set": Object {"a": Number(2)}} }
+
+## TransactionUpdateParams / query alias
+in:  {"transaction_id":"42","collection":"users","query":{"a":1},"update":{}}
+ok:  TransactionUpdateParams { transaction_id: "42", collection: "users", filter: Object {"a": Number(1)}, update: Object {} }
+
+## TransactionUpdateParams / missing update
+in:  {"transaction_id":"42","collection":"users","filter":{}}
+err: InvalidParams missing field `update`
+
+## TransactionDeleteParams / minimal
+in:  {"transaction_id":"42","collection":"users","filter":{"a":1}}
+ok:  TransactionDeleteParams { transaction_id: "42", collection: "users", filter: Object {"a": Number(1)} }
+
+## TransactionDeleteParams / query alias
+in:  {"transaction_id":"42","collection":"users","query":{"a":1}}
+ok:  TransactionDeleteParams { transaction_id: "42", collection: "users", filter: Object {"a": Number(1)} }
+
+## TransactionDeleteParams / missing filter
+in:  {"transaction_id":"42","collection":"users"}
+err: InvalidParams missing field `filter`
+
+## ScriptSaveParams / minimal
+in:  {"name":"s","code":"42"}
+ok:  ScriptSaveParams { name: "s", code: "42", description: None, tags: None, dependencies: None }
+
+## ScriptSaveParams / full
+in:  {"name":"s","code":"42","description":"d","tags":["a","b"],"dependencies":["x"]}
+ok:  ScriptSaveParams { name: "s", code: "42", description: Some("d"), tags: Some(["a", "b"]), dependencies: Some(["x"]) }
+
+## ScriptSaveParams / missing code
+in:  {"name":"s"}
+err: InvalidParams missing field `code`
+
+## ScriptSaveParams / tags wrong type
+in:  {"name":"s","code":"42","tags":"a"}
+err: InvalidParams invalid type: string "a", expected a sequence
+
+## ScriptListParams / minimal
+in:  {}
+ok:  ScriptListParams { tags: None, match_all: false }
+
+## ScriptListParams / full
+in:  {"tags":["a"],"match_all":true}
+ok:  ScriptListParams { tags: Some(["a"]), match_all: true }
+
+## ScriptListParams / match_all wrong type
+in:  {"match_all":1}
+err: InvalidParams invalid type: integer `1`, expected a boolean
+
+## ScriptNameParams / minimal
+in:  {"name":"s"}
+ok:  ScriptNameParams { name: "s" }
+
+## ScriptNameParams / missing name
+in:  {}
+err: InvalidParams missing field `name`
+
+## ScriptRunParams / minimal
+in:  {"name":"s"}
+ok:  ScriptRunParams { name: "s", params: None, max_operations: None }
+
+## ScriptRunParams / full
+in:  {"name":"s","params":{"x":1},"max_operations":5000}
+ok:  ScriptRunParams { name: "s", params: Some(Object {"x": Number(1)}), max_operations: Some(5000) }
+
+## ScriptRunParams / missing name
+in:  {"params":{}}
+err: InvalidParams missing field `name`
+
+## ScriptRunParams / negative max_operations
+in:  {"name":"s","max_operations":-1}
+err: InvalidParams invalid value: integer `-1`, expected u64
+
+## ScriptExecParams / minimal
+in:  {"code":"42"}
+ok:  ScriptExecParams { code: "42", params: None, max_operations: None }
+
+## ScriptExecParams / full
+in:  {"code":"42","params":{"x":1},"max_operations":5000}
+ok:  ScriptExecParams { code: "42", params: Some(Object {"x": Number(1)}), max_operations: Some(5000) }
+
+## ScriptExecParams / missing code
+in:  {}
+err: InvalidParams missing field `code`
+
+## ScriptHistoryParams / minimal
+in:  {"name":"s"}
+ok:  ScriptHistoryParams { name: "s", limit: None }
+
+## ScriptHistoryParams / full
+in:  {"name":"s","limit":3}
+ok:  ScriptHistoryParams { name: "s", limit: Some(3) }
+
+## ScriptHistoryParams / missing name
+in:  {"limit":3}
+err: InvalidParams missing field `name`
+
+## ScriptVersionParams / minimal
+in:  {"name":"s","version":2}
+ok:  ScriptVersionParams { name: "s", version: 2 }
+
+## ScriptVersionParams / missing version
+in:  {"name":"s"}
+err: InvalidParams missing field `version`
+
+## ScriptVersionParams / string version
+in:  {"name":"s","version":"2"}
+err: InvalidParams invalid type: string "2", expected u32
+
+## ScriptTagsParams / minimal
+in:  {"name":"s","tags":[]}
+ok:  ScriptTagsParams { name: "s", tags: [] }
+
+## ScriptTagsParams / full
+in:  {"name":"s","tags":["a","b"]}
+ok:  ScriptTagsParams { name: "s", tags: ["a", "b"] }
+
+## ScriptTagsParams / missing tags
+in:  {"name":"s"}
+err: InvalidParams missing field `tags`
+
+## AclSetParams / minimal
+in:  {"collection":"users","rules":[]}
+ok:  AclSetParams { collection: "users", rules: [] }
+
+## AclSetParams / full
+in:  {"collection":"users","rules":[{"ip":"10.0.0.0/8","permission":"read"}]}
+ok:  AclSetParams { collection: "users", rules: [Object {"ip": String("10.0.0.0/8"), "permission": String("read")}] }
+
+## AclSetParams / missing rules
+in:  {"collection":"users"}
+err: InvalidParams missing field `rules`
+
+## AclCollectionParams / minimal
+in:  {"collection":"users"}
+ok:  AclCollectionParams { collection: "users" }
+
+## AclCollectionParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## ListenerIdParams / minimal
+in:  {"id":"lan"}
+ok:  ListenerIdParams { id: "lan" }
+
+## ListenerIdParams / missing id
+in:  {}
+err: InvalidParams missing field `id`
+
+## ListenerAddParams / minimal
+in:  {"id":"lan","bind":"0.0.0.0:8081"}
+ok:  ListenerAddParams { id: "lan", bind: "0.0.0.0:8081", tls: false, cert_path: None, key_path: None, description: None }
+
+## ListenerAddParams / full
+in:  {"id":"lan","bind":"0.0.0.0:8443","tls":true,"cert_path":"/c.pem","key_path":"/k.pem","description":"LAN"}
+ok:  ListenerAddParams { id: "lan", bind: "0.0.0.0:8443", tls: true, cert_path: Some("/c.pem"), key_path: Some("/k.pem"), description: Some("LAN") }
+
+## ListenerAddParams / missing bind
+in:  {"id":"lan"}
+err: InvalidParams missing field `bind`
+
+## DbOpenParams / minimal
+in:  {"path":"/tmp/x.mlite"}
+ok:  DbOpenParams { path: "/tmp/x.mlite", create: false }
+
+## DbOpenParams / full
+in:  {"path":"/tmp/x.mlite","create":true}
+ok:  DbOpenParams { path: "/tmp/x.mlite", create: true }
+
+## DbOpenParams / missing path
+in:  {}
+err: InvalidParams missing field `path`
+
+## AdminCompactParams / minimal
+in:  {}
+ok:  AdminCompactParams { force: false }
+
+## AdminCompactParams / full
+in:  {"force":true}
+ok:  AdminCompactParams { force: true }
+
+## AdminCompactParams / force wrong type
+in:  {"force":"yes"}
+err: InvalidParams invalid type: string "yes", expected a boolean
+
+## AdminKeyParams / minimal
+in:  {}
+ok:  AdminKeyParams { admin_key: None }
+
+## AdminKeyParams / full
+in:  {"admin_key":"k"}
+ok:  AdminKeyParams { admin_key: Some("k") }
+
+## AdminKeyParams / admin_key wrong type
+in:  {"admin_key":1}
+err: InvalidParams invalid type: integer `1`, expected a string
+
+## AdminCollectionParams / minimal
+in:  {"collection":"_x"}
+ok:  AdminCollectionParams { collection: "_x", admin_key: None }
+
+## AdminCollectionParams / full
+in:  {"collection":"_x","admin_key":"k"}
+ok:  AdminCollectionParams { collection: "_x", admin_key: Some("k") }
+
+## AdminCollectionParams / missing collection
+in:  {"admin_key":"k"}
+err: InvalidParams missing field `collection`
+
+## AdminFlagsParams / minimal
+in:  {"collection":"x"}
+ok:  AdminFlagsParams { collection: "x", is_system: None, protected: None, hidden: None, admin_key: None }
+
+## AdminFlagsParams / full
+in:  {"collection":"x","is_system":true,"protected":false,"hidden":true,"admin_key":"k"}
+ok:  AdminFlagsParams { collection: "x", is_system: Some(true), protected: Some(false), hidden: Some(true), admin_key: Some("k") }
+
+## AdminFlagsParams / missing collection
+in:  {"hidden":true}
+err: InvalidParams missing field `collection`
+
+## AdminApiKeyCreateParams / minimal
+in:  {"name":"ci"}
+ok:  AdminApiKeyCreateParams { name: "ci", admin_key: None }
+
+## AdminApiKeyCreateParams / full
+in:  {"name":"ci","admin_key":"k"}
+ok:  AdminApiKeyCreateParams { name: "ci", admin_key: Some("k") }
+
+## AdminApiKeyCreateParams / missing name
+in:  {}
+err: InvalidParams missing field `name`
+
+## AdminApiKeyIdParams / minimal
+in:  {"id":7}
+ok:  AdminApiKeyIdParams { id: 7, admin_key: None }
+
+## AdminApiKeyIdParams / full
+in:  {"id":7,"admin_key":"k"}
+ok:  AdminApiKeyIdParams { id: 7, admin_key: Some("k") }
+
+## AdminApiKeyIdParams / missing id
+in:  {}
+err: InvalidParams missing field `id`
+
+## AdminApiKeyIdParams / string id
+in:  {"id":"7"}
+err: InvalidParams invalid type: string "7", expected u64
+
+## ApiKeyCreateParams / minimal
+in:  {"name":"ci","admin_key":"k"}
+ok:  ApiKeyCreateParams { name: "ci", admin_key: "k", expires_days: None }
+
+## ApiKeyCreateParams / full
+in:  {"name":"ci","admin_key":"k","expires_days":30}
+ok:  ApiKeyCreateParams { name: "ci", admin_key: "k", expires_days: Some(30) }
+
+## ApiKeyCreateParams / missing admin_key
+in:  {"name":"ci"}
+err: InvalidParams missing field `admin_key`
+
+## ApiKeyRevokeParams / minimal
+in:  {"key":"abc","admin_key":"k"}
+ok:  ApiKeyRevokeParams { key: "abc", admin_key: "k" }
+
+## ApiKeyRevokeParams / missing key
+in:  {"admin_key":"k"}
+err: InvalidParams missing field `key`
+
+## ApiKeyListParams / minimal
+in:  {"admin_key":"k"}
+ok:  ApiKeyListParams { admin_key: "k" }
+
+## ApiKeyListParams / missing admin_key
+in:  {}
+err: InvalidParams missing field `admin_key`
+
+## HybridSearchParams / minimal
+in:  {"collection":"kb","query":"q"}
+ok:  HybridSearchParams { collection: "kb", vector_field: "embedding", text_field: "content", vector: None, query: "q", limit: 10, vector_weight: None, fulltext_weight: None, projection: None, search_mode: None, provider: None, rerank: true, deduplicate: false, mmr_lambda: 0.7, filter: None, rrf_k: 20.0, title_field: None, mode: None, match_scope: None, text_fields: None, merge_chunks: true, group_by_document: false, max_chunks_per_doc: None }
+
+## HybridSearchParams / full
+in:  {"collection":"kb","vector_field":"vec","text_field":"body","vector":[0.1,0.25],"query":"q","limit":7,"vector_weight":0.6,"fulltext_weight":0.4,"projection":{"title":1},"search_mode":"semantic","provider":"ollama","rerank":false,"deduplicate":true,"mmr_lambda":0.3,"filter":{"year":2026},"rrf_k":60.0,"title_field":"title","mode":"and","match_scope":"chunk","text_fields":["body","title"],"merge_chunks":false,"group_by_document":true,"max_chunks_per_doc":2}
+ok:  HybridSearchParams { collection: "kb", vector_field: "vec", text_field: "body", vector: Some([0.1, 0.25]), query: "q", limit: 7, vector_weight: Some(0.6), fulltext_weight: Some(0.4), projection: Some(Object {"title": Number(1)}), search_mode: Some("semantic"), provider: Some("ollama"), rerank: false, deduplicate: true, mmr_lambda: 0.3, filter: Some(Object {"year": Number(2026)}), rrf_k: 60.0, title_field: Some("title"), mode: Some("and"), match_scope: Some("chunk"), text_fields: Some(["body", "title"]), merge_chunks: false, group_by_document: true, max_chunks_per_doc: Some(2) }
+
+## HybridSearchParams / empty filter is none
+in:  {"collection":"kb","query":"q","filter":{}}
+ok:  HybridSearchParams { collection: "kb", vector_field: "embedding", text_field: "content", vector: None, query: "q", limit: 10, vector_weight: None, fulltext_weight: None, projection: None, search_mode: None, provider: None, rerank: true, deduplicate: false, mmr_lambda: 0.7, filter: None, rrf_k: 20.0, title_field: None, mode: None, match_scope: None, text_fields: None, merge_chunks: true, group_by_document: false, max_chunks_per_doc: None }
+
+## HybridSearchParams / integer vector and rrf_k
+in:  {"collection":"kb","query":"q","vector":[1,2],"rrf_k":60}
+ok:  HybridSearchParams { collection: "kb", vector_field: "embedding", text_field: "content", vector: Some([1.0, 2.0]), query: "q", limit: 10, vector_weight: None, fulltext_weight: None, projection: None, search_mode: None, provider: None, rerank: true, deduplicate: false, mmr_lambda: 0.7, filter: None, rrf_k: 60.0, title_field: None, mode: None, match_scope: None, text_fields: None, merge_chunks: true, group_by_document: false, max_chunks_per_doc: None }
+
+## HybridSearchParams / missing query
+in:  {"collection":"kb"}
+err: InvalidParams missing field `query`
+
+## HybridSearchParams / missing collection
+in:  {"query":"q"}
+err: InvalidParams missing field `collection`
+
+## HybridSearchParams / vector wrong type
+in:  {"collection":"kb","query":"q","vector":"x"}
+err: InvalidParams invalid type: string "x", expected a sequence
+
+## RagCollectionCreateParams / minimal
+in:  {"collection":"kb"}
+ok:  RagCollectionCreateParams { collection: "kb", embedding_field: "embedding", text_field: "content", text_fields: None, context_fields: None, provider: None, language: "none" }
+
+## RagCollectionCreateParams / full
+in:  {"collection":"kb","embedding_field":"vec","text_field":"body","text_fields":["title"],"context_fields":["customer"],"provider":"ollama","language":"hungarian"}
+ok:  RagCollectionCreateParams { collection: "kb", embedding_field: "vec", text_field: "body", text_fields: Some(["title"]), context_fields: Some(["customer"]), provider: Some("ollama"), language: "hungarian" }
+
+## RagCollectionCreateParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## RagDocumentImportParams / minimal
+in:  {"collection":"kb","content":"text"}
+ok:  RagDocumentImportParams { collection: "kb", content: "text", title: None, metadata: None, doc_id: None, chunk_size: 1000, overlap: 100, mode: "auto", provider: None, if_exists: "replace", language: "none", text_fields: None, context_fields: None }
+
+## RagDocumentImportParams / full
+in:  {"collection":"kb","content":"text","title":"T","metadata":{"year":2026},"doc_id":"d1","chunk_size":500,"overlap":50,"mode":"markdown","provider":"ollama","if_exists":"skip","language":"english","text_fields":["title"],"context_fields":["customer"]}
+ok:  RagDocumentImportParams { collection: "kb", content: "text", title: Some("T"), metadata: Some(Object {"year": Number(2026)}), doc_id: Some("d1"), chunk_size: 500, overlap: 50, mode: "markdown", provider: Some("ollama"), if_exists: "skip", language: "english", text_fields: Some(["title"]), context_fields: Some(["customer"]) }
+
+## RagDocumentImportParams / missing content
+in:  {"collection":"kb"}
+err: InvalidParams missing field `content`
+
+## RagDocumentImportParams / chunk_size wrong type
+in:  {"collection":"kb","content":"text","chunk_size":"big"}
+err: InvalidParams invalid type: string "big", expected usize
+
+## RagCollectionStatsParams / minimal
+in:  {"collection":"kb"}
+ok:  RagCollectionStatsParams { collection: "kb" }
+
+## RagCollectionStatsParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## RagLoadAllChunksParams / minimal
+in:  {"collection":"kb","doc_ids":[]}
+ok:  RagLoadAllChunksParams { collection: "kb", doc_ids: [], query: None, text_field: "content", projection: None, merge_chunks: true, max_chunks_per_doc: None }
+
+## RagLoadAllChunksParams / full
+in:  {"collection":"kb","doc_ids":["d1","d2"],"query":"q","text_field":"body","projection":{"content":1},"merge_chunks":false,"max_chunks_per_doc":3}
+ok:  RagLoadAllChunksParams { collection: "kb", doc_ids: ["d1", "d2"], query: Some("q"), text_field: "body", projection: Some(Object {"content": Number(1)}), merge_chunks: false, max_chunks_per_doc: Some(3) }
+
+## RagLoadAllChunksParams / missing doc_ids
+in:  {"collection":"kb"}
+err: InvalidParams missing field `doc_ids`
+
+## VectorIndexCreateParams / minimal
+in:  {"collection":"kb","field":"embedding","dim":384}
+ok:  VectorIndexCreateParams { collection: "kb", field: "embedding", dim: 384, metric: "cosine", max_vectors: 100000, m: 16, ef_construction: 200, ef_search: 50 }
+
+## VectorIndexCreateParams / full
+in:  {"collection":"kb","field":"embedding","dim":384,"metric":"euclidean","max_vectors":5000,"m":8,"ef_construction":100,"ef_search":20}
+ok:  VectorIndexCreateParams { collection: "kb", field: "embedding", dim: 384, metric: "euclidean", max_vectors: 5000, m: 8, ef_construction: 100, ef_search: 20 }
+
+## VectorIndexCreateParams / missing dim
+in:  {"collection":"kb","field":"embedding"}
+err: InvalidParams missing field `dim`
+
+## VectorSearchParams / minimal
+in:  {"collection":"kb","vector":[0.1,0.2]}
+ok:  VectorSearchParams { collection: "kb", field: "embedding", vector: [0.1, 0.2], limit: 10, projection: None }
+
+## VectorSearchParams / full
+in:  {"collection":"kb","field":"vec","vector":[0.1,0.2],"limit":3,"projection":{"t":1}}
+ok:  VectorSearchParams { collection: "kb", field: "vec", vector: [0.1, 0.2], limit: 3, projection: Some(Object {"t": Number(1)}) }
+
+## VectorSearchParams / missing vector
+in:  {"collection":"kb"}
+err: InvalidParams missing field `vector`
+
+## SearchParams / minimal
+in:  {"collection":"kb","query":"q"}
+ok:  SearchParams { collection: "kb", query: "q", filter: None, limit: 5, format: "structured", debug: false }
+
+## SearchParams / full
+in:  {"collection":"kb","query":"q","filter":{"year":2026},"limit":9,"format":"context_block","debug":true}
+ok:  SearchParams { collection: "kb", query: "q", filter: Some(Object {"year": Number(2026)}), limit: 9, format: "context_block", debug: true }
+
+## SearchParams / empty filter is none
+in:  {"collection":"kb","query":"q","filter":{}}
+ok:  SearchParams { collection: "kb", query: "q", filter: None, limit: 5, format: "structured", debug: false }
+
+## SearchParams / missing query
+in:  {"collection":"kb"}
+err: InvalidParams missing field `query`
+
+## EmbedTextParams / minimal
+in:  {"text":"t"}
+ok:  EmbedTextParams { text: "t", provider: None }
+
+## EmbedTextParams / full
+in:  {"text":"t","provider":"ollama"}
+ok:  EmbedTextParams { text: "t", provider: Some("ollama") }
+
+## EmbedTextParams / missing text
+in:  {}
+err: InvalidParams missing field `text`
+
+## EmbedBatchParams / minimal
+in:  {"texts":[]}
+ok:  EmbedBatchParams { texts: [], provider: None }
+
+## EmbedBatchParams / full
+in:  {"texts":["a","b"],"provider":"ollama"}
+ok:  EmbedBatchParams { texts: ["a", "b"], provider: Some("ollama") }
+
+## EmbedBatchParams / missing texts
+in:  {}
+err: InvalidParams missing field `texts`
+
+## EmbedListModelsParams / minimal
+in:  {}
+ok:  EmbedListModelsParams
+
+## EmbedDocumentParams / minimal
+in:  {"collection":"kb","content":"text"}
+ok:  EmbedDocumentParams { collection: "kb", content: "text", doc_id: None, title: None, metadata: None, mode: "auto", chunk_size: 1000, overlap: 100, provider: None, create_vector_index: true, if_exists: "replace" }
+
+## EmbedDocumentParams / full
+in:  {"collection":"kb","content":"text","doc_id":"d1","title":"T","metadata":{"a":1},"mode":"plain","chunk_size":400,"overlap":40,"provider":"ollama","create_vector_index":false,"if_exists":"error"}
+ok:  EmbedDocumentParams { collection: "kb", content: "text", doc_id: Some("d1"), title: Some("T"), metadata: Some(Object {"a": Number(1)}), mode: "plain", chunk_size: 400, overlap: 40, provider: Some("ollama"), create_vector_index: false, if_exists: "error" }
+
+## EmbedDocumentParams / missing content
+in:  {"collection":"kb"}
+err: InvalidParams missing field `content`
+
+## AutoEmbedEnableParams / minimal
+in:  {"collection":"a","source_field":"content","target_field":"emb"}
+ok:  AutoEmbedEnableParams { collection: "a", source_field: "content", target_field: "emb", provider: None, model: None, dimension: None, skip_if_exists: false, chunking: None }
+
+## AutoEmbedEnableParams / full
+in:  {"collection":"a","source_field":"content","target_field":"emb","provider":"ollama","model":"m","dimension":384,"skip_if_exists":true,"chunking":{"mode":"markdown","chunk_size":300,"overlap":30}}
+ok:  AutoEmbedEnableParams { collection: "a", source_field: "content", target_field: "emb", provider: Some("ollama"), model: Some("m"), dimension: Some(384), skip_if_exists: true, chunking: Some(ChunkingParams { mode: "markdown", chunk_size: 300, overlap: 30 }) }
+
+## AutoEmbedEnableParams / empty chunking
+in:  {"collection":"a","source_field":"content","target_field":"emb","chunking":{}}
+ok:  AutoEmbedEnableParams { collection: "a", source_field: "content", target_field: "emb", provider: None, model: None, dimension: None, skip_if_exists: false, chunking: Some(ChunkingParams { mode: "auto", chunk_size: 1000, overlap: 100 }) }
+
+## AutoEmbedEnableParams / missing target_field
+in:  {"collection":"a","source_field":"content"}
+err: InvalidParams missing field `target_field`
+
+## AutoEmbedEnableParams / chunking wrong type
+in:  {"collection":"a","source_field":"c","target_field":"e","chunking":5}
+err: InvalidParams invalid type: integer `5`, expected struct ChunkingParams
+
+## ChunkingParams / minimal
+in:  {}
+ok:  ChunkingParams { mode: "auto", chunk_size: 1000, overlap: 100 }
+
+## ChunkingParams / full
+in:  {"mode":"markdown","chunk_size":300,"overlap":30}
+ok:  ChunkingParams { mode: "markdown", chunk_size: 300, overlap: 30 }
+
+## ChunkingParams / chunk_size wrong type
+in:  {"chunk_size":"x"}
+err: InvalidParams invalid type: string "x", expected usize
+
+## AutoEmbedDisableParams / minimal
+in:  {"collection":"a"}
+ok:  AutoEmbedDisableParams { collection: "a" }
+
+## AutoEmbedDisableParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## AutoEmbedStatusParams / minimal
+in:  {"collection":"a"}
+ok:  AutoEmbedStatusParams { collection: "a" }
+
+## AutoEmbedStatusParams / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## JobStatusParams / minimal
+in:  {"job_id":"j1"}
+ok:  JobStatusParams { job_id: "j1" }
+
+## JobStatusParams / missing job_id
+in:  {}
+err: InvalidParams missing field `job_id`
+
+## JobListParams / minimal
+in:  {}
+ok:  JobListParams { active_only: false }
+
+## JobListParams / full
+in:  {"active_only":true}
+ok:  JobListParams { active_only: true }
+
+## JobListParams / active_only wrong type
+in:  {"active_only":"yes"}
+err: InvalidParams invalid type: string "yes", expected a boolean
+
+## JobCancelParams / minimal
+in:  {"job_id":"j1"}
+ok:  JobCancelParams { job_id: "j1" }
+
+## JobCancelParams / missing job_id
+in:  {}
+err: InvalidParams missing field `job_id`
+

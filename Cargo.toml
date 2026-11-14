@@ -6,6 +6,7 @@ members = [
     "ironbase-backup",
     "bindings/python",
     "bindings/csharp",
+    "ironbase-mcp-types",
     "mcp-server",
     "ironbase-tui",
     "ironbase-bridge",

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `ironbase-mcp-types`: shared MCP tool argument types (ironbase-core 0.3.462, mcp-server 1.0.660)
+
+Phase 2a of the Tuti TUI overhaul. No change to the wire format or to server behaviour.
+
+- **New workspace crate `ironbase-mcp-types`** (depends on `serde` and `serde_json` only): one definition
+  of every MCP tool's arguments, for the server and for clients. It holds the 72 argument structs that
+  lived in `mcp-server/src/tools/params.rs` and next to five handlers, the shared default constants, and
+  a `Tool` trait (`NAME`, `Args`, `Resp`) with one marker type per tool that takes typed arguments (74).
+  `Resp` is still `serde_json::Value`; typed responses follow per tool group.
+- **The argument structs are now `Serialize` as well,** so a client can build requests from the same
+  types the server parses. `None` fields are omitted (the server routes on field presence, so a client
+  must never send `null`); round-trip tests cover every struct.
+- **The server re-exports the moved items under their old paths** (`mcp_ironbase::tools::params::*`,
+  `tools::defaults::*`); handler bodies are unchanged. `AutoEmbedEnableParams::validate` is now provided
+  by the server trait `ValidateParams`.
+- **Wire-format safety net:** `mcp-server/tests/params_wire_golden.rs` pins 239 argument-parsing cases
+  over all 72 structs (parsed values and exact error code + message). The golden file was captured on
+  the previous code and is byte-identical after the move.
+- A server test asserts that every `Tool::NAME` is a registered tool and lists the 13 tools that have
+  no typed arguments yet.
+
 ### Changed — Tuti TUI: ratatui 0.30, safer terminal lifecycle, file logging (ironbase-core 0.3.461, mcp-server 1.0.659)
 
 Phase 1b of the Tuti TUI overhaul. The screens are byte-identical to the previous build.

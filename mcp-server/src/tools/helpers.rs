@@ -416,10 +416,8 @@ pub fn parse_transaction_id_str(tx_id: &str) -> Result<u64> {
 // Rhai db_rag_import — see issue #67)
 // ============================================================================
 
-/// Default for serde-derived params.
-pub fn default_if_exists() -> String {
-    "replace".to_string()
-}
+/// Default for serde-derived params (defined with the shared argument structs).
+pub use ironbase_mcp_types::defaults::default_if_exists;
 
 /// Chunk import through the adapter (`ironbase_core::chunking::import::import_chunks`),
 /// so its document counts follow the inserts and deletes
