@@ -137,6 +137,59 @@ mod tests {
         assert_eq!(tools.len(), 87, "Expected 87 tools, got {}", tools.len());
     }
 
+    /// Every shared `Tool` marker (`ironbase_mcp_types::tools`) names a registered
+    /// tool, exactly once; the tools without a marker are the ones listed here.
+    #[test]
+    fn test_tool_markers_match_registered_tools() {
+        use ironbase_mcp_types::tools::TOOL_NAMES;
+        use std::collections::HashSet;
+
+        let tools_json = get_all_tools_json();
+        let registered: Vec<&str> = tools_json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+
+        let mut markers = HashSet::new();
+        for name in TOOL_NAMES {
+            assert!(
+                registered.contains(name),
+                "Tool::NAME '{}' is not a registered tool",
+                name
+            );
+            assert!(markers.insert(*name), "Duplicate Tool::NAME '{}'", name);
+        }
+
+        // No typed argument struct yet: tools without arguments, and index_create
+        // (four argument shapes selected by `type`).
+        let mut without_marker: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|name| !markers.contains(name))
+            .collect();
+        without_marker.sort_unstable();
+        assert_eq!(
+            without_marker,
+            [
+                "acl_cleanup",
+                "acl_list",
+                "collection_list",
+                "db_checkpoint",
+                "db_compact",
+                "db_stats",
+                "embed_cache_clear",
+                "embed_cache_stats",
+                "embed_models_list",
+                "index_create",
+                "listener_list",
+                "transaction_begin",
+                "transaction_status",
+            ]
+        );
+    }
+
     #[test]
     fn test_no_duplicate_tool_names() {
         let tools_json = get_all_tools_json();

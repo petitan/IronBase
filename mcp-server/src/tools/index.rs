@@ -92,10 +92,10 @@ fn handle_index_create_btree(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
 /// List indexes. With no `type`, returns every subtype (B+ tree, fulltext, fuzzy,
 /// vector). With a `type`, returns only that subtype's list under `indexes`.
 fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexListParams = IndexListParams::parse(params.clone())?;
+    let p: IndexListParams = IndexListParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let index_type = params.get("type").and_then(|v| v.as_str());
+    let index_type = p.index_type.as_deref();
 
     match index_type {
         Some("btree") => {
@@ -225,13 +225,10 @@ fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
 ///
 /// Returns num_keys, distinct_count, has_histogram, has_mcv for each index.
 fn handle_index_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let p: IndexListParams = IndexListParams::parse(params.clone())?;
+    let p: IndexListParams = IndexListParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let index_type = params
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("btree");
+    let index_type = p.index_type.as_deref().unwrap_or("btree");
 
     let stats = match index_type {
         "btree" => adapter.get_index_statistics(&p.collection)?,

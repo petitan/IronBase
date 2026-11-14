@@ -8,59 +8,15 @@ use ironbase_core::chunking::import::{
     ChunkDocumentOptions, IfExists,
 };
 use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::defaults::{default_chunk_mode, default_chunk_overlap, default_chunk_size};
 use super::params::ParseParams;
 
-// ============================================================================
-// Parameter Structs
-// ============================================================================
-
-/// Parameters for `embed_text` tool
-#[derive(Debug, Deserialize)]
-pub struct EmbedTextParams {
-    pub text: String,
-    pub provider: Option<String>,
-}
-
-/// Parameters for `embed_batch` tool
-#[derive(Debug, Deserialize)]
-pub struct EmbedBatchParams {
-    pub texts: Vec<String>,
-    pub provider: Option<String>,
-}
-
-/// Parameters for `embed_models_list` tool (no params needed)
-#[derive(Debug, Deserialize)]
-pub struct EmbedListModelsParams {}
-
-/// Parameters for `embed_document` tool
-#[derive(Debug, Deserialize)]
-pub struct EmbedDocumentParams {
-    pub collection: String,
-    pub content: String,
-    pub doc_id: Option<String>,
-    pub title: Option<String>,
-    pub metadata: Option<Value>,
-    #[serde(default = "default_chunk_mode")]
-    pub mode: String,
-    #[serde(default = "default_chunk_size")]
-    pub chunk_size: usize,
-    #[serde(default = "default_chunk_overlap")]
-    pub overlap: usize,
-    pub provider: Option<String>,
-    #[serde(default = "default_create_vector_index")]
-    pub create_vector_index: bool,
-    #[serde(default = "crate::tools::helpers::default_if_exists")]
-    pub if_exists: String,
-}
-
-fn default_create_vector_index() -> bool {
-    true
-}
+// Parameter structs: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::params::{
+    EmbedBatchParams, EmbedDocumentParams, EmbedListModelsParams, EmbedTextParams,
+};
 
 // ============================================================================
 // Dispatch

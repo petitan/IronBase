@@ -7,38 +7,31 @@ use crate::embedding::{EmbeddingManager, EmbeddingProvider};
 use crate::error::{McpError, Result};
 use crate::jobs::{JobManager, JobType};
 use ironbase_core::storage::{AutoEmbeddingConfig, ChunkingConfig};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::defaults::{
-    default_chunk_mode, default_chunk_overlap, default_chunk_size, effective_batch_size,
-    is_allowed_system_collection, MAX_EMPTY_BATCHES,
-};
+use super::defaults::{effective_batch_size, is_allowed_system_collection, MAX_EMPTY_BATCHES};
 use super::params::ParseParams;
 
+// Parameter structs: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::params::{
+    AutoEmbedDisableParams, AutoEmbedEnableParams, AutoEmbedStatusParams, ChunkingParams,
+};
+
 // ============================================================================
-// Parameter Structs
+// Parameter Validation
 // ============================================================================
 
-/// Parameters for `auto_embed_enable` tool
-#[derive(Debug, Deserialize)]
-pub struct AutoEmbedEnableParams {
-    pub collection: String,
-    pub source_field: String,
-    pub target_field: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub dimension: Option<usize>,
-    #[serde(default)]
-    pub skip_if_exists: bool,
-    pub chunking: Option<ChunkingParams>,
+/// Argument rules that serde cannot express. The structs are defined in
+/// `ironbase_mcp_types`; the check returns the server's error type, so it stays here.
+pub trait ValidateParams {
+    /// Validate parameters
+    fn validate(&self) -> Result<()>;
 }
 
-impl AutoEmbedEnableParams {
-    /// Validate parameters
-    pub fn validate(&self) -> Result<()> {
+impl ValidateParams for AutoEmbedEnableParams {
+    fn validate(&self) -> Result<()> {
         // Collection name validation
         if self.collection.is_empty() {
             return Err(McpError::invalid_params("collection name cannot be empty"));
@@ -103,29 +96,6 @@ impl AutoEmbedEnableParams {
 
         Ok(())
     }
-}
-
-/// Chunking parameters (subset of ChunkingConfig for MCP)
-#[derive(Debug, Deserialize)]
-pub struct ChunkingParams {
-    #[serde(default = "default_chunk_mode")]
-    pub mode: String,
-    #[serde(default = "default_chunk_size")]
-    pub chunk_size: usize,
-    #[serde(default = "default_chunk_overlap")]
-    pub overlap: usize,
-}
-
-/// Parameters for `auto_embed_disable` tool
-#[derive(Debug, Deserialize)]
-pub struct AutoEmbedDisableParams {
-    pub collection: String,
-}
-
-/// Parameters for `auto_embed_status` tool
-#[derive(Debug, Deserialize)]
-pub struct AutoEmbedStatusParams {
-    pub collection: String,
 }
 
 // ============================================================================
