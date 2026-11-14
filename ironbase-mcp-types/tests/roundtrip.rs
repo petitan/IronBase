@@ -447,3 +447,22 @@ fn index_create_args_route_by_type() {
     assert_eq!(wire["name"], "index_create");
     assert_eq!(wire["arguments"]["type"], "vector");
 }
+
+/// `VectorIndexCreateParams::new` must equal what the server parses from the
+/// minimal request, so a client that uses it gets exactly the server defaults.
+#[test]
+fn vector_index_create_new_matches_server_defaults() {
+    let parsed: ironbase_mcp_types::params::VectorIndexCreateParams = serde_json::from_value(
+        serde_json::json!({"collection": "c", "field": "f", "dim": 3, "metric": "cosine"}),
+    )
+    .unwrap();
+    assert_eq!(
+        ironbase_mcp_types::params::VectorIndexCreateParams::new(
+            "c".into(),
+            "f".into(),
+            3,
+            "cosine".into()
+        ),
+        parsed
+    );
+}

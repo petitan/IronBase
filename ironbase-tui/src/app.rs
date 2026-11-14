@@ -1890,7 +1890,7 @@ impl App {
             let args = UpdateOneParams {
                 collection,
                 filter: serde_json::json!({"_id": doc_id}),
-                update: serde_json::json!({"$set": doc}),
+                update: self.insert.edit_update(&doc),
                 upsert: false,
             };
             match db.call::<UpdateOne>(&args).await {
@@ -1898,6 +1898,12 @@ impl App {
                     self.close_modal();
                     if updated.matched_count == 0 {
                         self.set_status("Dokumentum nem található");
+                    } else if let Some(err) = updated.auto_embed_error {
+                        // The update is stored; only the vector is stale
+                        self.set_error(format!(
+                            "Dokumentum frissítve, de az újrabeágyazás hibázott (a vektor elavult): {}",
+                            err
+                        ));
                     } else if updated.modified_count == 0 {
                         self.set_status("Dokumentum változatlan (nincs módosítás)");
                     } else {

@@ -1102,6 +1102,42 @@ async fn test_edit_reports_updated_unchanged_and_not_found() {
 }
 
 #[tokio::test]
+async fn test_edit_unsets_removed_fields() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+
+    // The first user is {"_id": 0, "n": 0, "even": true}: remove `even`
+    open_edit_of_first_user(&mut app).await;
+    app.insert.lines = vec![r#"{"_id": 0, "n": 0}"#.to_string()];
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        server.calls_to("update_one"),
+        vec![json!({"collection": "users", "filter": {"_id": 0},
+                    "update": {"$set": {"_id": 0, "n": 0}, "$unset": {"even": ""}},
+                    "upsert": false})]
+    );
+}
+
+#[tokio::test]
+async fn test_edit_reports_a_failed_re_embed() {
+    let server = two_collections();
+    // golden "update_one / re-embedding fails": stored, vector stale
+    server.respond(
+        "update_one",
+        wire(r#"{"matched_count":1,"modified_count":1,"auto_embed_error":"provider down"}"#),
+    );
+    let mut app = app_with_server(&server).await;
+    open_edit_of_first_user(&mut app).await;
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+    let err = app.error_message.clone().unwrap_or_default();
+    assert!(
+        err.contains("újrabeágyazás") && err.contains("provider down"),
+        "{err:?}"
+    );
+    assert_ne!(app.status_message.as_deref(), Some("Dokumentum frissítve"));
+}
+
+#[tokio::test]
 async fn test_insert_reports_inserted_id_as_sent() {
     let server = two_collections();
     // golden "no _id": the server reports every `_id` as a string

@@ -524,10 +524,12 @@ pub struct VectorIndexCreated {
 /// `index_create` response.
 ///
 /// One tool, five shapes, selected by the request (`type`, and `field` vs.
-/// `fields` for B+ tree indexes). The wire has no tag, so the enum is untagged;
-/// every variant has a required field no other variant has (`field`+`unique`,
-/// `fields`, `language`, `algorithm`, `dim`), so a response parses as exactly one
-/// variant whatever the order.
+/// `fields` for B+ tree indexes). The wire has no tag, so the enum is untagged.
+/// The compound, fulltext, fuzzy and vector variants each require a field no
+/// other variant has (`fields`, `language`, `algorithm`, `dim`); the B+ tree
+/// variant has no such field of its own, only the *combination* `field` +
+/// `unique`, which no other shape carries together, so every other response
+/// fails it. A real response therefore parses as exactly one variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexCreateResponse {

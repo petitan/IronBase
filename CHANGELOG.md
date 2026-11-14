@@ -23,6 +23,9 @@ Phase 2c of the Tuti TUI overhaul. The server's response JSON is unchanged.
   normalisation.
 - **Tuti TUI writes through the typed call** and now reports what the server actually did:
   - saving an unchanged document says "változatlan" instead of "frissítve";
+  - a field removed in the editor is now actually removed (`$unset`; the editor only sent `$set`, so the
+    removal was silently ignored);
+  - a failed re-embed after an update is reported (the update is stored, the vector is stale);
   - the inserted `_id` is shown as sent, not JSON-quoted;
   - index creation names the index the server created;
   - a response of the wrong shape is an error instead of a silent success;
