@@ -6,8 +6,9 @@
 //! (`crate::responses`).
 //!
 //! Tools whose handler parses a typed argument struct have a marker, and so do
-//! the argument-less read tools a client needs (`collection_list`, `db_stats`,
-//! with [`NoParams`]), and `index_create` (with [`IndexCreateArgs`], one argument
+//! the argument-less tools a client needs (`collection_list`, `db_stats`,
+//! `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`, with
+//! [`NoParams`]), and `index_create` (with [`IndexCreateArgs`], one argument
 //! struct per `type`); the other argument-less tools do not have one yet.
 
 use serde::de::DeserializeOwned;
@@ -141,19 +142,22 @@ tools! {
     Search => "search", SearchParams => SearchResponse;
 
     // Embedding
-    EmbedText => "embed_text", EmbedTextParams;
-    EmbedBatch => "embed_batch", EmbedBatchParams;
+    EmbedText => "embed_text", EmbedTextParams => EmbedTextResponse;
+    EmbedBatch => "embed_batch", EmbedBatchParams => EmbedBatchResponse;
+    EmbedModelsList => "embed_models_list", NoParams => EmbedModelsListResponse;
+    EmbedCacheStats => "embed_cache_stats", NoParams => EmbedCacheStatsResponse;
+    EmbedCacheClear => "embed_cache_clear", NoParams => EmbedCacheClearResponse;
     EmbedDocument => "embed_document", EmbedDocumentParams;
 
     // Auto-embedding
-    AutoEmbedEnable => "auto_embed_enable", AutoEmbedEnableParams;
-    AutoEmbedDisable => "auto_embed_disable", AutoEmbedDisableParams;
-    AutoEmbedStatus => "auto_embed_status", AutoEmbedStatusParams;
+    AutoEmbedEnable => "auto_embed_enable", AutoEmbedEnableParams => AutoEmbedEnableResponse;
+    AutoEmbedDisable => "auto_embed_disable", AutoEmbedDisableParams => AutoEmbedDisableResponse;
+    AutoEmbedStatus => "auto_embed_status", AutoEmbedStatusParams => AutoEmbedStatusResponse;
 
     // Embedding jobs
-    EmbedJobStatus => "embed_job_status", JobStatusParams;
-    EmbedJobList => "embed_job_list", JobListParams;
-    EmbedJobCancel => "embed_job_cancel", JobCancelParams;
+    EmbedJobStatus => "embed_job_status", JobStatusParams => EmbedJobStatusResponse;
+    EmbedJobList => "embed_job_list", JobListParams => EmbedJobListResponse;
+    EmbedJobCancel => "embed_job_cancel", JobCancelParams => EmbedJobCancelResponse;
 
     // RAG
     RagCollectionCreate => "rag_collection_create", RagCollectionCreateParams;

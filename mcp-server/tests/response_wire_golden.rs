@@ -49,12 +49,27 @@
 //! response, strictly, with its tool's shared response type
 //! (`ironbase_mcp_types`) and serializes it back to the same bytes.
 //!
+//! The embedding group (`embed_text`, `embed_batch`, `embed_models_list`,
+//! `embed_cache_stats`, `embed_cache_clear`, `auto_embed_enable`,
+//! `auto_embed_disable`, `auto_embed_status`, on a fourth database) embeds with
+//! the same in-test provider, registered as "length" (the default) and
+//! "other". It normalises the order of `embed_models_list.models` (hash-map
+//! order: sorted by `provider`); an error listing the providers is recorded
+//! with one provider only, for the same reason. The one backfill job is run
+//! to its end before the next case. The job group (`embed_job_list`,
+//! `embed_job_status`, `embed_job_cancel`) runs on jobs set up directly in a
+//! job manager; it normalises the jobs' `created_at_secs` and
+//! `updated_at_secs` (ages in seconds, measured at the call) and the order of
+//! `embed_job_list.jobs` (hash-map order: sorted by `id`). A third test parses
+//! these groups' responses with the shared types, as for the search group.
+//!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
 
-use mcp_ironbase::embedding::EmbeddingResult;
+use mcp_ironbase::embedding::{CacheConfig, EmbeddingResult};
 use mcp_ironbase::{
-    dispatch_tool, EmbeddingError, EmbeddingManager, EmbeddingProvider, IronBaseAdapter, ServerInfo,
+    dispatch_tool, EmbeddingError, EmbeddingManager, EmbeddingProvider, IronBaseAdapter,
+    JobManager, JobType, ServerInfo,
 };
 use serde_json::{json, Value};
 use std::fmt::Write;
@@ -98,6 +113,19 @@ fn sort_keys(v: &mut Value) {
     }
 }
 
+/// A job's age and time since its last update (seconds, measured at the call)
+fn normalize_job_ages(job: &mut Value) {
+    for field in ["created_at_secs", "updated_at_secs"] {
+        job[field] = placeholder(field);
+    }
+}
+
+fn sort_by_key(list: &mut Value, key: &str) {
+    if let Some(items) = list.as_array_mut() {
+        items.sort_by(|a, b| a[key].to_string().cmp(&b[key].to_string()));
+    }
+}
+
 fn sort_by_name(list: &mut Value) {
     if let Some(items) = list.as_array_mut() {
         items.sort_by(|a, b| {
@@ -138,6 +166,18 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
             out["server"]["version"] = placeholder("version");
             sort_by_name(&mut out["collections"]);
         }
+        "embed_models_list" => sort_by_key(&mut out["models"], "provider"),
+        "embed_job_list" => {
+            sort_by_key(&mut out["jobs"], "id");
+            if let Some(jobs) = out["jobs"].as_array_mut() {
+                jobs.iter_mut().for_each(normalize_job_ages);
+            }
+        }
+        "embed_job_status" => {
+            if let Some(job) = out.get_mut("job") {
+                normalize_job_ages(job);
+            }
+        }
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
             normalize_search(tool, args, out);
             if tool == "fulltext_search" && args.get("fields").is_some() {
@@ -168,6 +208,29 @@ fn record_with(
     label: &str,
     args: Value,
 ) {
+    record_full(
+        out,
+        adapter,
+        server_info,
+        embedding_manager,
+        &None,
+        tool,
+        label,
+        args,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_full(
+    out: &mut String,
+    adapter: &Arc<IronBaseAdapter>,
+    server_info: Option<&ServerInfo>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
+    tool: &str,
+    label: &str,
+    args: Value,
+) {
     writeln!(out, "## {tool} / {label}").unwrap();
     writeln!(out, "in:  {args}").unwrap();
     match dispatch_tool(
@@ -179,7 +242,7 @@ fn record_with(
         None,
         None,
         embedding_manager,
-        &None,
+        job_manager,
     ) {
         Ok(mut v) => {
             normalize(tool, &args, &mut v);
@@ -311,6 +374,8 @@ fn render() -> String {
 
     render_write_group(&mut out);
     render_search_group(&mut out);
+    render_embedding_group(&mut out);
+    render_job_group(&mut out);
     out
 }
 
@@ -903,6 +968,262 @@ fn render_search_group(out: &mut String) {
     out.push_str(&local);
 }
 
+/// The embedding tools (`embed_text`, `embed_batch`, `embed_models_list`,
+/// `embed_cache_stats`, `embed_cache_clear`) and the auto-embedding
+/// configuration tools (`auto_embed_enable`, `auto_embed_disable`,
+/// `auto_embed_status`), embedding with [`LengthProvider`]: "length" (the
+/// default) and "other", without a cache; a second manager with a cache
+fn render_embedding_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    let mut manager = EmbeddingManager::new();
+    manager.register_provider("length", Arc::new(LengthProvider));
+    manager.register_provider("other", Arc::new(LengthProvider));
+    let manager = Some(Arc::new(manager));
+    let mut cached = EmbeddingManager::with_cache(CacheConfig {
+        max_entries: 100,
+        ttl: None,
+    });
+    cached.register_provider("length", Arc::new(LengthProvider));
+    let cached = Some(Arc::new(cached));
+    let empty = Some(Arc::new(EmbeddingManager::new()));
+    let jobs = Some(Arc::new(JobManager::new()));
+    macro_rules! case {
+        ($m:expr, $tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record_full(out, &adapter, None, $m, &None, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!(&manager, "embed_text",
+        "default provider" => {"text": "hello"},
+        "explicit provider" => {"text": "hi", "provider": "other"},
+        "unknown provider" => {"text": "hi", "provider": "nope"},
+        "embedding fails" => {"text": "fail"},
+        "missing text" => {},
+    );
+    case!(&None, "embed_text", "no embedding manager" => {"text": "hello"});
+    case!(&empty, "embed_text", "no provider" => {"text": "hello"});
+    case!(&manager, "embed_batch",
+        "two texts" => {"texts": ["a", "bcd"]},
+        "explicit provider" => {"texts": ["xy"], "provider": "other"},
+        "empty" => {"texts": []},
+        "embedding fails" => {"texts": ["ok", "fail"]},
+    );
+    case!(&manager, "embed_models_list", "two providers" => {});
+    case!(&empty, "embed_models_list", "no provider" => {});
+    case!(&None, "embed_models_list", "no embedding manager" => {});
+    case!(&manager, "embed_cache_stats", "cache disabled" => {});
+    case!(&cached, "embed_cache_stats", "empty cache" => {});
+    case!(&cached, "embed_text", "cached miss" => {"text": "cache me"});
+    case!(&cached, "embed_text", "cached hit" => {"text": "cache me"});
+    case!(&cached, "embed_cache_stats", "one hit one miss" => {});
+    case!(&manager, "embed_cache_clear", "cache disabled" => {});
+    case!(&cached, "embed_cache_clear", "one entry" => {});
+    case!(&cached, "embed_cache_stats", "after clear" => {});
+
+    // auto-embedding: "plain" has no documents, "docs" two without a vector,
+    // "vecs" one with a vector of the old space, "chunks" a chunk document
+    dispatch_ok(
+        &adapter,
+        "collection_create",
+        json!({"collection": "plain"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "insert_many",
+        json!({"collection": "docs", "documents": [
+            {"_id": 1, "content": "abc"}, {"_id": 2, "content": "de"},
+        ]}),
+    );
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection": "vecs", "document": {"_id": 1, "content": "abc", "embedding": [3.0, 1.0]}}),
+    );
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection": "chunks", "document": {"_id": 1, "content": "abc", "section_path": "A > B"}}),
+    );
+    adapter
+        .set_auto_embedding_config(
+            "legacy",
+            Some(ironbase_core::storage::AutoEmbeddingConfig {
+                enabled: true,
+                source_field: "text".to_string(),
+                target_field: "vec".to_string(),
+                provider: "fasttext".to_string(),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+    case!(&manager, "auto_embed_status",
+        "not configured" => {"collection": "plain"},
+        "removed provider" => {"collection": "legacy"},
+        "missing collection param" => {},
+    );
+    case!(&manager, "auto_embed_enable",
+        "empty collection" => {"collection": "plain", "source_field": "content", "target_field": "embedding"},
+        "explicit provider, chunking" => {"collection": "plain", "source_field": "body", "target_field": "body_vec",
+            "provider": "other", "skip_if_exists": false,
+            "chunking": {"mode": "paragraph", "chunk_size": 200, "overlap": 20}},
+        "chunk documents" => {"collection": "chunks", "source_field": "content", "target_field": "embedding"},
+        "dimension mismatch" => {"collection": "plain", "source_field": "content", "target_field": "embedding", "dimension": 5},
+        "same source and target" => {"collection": "plain", "source_field": "content", "target_field": "content"},
+        "missing source_field" => {"collection": "plain", "target_field": "embedding"},
+    );
+    // One provider: the error lists the available ones in hash-map order
+    case!(&cached, "auto_embed_enable",
+        "unknown provider" => {"collection": "plain", "source_field": "content", "target_field": "embedding", "provider": "nope"},
+    );
+    case!(&None, "auto_embed_enable",
+        "no embedding manager" => {"collection": "plain", "source_field": "content", "target_field": "embedding"},
+    );
+    case!(&manager, "auto_embed_status",
+        "enabled" => {"collection": "plain"},
+        "chunk documents" => {"collection": "chunks"},
+    );
+    // A backfill of "docs" (no job manager: no job is started)
+    case!(&manager, "auto_embed_enable",
+        "existing documents" => {"collection": "docs", "source_field": "content", "target_field": "embedding"},
+    );
+    // A re-embed of "vecs" into the space of another model name
+    adapter
+        .set_auto_embedding_config(
+            "vecs",
+            Some(ironbase_core::storage::AutoEmbeddingConfig {
+                enabled: true,
+                source_field: "content".to_string(),
+                target_field: "embedding".to_string(),
+                provider: "length".to_string(),
+                model: Some("older".to_string()),
+                dimension: Some(2),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    case!(&manager, "auto_embed_enable",
+        "other model, existing vectors" => {"collection": "vecs", "source_field": "content", "target_field": "embedding"},
+    );
+    case!(&manager, "auto_embed_status", "re-embed pending" => {"collection": "vecs"});
+
+    // A backfill job, run to its end before the next case
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection": "jobbed", "document": {"_id": 1, "content": "abc"}}),
+    );
+    record_full(
+        out,
+        &adapter,
+        None,
+        &manager,
+        &jobs,
+        "auto_embed_enable",
+        "backfill job started",
+        json!({"collection": "jobbed", "source_field": "content", "target_field": "embedding"}),
+    );
+    let job_manager = jobs.as_ref().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while job_manager
+        .get_job_info("job_1")
+        .is_some_and(|info| !info.status.is_terminal())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "backfill job did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    job_manager.shutdown();
+
+    case!(&manager, "auto_embed_disable",
+        "enabled" => {"collection": "plain"},
+        "not configured" => {"collection": "empty_one"},
+        "missing collection param" => {},
+    );
+    case!(&manager, "auto_embed_status", "after disable" => {"collection": "plain"});
+}
+
+/// The job tools (`embed_job_list`, `embed_job_status`, `embed_job_cancel`) on
+/// jobs set up directly in a [`JobManager`]: pending, running, completed,
+/// failed and cancelled, of every job type
+fn render_job_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    let manager = JobManager::new();
+    let (pending, _) = manager.create_job(JobType::Compact);
+    let (running, _) = manager.create_job(JobType::EmbedBackfill {
+        collection: "kb".to_string(),
+        provider: "length".to_string(),
+    });
+    manager.update_progress(&running, 1, Some(4), "Embedding batch 1");
+    let (completed, _) = manager.create_job(JobType::EmbedDocument {
+        collection: "kb".to_string(),
+        doc_id: "d1".to_string(),
+    });
+    manager.complete_job(&completed, json!({"processed": 3, "errors": 0}));
+    let (failed, _) = manager.create_job(JobType::Custom {
+        name: "x".to_string(),
+    });
+    manager.fail_job(&failed, "Provider 'nope' not available".to_string());
+    let (cancelled, _) = manager.create_job(JobType::Compact);
+    manager.cancel_job(&cancelled);
+    let (to_cancel, _) = manager.create_job(JobType::Compact);
+    manager.update_progress(&to_cancel, 0, None, "Starting...");
+    let jobs = Some(Arc::new(manager));
+    macro_rules! case {
+        ($m:expr, $tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record_full(out, &adapter, None, &None, $m, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!(&jobs, "embed_job_list",
+        "all" => {},
+        "active only" => {"active_only": true},
+    );
+    for (label, id) in [
+        ("pending", &pending),
+        ("running", &running),
+        ("completed", &completed),
+        ("failed", &failed),
+        ("cancelled", &cancelled),
+    ] {
+        record_full(
+            out,
+            &adapter,
+            None,
+            &None,
+            &jobs,
+            "embed_job_status",
+            label,
+            json!({"job_id": id}),
+        );
+    }
+    case!(&jobs, "embed_job_status",
+        "unknown" => {"job_id": "job_999"},
+        "missing job_id" => {},
+    );
+    record_full(
+        out,
+        &adapter,
+        None,
+        &None,
+        &jobs,
+        "embed_job_cancel",
+        "running",
+        json!({"job_id": to_cancel}),
+    );
+    case!(&jobs, "embed_job_cancel",
+        "completed" => {"job_id": "job_3"},
+        "already cancelled" => {"job_id": "job_5"},
+        "unknown" => {"job_id": "job_999"},
+        "missing job_id" => {},
+    );
+    case!(&None, "embed_job_list", "no job manager" => {});
+    case!(&None, "embed_job_status", "no job manager" => {"job_id": "job_1"});
+    case!(&None, "embed_job_cancel", "no job manager" => {"job_id": "job_1"});
+}
+
 #[test]
 fn response_wire_format_matches_golden() {
     let actual = render();
@@ -921,24 +1242,18 @@ fn response_wire_format_matches_golden() {
     );
 }
 
-/// Every recorded response of the search tool group parses, strictly, into the
-/// tool's shared response type and serializes back to the same bytes,
-/// including a one-chunk `search` document whose own `doc_id` field is a number
-/// and the "clash" documents' own fields named like the metadata.
-#[test]
-fn search_group_golden_parses_as_the_shared_response_types() {
-    use ironbase_mcp_types::tools::{
-        FulltextAnalyze, FulltextSearch, FuzzySearch, Search, VectorSearch,
-    };
-    use ironbase_mcp_types::Tool;
+/// Parses a recorded response, strictly, into the tool's shared response type
+/// and checks that it serializes back to the same bytes
+fn same_bytes<T: ironbase_mcp_types::Tool>(json: &str) -> Result<(), String> {
+    let parsed: T::Resp = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let back = serde_json::to_string(&parsed).unwrap();
+    assert_eq!(back, json, "{} does not round-trip", T::NAME);
+    Ok(())
+}
 
-    fn same_bytes<T: Tool>(json: &str) -> Result<(), String> {
-        let parsed: T::Resp = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        let back = serde_json::to_string(&parsed).unwrap();
-        assert_eq!(back, json, "{} does not round-trip", T::NAME);
-        Ok(())
-    }
-
+/// Runs `check` on every recorded successful response of the golden file;
+/// returns how many it checked (`check` returns `None` for other tools)
+fn check_golden(check: impl Fn(&str, &str) -> Option<Result<(), String>>) -> usize {
     let mut checked = 0;
     let mut lines = GOLDEN.lines();
     while let Some(line) = lines.next() {
@@ -950,16 +1265,72 @@ fn search_group_golden_parses_as_the_shared_response_types() {
         let Some(json) = lines.next().unwrap().strip_prefix("out: ") else {
             continue; // an error
         };
-        let parsed = match tool {
+        if let Some(parsed) = check(tool, json) {
+            parsed.unwrap_or_else(|e| panic!("{tool} / {label}: {e}"));
+            checked += 1;
+        }
+    }
+    checked
+}
+
+/// Every recorded response of the search tool group parses, strictly, into the
+/// tool's shared response type and serializes back to the same bytes,
+/// including a one-chunk `search` document whose own `doc_id` field is a number
+/// and the "clash" documents' own fields named like the metadata.
+#[test]
+fn search_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        FulltextAnalyze, FulltextSearch, FuzzySearch, Search, VectorSearch,
+    };
+
+    let checked = check_golden(|tool, json| {
+        Some(match tool {
             "fulltext_search" => same_bytes::<FulltextSearch>(json),
             "fulltext_analyze" => same_bytes::<FulltextAnalyze>(json),
             "fuzzy_search" => same_bytes::<FuzzySearch>(json),
             "vector_search" => same_bytes::<VectorSearch>(json),
             "search" => same_bytes::<Search>(json),
-            _ => continue,
-        };
-        parsed.unwrap_or_else(|e| panic!("{tool} / {label}: {e}"));
-        checked += 1;
-    }
+            _ => return None,
+        })
+    });
     assert_eq!(checked, 65);
+}
+
+/// Every recorded response of the embedding tool group (embedding,
+/// auto-embedding and job tools) parses, strictly, into the tool's shared
+/// response type and serializes back to the same bytes
+#[test]
+fn embedding_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        AutoEmbedDisable, AutoEmbedEnable, AutoEmbedStatus, EmbedBatch, EmbedCacheClear,
+        EmbedCacheStats, EmbedJobCancel, EmbedJobList, EmbedJobStatus, EmbedModelsList, EmbedText,
+    };
+
+    let checked = check_golden(|tool, json| {
+        // The job ages are normalised to a string placeholder
+        let json_owned;
+        let json = if tool.starts_with("embed_job_") {
+            json_owned = json
+                .replace("\"<created_at_secs>\"", "0")
+                .replace("\"<updated_at_secs>\"", "0");
+            json_owned.as_str()
+        } else {
+            json
+        };
+        Some(match tool {
+            "embed_text" => same_bytes::<EmbedText>(json),
+            "embed_batch" => same_bytes::<EmbedBatch>(json),
+            "embed_models_list" => same_bytes::<EmbedModelsList>(json),
+            "embed_cache_stats" => same_bytes::<EmbedCacheStats>(json),
+            "embed_cache_clear" => same_bytes::<EmbedCacheClear>(json),
+            "auto_embed_enable" => same_bytes::<AutoEmbedEnable>(json),
+            "auto_embed_disable" => same_bytes::<AutoEmbedDisable>(json),
+            "auto_embed_status" => same_bytes::<AutoEmbedStatus>(json),
+            "embed_job_list" => same_bytes::<EmbedJobList>(json),
+            "embed_job_status" => same_bytes::<EmbedJobStatus>(json),
+            "embed_job_cancel" => same_bytes::<EmbedJobCancel>(json),
+            _ => return None,
+        })
+    });
+    assert_eq!(checked, 40);
 }

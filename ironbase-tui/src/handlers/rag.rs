@@ -2,8 +2,15 @@
 
 use crate::app::{App, Modal, RagState};
 use crossterm::event::{KeyCode, KeyModifiers};
-use ironbase_mcp_types::params::SearchParams;
-use ironbase_mcp_types::tools::Search;
+use ironbase_mcp_types::params::{
+    AutoEmbedEnableParams, AutoEmbedStatusParams, EmbedTextParams, JobListParams, NoParams,
+    SearchParams,
+};
+use ironbase_mcp_types::responses::EmbedCacheStatsResponse;
+use ironbase_mcp_types::tools::{
+    AutoEmbedEnable, AutoEmbedStatus, EmbedCacheStats, EmbedJobList, EmbedModelsList, EmbedText,
+    Search,
+};
 
 /// Open RAG & Embedding modal
 pub(crate) async fn handle_rag_open(app: &mut App) {
@@ -26,15 +33,29 @@ pub(crate) async fn handle_rag_open(app: &mut App) {
 
     // Load models + auto-embed status
     if let Some(ref db) = app.db {
-        if let Ok(models_result) = db.embed_list_models().await {
-            if let Some(models) = models_result.get("models").and_then(|v| v.as_array()) {
-                app.rag_state.models = models.clone();
-            }
+        let mut errors = Vec::new();
+        match db.call::<EmbedModelsList>(&NoParams {}).await {
+            Ok(models) => app.rag_state.set_models(models.models),
+            Err(e) => errors.push(format!("Models: {}", e)),
         }
-        if let Ok(ae_status) = db.auto_embed_status(&collection).await {
-            app.rag_state.auto_embed_config = Some(ae_status);
+        match load_auto_embed_status(db, &collection).await {
+            Ok(status) => app.rag_state.auto_embed_config = Some(status),
+            Err(e) => errors.push(format!("Auto-embed status: {}", e)),
+        }
+        if !errors.is_empty() {
+            app.rag_state.error = Some(errors.join("; "));
         }
     }
+}
+
+async fn load_auto_embed_status(
+    db: &crate::db::DbWrapper,
+    collection: &str,
+) -> anyhow::Result<ironbase_mcp_types::responses::AutoEmbedStatusResponse> {
+    db.call::<AutoEmbedStatus>(&AutoEmbedStatusParams {
+        collection: collection.to_string(),
+    })
+    .await
 }
 
 /// Handle RAG modal keys
@@ -441,7 +462,12 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                 app.rag_state.error = None;
 
                 if let Some(ref db) = app.db {
-                    match db.embed_text(&text, "ollama").await {
+                    let args = EmbedTextParams {
+                        text,
+                        provider: app.rag_state.selected_provider(),
+                    };
+                    app.rag_state.embed_test_result = None;
+                    match db.call::<EmbedText>(&args).await {
                         Ok(result) => {
                             app.rag_state.is_loading = false;
                             app.rag_state.embed_test_result = Some(result);
@@ -478,14 +504,35 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
         (KeyCode::Char('e'), _) => {
             let collection = app.rag_state.collection.clone();
             if let Some(ref db) = app.db {
-                match db
-                    .auto_embed_enable(&collection, "content", "embedding", "ollama")
-                    .await
-                {
-                    Ok(_) => {
-                        app.rag_state.message = Some("Auto-embed enabled!".to_string());
-                        if let Ok(status) = db.auto_embed_status(&collection).await {
-                            app.rag_state.auto_embed_config = Some(status);
+                let args = AutoEmbedEnableParams {
+                    collection: collection.clone(),
+                    source_field: "content".to_string(),
+                    target_field: "embedding".to_string(),
+                    provider: app.rag_state.selected_provider(),
+                    model: None,
+                    dimension: None,
+                    skip_if_exists: false,
+                    chunking: None,
+                };
+                match db.call::<AutoEmbedEnable>(&args).await {
+                    Ok(response) => {
+                        // What the server started (backfill / re-embed) and
+                        // why the vectors may differ, not a bare "enabled"
+                        let mut message = response
+                            .message
+                            .unwrap_or_else(|| "Auto-embed enabled".to_string());
+                        if let Some(job_id) = response.backfill_job_id {
+                            message.push_str(&format!(" (job {})", job_id));
+                        }
+                        if let Some(warning) = response.warning {
+                            message.push_str(&format!(" Warning: {}", warning));
+                        }
+                        app.rag_state.message = Some(message);
+                        match load_auto_embed_status(db, &collection).await {
+                            Ok(status) => app.rag_state.auto_embed_config = Some(status),
+                            Err(e) => {
+                                app.rag_state.error = Some(format!("Auto-embed status: {}", e))
+                            }
                         }
                     }
                     Err(e) => {
@@ -501,10 +548,15 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
         // Cache stats
         (KeyCode::Char('c'), _) => {
             if let Some(ref db) = app.db {
-                match db.embed_cache_stats().await {
+                match db.call::<EmbedCacheStats>(&NoParams {}).await {
                     Ok(stats) => {
+                        app.rag_state.message = Some(match &stats {
+                            EmbedCacheStatsResponse::Enabled { .. } => {
+                                "Cache stats loaded".to_string()
+                            }
+                            EmbedCacheStatsResponse::Disabled { message, .. } => message.clone(),
+                        });
                         app.rag_state.cache_stats = Some(stats);
-                        app.rag_state.message = Some("Cache stats loaded".to_string());
                     }
                     Err(e) => {
                         app.rag_state.error = Some(format!("{}", e));
@@ -543,11 +595,12 @@ pub(crate) async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
         // Refresh job list
         KeyCode::Char('r') => {
             if let Some(ref db) = app.db {
-                match db.embed_job_list(false).await {
+                match db
+                    .call::<EmbedJobList>(&JobListParams { active_only: false })
+                    .await
+                {
                     Ok(result) => {
-                        if let Some(jobs) = result.get("jobs").and_then(|v| v.as_array()) {
-                            app.rag_state.jobs = jobs.clone();
-                        }
+                        app.rag_state.set_jobs(result.jobs);
                         app.rag_state.message = Some("Jobs refreshed".to_string());
                     }
                     Err(e) => {

@@ -1038,3 +1038,243 @@ out: {"verdict":"unknown","documents":[{"doc_id":"c3","heading":"Other","passage
 in:  {"collection":"clash","query":"relevance","format":"context_block"}
 out: {"verdict":"unknown","context":"[c3]\nrust relevance\n\n","count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
 
+## embed_text / default provider
+in:  {"text":"hello"}
+out: {"vector":[5.0,1.0],"dimension":2,"provider":"length","model":"length"}
+
+## embed_text / explicit provider
+in:  {"text":"hi","provider":"other"}
+out: {"vector":[2.0,1.0],"dimension":2,"provider":"other","model":"length"}
+
+## embed_text / unknown provider
+in:  {"text":"hi","provider":"nope"}
+err: InternalError Embedding failed: Provider not found: nope
+
+## embed_text / embedding fails
+in:  {"text":"fail"}
+err: InternalError Embedding failed: Embedding failed: cannot embed 'fail'
+
+## embed_text / missing text
+in:  {}
+err: InvalidParams missing field `text`
+
+## embed_text / no embedding manager
+in:  {"text":"hello"}
+err: InternalError Embedding not available. Configure an [embedding] section in config.toml.
+
+## embed_text / no provider
+in:  {"text":"hello"}
+err: InvalidParams No embedding provider available. Configure an [embedding] section in config.toml or pass an explicit 'provider' argument.
+
+## embed_batch / two texts
+in:  {"texts":["a","bcd"]}
+out: {"vectors":[[1.0,1.0],[3.0,1.0]],"count":2,"dimension":2,"provider":"length","model":"length"}
+
+## embed_batch / explicit provider
+in:  {"texts":["xy"],"provider":"other"}
+out: {"vectors":[[2.0,1.0]],"count":1,"dimension":2,"provider":"other","model":"length"}
+
+## embed_batch / empty
+in:  {"texts":[]}
+err: InvalidParams texts array cannot be empty
+
+## embed_batch / embedding fails
+in:  {"texts":["ok","fail"]}
+err: InternalError Batch embedding failed: Embedding failed: cannot embed 'fail'
+
+## embed_models_list / two providers
+in:  {}
+out: {"models":[{"provider":"length","model":"length","dimension":2,"description":"length embedding provider","available":true},{"provider":"other","model":"length","dimension":2,"description":"length embedding provider","available":true}],"count":2,"default_provider":"length"}
+
+## embed_models_list / no provider
+in:  {}
+out: {"models":[],"count":0,"default_provider":""}
+
+## embed_models_list / no embedding manager
+in:  {}
+err: InternalError Embedding not available. Configure an [embedding] section in config.toml.
+
+## embed_cache_stats / cache disabled
+in:  {}
+out: {"enabled":false,"message":"Embedding cache is not enabled"}
+
+## embed_cache_stats / empty cache
+in:  {}
+out: {"enabled":true,"stats":{"hits":0,"misses":0,"entries":0,"max_entries":100,"bytes_used":0,"hit_rate":0.0}}
+
+## embed_text / cached miss
+in:  {"text":"cache me"}
+out: {"vector":[8.0,1.0],"dimension":2,"provider":"length","model":"length"}
+
+## embed_text / cached hit
+in:  {"text":"cache me"}
+out: {"vector":[8.0,1.0],"dimension":2,"provider":"length","model":"length"}
+
+## embed_cache_stats / one hit one miss
+in:  {}
+out: {"enabled":true,"stats":{"hits":1,"misses":1,"entries":1,"max_entries":100,"bytes_used":84,"hit_rate":50.0}}
+
+## embed_cache_clear / cache disabled
+in:  {}
+out: {"success":false,"message":"Embedding cache is not enabled"}
+
+## embed_cache_clear / one entry
+in:  {}
+out: {"success":true,"entries_cleared":1,"message":"Cleared 1 cache entries"}
+
+## embed_cache_stats / after clear
+in:  {}
+out: {"enabled":true,"stats":{"hits":1,"misses":1,"entries":0,"max_entries":100,"bytes_used":0,"hit_rate":50.0}}
+
+## auto_embed_status / not configured
+in:  {"collection":"plain"}
+out: {"collection":"plain","enabled":false,"config":null}
+
+## auto_embed_status / removed provider
+in:  {"collection":"legacy"}
+out: {"collection":"legacy","enabled":true,"config":{"source_field":"text","target_field":"vec","provider":"fasttext","model":null,"dimension":null,"skip_if_exists":false,"chunking":null},"reembed_pending":false,"reembed_field":null,"requires_reconfiguration":true,"reconfiguration_reason":"Provider 'fasttext' has been removed. Call auto_embed_enable with a supported provider (ollama, vllm, openai) to re-enable this collection."}
+
+## auto_embed_status / missing collection param
+in:  {}
+err: InvalidParams missing field `collection`
+
+## auto_embed_enable / empty collection
+in:  {"collection":"plain","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"plain","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":0}
+
+## auto_embed_enable / explicit provider, chunking
+in:  {"collection":"plain","source_field":"body","target_field":"body_vec","provider":"other","skip_if_exists":false,"chunking":{"mode":"paragraph","chunk_size":200,"overlap":20}}
+out: {"success":true,"collection":"plain","config":{"enabled":true,"source_field":"body","target_field":"body_vec","provider":"other","model":"length","dimension":2,"skip_if_exists":false,"chunking":{"mode":"paragraph","chunk_size":200,"overlap":20}},"existing_documents":0}
+
+## auto_embed_enable / chunk documents
+in:  {"collection":"chunks","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"chunks","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"warning":"Collection 'chunks' contains chunk documents (section_path present). Auto-embed embeds 'content' verbatim, without the section breadcrumb that rag_document_import adds — these vectors will differ from import-time vectors."}
+
+## auto_embed_enable / dimension mismatch
+in:  {"collection":"plain","source_field":"content","target_field":"embedding","dimension":5}
+err: InvalidParams dimension 5 does not match provider 'length', which returns 2-dimensional vectors
+
+## auto_embed_enable / same source and target
+in:  {"collection":"plain","source_field":"content","target_field":"content"}
+err: InvalidParams source_field and target_field cannot be the same
+
+## auto_embed_enable / missing source_field
+in:  {"collection":"plain","target_field":"embedding"}
+err: InvalidParams missing field `source_field`
+
+## auto_embed_enable / unknown provider
+in:  {"collection":"plain","source_field":"content","target_field":"embedding","provider":"nope"}
+err: InvalidParams Provider 'nope' not found. Available: ["length"]
+
+## auto_embed_enable / no embedding manager
+in:  {"collection":"plain","source_field":"content","target_field":"embedding"}
+err: InternalError Embedding not available. Configure [embedding] section in config.toml.
+
+## auto_embed_status / enabled
+in:  {"collection":"plain"}
+out: {"collection":"plain","enabled":true,"config":{"source_field":"body","target_field":"body_vec","provider":"other","model":"length","dimension":2,"skip_if_exists":false,"chunking":{"mode":"paragraph","chunk_size":200,"overlap":20}},"reembed_pending":false,"reembed_field":null}
+
+## auto_embed_status / chunk documents
+in:  {"collection":"chunks"}
+out: {"collection":"chunks","enabled":true,"config":{"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"reembed_pending":false,"reembed_field":null}
+
+## auto_embed_enable / existing documents
+in:  {"collection":"docs","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"docs","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":2}
+
+## auto_embed_enable / other model, existing vectors
+in:  {"collection":"vecs","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"vecs","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"reembed":true,"message":"Auto-embedding enabled with a different provider, model, preprocessing, dimension or source field: all existing vectors are being re-embedded (retried on startup until done)."}
+
+## auto_embed_status / re-embed pending
+in:  {"collection":"vecs"}
+out: {"collection":"vecs","enabled":true,"config":{"source_field":"content","target_field":"embedding","provider":"length","model":"older","dimension":2,"skip_if_exists":false,"chunking":null},"reembed_pending":true,"reembed_field":null}
+
+## auto_embed_enable / backfill job started
+in:  {"collection":"jobbed","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"jobbed","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"backfill_job_id":"job_1","message":"Auto-embedding enabled. Backfill job started for existing documents."}
+
+## auto_embed_disable / enabled
+in:  {"collection":"plain"}
+out: {"success":true,"collection":"plain","message":"Auto-embedding disabled"}
+
+## auto_embed_disable / not configured
+in:  {"collection":"empty_one"}
+out: {"success":true,"collection":"empty_one","message":"Auto-embedding disabled"}
+
+## auto_embed_disable / missing collection param
+in:  {}
+err: InvalidParams missing field `collection`
+
+## auto_embed_status / after disable
+in:  {"collection":"plain"}
+out: {"collection":"plain","enabled":false,"config":null}
+
+## embed_job_list / all
+in:  {}
+out: {"jobs":[{"id":"job_1","job_type":"Compact","status":{"status":"pending"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null},{"id":"job_2","job_type":{"EmbedBackfill":{"collection":"kb","provider":"length"}},"status":{"status":"running","progress":25.0,"message":"Embedding batch 1"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":1,"items_total":4},{"id":"job_3","job_type":{"EmbedDocument":{"collection":"kb","doc_id":"d1"}},"status":{"status":"completed","result":{"processed":3,"errors":0}},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null},{"id":"job_4","job_type":{"Custom":{"name":"x"}},"status":{"status":"failed","error":"Provider 'nope' not available"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null},{"id":"job_5","job_type":"Compact","status":{"status":"cancelled"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null},{"id":"job_6","job_type":"Compact","status":{"status":"running","progress":0.0,"message":"Starting..."},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}],"count":6,"active_count":2}
+
+## embed_job_list / active only
+in:  {"active_only":true}
+out: {"jobs":[{"id":"job_2","job_type":{"EmbedBackfill":{"collection":"kb","provider":"length"}},"status":{"status":"running","progress":25.0,"message":"Embedding batch 1"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":1,"items_total":4},{"id":"job_6","job_type":"Compact","status":{"status":"running","progress":0.0,"message":"Starting..."},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}],"count":2,"active_count":2}
+
+## embed_job_status / pending
+in:  {"job_id":"job_1"}
+out: {"found":true,"job":{"id":"job_1","job_type":"Compact","status":{"status":"pending"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}}
+
+## embed_job_status / running
+in:  {"job_id":"job_2"}
+out: {"found":true,"job":{"id":"job_2","job_type":{"EmbedBackfill":{"collection":"kb","provider":"length"}},"status":{"status":"running","progress":25.0,"message":"Embedding batch 1"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":1,"items_total":4}}
+
+## embed_job_status / completed
+in:  {"job_id":"job_3"}
+out: {"found":true,"job":{"id":"job_3","job_type":{"EmbedDocument":{"collection":"kb","doc_id":"d1"}},"status":{"status":"completed","result":{"processed":3,"errors":0}},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}}
+
+## embed_job_status / failed
+in:  {"job_id":"job_4"}
+out: {"found":true,"job":{"id":"job_4","job_type":{"Custom":{"name":"x"}},"status":{"status":"failed","error":"Provider 'nope' not available"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}}
+
+## embed_job_status / cancelled
+in:  {"job_id":"job_5"}
+out: {"found":true,"job":{"id":"job_5","job_type":"Compact","status":{"status":"cancelled"},"created_at_secs":"<created_at_secs>","updated_at_secs":"<updated_at_secs>","items_processed":0,"items_total":null}}
+
+## embed_job_status / unknown
+in:  {"job_id":"job_999"}
+out: {"found":false,"message":"Job 'job_999' not found"}
+
+## embed_job_status / missing job_id
+in:  {}
+err: InvalidParams missing field `job_id`
+
+## embed_job_cancel / running
+in:  {"job_id":"job_6"}
+out: {"success":true,"job_id":"job_6","message":"Job 'job_6' cancelled"}
+
+## embed_job_cancel / completed
+in:  {"job_id":"job_3"}
+out: {"success":false,"job_id":"job_3","message":"Job 'job_3' is already in terminal state","status":{"status":"completed","result":{"processed":3,"errors":0}}}
+
+## embed_job_cancel / already cancelled
+in:  {"job_id":"job_5"}
+out: {"success":false,"job_id":"job_5","message":"Job 'job_5' is already in terminal state","status":{"status":"cancelled"}}
+
+## embed_job_cancel / unknown
+in:  {"job_id":"job_999"}
+out: {"success":false,"job_id":"job_999","message":"Job 'job_999' not found"}
+
+## embed_job_cancel / missing job_id
+in:  {}
+err: InvalidParams missing field `job_id`
+
+## embed_job_list / no job manager
+in:  {}
+err: InternalError Job manager not available
+
+## embed_job_status / no job manager
+in:  {"job_id":"job_1"}
+err: InternalError Job manager not available
+
+## embed_job_cancel / no job manager
+in:  {"job_id":"job_1"}
+err: InternalError Job manager not available
+

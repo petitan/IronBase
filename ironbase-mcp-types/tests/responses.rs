@@ -581,3 +581,97 @@ fn search_document_with_its_own_relevance_and_passages() {
     assert_eq!(docs[0].passages[0].text, "rust relevance");
     assert_eq!(docs[0].fields["heading"], "Other");
 }
+
+// ============================================================================
+// Embedding tool group
+// ============================================================================
+
+#[test]
+fn flag_accepts_only_its_own_value() {
+    assert_eq!(serde_json::to_string(&Flag::<true>).unwrap(), "true");
+    assert!(serde_json::from_str::<Flag<true>>("true").is_ok());
+    assert!(serde_json::from_str::<Flag<true>>("false").is_err());
+    assert!(serde_json::from_str::<Flag<false>>("true").is_err());
+    assert!(serde_json::from_str::<Flag<false>>("null").is_err());
+}
+
+#[test]
+fn embed_cache_stats_variants() {
+    let text = r#"{"enabled":true,"stats":{"hits":1,"misses":1,"entries":1,"max_entries":100,"bytes_used":84,"hit_rate":50.0}}"#;
+    let parsed = same_bytes::<<tools::EmbedCacheStats as Tool>::Resp>(text);
+    let EmbedCacheStatsResponse::Enabled { stats, .. } = parsed else {
+        panic!("{parsed:?}");
+    };
+    assert_eq!(stats.hit_rate, 50.0);
+    requires::<EmbedCacheStatsResponse>(text, "misses");
+
+    let disabled = r#"{"enabled":false,"message":"Embedding cache is not enabled"}"#;
+    assert!(matches!(
+        same_bytes::<EmbedCacheStatsResponse>(disabled),
+        EmbedCacheStatsResponse::Disabled { .. }
+    ));
+    // The flag decides the variant: an enabled cache without stats is an error
+    assert!(serde_json::from_str::<EmbedCacheStatsResponse>(
+        r#"{"enabled":true,"message":"Embedding cache is not enabled"}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn auto_embed_status_variants() {
+    let configured = r#"{"collection":"plain","enabled":true,"config":{"source_field":"body","target_field":"body_vec","provider":"other","model":"length","dimension":2,"skip_if_exists":false,"chunking":{"mode":"paragraph","chunk_size":200,"overlap":20}},"reembed_pending":false,"reembed_field":null}"#;
+    let parsed = same_bytes::<<tools::AutoEmbedStatus as Tool>::Resp>(configured);
+    let AutoEmbedStatusResponse::Configured { config, .. } = parsed else {
+        panic!("{parsed:?}");
+    };
+    assert_eq!(config.source_field, "body");
+    assert_eq!(config.chunking.unwrap().chunk_size, 200);
+    requires::<AutoEmbedStatusResponse>(configured, "target_field");
+    requires::<AutoEmbedStatusResponse>(configured, "reembed_pending");
+
+    let none = r#"{"collection":"plain","enabled":false,"config":null}"#;
+    assert!(matches!(
+        same_bytes::<AutoEmbedStatusResponse>(none),
+        AutoEmbedStatusResponse::NotConfigured { .. }
+    ));
+    // `config: null` with `enabled: true` matches neither shape
+    assert!(serde_json::from_str::<AutoEmbedStatusResponse>(
+        r#"{"collection":"plain","enabled":true,"config":null}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn auto_embed_enable_config_flattens_after_enabled() {
+    let text = r#"{"success":true,"collection":"jobbed","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"backfill_job_id":"job_1","message":"Auto-embedding enabled. Backfill job started for existing documents."}"#;
+    let parsed = same_bytes::<<tools::AutoEmbedEnable as Tool>::Resp>(text);
+    assert!(parsed.config.enabled);
+    assert_eq!(parsed.config.config.target_field, "embedding");
+    assert_eq!(parsed.backfill_job_id.as_deref(), Some("job_1"));
+    requires::<AutoEmbedEnableResponse>(text, "existing_documents");
+    requires::<AutoEmbedEnableResponse>(text, "provider");
+}
+
+#[test]
+fn job_info_status_and_type_shapes() {
+    let text = r#"{"jobs":[{"id":"job_1","job_type":"Compact","status":{"status":"pending"},"created_at_secs":0,"updated_at_secs":0,"items_processed":0,"items_total":null},{"id":"job_2","job_type":{"EmbedBackfill":{"collection":"kb","provider":"length"}},"status":{"status":"running","progress":25.0,"message":"Embedding batch 1"},"created_at_secs":3,"updated_at_secs":1,"items_processed":1,"items_total":4}],"count":2,"active_count":1}"#;
+    let parsed = same_bytes::<<tools::EmbedJobList as Tool>::Resp>(text);
+    assert_eq!(parsed.jobs[0].job_type, JobType::Compact);
+    assert!(matches!(
+        parsed.jobs[1].status,
+        JobStatus::Running { progress, .. } if progress == 25.0
+    ));
+    assert!(parsed.jobs[1].status.is_running());
+    requires::<EmbedJobListResponse>(text, "active_count");
+    requires::<EmbedJobListResponse>(text, "items_processed");
+
+    let not_found = r#"{"found":false,"message":"Job 'job_999' not found"}"#;
+    assert!(matches!(
+        same_bytes::<<tools::EmbedJobStatus as Tool>::Resp>(not_found),
+        EmbedJobStatusResponse::NotFound { .. }
+    ));
+
+    let terminal = r#"{"success":false,"job_id":"job_5","message":"Job 'job_5' is already in terminal state","status":{"status":"cancelled"}}"#;
+    let parsed = same_bytes::<<tools::EmbedJobCancel as Tool>::Resp>(terminal);
+    assert_eq!(parsed.status, Some(JobStatus::Cancelled));
+}

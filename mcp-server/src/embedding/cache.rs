@@ -85,22 +85,8 @@ impl CacheConfig {
     }
 }
 
-/// Cache statistics
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct CacheStats {
-    /// Number of cache hits
-    pub hits: u64,
-    /// Number of cache misses
-    pub misses: u64,
-    /// Current number of entries in cache
-    pub entries: usize,
-    /// Maximum capacity
-    pub max_entries: usize,
-    /// Total bytes used (approximate)
-    pub bytes_used: usize,
-    /// Hit rate percentage
-    pub hit_rate: f64,
-}
+// Cache statistics: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::responses::CacheStats;
 
 /// Thread-safe embedding cache
 pub struct EmbeddingCache {
@@ -157,9 +143,12 @@ impl EmbeddingCache {
     pub fn get(&self, text: &str, provider: &str, model: &str) -> Option<CachedEmbedding> {
         let key = Self::cache_key(text, provider, model);
 
-        // Try to get from cache
+        // Try to get from cache; an absent key is a miss like an expired one
         let mut cache = self.cache.write();
-        let entry = cache.get_mut(&key)?;
+        let Some(entry) = cache.get_mut(&key) else {
+            self.stats.write().misses += 1;
+            return None;
+        };
 
         // Check TTL
         if let Some(ttl) = self.config.ttl {
@@ -318,7 +307,7 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
-        assert_eq!(stats.misses, 1); // only the explicit miss is recorded
+        assert_eq!(stats.misses, 2); // the lookup miss and the explicit one
         assert_eq!(stats.entries, 1);
     }
 

@@ -8,12 +8,15 @@ use crate::state::rag::RagTab;
 use crate::state::vector::VectorTab;
 use crate::state::{ConnectionType, ScriptConfirmAction, ScriptMode};
 use crate::testing::{
-    app_with_server, numbered_docs, press, press_with, render_to_string, type_text, FakeServer,
+    app_with_server, model_info, numbered_docs, press, press_with, render_to_string, type_text,
+    FakeServer,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::{
-    FulltextIndexInfo, FuzzyIndexInfo, HnswParams, IndexListAll, IndexListResponse,
-    IndexStatsResponse, TypedIndexList, VectorIndexInfo, VectorMetric,
+    AutoEmbedDisableResponse, EmbedCacheClearResponse, EmbedJobCancelResponse,
+    EmbedJobListResponse, EmbedModelsListResponse, EmbedTextResponse, Flag, FulltextIndexInfo,
+    FuzzyIndexInfo, HnswParams, IndexListAll, IndexListResponse, IndexStatsResponse, JobInfo,
+    JobStatus, JobType, TypedIndexList, VectorIndexInfo, VectorMetric,
 };
 use serde_json::{json, to_value};
 use std::sync::Arc;
@@ -425,7 +428,15 @@ async fn open_rag_models_tab(app: &mut App) {
 #[tokio::test]
 async fn test_auto_embed_disable_executes_with_captured_collection() {
     let server = two_collections();
-    server.respond("auto_embed_disable", json!({"success": true}));
+    server.respond(
+        "auto_embed_disable",
+        to_value(AutoEmbedDisableResponse {
+            success: true,
+            collection: "users".to_string(),
+            message: "Auto-embedding disabled".to_string(),
+        })
+        .unwrap(),
+    );
     let mut app = app_with_server(&server).await;
     open_rag_models_tab(&mut app).await;
     server.clear_calls();
@@ -450,7 +461,15 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
 #[tokio::test]
 async fn test_embed_cache_clear_executes_after_confirm() {
     let server = two_collections();
-    server.respond("embed_cache_clear", json!({"success": true}));
+    server.respond(
+        "embed_cache_clear",
+        to_value(EmbedCacheClearResponse::Cleared {
+            success: Flag,
+            entries_cleared: 3,
+            message: "Cleared 3 cache entries".to_string(),
+        })
+        .unwrap(),
+    );
     let mut app = app_with_server(&server).await;
     open_rag_models_tab(&mut app).await;
     server.clear_calls();
@@ -466,23 +485,94 @@ async fn test_embed_cache_clear_executes_after_confirm() {
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.modal, Some(Modal::Rag));
     assert_eq!(server.calls_to("embed_cache_clear").len(), 1);
-    assert_eq!(app.rag_state.message.as_deref(), Some("Cache cleared"));
+    assert_eq!(
+        app.rag_state.message.as_deref(),
+        Some("Cleared 3 cache entries")
+    );
+}
+
+/// Without a cache on the server nothing is cleared: the server's
+/// `success: false` is shown as an error, not as "cleared"
+#[tokio::test]
+async fn test_embed_cache_clear_without_a_cache_reports_it() {
+    let server = two_collections();
+    server.respond(
+        "embed_cache_clear",
+        to_value(EmbedCacheClearResponse::Disabled {
+            success: Flag,
+            message: "Embedding cache is not enabled".to_string(),
+        })
+        .unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_models_tab(&mut app).await;
+    press(&mut app, KeyCode::Char('x')).await;
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(
+        app.rag_state.error.as_deref(),
+        Some("Embedding cache is not enabled")
+    );
+    assert_eq!(app.rag_state.message, None);
+}
+
+/// A job of the job tools' shape
+fn job(n: u64, status: JobStatus) -> JobInfo {
+    JobInfo {
+        id: format!("job_{}", n),
+        job_type: JobType::EmbedBackfill {
+            collection: "users".to_string(),
+            provider: "length".to_string(),
+        },
+        status,
+        created_at_secs: 10 - n,
+        updated_at_secs: 0,
+        items_processed: 1,
+        items_total: Some(4),
+    }
+}
+
+fn running() -> JobStatus {
+    JobStatus::Running {
+        progress: 25.0,
+        message: "Embedding batch 1".to_string(),
+    }
+}
+
+/// The server's job list (hash-map order), as `embed_job_list` answers it
+fn job_list(jobs: Vec<JobInfo>) -> serde_json::Value {
+    to_value(EmbedJobListResponse {
+        count: jobs.len(),
+        active_count: jobs.iter().filter(|j| j.status.is_running()).count(),
+        jobs,
+    })
+    .unwrap()
 }
 
 #[tokio::test]
 async fn test_embed_job_cancel_executes_with_captured_job_id() {
     let server = two_collections();
+    // Hash-map order on the server: the TUI lists the newest first
     server.respond(
         "embed_job_list",
-        json!({"jobs": [{"job_id": "job-1"}, {"job_id": "job-2"}]}),
+        job_list(vec![job(1, running()), job(2, running())]),
     );
-    server.respond("embed_job_cancel", json!({"success": true}));
+    server.respond(
+        "embed_job_cancel",
+        to_value(EmbedJobCancelResponse {
+            success: true,
+            job_id: "job_1".to_string(),
+            message: "Job 'job_1' cancelled".to_string(),
+            status: None,
+        })
+        .unwrap(),
+    );
     let mut app = app_with_server(&server).await;
     shift(&mut app, 'E').await;
     press_with(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
     assert_eq!(app.rag_state.active_tab, RagTab::Jobs);
     press(&mut app, KeyCode::Char('r')).await;
-    assert_eq!(app.rag_state.jobs.len(), 2);
+    let ids: Vec<&str> = app.rag_state.jobs.iter().map(|j| j.id.as_str()).collect();
+    assert_eq!(ids, ["job_2", "job_1"]);
     press(&mut app, KeyCode::Char('j')).await;
     server.clear_calls();
 
@@ -495,11 +585,141 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
     assert_eq!(app.modal, Some(Modal::Rag));
     assert_eq!(
         server.calls_to("embed_job_cancel"),
-        vec![json!({"job_id": "job-2"})]
+        vec![json!({"job_id": "job_1"})]
     );
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("Job job-2 cancelled")
+        Some("Job 'job_1' cancelled")
+    );
+    // The list is reloaded after the cancel
+    assert_eq!(server.calls_to("embed_job_list").len(), 1);
+}
+
+/// The jobs are shown with their real fields: the state of the `status`
+/// object, the collection of the job type, the item counters (all `?` / empty
+/// before: the TUI read `job_id`, a string `status`, `progress`, `total`)
+#[tokio::test]
+async fn test_rag_jobs_tab_shows_the_job_fields() {
+    let server = two_collections();
+    let failed = JobStatus::Failed {
+        error: "Provider 'nope' not available".to_string(),
+    };
+    server.respond(
+        "embed_job_list",
+        job_list(vec![job(1, failed), job(2, running())]),
+    );
+    let mut app = app_with_server(&server).await;
+    shift(&mut app, 'E').await;
+    press_with(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
+    press(&mut app, KeyCode::Char('r')).await;
+
+    let screen = render_to_string(&app, 120, 36);
+    assert!(
+        screen.contains("job_2 | running 25% | backfill users 1/4"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("job_1 | failed: Provider 'nope' not available"),
+        "{screen}"
+    );
+}
+
+/// A finished job cannot be cancelled: the server's reason is shown as an
+/// error, not "cancelled"
+#[tokio::test]
+async fn test_embed_job_cancel_of_a_finished_job_reports_it() {
+    let server = two_collections();
+    server.respond(
+        "embed_job_list",
+        job_list(vec![job(1, JobStatus::Cancelled)]),
+    );
+    server.respond(
+        "embed_job_cancel",
+        to_value(EmbedJobCancelResponse {
+            success: false,
+            job_id: "job_1".to_string(),
+            message: "Job 'job_1' is already in terminal state".to_string(),
+            status: Some(JobStatus::Cancelled),
+        })
+        .unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    shift(&mut app, 'E').await;
+    press_with(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
+    press(&mut app, KeyCode::Char('r')).await;
+    press(&mut app, KeyCode::Char('x')).await;
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(
+        app.rag_state.error.as_deref(),
+        Some("Job 'job_1' is already in terminal state")
+    );
+}
+
+/// The test embedding and auto-embed use the provider selected on the
+/// Models tab (before: always `ollama`, an error on a server without it)
+#[tokio::test]
+async fn test_rag_models_tab_uses_the_selected_provider() {
+    let server = two_collections();
+    server.respond(
+        "embed_models_list",
+        to_value(EmbedModelsListResponse {
+            models: vec![model_info("vllm"), model_info("openai")],
+            count: 2,
+            default_provider: "vllm".to_string(),
+        })
+        .unwrap(),
+    );
+    server.respond(
+        "embed_text",
+        to_value(EmbedTextResponse {
+            vector: vec![0.5, 1.0],
+            dimension: 2,
+            provider: "vllm".to_string(),
+            model: "vllm-model".to_string(),
+        })
+        .unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_models_tab(&mut app).await;
+    // Sorted by name: openai, vllm
+    press(&mut app, KeyCode::Char('j')).await;
+    press(&mut app, KeyCode::Char('t')).await;
+    type_text(&mut app, "hi").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        server.calls_to("embed_text"),
+        vec![json!({"text": "hi", "provider": "vllm"})]
+    );
+    let screen = render_to_string(&app, 120, 36);
+    assert!(
+        screen.contains("Provider: vllm (vllm-model) | Dim: 2 | [0.5000, 1.0000]"),
+        "{screen}"
+    );
+
+    press(&mut app, KeyCode::Esc).await;
+    press(&mut app, KeyCode::Char('e')).await;
+    assert_eq!(
+        server.calls_to("auto_embed_enable"),
+        vec![json!({"collection": "users", "source_field": "content",
+            "target_field": "embedding", "provider": "vllm", "skip_if_exists": false})]
+    );
+}
+
+/// A failing provider list is reported, not shown as "Loading models..."
+#[tokio::test]
+async fn test_rag_open_reports_a_failing_models_list() {
+    let server = two_collections();
+    server.fail("embed_models_list", "Embedding not available");
+    let mut app = app_with_server(&server).await;
+    shift(&mut app, 'E').await;
+    assert_eq!(app.modal, Some(Modal::Rag));
+    assert!(
+        app.rag_state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("Embedding not available")),
+        "{:?}",
+        app.rag_state.error
     );
 }
 

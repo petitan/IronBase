@@ -2,7 +2,10 @@
 
 use crate::error::{McpError, Result};
 use crate::jobs::JobManager;
-use serde_json::{json, Value};
+use ironbase_mcp_types::responses::{
+    EmbedJobCancelResponse, EmbedJobListResponse, EmbedJobStatusResponse, Flag,
+};
+use serde_json::Value;
 use std::sync::Arc;
 
 use super::params::ParseParams;
@@ -38,16 +41,14 @@ pub fn dispatch(name: &str, params: Value, job_manager: &Option<Arc<JobManager>>
 fn handle_job_status(params: Value, manager: &JobManager) -> Result<Value> {
     let p: JobStatusParams = JobStatusParams::parse(params)?;
 
-    match manager.get_job_info(&p.job_id) {
-        Some(info) => Ok(json!({
-            "found": true,
-            "job": info
-        })),
-        None => Ok(json!({
-            "found": false,
-            "message": format!("Job '{}' not found", p.job_id)
-        })),
-    }
+    let response = match manager.get_job_info(&p.job_id) {
+        Some(job) => EmbedJobStatusResponse::Found { found: Flag, job },
+        None => EmbedJobStatusResponse::NotFound {
+            found: Flag,
+            message: format!("Job '{}' not found", p.job_id),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 fn handle_job_list(params: Value, manager: &JobManager) -> Result<Value> {
@@ -61,39 +62,42 @@ fn handle_job_list(params: Value, manager: &JobManager) -> Result<Value> {
 
     let active_count = manager.active_job_count();
 
-    Ok(json!({
-        "jobs": jobs,
-        "count": jobs.len(),
-        "active_count": active_count
-    }))
+    Ok(serde_json::to_value(EmbedJobListResponse {
+        count: jobs.len(),
+        jobs,
+        active_count,
+    })?)
 }
 
 fn handle_job_cancel(params: Value, manager: &JobManager) -> Result<Value> {
     let p: JobCancelParams = JobCancelParams::parse(params)?;
 
-    if manager.cancel_job(&p.job_id) {
-        Ok(json!({
-            "success": true,
-            "job_id": p.job_id,
-            "message": format!("Job '{}' cancelled", p.job_id)
-        }))
+    let response = if manager.cancel_job(&p.job_id) {
+        EmbedJobCancelResponse {
+            success: true,
+            message: format!("Job '{}' cancelled", p.job_id),
+            job_id: p.job_id,
+            status: None,
+        }
     } else {
         // Check if job exists but is already completed
-        if let Some(info) = manager.get_job_info(&p.job_id) {
-            if info.status.is_terminal() {
-                return Ok(json!({
-                    "success": false,
-                    "job_id": p.job_id,
-                    "message": format!("Job '{}' is already in terminal state", p.job_id),
-                    "status": info.status
-                }));
-            }
+        match manager
+            .get_job_info(&p.job_id)
+            .filter(|info| info.status.is_terminal())
+        {
+            Some(info) => EmbedJobCancelResponse {
+                success: false,
+                message: format!("Job '{}' is already in terminal state", p.job_id),
+                job_id: p.job_id,
+                status: Some(info.status),
+            },
+            None => EmbedJobCancelResponse {
+                success: false,
+                message: format!("Job '{}' not found", p.job_id),
+                job_id: p.job_id,
+                status: None,
+            },
         }
-
-        Ok(json!({
-            "success": false,
-            "job_id": p.job_id,
-            "message": format!("Job '{}' not found", p.job_id)
-        }))
-    }
+    };
+    Ok(serde_json::to_value(response)?)
 }

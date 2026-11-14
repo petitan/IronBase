@@ -1,6 +1,9 @@
 //! RAG & Embedding state
 
-use ironbase_mcp_types::responses::{SearchBody, SearchDocument, SearchResponse};
+use ironbase_mcp_types::responses::{
+    AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, ModelInfo,
+    SearchBody, SearchDocument, SearchResponse,
+};
 use serde_json::Value;
 
 /// Active tab in RAG modal
@@ -83,17 +86,19 @@ pub struct RagState {
     pub create_form_field: usize,
 
     // === Models tab ===
-    pub models: Vec<Value>,
+    /// The server's embedding providers, sorted by name
+    pub models: Vec<ModelInfo>,
     pub selected_model: usize,
-    pub auto_embed_config: Option<Value>,
-    pub cache_stats: Option<Value>,
+    pub auto_embed_config: Option<AutoEmbedStatusResponse>,
+    pub cache_stats: Option<EmbedCacheStatsResponse>,
     pub embed_test_input: String,
-    pub embed_test_result: Option<Value>,
+    pub embed_test_result: Option<EmbedTextResponse>,
     /// Sub-mode: 0=main view, 1=test input
     pub models_mode: usize,
 
     // === Jobs tab ===
-    pub jobs: Vec<Value>,
+    /// The server's jobs, newest first
+    pub jobs: Vec<JobInfo>,
     pub selected_job: usize,
 
     // === Common ===
@@ -191,12 +196,40 @@ impl RagState {
 
     /// Get selected job ID (if any)
     pub fn selected_job_id(&self) -> Option<String> {
-        self.jobs.get(self.selected_job).and_then(|j| {
-            j.get("job_id")
-                .or_else(|| j.get("id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+        self.jobs.get(self.selected_job).map(|j| j.id.clone())
+    }
+
+    /// Take a job list (the server lists jobs in hash-map order): newest
+    /// first, the selection staying on the same job while it is listed
+    pub fn set_jobs(&mut self, mut jobs: Vec<JobInfo>) {
+        let selected = self.selected_job_id();
+        jobs.sort_by(|a, b| {
+            job_number(&b.id)
+                .cmp(&job_number(&a.id))
+                .then(b.id.cmp(&a.id))
+        });
+        self.selected_job = selected
+            .and_then(|id| jobs.iter().position(|j| j.id == id))
+            .unwrap_or(0);
+        self.jobs = jobs;
+    }
+
+    /// Take the provider list (hash-map order on the server): sorted by
+    /// name, the selection staying on the same provider while it is listed
+    pub fn set_models(&mut self, mut models: Vec<ModelInfo>) {
+        let selected = self.selected_provider();
+        models.sort_by(|a, b| a.provider.cmp(&b.provider));
+        self.selected_model = selected
+            .and_then(|p| models.iter().position(|m| m.provider == p))
+            .unwrap_or(0);
+        self.models = models;
+    }
+
+    /// The provider selected on the Models tab (`None`: the server's default)
+    pub fn selected_provider(&self) -> Option<String> {
+        self.models
+            .get(self.selected_model)
+            .map(|m| m.provider.clone())
     }
 
     /// Take a `search` response: its documents and what the server left out
@@ -289,4 +322,9 @@ impl RagState {
             _ => "ollama".to_string(),
         };
     }
+}
+
+/// The sequence number of a `job_<n>` id (jobs are numbered in creation order)
+fn job_number(id: &str) -> Option<u64> {
+    id.strip_prefix("job_")?.parse().ok()
 }

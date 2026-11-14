@@ -162,8 +162,8 @@ mod tests {
             assert!(markers.insert(*name), "Duplicate Tool::NAME '{}'", name);
         }
 
-        // No marker yet: tools without arguments (except collection_list and
-        // db_stats, which take `NoParams`).
+        // No marker yet: tools without arguments (except collection_list,
+        // db_stats and the embedding model / cache tools, which take `NoParams`).
         let mut without_marker: Vec<&str> = registered
             .iter()
             .copied()
@@ -177,9 +177,6 @@ mod tests {
                 "acl_list",
                 "db_checkpoint",
                 "db_compact",
-                "embed_cache_clear",
-                "embed_cache_stats",
-                "embed_models_list",
                 "listener_list",
                 "transaction_begin",
                 "transaction_status",

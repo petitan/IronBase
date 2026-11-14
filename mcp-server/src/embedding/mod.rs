@@ -91,15 +91,9 @@ pub trait EmbeddingProvider: Send + Sync {
     }
 }
 
-/// Information about an available model
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ModelInfo {
-    pub provider: String,
-    pub model: String,
-    pub dimension: usize,
-    pub description: String,
-    pub available: bool,
-}
+// Information about an available model: shared with clients, re-exported under
+// its old path.
+pub use ironbase_mcp_types::responses::ModelInfo;
 
 /// Manager for embedding providers with optional caching
 pub struct EmbeddingManager {
@@ -527,5 +521,26 @@ mod tests {
         manager.register_provider("ollama", provider);
 
         assert!(manager.get_provider("ollama").is_some());
+    }
+
+    /// Every cached path counts its misses: a stats call after one miss and
+    /// one hit reports a 50% hit rate, not 100% (a lookup of an absent key
+    /// was not counted)
+    #[test]
+    fn test_cache_counts_misses_on_every_path() {
+        let mut manager = EmbeddingManager::with_cache(CacheConfig::default());
+        manager.register_provider("mock", Arc::new(MockProvider { dim: 2 }));
+        let cache = manager.cache().unwrap().clone();
+
+        manager.embed("a", None).unwrap(); // miss
+        manager.embed("a", None).unwrap(); // hit
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses), (1, 1));
+        assert_eq!(stats.hit_rate, 50.0);
+
+        manager.embed_query("q", None).unwrap(); // miss
+        manager.embed_batch(&["a", "b"], None).unwrap(); // hit + miss
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses), (2, 3));
     }
 }

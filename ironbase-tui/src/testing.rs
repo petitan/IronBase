@@ -8,23 +8,24 @@ use crate::db::DbWrapper;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpResult, Transport};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ironbase_mcp_types::params::{
-    CollectionCreateParams, CollectionDropParams, DeleteParams, FulltextSearchParams,
-    IndexCreateArgs, IndexDropParams, IndexListParams, InsertOneParams, SearchParams,
-    UpdateOneParams, VectorSearchParams,
+    AutoEmbedStatusParams, CollectionCreateParams, CollectionDropParams, DeleteParams,
+    FulltextSearchParams, IndexCreateArgs, IndexDropParams, IndexListParams, InsertOneParams,
+    SearchParams, UpdateOneParams, VectorSearchParams,
 };
 use ironbase_mcp_types::responses::{
-    BTreeIndexCreated, CollectionCreateResponse, CollectionDropResponse, CollectionListResponse,
-    CompoundIndexCreated, CountResponse, DeleteResponse, FindResponse, FulltextHit,
-    FulltextIndexCreated, FulltextSearchResponse, FuzzyIndexCreated, HnswParams,
-    IndexCreateResponse, IndexDropResponse, IndexListAll, IndexListResponse,
-    IndexStatsRefreshResponse, InsertOneResponse, MatchScope, ScorePosition, SearchBody,
-    SearchDocument, SearchPassage, SearchResponse, SearchVerdict, TypedIndexList,
-    UpdateOneResponse, VectorIndexCreated, VectorSearchHit, VectorSearchResponse,
+    AutoEmbedStatusResponse, BTreeIndexCreated, CollectionCreateResponse, CollectionDropResponse,
+    CollectionListResponse, CompoundIndexCreated, CountResponse, DeleteResponse,
+    EmbedModelsListResponse, FindResponse, Flag, FulltextHit, FulltextIndexCreated,
+    FulltextSearchResponse, FuzzyIndexCreated, HnswParams, IndexCreateResponse, IndexDropResponse,
+    IndexListAll, IndexListResponse, IndexStatsRefreshResponse, InsertOneResponse, MatchScope,
+    ModelInfo, ScorePosition, SearchBody, SearchDocument, SearchPassage, SearchResponse,
+    SearchVerdict, TypedIndexList, UpdateOneResponse, VectorIndexCreated, VectorSearchHit,
+    VectorSearchResponse,
 };
 use ironbase_mcp_types::tools::{
-    CollectionCreate, CollectionDrop, CollectionList, Count, DeleteOne, Find, FulltextSearch,
-    IndexCreate, IndexDrop, IndexList, IndexStatsRefresh, InsertOne, Search, UpdateOne,
-    VectorSearch,
+    AutoEmbedStatus, CollectionCreate, CollectionDrop, CollectionList, Count, DeleteOne,
+    EmbedModelsList, Find, FulltextSearch, IndexCreate, IndexDrop, IndexList, IndexStatsRefresh,
+    InsertOne, Search, UpdateOne, VectorSearch,
 };
 use ironbase_mcp_types::Tool;
 use ratatui::{backend::TestBackend, Terminal};
@@ -41,7 +42,9 @@ use std::sync::{Arc, Mutex};
 /// collection_drop, index_create / index_drop / index_stats_refresh (echoed,
 /// not stored), and the searches: fulltext_search (case-insensitive substring
 /// of the field), vector_search (dot product) and search (substring of any
-/// string field; the document's `content` is its passage). Any tool can be scripted with
+/// string field; the document's `content` is its passage), and what the RAG
+/// modal loads when it opens: embed_models_list (one provider, `length`) and
+/// auto_embed_status (not configured). Any tool can be scripted with
 /// [`FakeServer::respond`] / [`FakeServer::fail`] (scripted answers win over
 /// the built-in ones); an unscripted, unknown tool is an error. Every call is
 /// logged.
@@ -403,6 +406,19 @@ impl FakeServer {
             FulltextSearch::NAME => self.fulltext_search(parse(args)?),
             VectorSearch::NAME => self.vector_search(parse(args)?),
             Search::NAME => self.search(parse(args)?),
+            EmbedModelsList::NAME => to_result(EmbedModelsListResponse {
+                models: vec![model_info("length")],
+                count: 1,
+                default_provider: "length".to_string(),
+            }),
+            AutoEmbedStatus::NAME => {
+                let p: AutoEmbedStatusParams = parse(args)?;
+                to_result(AutoEmbedStatusResponse::NotConfigured {
+                    collection: p.collection,
+                    enabled: Flag,
+                    config: (),
+                })
+            }
             other => Err(format!("unexpected tool: {}", other)),
         }
     }
@@ -434,6 +450,17 @@ impl Transport for FakeServer {
 }
 
 /// A built-in answer: the response struct as the server serializes it
+/// A 2-dimensional embedding provider registered as `provider`
+pub(crate) fn model_info(provider: &str) -> ModelInfo {
+    ModelInfo {
+        provider: provider.to_string(),
+        model: format!("{}-model", provider),
+        dimension: 2,
+        description: format!("{} embedding provider", provider),
+        available: true,
+    }
+}
+
 fn to_result<T: serde::Serialize>(response: T) -> Result<Value, String> {
     serde_json::to_value(response).map_err(|e| e.to_string())
 }

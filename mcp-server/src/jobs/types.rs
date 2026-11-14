@@ -1,97 +1,10 @@
 //! Job types for async operations
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Instant;
 
-/// Unique job identifier
-pub type JobId = String;
-
-/// Job status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status")]
-pub enum JobStatus {
-    /// Job is waiting to be processed
-    #[serde(rename = "pending")]
-    Pending,
-
-    /// Job is currently running
-    #[serde(rename = "running")]
-    Running {
-        /// Progress percentage (0.0 - 100.0)
-        progress: f64,
-        /// Current status message
-        message: String,
-    },
-
-    /// Job completed successfully
-    #[serde(rename = "completed")]
-    Completed {
-        /// Job result
-        result: Value,
-    },
-
-    /// Job failed with error
-    #[serde(rename = "failed")]
-    Failed {
-        /// Error message
-        error: String,
-    },
-
-    /// Job was cancelled
-    #[serde(rename = "cancelled")]
-    Cancelled,
-}
-
-impl JobStatus {
-    /// Check if job is in a terminal state
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            JobStatus::Completed { .. } | JobStatus::Failed { .. } | JobStatus::Cancelled
-        )
-    }
-
-    /// Check if job is running
-    pub fn is_running(&self) -> bool {
-        matches!(self, JobStatus::Running { .. })
-    }
-}
-
-/// Job type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum JobType {
-    /// Backfill embeddings for existing documents
-    EmbedBackfill {
-        collection: String,
-        provider: String,
-    },
-    /// Import and embed a document with chunking
-    EmbedDocument { collection: String, doc_id: String },
-    /// Database compaction (background, non-blocking)
-    Compact,
-    /// Custom job type
-    Custom { name: String },
-}
-
-/// Job information
-#[derive(Debug, Clone, Serialize)]
-pub struct JobInfo {
-    /// Unique job identifier
-    pub id: JobId,
-    /// Job type
-    pub job_type: JobType,
-    /// Current status
-    pub status: JobStatus,
-    /// When the job was created (seconds since epoch for serialization)
-    pub created_at_secs: u64,
-    /// When the job was last updated (seconds since epoch for serialization)
-    pub updated_at_secs: u64,
-    /// Items processed so far
-    pub items_processed: usize,
-    /// Total items to process (if known)
-    pub items_total: Option<usize>,
-}
+// The reported job types: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::responses::{JobId, JobInfo, JobStatus, JobType};
 
 /// Internal job state (not serialized directly)
 pub struct Job {

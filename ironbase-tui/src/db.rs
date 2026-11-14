@@ -492,66 +492,6 @@ impl DbWrapper {
         let result = self.client.rag_collection_stats(collection).await?;
         Ok(result)
     }
-
-    // === Embedding operations ===
-
-    pub async fn embed_text(&self, text: &str, provider: &str) -> Result<Value> {
-        let result = self.client.embed_text(text, provider).await?;
-        Ok(result)
-    }
-
-    pub async fn embed_list_models(&self) -> Result<Value> {
-        let result = self.client.embed_list_models().await?;
-        Ok(result)
-    }
-
-    pub async fn embed_cache_stats(&self) -> Result<Value> {
-        let result = self.client.embed_cache_stats().await?;
-        Ok(result)
-    }
-
-    pub async fn embed_cache_clear(&self) -> Result<Value> {
-        let result = self.client.embed_cache_clear().await?;
-        Ok(result)
-    }
-
-    // === Auto-embed operations ===
-
-    pub async fn auto_embed_enable(
-        &self,
-        collection: &str,
-        source_field: &str,
-        target_field: &str,
-        provider: &str,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .auto_embed_enable(collection, source_field, target_field, provider)
-            .await?;
-        Ok(result)
-    }
-
-    pub async fn auto_embed_disable(&self, collection: &str) -> Result<Value> {
-        let result = self.client.auto_embed_disable(collection).await?;
-        Ok(result)
-    }
-
-    pub async fn auto_embed_status(&self, collection: &str) -> Result<Value> {
-        let result = self.client.auto_embed_status(collection).await?;
-        Ok(result)
-    }
-
-    // === Job management ===
-
-    pub async fn embed_job_list(&self, active_only: bool) -> Result<Value> {
-        let result = self.client.embed_job_list(active_only).await?;
-        Ok(result)
-    }
-
-    pub async fn embed_job_cancel(&self, job_id: &str) -> Result<Value> {
-        let result = self.client.embed_job_cancel(job_id).await?;
-        Ok(result)
-    }
 }
 
 /// Recursively collect field names and types
