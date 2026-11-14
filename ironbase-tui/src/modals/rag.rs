@@ -5,7 +5,7 @@ use crate::state::rag::{RagState, RagTab};
 use crate::theme::Theme;
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, JobStatus,
-    JobType, ModelInfo,
+    JobType, ModelInfo, RagCollectionStatsResponse, RagDocumentImportResponse,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
@@ -300,11 +300,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     // Result
     if let Some(ref result) = state.import_result {
-        let chunks_created = result
-            .get("chunks_created")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let msg = format!("Imported: {} chunks created", chunks_created);
+        let msg = import_result_text(result);
         let result_text = Paragraph::new(msg)
             .style(Style::default().fg(theme.success))
             .block(
@@ -384,20 +380,7 @@ fn render_collections_tab(frame: &mut Frame, area: Rect, state: &RagState, theme
                 Style::default().fg(theme.fg)
             };
 
-            let name = c
-                .get("collection")
-                .or_else(|| c.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let chunks_count = c
-                .get("chunk_count")
-                .or_else(|| c.get("total_documents"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let provider = c.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
-
-            let text = format!("  {} | {} chunks | {}", name, chunks_count, provider);
-            ListItem::new(text).style(style)
+            ListItem::new(rag_collection_line(c)).style(style)
         })
         .collect();
 
@@ -685,6 +668,40 @@ fn render_status(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme)
 }
 
 // ==================== Helpers ====================
+
+/// The outcome of a document import: chunks stored, or why none were
+pub(crate) fn import_result_text(result: &RagDocumentImportResponse) -> String {
+    match result {
+        RagDocumentImportResponse::Imported(r) => {
+            let mut text = format!(
+                "Imported '{}': {} chunks created",
+                r.doc_id, r.chunks_created
+            );
+            if r.chunks_replaced > 0 {
+                text.push_str(&format!(", {} replaced", r.chunks_replaced));
+            }
+            if r.language_ignored {
+                text.push_str(" (language ignored: the collection keeps its own)");
+            }
+            text
+        }
+        RagDocumentImportResponse::Skipped(r) => format!("'{}': {}", r.doc_id, r.message),
+        RagDocumentImportResponse::Empty(r) => r.message.clone(),
+    }
+}
+
+/// A RAG collection of the Collections tab: chunks, source documents and
+/// provider (read from the nested `stats` and `config`)
+pub(crate) fn rag_collection_line(c: &RagCollectionStatsResponse) -> String {
+    let provider = c
+        .config
+        .as_ref()
+        .map_or("no RAG config", |cfg| &cfg.provider);
+    format!(
+        "  {} | {} chunks | {} docs | {}",
+        c.collection, c.stats.chunk_count, c.stats.source_document_count, provider
+    )
+}
 
 /// A provider of the Models tab: name, model and dimension
 fn model_line(m: &ModelInfo) -> String {

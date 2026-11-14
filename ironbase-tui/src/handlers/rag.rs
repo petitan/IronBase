@@ -4,12 +4,12 @@ use crate::app::{App, Modal, RagState};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{
     AutoEmbedEnableParams, AutoEmbedStatusParams, EmbedTextParams, JobListParams, NoParams,
-    SearchParams,
+    RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams, SearchParams,
 };
-use ironbase_mcp_types::responses::EmbedCacheStatsResponse;
+use ironbase_mcp_types::responses::{EmbedCacheStatsResponse, RagCollectionCreateResponse};
 use ironbase_mcp_types::tools::{
     AutoEmbedEnable, AutoEmbedStatus, EmbedCacheStats, EmbedJobList, EmbedModelsList, EmbedText,
-    Search,
+    RagCollectionCreate, RagCollectionStats, RagDocumentImport, Search,
 };
 
 /// Open RAG & Embedding modal
@@ -201,29 +201,36 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
             let title = if app.rag_state.import_title.is_empty() {
                 None
             } else {
-                Some(app.rag_state.import_title.as_str())
+                Some(app.rag_state.import_title.clone())
             };
-            let chunk_size = app.rag_state.import_chunk_size;
-            let overlap = app.rag_state.import_overlap;
-            let mode = app.rag_state.import_mode.clone();
+            let args = RagDocumentImportParams {
+                collection,
+                content,
+                title,
+                metadata: None,
+                doc_id: None,
+                chunk_size: app.rag_state.import_chunk_size,
+                overlap: app.rag_state.import_overlap,
+                mode: app.rag_state.import_mode.clone(),
+                provider: None,
+                if_exists: ironbase_mcp_types::defaults::default_if_exists(),
+                language: ironbase_mcp_types::params::default_rag_language(),
+                text_fields: None,
+                context_fields: None,
+            };
 
             app.rag_state.is_loading = true;
             app.rag_state.error = None;
+            // A failed import must not leave the previous one's result
+            app.rag_state.import_result = None;
 
             if let Some(ref db) = app.db {
-                match db
-                    .rag_document_import(&collection, &content, title, chunk_size, overlap, &mode)
-                    .await
-                {
+                match db.call::<RagDocumentImport>(&args).await {
                     Ok(result) => {
                         app.rag_state.is_loading = false;
-                        let chunks_created = result
-                            .get("chunks_created")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        app.rag_state.import_result = Some(result);
                         app.rag_state.message =
-                            Some(format!("Import OK: {} chunks", chunks_created));
+                            Some(crate::modals::rag::import_result_text(&result));
+                        app.rag_state.import_result = Some(result);
                     }
                     Err(e) => {
                         app.rag_state.is_loading = false;
@@ -300,23 +307,25 @@ pub(crate) async fn handle_rag_collections_key(
                     return;
                 }
 
-                let emb_field = app.rag_state.create_embedding_field.clone();
-                let text_field = app.rag_state.create_text_field.clone();
-                let provider = app.rag_state.create_provider.clone();
-                let language = app.rag_state.create_language.clone();
+                let args = RagCollectionCreateParams {
+                    collection: name,
+                    embedding_field: app.rag_state.create_embedding_field.clone(),
+                    text_field: app.rag_state.create_text_field.clone(),
+                    text_fields: None,
+                    context_fields: None,
+                    provider: Some(app.rag_state.create_provider.clone()),
+                    language: app.rag_state.create_language.clone(),
+                };
 
                 app.rag_state.is_loading = true;
                 app.rag_state.error = None;
 
                 if let Some(ref db) = app.db {
-                    match db
-                        .rag_collection_create(&name, &emb_field, &text_field, &provider, &language)
-                        .await
-                    {
-                        Ok(_) => {
+                    match db.call::<RagCollectionCreate>(&args).await {
+                        Ok(response) => {
                             app.rag_state.is_loading = false;
                             app.rag_state.creating = false;
-                            app.rag_state.message = Some(format!("Collection '{}' created!", name));
+                            app.rag_state.message = Some(rag_created_message(&response));
                         }
                         Err(e) => {
                             app.rag_state.is_loading = false;
@@ -385,38 +394,34 @@ pub(crate) async fn handle_rag_collections_key(
 
         // Stats for selected collection
         (KeyCode::Enter, _) => {
-            if let Some(coll) = app
+            let Some(name) = app
                 .rag_state
                 .rag_collections
                 .get(app.rag_state.selected_collection)
-            {
-                let name = coll
-                    .get("collection")
-                    .or_else(|| coll.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !name.is_empty() {
-                    if let Some(ref db) = app.db {
-                        match db.rag_collection_stats(&name).await {
-                            Ok(stats) => {
-                                let chunk_count = stats
-                                    .get("chunk_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let source_docs = stats
-                                    .get("source_doc_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                app.rag_state.message = Some(format!(
-                                    "{}: {} chunks, {} source docs",
-                                    name, chunk_count, source_docs
-                                ));
-                            }
-                            Err(e) => {
-                                app.rag_state.error = Some(format!("{}", e));
-                            }
+                .map(|c| c.collection.clone())
+            else {
+                return;
+            };
+            if let Some(ref db) = app.db {
+                match load_rag_stats(db, &name).await {
+                    Ok(stats) => {
+                        app.rag_state.message = Some(format!(
+                            "{}: {} chunks, {} source docs",
+                            stats.collection,
+                            stats.stats.chunk_count,
+                            stats.stats.source_document_count
+                        ));
+                        if let Some(entry) = app
+                            .rag_state
+                            .rag_collections
+                            .iter_mut()
+                            .find(|c| c.collection == name)
+                        {
+                            *entry = stats;
                         }
+                    }
+                    Err(e) => {
+                        app.rag_state.error = Some(format!("{}", e));
                     }
                 }
             }
@@ -426,7 +431,7 @@ pub(crate) async fn handle_rag_collections_key(
         (KeyCode::Char('r'), _) => {
             let collection = app.rag_state.collection.clone();
             if let Some(ref db) = app.db {
-                match db.rag_collection_stats(&collection).await {
+                match load_rag_stats(db, &collection).await {
                     Ok(stats) => {
                         app.rag_state.message = Some("Stats refreshed".to_string());
                         app.rag_state.rag_collections = vec![stats];
@@ -615,4 +620,28 @@ pub(crate) async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
 
         _ => {}
     }
+}
+
+async fn load_rag_stats(
+    db: &crate::db::DbWrapper,
+    collection: &str,
+) -> anyhow::Result<ironbase_mcp_types::responses::RagCollectionStatsResponse> {
+    db.call::<RagCollectionStats>(&RagCollectionStatsParams {
+        collection: collection.to_string(),
+    })
+    .await
+}
+
+/// What `rag_collection_create` did: an existing index is kept (the server
+/// does not report whether the collection itself existed)
+fn rag_created_message(response: &RagCollectionCreateResponse) -> String {
+    let created = |yes: bool| if yes { "created" } else { "already existed" };
+    format!(
+        "RAG collection '{}' ready: vector index {}, {} fulltext index(es) created ({} dims, {})",
+        response.collection,
+        created(response.indexes.vector_created),
+        response.indexes.fulltext_created,
+        response.config.dimension,
+        response.config.provider
+    )
 }

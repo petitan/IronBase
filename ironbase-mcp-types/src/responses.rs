@@ -21,6 +21,9 @@
 //! `embed_cache_stats`, `embed_cache_clear`, `auto_embed_enable`,
 //! `auto_embed_disable`, `auto_embed_status`, `embed_job_list`,
 //! `embed_job_status`, `embed_job_cancel`.
+//!
+//! RAG tool group: `rag_collection_create`, `rag_document_import`,
+//! `rag_collection_stats`, `rag_chunks_load`, `embed_document`.
 
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
@@ -1510,4 +1513,186 @@ pub struct EmbedJobCancelResponse {
     /// The finished job's state; only when it was already terminal
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<JobStatus>,
+}
+
+// ============================================================================
+// RAG
+// ============================================================================
+
+/// The configuration `rag_collection_create` stored
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagCreatedConfig {
+    pub embedding_field: String,
+    /// The primary text field
+    pub text_field: String,
+    /// Every field with a fulltext index (the primary one included)
+    pub text_fields: Vec<String>,
+    /// Document fields prepended to each chunk's embedding text
+    pub context_fields: Vec<String>,
+    pub provider: String,
+    /// Fulltext language (`none`: no stemming)
+    pub language: String,
+    pub dimension: usize,
+}
+
+/// What `rag_collection_create` created; an existing index is kept (`false` /
+/// not counted)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagCreatedIndexes {
+    /// Always `true`: the server opens an existing collection or creates it,
+    /// and does not tell the two apart
+    pub collection_created: bool,
+    pub vector_created: bool,
+    /// Number of fulltext indexes created (one per new text field)
+    pub fulltext_created: usize,
+}
+
+/// `rag_collection_create` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagCollectionCreateResponse {
+    pub success: bool,
+    pub collection: String,
+    pub config: RagCreatedConfig,
+    pub indexes: RagCreatedIndexes,
+}
+
+/// A chunked import skipped because the `doc_id` already has chunks
+/// (`if_exists: skip`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkImportSkipped {
+    pub success: bool,
+    pub collection: String,
+    pub doc_id: String,
+    /// Always `0`
+    pub chunks_created: usize,
+    pub skipped: Flag<true>,
+    pub message: String,
+}
+
+/// A chunked import whose content produced no chunk (e.g. whitespace only)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkImportEmpty {
+    pub success: bool,
+    pub collection: String,
+    /// Always `0`
+    pub chunks_created: usize,
+    pub message: String,
+}
+
+/// A document `rag_document_import` chunked, embedded and stored
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagImported {
+    pub success: bool,
+    pub collection: String,
+    /// The given `doc_id`, or a generated one
+    pub doc_id: String,
+    pub chunks_created: usize,
+    /// Chunks of the same `doc_id` removed first (`if_exists: replace`)
+    pub chunks_replaced: u64,
+    pub dimension: usize,
+    /// The provider that embedded the chunks
+    pub provider: String,
+    /// `true` when the request's `language` differs from the collection's
+    /// existing fulltext index, which keeps its own
+    pub language_ignored: bool,
+}
+
+/// `rag_document_import` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RagDocumentImportResponse {
+    Imported(RagImported),
+    Skipped(ChunkImportSkipped),
+    Empty(ChunkImportEmpty),
+}
+
+/// A document `embed_document` chunked, embedded and stored
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbedDocumentImported {
+    pub success: bool,
+    pub collection: String,
+    /// The given `doc_id`, or a generated one
+    pub doc_id: String,
+    pub chunks_created: usize,
+    /// Chunks of the same `doc_id` removed first (`if_exists: replace`)
+    pub chunks_replaced: u64,
+    pub dimension: usize,
+    /// The request's `provider` (`null` when the default one was used)
+    pub provider: Option<String>,
+    /// Whether the request asked for the vector index (an existing one is kept)
+    pub vector_index_created: bool,
+    /// `_id`s of the inserted chunk documents
+    pub inserted_ids: Vec<Value>,
+}
+
+/// `embed_document` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EmbedDocumentResponse {
+    Embedded(EmbedDocumentImported),
+    Skipped(ChunkImportSkipped),
+    Empty(ChunkImportEmpty),
+}
+
+/// A collection's stored RAG configuration, as `rag_collection_stats`
+/// reports it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagConfigView {
+    pub embedding_field: String,
+    pub text_field: String,
+    /// The fields searched by fulltext (`[text_field]` for a legacy configuration)
+    pub text_fields: Vec<String>,
+    pub provider: String,
+    pub language: String,
+    pub dimension: usize,
+    /// When the configuration was stored (RFC 3339)
+    pub created_at: String,
+}
+
+/// Contents and indexes of a RAG collection
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagStats {
+    /// Number of documents (chunks) in the collection
+    pub chunk_count: u64,
+    /// Number of distinct `doc_id`s
+    pub source_document_count: usize,
+    pub vector_indexes: Vec<VectorIndexInfo>,
+    pub fulltext_indexes: Vec<FulltextIndexInfo>,
+}
+
+/// The configured provider of a RAG collection, as the server has it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagProviderInfo {
+    pub name: String,
+    pub dimension: usize,
+    pub model: String,
+}
+
+/// `rag_collection_stats` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagCollectionStatsResponse {
+    pub collection: String,
+    /// The collection has a stored RAG configuration (`rag_collection_create`,
+    /// or the first `rag_document_import`)
+    pub rag_enabled: bool,
+    /// `null` without a RAG configuration
+    pub config: Option<RagConfigView>,
+    pub stats: RagStats,
+    /// `null` without a RAG configuration or when its provider is not
+    /// available on the server
+    pub provider_info: Option<RagProviderInfo>,
+}
+
+/// `rag_chunks_load` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RagChunksLoadResponse {
+    /// The chunk documents (adjacent ones merged unless `merge_chunks: false`);
+    /// with a `query`, each carries its fulltext `_score`
+    pub results: Vec<Value>,
+    /// `results.len()`
+    pub count: usize,
+    /// Number of chunks folded into a neighbour by the merge
+    pub chunks_merged: usize,
+    /// `true` when a `query` scored the chunks
+    pub scored: bool,
 }

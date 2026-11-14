@@ -2,9 +2,9 @@
 
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, ModelInfo,
-    SearchBody, SearchDocument, SearchResponse,
+    RagCollectionStatsResponse, RagDocumentImportResponse, SearchBody, SearchDocument,
+    SearchResponse,
 };
-use serde_json::Value;
 
 /// Active tab in RAG modal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,10 +71,10 @@ pub struct RagState {
     pub import_mode: String,
     /// Focus field (0=content, 1=title, 2=chunk_size, 3=overlap, 4=mode)
     pub import_form_field: usize,
-    pub import_result: Option<Value>,
+    pub import_result: Option<RagDocumentImportResponse>,
 
     // === Collections tab ===
-    pub rag_collections: Vec<Value>,
+    pub rag_collections: Vec<RagCollectionStatsResponse>,
     pub selected_collection: usize,
     pub creating: bool,
     pub create_collection_name: String,

@@ -63,6 +63,16 @@
 //! `embed_job_list.jobs` (hash-map order: sorted by `id`). A third test parses
 //! these groups' responses with the shared types, as for the search group.
 //!
+//! The RAG group (`rag_collection_create`, `rag_document_import`,
+//! `embed_document`, `rag_collection_stats`, `rag_chunks_load`, on a fifth
+//! database) embeds with the same in-test provider. It normalises a generated
+//! `doc_id` (a UUID: only when the request names none), the stored RAG
+//! configuration's `created_at` and the vector indexes' creation fields in
+//! `rag_collection_stats` (whose index lists it sorts by name: hash-map
+//! order), and the key order of the `rag_chunks_load` documents (as for
+//! `find`; a `_score` keeps its position). Another test parses its responses
+//! with the shared types.
+//!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
 
@@ -176,6 +186,28 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
         "embed_job_status" => {
             if let Some(job) = out.get_mut("job") {
                 normalize_job_ages(job);
+            }
+        }
+        "rag_collection_stats" => {
+            if let Some(created_at) = out["config"].get_mut("created_at") {
+                *created_at = placeholder("created_at");
+            }
+            if let Some(items) = out["stats"]["vector_indexes"].as_array_mut() {
+                items.iter_mut().for_each(normalize_vector_index);
+            }
+            sort_by_name(&mut out["stats"]["vector_indexes"]);
+            sort_by_name(&mut out["stats"]["fulltext_indexes"]);
+        }
+        "rag_document_import" | "embed_document" if args.get("doc_id").is_none() => {
+            if let Some(doc_id) = out.get_mut("doc_id") {
+                *doc_id = placeholder("doc_id");
+            }
+        }
+        "rag_chunks_load" => {
+            if let Some(items) = out["results"].as_array_mut() {
+                for item in items {
+                    sort_document_keys(item, &["_score"]);
+                }
             }
         }
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
@@ -376,6 +408,7 @@ fn render() -> String {
     render_search_group(&mut out);
     render_embedding_group(&mut out);
     render_job_group(&mut out);
+    render_rag_group(&mut out);
     out
 }
 
@@ -1262,6 +1295,86 @@ fn render_job_group(out: &mut String) {
     case!(&None, "embed_job_cancel", "no job manager" => {"job_id": "job_1"});
 }
 
+/// The RAG tools (`rag_collection_create`, `rag_document_import`,
+/// `rag_collection_stats`, `rag_chunks_load`) and `embed_document`, embedding
+/// with [`LengthProvider`] ("length", the default)
+fn render_rag_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    let mut manager = EmbeddingManager::new();
+    manager.register_provider("length", Arc::new(LengthProvider));
+    let manager = Some(Arc::new(manager));
+    macro_rules! case {
+        ($m:expr, $tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record_full(out, &adapter, None, $m, &None, $tool, $label, json!($json)); )+
+        };
+    }
+    dispatch_ok(
+        &adapter,
+        "collection_create",
+        json!({"collection": "plain"}),
+    );
+    let text = "Első bekezdés a királyról és a várról.\n\nMásodik bekezdés a folyóról és a hídról.\n\nHarmadik bekezdés a hegyről.";
+
+    case!(&manager, "rag_collection_create",
+        "defaults" => {"collection": "kb"},
+        "fields and context" => {"collection": "kb2", "embedding_field": "vec", "text_field": "body",
+            "text_fields": ["body", "title"], "context_fields": ["title"], "provider": "length",
+            "language": "english"},
+        "again" => {"collection": "kb"},
+        "unknown provider" => {"collection": "kb3", "provider": "nope"},
+        "invalid name" => {"collection": "bad name!"},
+        "missing collection" => {},
+    );
+    case!(&None, "rag_collection_create", "no embedding manager" => {"collection": "kb4"});
+    case!(&manager, "rag_document_import",
+        "chunked" => {"collection": "kb", "content": text, "doc_id": "d1", "title": "Mesék",
+            "chunk_size": 60, "overlap": 0, "mode": "text"},
+        "metadata" => {"collection": "kb", "content": "Rövid szöveg a tengerről.", "doc_id": "d2",
+            "metadata": {"year": 2026}},
+        "skip existing" => {"collection": "kb", "content": "Más.", "doc_id": "d1", "if_exists": "skip"},
+        "replace existing" => {"collection": "kb", "content": "Rövid szöveg a tengerről, újra.",
+            "doc_id": "d2", "if_exists": "replace"},
+        "error existing" => {"collection": "kb", "content": "Más.", "doc_id": "d1", "if_exists": "error"},
+        "generated doc_id" => {"collection": "kb", "content": "Egy harmadik dokumentum."},
+        "language ignored" => {"collection": "kb", "content": "Negyedik.", "doc_id": "d4", "language": "english"},
+        "whitespace only" => {"collection": "kb", "content": "   ", "doc_id": "d5"},
+        "empty content" => {"collection": "kb", "content": "", "doc_id": "d6"},
+        "unknown provider" => {"collection": "kb", "content": "x", "doc_id": "d7", "provider": "nope"},
+        "embedding fails" => {"collection": "kb", "content": "fail", "doc_id": "d8"},
+        "without RAG config" => {"collection": "plain", "content": "Sima szöveg.", "doc_id": "p1"},
+    );
+    case!(&None, "rag_document_import", "no embedding manager" => {"collection": "kb", "content": "x"});
+    case!(&manager, "embed_document",
+        "chunked" => {"collection": "docs", "content": text, "doc_id": "e1", "chunk_size": 60,
+            "overlap": 0, "mode": "text", "metadata": {"src": "t"}},
+        "explicit provider, no index" => {"collection": "docs", "content": "Rövid.", "doc_id": "e2",
+            "provider": "length", "create_vector_index": false},
+        "skip existing" => {"collection": "docs", "content": "Más.", "doc_id": "e1", "if_exists": "skip"},
+        "generated doc_id" => {"collection": "docs", "content": "Harmadik."},
+        "whitespace only" => {"collection": "docs", "content": "   ", "doc_id": "e5"},
+        "empty content" => {"collection": "docs", "content": ""},
+    );
+    case!(&manager, "rag_collection_stats",
+        "RAG collection" => {"collection": "kb"},
+        "fields and context" => {"collection": "kb2"},
+        "plain collection" => {"collection": "plain"},
+        "missing collection" => {"collection": "nope"},
+    );
+    case!(&None, "rag_collection_stats", "no embedding manager" => {"collection": "kb"});
+    case!(&manager, "rag_chunks_load",
+        "one document" => {"collection": "kb", "doc_ids": ["d1"]},
+        "unmerged" => {"collection": "kb", "doc_ids": ["d1", "d2"], "merge_chunks": false},
+        "capped" => {"collection": "kb", "doc_ids": ["d1"], "merge_chunks": false, "max_chunks_per_doc": 1},
+        "projection" => {"collection": "kb", "doc_ids": ["d1", "d2"], "merge_chunks": false,
+            "projection": {"chunk_index": 1, "doc_id": 1}},
+        "scored" => {"collection": "kb", "doc_ids": ["d1", "d2"], "query": "folyóról", "merge_chunks": false},
+        "scored, merged" => {"collection": "kb", "doc_ids": ["d1"], "query": "bekezdés"},
+        "no doc_ids" => {"collection": "kb", "doc_ids": []},
+        "unknown doc_id" => {"collection": "kb", "doc_ids": ["zz"]},
+        "missing doc_ids" => {"collection": "kb"},
+    );
+}
+
 #[test]
 fn response_wire_format_matches_golden() {
     let actual = render();
@@ -1371,4 +1484,25 @@ fn embedding_group_golden_parses_as_the_shared_response_types() {
         })
     });
     assert_eq!(checked, 41);
+}
+
+/// Every recorded response of the RAG tool group parses, strictly, into the
+/// tool's shared response type and serializes back to the same bytes
+#[test]
+fn rag_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        EmbedDocument, RagChunksLoad, RagCollectionCreate, RagCollectionStats, RagDocumentImport,
+    };
+
+    let checked = check_golden(|tool, json| {
+        Some(match tool {
+            "rag_collection_create" => same_bytes::<RagCollectionCreate>(json),
+            "rag_document_import" => same_bytes::<RagDocumentImport>(json),
+            "embed_document" => same_bytes::<EmbedDocument>(json),
+            "rag_collection_stats" => same_bytes::<RagCollectionStats>(json),
+            "rag_chunks_load" => same_bytes::<RagChunksLoad>(json),
+            _ => return None,
+        })
+    });
+    assert_eq!(checked, 29);
 }

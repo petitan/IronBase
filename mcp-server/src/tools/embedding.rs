@@ -8,13 +8,14 @@ use ironbase_core::chunking::import::{
     ChunkDocumentOptions, IfExists,
 };
 use ironbase_core::chunking::{build_embed_text, chunk_content, ChunkMode, ChunkOptions};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
 
 use super::params::ParseParams;
+use super::rag::{chunk_import_empty, chunk_import_skipped};
 use ironbase_mcp_types::responses::{
-    EmbedBatchResponse, EmbedCacheClearResponse, EmbedCacheStatsResponse, EmbedModelsListResponse,
-    EmbedTextResponse, Flag,
+    EmbedBatchResponse, EmbedCacheClearResponse, EmbedCacheStatsResponse, EmbedDocumentImported,
+    EmbedDocumentResponse, EmbedModelsListResponse, EmbedTextResponse, Flag,
 };
 
 // Parameter structs: shared with clients, re-exported under their old path.
@@ -201,12 +202,9 @@ fn handle_embed_document(
         .map_err(|e| McpError::internal(format!("Chunking failed: {}", e)))?;
 
     if chunks.is_empty() {
-        return Ok(json!({
-            "success": true,
-            "collection": p.collection,
-            "chunks_created": 0,
-            "message": "No chunks generated from content"
-        }));
+        return Ok(serde_json::to_value(EmbedDocumentResponse::Empty(
+            chunk_import_empty(p.collection),
+        ))?);
     }
 
     // Pre-check before the expensive embedding step: skip/error short-circuit if
@@ -214,14 +212,9 @@ fn handle_embed_document(
     let if_exists = IfExists::parse(&p.if_exists);
     if let Some(ref doc_id) = p.doc_id {
         if should_skip_before_embedding(adapter.as_ref(), &p.collection, doc_id, if_exists)? {
-            return Ok(json!({
-                "success": true,
-                "collection": p.collection,
-                "doc_id": doc_id,
-                "chunks_created": 0,
-                "skipped": true,
-                "message": "doc_id already exists; skipped (if_exists=skip)"
-            }));
+            return Ok(serde_json::to_value(EmbedDocumentResponse::Skipped(
+                chunk_import_skipped(p.collection, doc_id.clone()),
+            ))?);
         }
     }
 
@@ -303,27 +296,24 @@ fn handle_embed_document(
     )?;
 
     if result.skipped {
-        return Ok(json!({
-            "success": true,
-            "collection": p.collection,
-            "doc_id": parent_id,
-            "chunks_created": 0,
-            "skipped": true,
-            "message": "doc_id already exists; skipped (if_exists=skip)"
-        }));
+        return Ok(serde_json::to_value(EmbedDocumentResponse::Skipped(
+            chunk_import_skipped(p.collection, parent_id),
+        ))?);
     }
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "doc_id": parent_id,
-        "chunks_created": result.inserted_ids.len(),
-        "chunks_replaced": result.replaced,
-        "dimension": provider.dimension(),
-        "provider": p.provider,
-        "vector_index_created": p.create_vector_index,
-        "inserted_ids": result.inserted_ids
-    }))
+    Ok(serde_json::to_value(EmbedDocumentResponse::Embedded(
+        EmbedDocumentImported {
+            success: true,
+            collection: p.collection,
+            doc_id: parent_id,
+            chunks_created: result.inserted_ids.len(),
+            chunks_replaced: result.replaced,
+            dimension: provider.dimension(),
+            provider: p.provider,
+            vector_index_created: p.create_vector_index,
+            inserted_ids: result.inserted_ids,
+        },
+    ))?)
 }
 
 fn handle_embed_cache_stats(manager: &EmbeddingManager) -> Result<Value> {

@@ -1282,3 +1282,163 @@ err: InternalError Job manager not available
 in:  {"job_id":"job_1"}
 err: InternalError Job manager not available
 
+## rag_collection_create / defaults
+in:  {"collection":"kb"}
+out: {"success":true,"collection":"kb","config":{"embedding_field":"embedding","text_field":"content","text_fields":["content"],"context_fields":[],"provider":"length","language":"none","dimension":2},"indexes":{"collection_created":true,"vector_created":true,"fulltext_created":1}}
+
+## rag_collection_create / fields and context
+in:  {"collection":"kb2","embedding_field":"vec","text_field":"body","text_fields":["body","title"],"context_fields":["title"],"provider":"length","language":"english"}
+out: {"success":true,"collection":"kb2","config":{"embedding_field":"vec","text_field":"body","text_fields":["body","title"],"context_fields":["title"],"provider":"length","language":"english","dimension":2},"indexes":{"collection_created":true,"vector_created":true,"fulltext_created":2}}
+
+## rag_collection_create / again
+in:  {"collection":"kb"}
+out: {"success":true,"collection":"kb","config":{"embedding_field":"embedding","text_field":"content","text_fields":["content"],"context_fields":[],"provider":"length","language":"none","dimension":2},"indexes":{"collection_created":true,"vector_created":false,"fulltext_created":0}}
+
+## rag_collection_create / unknown provider
+in:  {"collection":"kb3","provider":"nope"}
+err: InvalidParams Provider 'nope' not found. Available: ["length"]
+
+## rag_collection_create / invalid name
+in:  {"collection":"bad name!"}
+err: InvalidParams Collection name can only contain alphanumeric characters, underscores, and hyphens
+
+## rag_collection_create / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## rag_collection_create / no embedding manager
+in:  {"collection":"kb4"}
+err: InternalError Embedding not available. Configure an [embedding] section in config.toml.
+
+## rag_document_import / chunked
+in:  {"collection":"kb","content":"Első bekezdés a királyról és a várról.\n\nMásodik bekezdés a folyóról és a hídról.\n\nHarmadik bekezdés a hegyről.","doc_id":"d1","title":"Mesék","chunk_size":60,"overlap":0,"mode":"text"}
+out: {"success":true,"collection":"kb","doc_id":"d1","chunks_created":3,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":false}
+
+## rag_document_import / metadata
+in:  {"collection":"kb","content":"Rövid szöveg a tengerről.","doc_id":"d2","metadata":{"year":2026}}
+out: {"success":true,"collection":"kb","doc_id":"d2","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":false}
+
+## rag_document_import / skip existing
+in:  {"collection":"kb","content":"Más.","doc_id":"d1","if_exists":"skip"}
+out: {"success":true,"collection":"kb","doc_id":"d1","chunks_created":0,"skipped":true,"message":"doc_id already exists; skipped (if_exists=skip)"}
+
+## rag_document_import / replace existing
+in:  {"collection":"kb","content":"Rövid szöveg a tengerről, újra.","doc_id":"d2","if_exists":"replace"}
+out: {"success":true,"collection":"kb","doc_id":"d2","chunks_created":1,"chunks_replaced":1,"dimension":2,"provider":"length","language_ignored":false}
+
+## rag_document_import / error existing
+in:  {"collection":"kb","content":"Más.","doc_id":"d1","if_exists":"error"}
+err: InvalidParams doc_id 'd1' already exists. Use if_exists=replace to overwrite, or if_exists=append to add alongside.
+
+## rag_document_import / generated doc_id
+in:  {"collection":"kb","content":"Egy harmadik dokumentum."}
+out: {"success":true,"collection":"kb","doc_id":"<doc_id>","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":false}
+
+## rag_document_import / language ignored
+in:  {"collection":"kb","content":"Negyedik.","doc_id":"d4","language":"english"}
+out: {"success":true,"collection":"kb","doc_id":"d4","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":true}
+
+## rag_document_import / whitespace only
+in:  {"collection":"kb","content":"   ","doc_id":"d5"}
+out: {"success":true,"collection":"kb","chunks_created":0,"message":"No chunks generated from content"}
+
+## rag_document_import / empty content
+in:  {"collection":"kb","content":"","doc_id":"d6"}
+err: InvalidParams Content cannot be empty
+
+## rag_document_import / unknown provider
+in:  {"collection":"kb","content":"x","doc_id":"d7","provider":"nope"}
+err: InvalidParams Provider 'nope' not available
+
+## rag_document_import / embedding fails
+in:  {"collection":"kb","content":"fail","doc_id":"d8"}
+err: InternalError Embedding failed: Embedding failed: cannot embed 'fail'
+
+## rag_document_import / without RAG config
+in:  {"collection":"plain","content":"Sima szöveg.","doc_id":"p1"}
+out: {"success":true,"collection":"plain","doc_id":"p1","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":false}
+
+## rag_document_import / no embedding manager
+in:  {"collection":"kb","content":"x"}
+err: InternalError Embedding not available. Configure an [embedding] section in config.toml.
+
+## embed_document / chunked
+in:  {"collection":"docs","content":"Első bekezdés a királyról és a várról.\n\nMásodik bekezdés a folyóról és a hídról.\n\nHarmadik bekezdés a hegyről.","doc_id":"e1","chunk_size":60,"overlap":0,"mode":"text","metadata":{"src":"t"}}
+out: {"success":true,"collection":"docs","doc_id":"e1","chunks_created":3,"chunks_replaced":0,"dimension":2,"provider":null,"vector_index_created":true,"inserted_ids":["1","2","3"]}
+
+## embed_document / explicit provider, no index
+in:  {"collection":"docs","content":"Rövid.","doc_id":"e2","provider":"length","create_vector_index":false}
+out: {"success":true,"collection":"docs","doc_id":"e2","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":"length","vector_index_created":false,"inserted_ids":["4"]}
+
+## embed_document / skip existing
+in:  {"collection":"docs","content":"Más.","doc_id":"e1","if_exists":"skip"}
+out: {"success":true,"collection":"docs","doc_id":"e1","chunks_created":0,"skipped":true,"message":"doc_id already exists; skipped (if_exists=skip)"}
+
+## embed_document / generated doc_id
+in:  {"collection":"docs","content":"Harmadik."}
+out: {"success":true,"collection":"docs","doc_id":"<doc_id>","chunks_created":1,"chunks_replaced":0,"dimension":2,"provider":null,"vector_index_created":true,"inserted_ids":["5"]}
+
+## embed_document / whitespace only
+in:  {"collection":"docs","content":"   ","doc_id":"e5"}
+out: {"success":true,"collection":"docs","chunks_created":0,"message":"No chunks generated from content"}
+
+## embed_document / empty content
+in:  {"collection":"docs","content":""}
+err: InvalidParams Content cannot be empty
+
+## rag_collection_stats / RAG collection
+in:  {"collection":"kb"}
+out: {"collection":"kb","rag_enabled":true,"config":{"embedding_field":"embedding","text_field":"content","text_fields":["content"],"provider":"length","language":"none","dimension":2,"created_at":"<created_at>"},"stats":{"chunk_count":6,"source_document_count":4,"vector_indexes":[{"name":"kb_vec_embedding","field":"embedding","dim":2,"metric":"cosine","max_vectors":100000,"vector_count":6,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":100,"ef_search":50}}],"fulltext_indexes":[{"name":"kb_content_fts","field":"content","language":"none","min_word_length":2,"accent_folding":true,"num_documents":6,"num_tokens":17}]},"provider_info":{"name":"length","dimension":2,"model":"length"}}
+
+## rag_collection_stats / fields and context
+in:  {"collection":"kb2"}
+out: {"collection":"kb2","rag_enabled":true,"config":{"embedding_field":"vec","text_field":"body","text_fields":["body","title"],"provider":"length","language":"english","dimension":2,"created_at":"<created_at>"},"stats":{"chunk_count":0,"source_document_count":0,"vector_indexes":[{"name":"kb2_vec_vec","field":"vec","dim":2,"metric":"cosine","max_vectors":100000,"vector_count":0,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":100,"ef_search":50}}],"fulltext_indexes":[{"name":"kb2_body_fts","field":"body","language":"english","min_word_length":2,"accent_folding":true,"num_documents":0,"num_tokens":0},{"name":"kb2_title_fts","field":"title","language":"english","min_word_length":2,"accent_folding":true,"num_documents":0,"num_tokens":0}]},"provider_info":{"name":"length","dimension":2,"model":"length"}}
+
+## rag_collection_stats / plain collection
+in:  {"collection":"plain"}
+out: {"collection":"plain","rag_enabled":true,"config":{"embedding_field":"embedding","text_field":"content","text_fields":["content"],"provider":"length","language":"none","dimension":2,"created_at":"<created_at>"},"stats":{"chunk_count":1,"source_document_count":1,"vector_indexes":[{"name":"plain_vec_embedding","field":"embedding","dim":2,"metric":"cosine","max_vectors":100000,"vector_count":1,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":100,"ef_search":50}}],"fulltext_indexes":[{"name":"plain_content_fts","field":"content","language":"none","min_word_length":2,"accent_folding":true,"num_documents":1,"num_tokens":2}]},"provider_info":{"name":"length","dimension":2,"model":"length"}}
+
+## rag_collection_stats / missing collection
+in:  {"collection":"nope"}
+out: {"collection":"nope","rag_enabled":false,"config":null,"stats":{"chunk_count":0,"source_document_count":0,"vector_indexes":[],"fulltext_indexes":[]},"provider_info":null}
+
+## rag_collection_stats / no embedding manager
+in:  {"collection":"kb"}
+out: {"collection":"kb","rag_enabled":true,"config":{"embedding_field":"embedding","text_field":"content","text_fields":["content"],"provider":"length","language":"none","dimension":2,"created_at":"<created_at>"},"stats":{"chunk_count":6,"source_document_count":4,"vector_indexes":[{"name":"kb_vec_embedding","field":"embedding","dim":2,"metric":"cosine","max_vectors":100000,"vector_count":6,"cache_file":"<cache_file>","created_at":"<created_at>","hnsw_params":{"m":16,"ef_construction":100,"ef_search":50}}],"fulltext_indexes":[{"name":"kb_content_fts","field":"content","language":"none","min_word_length":2,"accent_folding":true,"num_documents":6,"num_tokens":17}]},"provider_info":null}
+
+## rag_chunks_load / one document
+in:  {"collection":"kb","doc_ids":["d1"]}
+out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.Második bekezdés a folyóról és a hídról.Harmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék"}],"count":1,"chunks_merged":2,"scored":false}
+
+## rag_chunks_load / unmerged
+in:  {"collection":"kb","doc_ids":["d1","d2"],"merge_chunks":false}
+out: {"results":[{"_id":1,"chunk_index":0,"chunk_total":3,"content":"Első bekezdés a királyról és a várról.","doc_id":"d1","embedding":[38.0,1.0],"end_char":38,"start_char":0,"title":"Mesék"},{"_id":2,"chunk_index":1,"chunk_total":3,"content":"Második bekezdés a folyóról és a hídról.","doc_id":"d1","embedding":[40.0,1.0],"end_char":80,"start_char":40,"title":"Mesék"},{"_id":3,"chunk_index":2,"chunk_total":3,"content":"Harmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":82,"title":"Mesék"},{"_id":5,"chunk_index":0,"chunk_total":1,"content":"Rövid szöveg a tengerről, újra.","doc_id":"d2","embedding":[31.0,1.0],"end_char":31,"start_char":0}],"count":4,"chunks_merged":0,"scored":false}
+
+## rag_chunks_load / capped
+in:  {"collection":"kb","doc_ids":["d1"],"merge_chunks":false,"max_chunks_per_doc":1}
+out: {"results":[{"_id":1,"chunk_index":0,"chunk_total":3,"content":"Első bekezdés a királyról és a várról.","doc_id":"d1","embedding":[38.0,1.0],"end_char":38,"start_char":0,"title":"Mesék"}],"count":1,"chunks_merged":0,"scored":false}
+
+## rag_chunks_load / projection
+in:  {"collection":"kb","doc_ids":["d1","d2"],"merge_chunks":false,"projection":{"chunk_index":1,"doc_id":1}}
+out: {"results":[{"_id":1,"chunk_index":0,"doc_id":"d1"},{"_id":2,"chunk_index":1,"doc_id":"d1"},{"_id":3,"chunk_index":2,"doc_id":"d1"},{"_id":5,"chunk_index":0,"doc_id":"d2"}],"count":4,"chunks_merged":0,"scored":false}
+
+## rag_chunks_load / scored
+in:  {"collection":"kb","doc_ids":["d1","d2"],"query":"folyóról","merge_chunks":false}
+out: {"results":[{"_id":2,"chunk_index":1,"chunk_total":3,"content":"Második bekezdés a folyóról és a hídról.","doc_id":"d1","embedding":[40.0,1.0],"end_char":80,"start_char":40,"title":"Mesék","_score":1.6556362594172283}],"count":1,"chunks_merged":0,"scored":true}
+
+## rag_chunks_load / scored, merged
+in:  {"collection":"kb","doc_ids":["d1"],"query":"bekezdés"}
+out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.Második bekezdés a folyóról és a hídról.Harmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék","_score":1.1668020169302684}],"count":1,"chunks_merged":2,"scored":true}
+
+## rag_chunks_load / no doc_ids
+in:  {"collection":"kb","doc_ids":[]}
+out: {"results":[],"count":0,"chunks_merged":0,"scored":false}
+
+## rag_chunks_load / unknown doc_id
+in:  {"collection":"kb","doc_ids":["zz"]}
+out: {"results":[],"count":0,"chunks_merged":0,"scored":false}
+
+## rag_chunks_load / missing doc_ids
+in:  {"collection":"kb"}
+err: InvalidParams missing field `doc_ids`
+

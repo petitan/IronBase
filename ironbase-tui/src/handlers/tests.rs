@@ -16,7 +16,9 @@ use ironbase_mcp_types::responses::{
     AutoEmbedDisableResponse, EmbedCacheClearResponse, EmbedJobCancelResponse,
     EmbedJobListResponse, EmbedModelsListResponse, EmbedTextResponse, Flag, FulltextIndexInfo,
     FuzzyIndexInfo, HnswParams, IndexListAll, IndexListResponse, IndexStatsResponse, JobInfo,
-    JobStatus, JobType, TypedIndexList, VectorIndexInfo, VectorMetric,
+    JobStatus, JobType, RagCollectionCreateResponse, RagCollectionStatsResponse, RagConfigView,
+    RagCreatedConfig, RagCreatedIndexes, RagDocumentImportResponse, RagImported, RagStats,
+    TypedIndexList, VectorIndexInfo, VectorMetric,
 };
 use serde_json::{json, to_value};
 use std::sync::Arc;
@@ -1940,4 +1942,153 @@ async fn test_vector_search_filter_is_applied_to_typed_hits() {
     press(&mut app, KeyCode::Enter).await;
     let error = app.vector_state.error.clone().unwrap_or_default();
     assert!(error.contains("only equality matches"), "{error}");
+}
+
+/// Shift+E, then BackTab `n` times (Tab is text input on Search)
+async fn open_rag_tab(app: &mut App, back_tabs: usize, tab: RagTab) {
+    shift(app, 'E').await;
+    for _ in 0..back_tabs {
+        press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
+    }
+    assert_eq!(app.rag_state.active_tab, tab);
+}
+
+/// `rag_collection_stats` of "users": 6 chunks of 4 documents, provider `length`
+fn rag_stats() -> serde_json::Value {
+    to_value(RagCollectionStatsResponse {
+        collection: "users".to_string(),
+        rag_enabled: true,
+        config: Some(RagConfigView {
+            embedding_field: "embedding".to_string(),
+            text_field: "content".to_string(),
+            text_fields: vec!["content".to_string()],
+            provider: "length".to_string(),
+            language: "none".to_string(),
+            dimension: 2,
+            created_at: "2026-11-14T10:00:00Z".to_string(),
+        }),
+        stats: RagStats {
+            chunk_count: 6,
+            source_document_count: 4,
+            vector_indexes: vec![],
+            fulltext_indexes: vec![],
+        },
+        provider_info: None,
+    })
+    .unwrap()
+}
+
+/// The counts are read from the nested `stats` and the provider from
+/// `config` (before: from the top level, "0 chunks | ?" and "0 source docs")
+#[tokio::test]
+async fn test_rag_collections_tab_shows_the_nested_stats() {
+    let server = two_collections();
+    server.respond("rag_collection_stats", rag_stats());
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 3, RagTab::Collections).await;
+
+    press(&mut app, KeyCode::Char('r')).await;
+    assert_eq!(
+        server.calls_to("rag_collection_stats"),
+        vec![json!({"collection": "users"})]
+    );
+    let screen = render_to_string(&app, 120, 36);
+    assert!(
+        screen.contains("users | 6 chunks | 4 docs | length"),
+        "{screen}"
+    );
+
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        app.rag_state.message.as_deref(),
+        Some("users: 6 chunks, 4 source docs")
+    );
+}
+
+/// The import reports what the server stored, and a failed import does not
+/// leave the previous result on screen
+#[tokio::test]
+async fn test_rag_import_reports_the_stored_chunks() {
+    let server = two_collections();
+    server.respond(
+        "rag_document_import",
+        to_value(RagDocumentImportResponse::Imported(RagImported {
+            success: true,
+            collection: "users".to_string(),
+            doc_id: "d1".to_string(),
+            chunks_created: 3,
+            chunks_replaced: 1,
+            dimension: 2,
+            provider: "length".to_string(),
+            language_ignored: false,
+        }))
+        .unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 4, RagTab::Import).await;
+    type_text(&mut app, "Hello").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        server.calls_to("rag_document_import"),
+        vec![
+            json!({"collection": "users", "content": "Hello", "chunk_size": 1000,
+            "overlap": 100, "mode": "auto", "if_exists": "replace", "language": "none"})
+        ]
+    );
+    assert_eq!(
+        app.rag_state.message.as_deref(),
+        Some("Imported 'd1': 3 chunks created, 1 replaced")
+    );
+    assert!(app.rag_state.import_result.is_some());
+
+    server.fail("rag_document_import", "Embedding failed");
+    press(&mut app, KeyCode::Enter).await;
+    assert!(app.rag_state.import_result.is_none());
+    assert!(app
+        .rag_state
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("Embedding failed")));
+}
+
+/// Creating a RAG collection says what already existed
+#[tokio::test]
+async fn test_rag_create_reports_existing_indexes() {
+    let server = two_collections();
+    server.respond(
+        "rag_collection_create",
+        to_value(RagCollectionCreateResponse {
+            success: true,
+            collection: "kb".to_string(),
+            config: RagCreatedConfig {
+                embedding_field: "embedding".to_string(),
+                text_field: "content".to_string(),
+                text_fields: vec!["content".to_string()],
+                context_fields: vec![],
+                provider: "ollama".to_string(),
+                language: "hungarian".to_string(),
+                dimension: 768,
+            },
+            indexes: RagCreatedIndexes {
+                collection_created: true,
+                vector_created: false,
+                fulltext_created: 0,
+            },
+        })
+        .unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 3, RagTab::Collections).await;
+    press(&mut app, KeyCode::Char('c')).await;
+    type_text(&mut app, "kb").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        server.calls_to("rag_collection_create"),
+        vec![json!({"collection": "kb", "embedding_field": "embedding",
+            "text_field": "content", "provider": "ollama", "language": "hungarian"})]
+    );
+    assert_eq!(
+        app.rag_state.message.as_deref(),
+        Some("RAG collection 'kb' ready: vector index already existed, 0 fulltext index(es) created (768 dims, ollama)")
+    );
 }

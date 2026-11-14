@@ -861,7 +861,8 @@ fn default_rrf_k() -> f64 {
 // RAG Tool Parameters
 // ============================================================================
 
-fn default_rag_language() -> String {
+/// Default fulltext language of the RAG tools: `none` (no stemming)
+pub fn default_rag_language() -> String {
     "none".to_string()
 }
 
