@@ -1120,7 +1120,7 @@ impl App {
     pub fn set_error(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         tracing::warn!(
-            error = %crate::logging::redact_url_credentials(&msg),
+            error = %crate::logging::sanitize_for_log(&msg),
             "Error shown to the user"
         );
         self.error_message = Some(msg);

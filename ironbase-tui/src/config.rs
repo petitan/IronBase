@@ -105,7 +105,22 @@ impl Config {
 
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
-        toml::from_str(&content).map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))
+        // The Display of a TOML error quotes the offending source line, which can
+        // be the API key line: report the position and the message only.
+        toml::from_str(&content).map_err(|e| {
+            let line = e.span().map(|span| {
+                content[..span.start.min(content.len())]
+                    .lines()
+                    .count()
+                    .max(1)
+            });
+            match line {
+                Some(line) => {
+                    anyhow::anyhow!("{}: line {}: {}", path.display(), line, e.message())
+                }
+                None => anyhow::anyhow!("{}: {}", path.display(), e.message()),
+            }
+        })
     }
 
     /// Save config to file
@@ -188,6 +203,21 @@ mod tests {
         std::fs::write(&path, "theme = [this is not toml").unwrap();
         let err = Config::load_from(&path).unwrap_err();
         assert!(err.to_string().contains("config.toml"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_config_error_does_not_quote_the_api_key_line() {
+        let path = temp_config_path("secret-line");
+        // Broken on the key line itself: the error must name the line, not show it
+        std::fs::write(
+            &path,
+            "mcp_url = \"http://127.0.0.1:8080\"\nmcp_api_key = \"sk-very-secret-value\n",
+        )
+        .unwrap();
+        let err = Config::load_from(&path).unwrap_err().to_string();
+        assert!(!err.contains("sk-very-secret-value"), "{err}");
+        assert!(err.contains("line 2"), "{err}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

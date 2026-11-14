@@ -60,6 +60,8 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                 // Extract the full key from the result
                                 let mut saved_path: Option<String> = None;
                                 if let Some(key) = result.get("key").and_then(|v| v.as_str()) {
+                                    // The TUI holds the new key from here: masked in the log
+                                    crate::logging::register_secret(key);
                                     app.api_key_state.new_key = Some(key.to_string());
                                     // Save key to config directory for easy copying
                                     if let Some(config_dir) = dirs::config_dir() {

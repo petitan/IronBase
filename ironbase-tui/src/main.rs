@@ -110,10 +110,36 @@ fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
 /// inside the TUI (theme, last database). CLI/env overrides live only in the
 /// effective config (`app.config`), so a key or `--insecure` given on the
 /// command line never reaches the file.
+///
+/// The remembered database is replaced only by one that was opened: a
+/// session that never started (terminal setup failed) or never connected
+/// keeps the persisted value.
 fn config_to_save(mut persisted: Config, app: &App) -> Config {
     persisted.theme = app.theme_name;
-    persisted.last_db_path = app.db_path.clone();
+    if let Some(path) = &app.db_path {
+        persisted.last_db_path = Some(path.clone());
+    }
     persisted
+}
+
+/// The key given on the command line / in the environment: known before
+/// the config is read, so it is masked in the log from the first line. (The
+/// admin key is registered where it is read: `ApiKeyState::new`.)
+fn register_startup_secrets(cli: &Cli) {
+    if let Some(key) = &cli.api_key {
+        logging::register_secret(key);
+    }
+}
+
+/// The keys of the persisted and of the effective config (the latter falls
+/// back to the environment)
+fn register_config_secrets(persisted: &Config, effective: &Config) {
+    for key in [persisted.mcp_api_key.clone(), effective.get_mcp_api_key()]
+        .into_iter()
+        .flatten()
+    {
+        logging::register_secret(&key);
+    }
 }
 
 #[tokio::main]
@@ -126,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     init_logging(&cli);
+    register_startup_secrets(&cli);
 
     // Load the persisted config. A broken file is reported and never
     // overwritten on exit.
@@ -135,7 +162,10 @@ async fn main() -> anyhow::Result<()> {
             (config, None)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Config load failed, using defaults");
+            tracing::warn!(
+                error = %logging::sanitize_for_log(&e.to_string()),
+                "Config load failed, using defaults"
+            );
             eprintln!(
                 "Config hiba: {} - alapertelmezett beallitasokkal indul, a fajl nem lesz felulirva",
                 e
@@ -148,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
     // are never written back to the config file
     let mut config = persisted_config.clone();
     apply_cli_overrides(&mut config, &cli);
+    register_config_secrets(&persisted_config, &config);
 
     // Never the full URL: it can carry credentials
     match config.transport {
@@ -187,17 +218,23 @@ async fn main() -> anyhow::Result<()> {
     // and after an error in the session
     let restored = ratatui::try_restore();
     if let Err(e) = &result {
-        tracing::error!(error = %e, "TUI session failed");
+        tracing::error!(error = %logging::sanitize_for_log(&e.to_string()), "TUI session failed");
     }
     if let Err(e) = &restored {
-        tracing::error!(error = %e, "Terminal restore failed");
+        tracing::error!(
+            error = %logging::sanitize_for_log(&e.to_string()),
+            "Terminal restore failed"
+        );
     }
 
     // Save config (only what the user changed inside the TUI)
     match config_error {
         None => match config_to_save(persisted_config, &app).save() {
             Ok(()) => tracing::info!("Config saved"),
-            Err(e) => tracing::warn!(error = %e, "Config save failed"),
+            Err(e) => tracing::warn!(
+                error = %logging::sanitize_for_log(&e.to_string()),
+                "Config save failed"
+            ),
         },
         Some(e) => eprintln!("Config hiba: {} - a beallitasok nem lettek elmentve", e),
     }
@@ -367,6 +404,41 @@ mod tests {
         assert_eq!(saved.theme, app.theme_name);
         assert_ne!(saved.theme, persisted.theme);
         assert_eq!(saved.last_db_path, Some(PathBuf::from("/data/x.mlite")));
+    }
+
+    /// A session that never started (terminal setup failed) or never
+    /// connected has no database path: the remembered one used to be erased
+    #[test]
+    fn test_last_db_path_survives_a_session_without_database() {
+        let persisted = Config {
+            last_db_path: Some(PathBuf::from("/data/remembered.mlite")),
+            ..Config::default()
+        };
+        let app = App::new(persisted.clone());
+        assert_eq!(app.db_path, None);
+
+        let saved = config_to_save(persisted.clone(), &app);
+        assert_eq!(saved.last_db_path, persisted.last_db_path);
+        assert_eq!(saved.theme, persisted.theme);
+    }
+
+    /// The API key and the config keys are masked in logged text
+    #[test]
+    fn test_startup_secrets_are_registered() {
+        let cli = Cli::parse_from(["tuti-tui", "--api-key", "sk-cli-5b77e2"]);
+        register_startup_secrets(&cli);
+        let persisted = Config {
+            mcp_api_key: Some("sk-file-91ac04".to_string()),
+            ..Config::default()
+        };
+        let mut effective = persisted.clone();
+        apply_cli_overrides(&mut effective, &cli);
+        register_config_secrets(&persisted, &effective);
+
+        assert_eq!(
+            logging::sanitize_for_log("denied: sk-cli-5b77e2 / sk-file-91ac04"),
+            "denied: [REDACTED] / [REDACTED]"
+        );
     }
 
     #[test]

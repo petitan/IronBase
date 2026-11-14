@@ -1,6 +1,6 @@
 //! MCP Client - high-level API for IronBase MCP operations
 
-use crate::logging::redact_arguments;
+use crate::logging::{redact_arguments, sanitize_for_log};
 use crate::mcp::error::{McpError, McpResult};
 use crate::mcp::protocol::{JsonRpcRequest, ToolCallResult};
 use crate::mcp::transport::{HttpTransport, StdioTransport, Transport};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Log how a request to the server ended: what was called, how long it took
-/// and, on failure, the error text
+/// and, on failure, the (sanitised) error text
 fn log_outcome<T>(what: &str, tool: &str, started: Instant, result: &McpResult<T>) {
     let duration_ms = started.elapsed().as_millis() as u64;
     match result {
@@ -19,7 +19,7 @@ fn log_outcome<T>(what: &str, tool: &str, started: Instant, result: &McpResult<T
             tool,
             duration_ms,
             outcome = "error",
-            error = %crate::logging::redact_url_credentials(&e.to_string()),
+            error = %sanitize_for_log(&e.to_string()),
             "{}",
             what
         ),
@@ -90,7 +90,11 @@ impl McpClient {
     /// duration and outcome at info level, the (redacted) arguments only at
     /// debug level - the result is never logged.
     async fn call_tool(&self, name: &str, arguments: Value) -> McpResult<Value> {
-        tracing::debug!(tool = name, arguments = %redact_arguments(&arguments), "MCP tool call started");
+        tracing::debug!(
+            tool = name,
+            arguments = %sanitize_for_log(&redact_arguments(&arguments).to_string()),
+            "MCP tool call started"
+        );
         let started = Instant::now();
         let result = self.call_tool_unlogged(name, arguments).await;
         log_outcome("MCP tool call", name, started, &result);
