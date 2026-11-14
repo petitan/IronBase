@@ -456,42 +456,6 @@ impl DbWrapper {
     }
 
     // === RAG operations ===
-
-    pub async fn rag_collection_create(
-        &self,
-        collection: &str,
-        embedding_field: &str,
-        text_field: &str,
-        provider: &str,
-        language: &str,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .rag_collection_create(collection, embedding_field, text_field, provider, language)
-            .await?;
-        Ok(result)
-    }
-
-    pub async fn rag_document_import(
-        &self,
-        collection: &str,
-        content: &str,
-        title: Option<&str>,
-        chunk_size: usize,
-        overlap: usize,
-        mode: &str,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .rag_document_import(collection, content, title, chunk_size, overlap, mode)
-            .await?;
-        Ok(result)
-    }
-
-    pub async fn rag_collection_stats(&self, collection: &str) -> Result<Value> {
-        let result = self.client.rag_collection_stats(collection).await?;
-        Ok(result)
-    }
 }
 
 /// Recursively collect field names and types

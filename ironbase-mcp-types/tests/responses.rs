@@ -690,3 +690,51 @@ fn auto_embed_enable_message_position_follows_the_server() {
     same_bytes::<AutoEmbedEnableResponse>(&reembed);
     same_bytes::<AutoEmbedEnableResponse>(&backfill);
 }
+
+// ============================================================================
+// RAG tool group
+// ============================================================================
+
+#[test]
+fn rag_document_import_variants() {
+    let imported = r#"{"success":true,"collection":"kb","doc_id":"d1","chunks_created":3,"chunks_replaced":0,"dimension":2,"provider":"length","language_ignored":false}"#;
+    assert!(matches!(
+        same_bytes::<<tools::RagDocumentImport as Tool>::Resp>(imported),
+        RagDocumentImportResponse::Imported(RagImported {
+            chunks_created: 3,
+            ..
+        })
+    ));
+    let skipped = r#"{"success":true,"collection":"kb","doc_id":"d1","chunks_created":0,"skipped":true,"message":"doc_id already exists; skipped (if_exists=skip)"}"#;
+    assert!(matches!(
+        same_bytes::<RagDocumentImportResponse>(skipped),
+        RagDocumentImportResponse::Skipped(_)
+    ));
+    let empty = r#"{"success":true,"collection":"kb","chunks_created":0,"message":"No chunks generated from content"}"#;
+    assert!(matches!(
+        same_bytes::<RagDocumentImportResponse>(empty),
+        RagDocumentImportResponse::Empty(_)
+    ));
+    // An imported answer without `language_ignored` is not one of the shapes
+    requires::<RagImported>(imported, "language_ignored");
+}
+
+#[test]
+fn embed_document_provider_may_be_null() {
+    let text = r#"{"success":true,"collection":"docs","doc_id":"e1","chunks_created":3,"chunks_replaced":0,"dimension":2,"provider":null,"vector_index_created":true,"inserted_ids":["1","2","3"]}"#;
+    let EmbedDocumentResponse::Embedded(parsed) =
+        same_bytes::<<tools::EmbedDocument as Tool>::Resp>(text)
+    else {
+        panic!("not Embedded");
+    };
+    assert_eq!(parsed.provider, None);
+    assert_eq!(parsed.inserted_ids.len(), 3);
+}
+
+#[test]
+fn rag_collection_stats_without_config() {
+    let text = r#"{"collection":"nope","rag_enabled":false,"config":null,"stats":{"chunk_count":0,"source_document_count":0,"vector_indexes":[],"fulltext_indexes":[]},"provider_info":null}"#;
+    let parsed = same_bytes::<<tools::RagCollectionStats as Tool>::Resp>(text);
+    assert!(parsed.config.is_none());
+    requires::<RagCollectionStatsResponse>(text, "source_document_count");
+}

@@ -518,56 +518,6 @@ impl McpClient {
             .unwrap_or(false);
         Ok(success)
     }
-
-    // === RAG operations ===
-
-    /// Create a RAG-optimized collection with vector + fulltext indexes
-    pub async fn rag_collection_create(
-        &self,
-        collection: &str,
-        embedding_field: &str,
-        text_field: &str,
-        provider: &str,
-        language: &str,
-    ) -> McpResult<Value> {
-        let args = serde_json::json!({
-            "collection": collection,
-            "embedding_field": embedding_field,
-            "text_field": text_field,
-            "provider": provider,
-            "language": language
-        });
-        self.call_tool("rag_collection_create", args).await
-    }
-
-    /// Import a document with automatic chunking and embedding
-    pub async fn rag_document_import(
-        &self,
-        collection: &str,
-        content: &str,
-        title: Option<&str>,
-        chunk_size: usize,
-        overlap: usize,
-        mode: &str,
-    ) -> McpResult<Value> {
-        let mut args = serde_json::json!({
-            "collection": collection,
-            "content": content,
-            "chunk_size": chunk_size,
-            "overlap": overlap,
-            "mode": mode
-        });
-        if let Some(t) = title {
-            args["title"] = serde_json::json!(t);
-        }
-        self.call_tool("rag_document_import", args).await
-    }
-
-    /// Get RAG collection statistics
-    pub async fn rag_collection_stats(&self, collection: &str) -> McpResult<Value> {
-        let args = serde_json::json!({"collection": collection});
-        self.call_tool("rag_collection_stats", args).await
-    }
 }
 
 impl Drop for McpClient {

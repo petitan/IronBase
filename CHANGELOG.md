@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI RAG import and collection screens; typed MCP responses for the RAG tools (ironbase-core 0.3.467, mcp-server 1.0.665)
+
+Phase 2f of the Tuti TUI overhaul. The server's response JSON is unchanged.
+
+- **`ironbase-mcp-types` gains response types for the RAG tools:** `rag_collection_create`,
+  `rag_document_import`, `rag_collection_stats`, `rag_chunks_load` and `embed_document`. The chunked
+  imports answer in three shapes (imported, skipped for an existing `doc_id`, no chunks), shared as
+  `ChunkImportSkipped` / `ChunkImportEmpty`; `rag_collection_stats` reports the shared vector and fulltext
+  index types. `params::default_rag_language` is public. The server builds these responses from the shared
+  structs; the response golden test grew from 321 to 361 cases (recorded on the previous code) and every
+  recorded RAG response round-trips through the shared types byte for byte.
+- **Tuti TUI RAG modal, Import and Collections tabs:**
+  - the collection list and the stats message read the counts nested in `stats` and the provider in
+    `config` (they showed `0 chunks | ?` and "0 source docs" for every collection);
+  - the import reports the stored `doc_id`, the chunks created and replaced, a skipped `doc_id`, content
+    without chunks and an ignored `language`, instead of "Import OK: N chunks" for all of them; a failed
+    import no longer leaves the previous result on screen;
+  - creating a RAG collection says which of the collection and its indexes already existed and the
+    vector dimension, instead of "created!" for an existing one.
+- Known server behaviour, pinned by the golden test and not changed here: merging adjacent chunks
+  (`rag_chunks_load`, and the `merge_chunks` of `search`) joins chunks separated by a gap, such as a
+  paragraph break the chunker dropped, without any separator ("várról.Második"); `embed_document`
+  reports `provider: null` when the default provider embedded the chunks, and its `inserted_ids` are
+  strings; `rag_collection_stats` of a missing collection answers with zero counts instead of an error.
+
 ### Fixed — Tuti TUI embedding and job screens; embedding cache miss count; typed MCP responses for the embedding tools (ironbase-core 0.3.466, mcp-server 1.0.664)
 
 Phase 2e of the Tuti TUI overhaul. The server's response JSON keeps its shape.

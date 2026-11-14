@@ -147,7 +147,7 @@ tools! {
     EmbedModelsList => "embed_models_list", NoParams => EmbedModelsListResponse;
     EmbedCacheStats => "embed_cache_stats", NoParams => EmbedCacheStatsResponse;
     EmbedCacheClear => "embed_cache_clear", NoParams => EmbedCacheClearResponse;
-    EmbedDocument => "embed_document", EmbedDocumentParams;
+    EmbedDocument => "embed_document", EmbedDocumentParams => EmbedDocumentResponse;
 
     // Auto-embedding
     AutoEmbedEnable => "auto_embed_enable", AutoEmbedEnableParams => AutoEmbedEnableResponse;
@@ -160,8 +160,8 @@ tools! {
     EmbedJobCancel => "embed_job_cancel", JobCancelParams => EmbedJobCancelResponse;
 
     // RAG
-    RagCollectionCreate => "rag_collection_create", RagCollectionCreateParams;
-    RagDocumentImport => "rag_document_import", RagDocumentImportParams;
-    RagCollectionStats => "rag_collection_stats", RagCollectionStatsParams;
-    RagChunksLoad => "rag_chunks_load", RagLoadAllChunksParams;
+    RagCollectionCreate => "rag_collection_create", RagCollectionCreateParams => RagCollectionCreateResponse;
+    RagDocumentImport => "rag_document_import", RagDocumentImportParams => RagDocumentImportResponse;
+    RagCollectionStats => "rag_collection_stats", RagCollectionStatsParams => RagCollectionStatsResponse;
+    RagChunksLoad => "rag_chunks_load", RagLoadAllChunksParams => RagChunksLoadResponse;
 }

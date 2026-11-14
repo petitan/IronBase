@@ -28,6 +28,11 @@ use super::params::{
 };
 use ironbase_core::find_options::apply_projection;
 use ironbase_core::search::hybrid::{merge_adjacent_chunks, FusedResult};
+use ironbase_mcp_types::responses::{
+    ChunkImportEmpty, ChunkImportSkipped, Flag, RagChunksLoadResponse, RagCollectionCreateResponse,
+    RagCollectionStatsResponse, RagConfigView, RagCreatedConfig, RagCreatedIndexes,
+    RagDocumentImportResponse, RagImported, RagProviderInfo, RagStats,
+};
 
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
@@ -161,12 +166,12 @@ fn handle_rag_load_all_chunks(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
 
     // Empty doc_ids → empty results (NOT an error, per #73 AC4)
     if p.doc_ids.is_empty() {
-        return Ok(json!({
-            "results": [],
-            "count": 0,
-            "chunks_merged": 0,
-            "scored": p.query.is_some(),
-        }));
+        return Ok(serde_json::to_value(RagChunksLoadResponse {
+            results: vec![],
+            count: 0,
+            chunks_merged: 0,
+            scored: p.query.is_some(),
+        })?);
     }
 
     let projection = parse_projection_value(p.projection)?;
@@ -294,13 +299,12 @@ fn handle_rag_load_all_chunks(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
         results.push(doc);
     }
 
-    let count = results.len();
-    Ok(json!({
-        "results": results,
-        "count": count,
-        "chunks_merged": chunks_merged,
-        "scored": scored,
-    }))
+    Ok(serde_json::to_value(RagChunksLoadResponse {
+        count: results.len(),
+        results,
+        chunks_merged,
+        scored,
+    })?)
 }
 
 // ============================================================================
@@ -408,24 +412,24 @@ fn handle_rag_collection_create(
     };
     save_rag_config(adapter, &config)?;
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "config": {
-            "embedding_field": p.embedding_field,
-            "text_field": p.text_field,
-            "text_fields": fulltext_fields,
-            "context_fields": context_fields,
-            "provider": provider_name,
-            "language": p.language,
-            "dimension": dimension
+    Ok(serde_json::to_value(RagCollectionCreateResponse {
+        success: true,
+        collection: p.collection,
+        config: RagCreatedConfig {
+            embedding_field: p.embedding_field,
+            text_field: p.text_field,
+            text_fields: fulltext_fields,
+            context_fields,
+            provider: provider_name,
+            language: p.language,
+            dimension,
         },
-        "indexes": {
-            "collection_created": collection_created,
-            "vector_created": vector_index_created,
-            "fulltext_created": fulltext_created
-        }
-    }))
+        indexes: RagCreatedIndexes {
+            collection_created,
+            vector_created: vector_index_created,
+            fulltext_created,
+        },
+    })?)
 }
 
 /// Resolve which fulltext fields a hybrid_search should query (#66).
@@ -580,12 +584,9 @@ fn handle_rag_document_import(
         .map_err(|e| McpError::internal(format!("Chunking failed: {}", e)))?;
 
     if chunks.is_empty() {
-        return Ok(json!({
-            "success": true,
-            "collection": p.collection,
-            "chunks_created": 0,
-            "message": "No chunks generated from content"
-        }));
+        return Ok(serde_json::to_value(RagDocumentImportResponse::Empty(
+            chunk_import_empty(p.collection),
+        ))?);
     }
 
     // Pre-check before the expensive embedding step: skip/error short-circuit if
@@ -593,14 +594,9 @@ fn handle_rag_document_import(
     let if_exists = IfExists::parse(&p.if_exists);
     if let Some(ref doc_id) = p.doc_id {
         if should_skip_before_embedding(adapter.as_ref(), &p.collection, doc_id, if_exists)? {
-            return Ok(json!({
-                "success": true,
-                "collection": p.collection,
-                "doc_id": doc_id,
-                "chunks_created": 0,
-                "skipped": true,
-                "message": "doc_id already exists; skipped (if_exists=skip)"
-            }));
+            return Ok(serde_json::to_value(RagDocumentImportResponse::Skipped(
+                chunk_import_skipped(p.collection, doc_id.clone()),
+            ))?);
         }
     }
 
@@ -775,26 +771,46 @@ fn handle_rag_document_import(
     )?;
 
     if result.skipped {
-        return Ok(json!({
-            "success": true,
-            "collection": p.collection,
-            "doc_id": parent_id,
-            "chunks_created": 0,
-            "skipped": true,
-            "message": "doc_id already exists; skipped (if_exists=skip)"
-        }));
+        return Ok(serde_json::to_value(RagDocumentImportResponse::Skipped(
+            chunk_import_skipped(p.collection, parent_id),
+        ))?);
     }
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "doc_id": parent_id,
-        "chunks_created": result.inserted_ids.len(),
-        "chunks_replaced": result.replaced,
-        "dimension": provider.dimension(),
-        "provider": provider_name,
-        "language_ignored": language_ignored
-    }))
+    Ok(serde_json::to_value(RagDocumentImportResponse::Imported(
+        RagImported {
+            success: true,
+            collection: p.collection,
+            doc_id: parent_id,
+            chunks_created: result.inserted_ids.len(),
+            chunks_replaced: result.replaced,
+            dimension: provider.dimension(),
+            provider: provider_name,
+            language_ignored,
+        },
+    ))?)
+}
+
+/// The answer of a chunked import (`rag_document_import`, `embed_document`)
+/// skipped because `doc_id` already has chunks
+pub(super) fn chunk_import_skipped(collection: String, doc_id: String) -> ChunkImportSkipped {
+    ChunkImportSkipped {
+        success: true,
+        collection,
+        doc_id,
+        chunks_created: 0,
+        skipped: Flag,
+        message: "doc_id already exists; skipped (if_exists=skip)".to_string(),
+    }
+}
+
+/// The answer of a chunked import whose content produced no chunk
+pub(super) fn chunk_import_empty(collection: String) -> ChunkImportEmpty {
+    ChunkImportEmpty {
+        success: true,
+        collection,
+        chunks_created: 0,
+        message: "No chunks generated from content".to_string(),
+    }
 }
 
 // ============================================================================
@@ -825,47 +841,45 @@ fn handle_rag_collection_stats(
 
     // Get vector indexes
     let vector_indexes = adapter
-        .list_vector_indexes(&p.collection)
+        .vector_index_infos(&p.collection)
         .unwrap_or_default();
 
     // Get fulltext indexes
     let fulltext_indexes = adapter
-        .list_fulltext_indexes(&p.collection)
+        .fulltext_index_infos(&p.collection)
         .unwrap_or_default();
 
     // Provider info
     let provider_info = if let (Some(cfg), Some(mgr)) = (&rag_config, embedding_manager.as_ref()) {
-        mgr.get_provider(&cfg.provider).map(|p| {
-            json!({
-                "name": cfg.provider,
-                "dimension": p.dimension(),
-                "model": p.model_name()
-            })
+        mgr.get_provider(&cfg.provider).map(|p| RagProviderInfo {
+            name: cfg.provider.clone(),
+            dimension: p.dimension(),
+            model: p.model_name().to_string(),
         })
     } else {
         None
     };
 
-    Ok(json!({
-        "collection": p.collection,
-        "rag_enabled": rag_config.is_some(),
-        "config": rag_config.map(|c| json!({
-            "embedding_field": c.embedding_field,
-            "text_field": c.text_field,
-            "text_fields": c.effective_text_fields(),
-            "provider": c.provider,
-            "language": c.language,
-            "dimension": c.dimension,
-            "created_at": c.created_at
-        })),
-        "stats": {
-            "chunk_count": chunk_count,
-            "source_document_count": source_doc_count,
-            "vector_indexes": vector_indexes,
-            "fulltext_indexes": fulltext_indexes
+    Ok(serde_json::to_value(RagCollectionStatsResponse {
+        collection: p.collection,
+        rag_enabled: rag_config.is_some(),
+        config: rag_config.map(|c| RagConfigView {
+            text_fields: c.effective_text_fields(),
+            embedding_field: c.embedding_field,
+            text_field: c.text_field,
+            provider: c.provider,
+            language: c.language,
+            dimension: c.dimension,
+            created_at: c.created_at,
+        }),
+        stats: RagStats {
+            chunk_count,
+            source_document_count: source_doc_count,
+            vector_indexes,
+            fulltext_indexes,
         },
-        "provider_info": provider_info
-    }))
+        provider_info,
+    })?)
 }
 
 // ============================================================================
