@@ -261,6 +261,22 @@ roundtrip_tests! {
         {"collection": "kb", "field": "embedding", "dim": 384},
         {"collection": "kb", "field": "embedding", "dim": 384, "metric": "euclidean",
          "max_vectors": 5000, "m": 8, "ef_construction": 100, "ef_search": 20};
+    index_create_args_btree: IndexCreateArgs,
+        {"collection": "users"},
+        {"type": "btree", "collection": "users", "field": "age", "fields": ["a", "b"],
+         "unique": true, "sparse": true};
+    index_create_args_fulltext: IndexCreateArgs,
+        {"type": "fulltext", "collection": "docs", "field": "content"},
+        {"type": "fulltext", "collection": "docs", "field": "content", "language": "hungarian",
+         "min_word_length": 3, "accent_folding": false};
+    index_create_args_fuzzy: IndexCreateArgs,
+        {"type": "fuzzy", "collection": "users", "field": "name"},
+        {"type": "fuzzy", "collection": "users", "field": "name", "algorithm": "levenshtein",
+         "threshold": 0.65};
+    index_create_args_vector: IndexCreateArgs,
+        {"type": "vector", "collection": "kb", "field": "embedding", "dim": 384},
+        {"type": "vector", "collection": "kb", "field": "embedding", "dim": 384, "metric": "euclidean",
+         "max_vectors": 5000, "m": 8, "ef_construction": 100, "ef_search": 20};
     vector_search: VectorSearchParams,
         {"collection": "kb", "vector": [0.1, 0.2]},
         {"collection": "kb", "field": "vec", "vector": [0.1, 0.2], "limit": 3, "projection": {"t": 1}};
@@ -387,4 +403,47 @@ fn tool_names_are_unique() {
     let total = names.len();
     names.dedup();
     assert_eq!(names.len(), total, "duplicate Tool::NAME");
+}
+
+/// `index_create` routes by `type` the way the server always has: absent or
+/// not a string is `btree`, an unknown string is an error, and each variant
+/// parses (and fails) as its own struct
+#[test]
+fn index_create_args_route_by_type() {
+    let parse = |v: Value| from_value::<IndexCreateArgs>(v).map_err(|e| e.to_string());
+    let btree = parse(json!({"collection": "users", "field": "age"})).unwrap();
+    assert!(matches!(&btree, IndexCreateArgs::BTree(p) if p.field.as_deref() == Some("age")));
+    assert_eq!(
+        to_value(&btree).unwrap(),
+        json!({"type": "btree", "collection": "users", "field": "age", "unique": false, "sparse": false})
+    );
+    assert!(matches!(
+        parse(json!({"type": 7, "collection": "users", "field": "age"})),
+        Ok(IndexCreateArgs::BTree(_))
+    ));
+    assert!(matches!(
+        parse(json!({"type": null, "collection": "users"})),
+        Ok(IndexCreateArgs::BTree(_))
+    ));
+    assert_eq!(
+        parse(json!({"type": "hash", "collection": "users"})).unwrap_err(),
+        "Unknown index type 'hash'. Use one of: btree, fulltext, fuzzy, vector"
+    );
+    assert_eq!(
+        parse(json!({"type": "vector", "collection": "kb", "field": "e"})).unwrap_err(),
+        "missing field `dim`"
+    );
+    assert_eq!(
+        parse(json!({"type": "fulltext", "collection": "kb"})).unwrap_err(),
+        "missing field `field`"
+    );
+    // The routing never looks into a non-object: it fails as the B+ tree struct
+    assert!(parse(json!("users")).is_err());
+
+    let args = IndexCreateArgs::Vector(
+        from_value(json!({"collection": "kb", "field": "e", "dim": 3})).unwrap(),
+    );
+    let wire = json!({"name": <tools::IndexCreate as Tool>::NAME, "arguments": args});
+    assert_eq!(wire["name"], "index_create");
+    assert_eq!(wire["arguments"]["type"], "vector");
 }

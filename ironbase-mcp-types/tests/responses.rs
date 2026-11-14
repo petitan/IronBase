@@ -199,3 +199,113 @@ fn no_params_is_an_empty_object() {
     assert_eq!(<tools::CollectionList as Tool>::NAME, "collection_list");
     assert_eq!(<tools::DbStats as Tool>::NAME, "db_stats");
 }
+
+#[test]
+fn document_writes() {
+    let one = same_bytes::<<tools::InsertOne as Tool>::Resp>(r#"{"inserted_id":"10"}"#);
+    assert_eq!(one.inserted_id, "10");
+    assert_eq!(one.auto_embedded, None);
+    same_bytes::<InsertOneResponse>(r#"{"inserted_id":"e-1","auto_embedded":true}"#);
+    requires::<InsertOneResponse>(r#"{"inserted_id":"10"}"#, "inserted_id");
+    // `_id`s are strings on the wire, an integer one too
+    assert!(serde_json::from_str::<InsertOneResponse>(r#"{"inserted_id":10}"#).is_err());
+
+    same_bytes::<<tools::InsertMany as Tool>::Resp>(
+        r#"{"inserted_ids":["20","s-21","14"],"inserted_count":3}"#,
+    );
+    same_bytes::<InsertManyResponse>(
+        r#"{"inserted_ids":["20","21","22"],"inserted_count":3,"auto_embedded_count":2}"#,
+    );
+    requires::<InsertManyResponse>(
+        r#"{"inserted_ids":[],"inserted_count":0}"#,
+        "inserted_count",
+    );
+
+    let update =
+        same_bytes::<<tools::UpdateOne as Tool>::Resp>(r#"{"matched_count":1,"modified_count":0}"#);
+    assert_eq!((update.matched_count, update.modified_count), (1, 0));
+    assert_eq!(update.upserted_id, None);
+    same_bytes::<UpdateOneResponse>(
+        r#"{"matched_count":0,"modified_count":0,"upserted_id":"30","auto_embedded":true}"#,
+    );
+    same_bytes::<UpdateOneResponse>(
+        r#"{"matched_count":1,"modified_count":1,"auto_embedded_count":1}"#,
+    );
+    same_bytes::<UpdateOneResponse>(
+        r#"{"matched_count":1,"modified_count":1,"auto_embed_error":"Embedding generation failed: x"}"#,
+    );
+    requires::<UpdateOneResponse>(
+        r#"{"matched_count":1,"modified_count":0}"#,
+        "modified_count",
+    );
+
+    same_bytes::<<tools::UpdateMany as Tool>::Resp>(r#"{"matched_count":3,"modified_count":0}"#);
+    same_bytes::<UpdateManyResponse>(
+        r#"{"matched_count":1,"modified_count":1,"auto_embed_error":"Embedding generation failed: x"}"#,
+    );
+    requires::<UpdateManyResponse>(r#"{"matched_count":3,"modified_count":0}"#, "matched_count");
+
+    same_bytes::<<tools::DeleteOne as Tool>::Resp>(r#"{"deleted_count":0}"#);
+    same_bytes::<<tools::DeleteMany as Tool>::Resp>(r#"{"deleted_count":2}"#);
+    requires::<DeleteResponse>(r#"{"deleted_count":2}"#, "deleted_count");
+}
+
+#[test]
+fn collection_management() {
+    same_bytes::<<tools::CollectionCreate as Tool>::Resp>(r#"{"success":true,"collection":"c1"}"#);
+    let drop = same_bytes::<<tools::CollectionDrop as Tool>::Resp>(
+        r#"{"success":true,"dropped":"drop_me","acl_deleted":false}"#,
+    );
+    assert_eq!(drop.dropped, "drop_me");
+    requires::<CollectionDropResponse>(
+        r#"{"success":true,"dropped":"drop_me","acl_deleted":false}"#,
+        "acl_deleted",
+    );
+}
+
+#[test]
+fn index_create_shapes() {
+    let cases = [
+        (
+            r#"{"index_name":"w_name","field":"name","unique":false,"sparse":false}"#,
+            "btree",
+        ),
+        (
+            r#"{"index_name":"w_name_age","fields":["name","age"],"unique":false,"sparse":false}"#,
+            "compound",
+        ),
+        (
+            r#"{"index_name":"u_bio_fts","field":"bio","language":"hungarian","min_word_length":3,"accent_folding":false}"#,
+            "fulltext",
+        ),
+        (
+            r#"{"index_name":"w_city_fuzzy","field":"city","algorithm":"jaro_winkler","threshold":1.0}"#,
+            "fuzzy",
+        ),
+        (
+            r#"{"index_name":"w_vec_emb2","field":"emb2","dim":4,"metric":"dot_product","max_vectors":500,"hnsw_params":{"m":8,"ef_construction":100,"ef_search":20}}"#,
+            "vector",
+        ),
+    ];
+    for (text, kind) in cases {
+        let parsed = same_bytes::<<tools::IndexCreate as Tool>::Resp>(text);
+        let got = match &parsed {
+            IndexCreateResponse::BTree(_) => "btree",
+            IndexCreateResponse::Compound(_) => "compound",
+            IndexCreateResponse::Fulltext(_) => "fulltext",
+            IndexCreateResponse::Fuzzy(_) => "fuzzy",
+            IndexCreateResponse::Vector(_) => "vector",
+        };
+        assert_eq!(got, kind, "{text}");
+        assert!(text.contains(&format!(r#""index_name":"{}""#, parsed.index_name())));
+    }
+    // A B+ tree response without `unique` is no shape at all
+    requires::<IndexCreateResponse>(cases[0].0, "unique");
+    requires::<IndexCreateResponse>(cases[4].0, "ef_search");
+
+    same_bytes::<<tools::IndexDrop as Tool>::Resp>(r#"{"success":true,"dropped":"w_name"}"#);
+    requires::<IndexDropResponse>(r#"{"success":true,"dropped":"w_name"}"#, "dropped");
+    same_bytes::<<tools::IndexStatsRefresh as Tool>::Resp>(
+        r#"{"success":true,"message":"Index statistics refreshed for collection 'w'"}"#,
+    );
+}

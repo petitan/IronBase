@@ -7,8 +7,8 @@
 //!
 //! Tools whose handler parses a typed argument struct have a marker, and so do
 //! the argument-less read tools a client needs (`collection_list`, `db_stats`,
-//! with [`NoParams`]); the other argument-less tools and `index_create` (four
-//! argument shapes selected by `type`) do not have one yet.
+//! with [`NoParams`]), and `index_create` (with [`IndexCreateArgs`], one argument
+//! struct per `type`); the other argument-less tools do not have one yet.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -59,23 +59,24 @@ macro_rules! tools {
 
 tools! {
     // Document CRUD
-    InsertOne => "insert_one", InsertOneParams;
-    InsertMany => "insert_many", InsertManyParams;
+    InsertOne => "insert_one", InsertOneParams => InsertOneResponse;
+    InsertMany => "insert_many", InsertManyParams => InsertManyResponse;
     Find => "find", FindParams => FindResponse;
     FindOne => "find_one", FindOneParams;
-    UpdateOne => "update_one", UpdateOneParams;
-    UpdateMany => "update_many", UpdateManyParams;
-    DeleteOne => "delete_one", DeleteParams;
-    DeleteMany => "delete_many", DeleteParams;
+    UpdateOne => "update_one", UpdateOneParams => UpdateOneResponse;
+    UpdateMany => "update_many", UpdateManyParams => UpdateManyResponse;
+    DeleteOne => "delete_one", DeleteParams => DeleteResponse;
+    DeleteMany => "delete_many", DeleteParams => DeleteResponse;
     Count => "count", CountParams => CountResponse;
     Distinct => "distinct", DistinctParams;
     Aggregate => "aggregate", AggregateParams;
 
     // Index management & search
+    IndexCreate => "index_create", IndexCreateArgs => IndexCreateResponse;
     IndexList => "index_list", IndexListParams => IndexListResponse;
-    IndexDrop => "index_drop", IndexDropParams;
+    IndexDrop => "index_drop", IndexDropParams => IndexDropResponse;
     IndexStats => "index_stats", IndexListParams => IndexStatsResponse;
-    IndexStatsRefresh => "index_stats_refresh", IndexListParams;
+    IndexStatsRefresh => "index_stats_refresh", IndexListParams => IndexStatsRefreshResponse;
     FuzzySearch => "fuzzy_search", FuzzySearchParams;
     FulltextSearch => "fulltext_search", FulltextSearchParams;
     FulltextAnalyze => "fulltext_analyze", FulltextAnalyzeParams;
@@ -84,8 +85,8 @@ tools! {
 
     // Collection & schema
     CollectionList => "collection_list", NoParams => CollectionListResponse;
-    CollectionCreate => "collection_create", CollectionCreateParams;
-    CollectionDrop => "collection_drop", CollectionDropParams;
+    CollectionCreate => "collection_create", CollectionCreateParams => CollectionCreateResponse;
+    CollectionDrop => "collection_drop", CollectionDropParams => CollectionDropResponse;
     CollectionRename => "collection_rename", CollectionRenameParams;
     SchemaSet => "schema_set", SchemaSetParams;
     SchemaGet => "schema_get", SchemaGetParams;

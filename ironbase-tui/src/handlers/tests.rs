@@ -207,7 +207,6 @@ async fn test_failed_document_refresh_after_switch_leaves_empty_list_and_error()
 #[tokio::test]
 async fn test_delete_document_needs_explicit_yes() {
     let server = two_collections();
-    server.respond("delete_one", json!({"deleted_count": 1}));
     let mut app = app_with_server(&server).await;
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Char('j')).await;
@@ -234,6 +233,15 @@ async fn test_delete_document_needs_explicit_yes() {
         vec![json!({"collection": "users", "filter": {"_id": 1}})]
     );
     assert_eq!(app.status_message.as_deref(), Some("Dokumentum törölve"));
+
+    // The same document again: the server deletes nothing, and says so
+    app.documents.insert(1, json!({"_id": 1}));
+    press(&mut app, KeyCode::Char('d')).await;
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(
+        app.error_message.as_deref(),
+        Some("Dokumentum nem található")
+    );
 }
 
 // === Index list ===
@@ -249,7 +257,6 @@ async fn test_index_list_drop_flow() {
         "index_stats",
         to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
     );
-    server.respond("index_drop", json!({"success": true}));
     let mut app = app_with_server(&server).await;
 
     // Actions -> x opens the index modal and loads the list
@@ -286,6 +293,11 @@ async fn test_index_list_drop_flow() {
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_age"})]
     );
+    assert_eq!(app.index_state.error, None);
+    assert_eq!(
+        app.index_state.message.as_deref(),
+        Some("Index törölve: users_age")
+    );
 }
 
 // === Confirmed actions: the call uses the names captured when the confirm opened ===
@@ -302,7 +314,6 @@ async fn test_vector_index_drop_executes_with_captured_names() {
         ])))
         .unwrap(),
     );
-    server.respond("index_drop", json!({"success": true}));
 
     shift(&mut app, 'V').await;
     assert_eq!(app.modal, Some(Modal::VectorSearch));
@@ -323,6 +334,11 @@ async fn test_vector_index_drop_executes_with_captured_names() {
     assert_eq!(
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_emb_vec"})]
+    );
+    assert_eq!(app.vector_state.error, None);
+    assert_eq!(
+        app.vector_state.message.as_deref(),
+        Some("Index 'users_emb_vec' deleted!")
     );
 }
 
@@ -1030,4 +1046,231 @@ async fn test_vector_index_list_shows_dim_and_metric() {
         line.contains("users_vec_emb | emb | dim:3 | dot_product | 3 vectors"),
         "{line}"
     );
+}
+
+// === Write-side responses: the server's real shapes (mcp-server/tests/golden/response_wire.txt) ===
+
+/// Open the editor on the selected (first) document of "users", change nothing
+async fn open_edit_of_first_user(app: &mut App) {
+    if app.active_pane != Pane::Documents {
+        press(app, KeyCode::Tab).await;
+    }
+    press(app, KeyCode::Char('e')).await;
+    assert_eq!(app.modal, Some(Modal::Insert));
+    assert!(app.insert.is_edit_mode());
+}
+
+#[tokio::test]
+async fn test_edit_reports_updated_unchanged_and_not_found() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+
+    // A real change (built-in update_one)
+    open_edit_of_first_user(&mut app).await;
+    app.insert.lines = vec![r#"{"_id": 0, "n": 100, "even": true}"#.to_string()];
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.status_message.as_deref(), Some("Dokumentum frissítve"));
+    assert_eq!(
+        server.calls_to("update_one"),
+        vec![json!({"collection": "users", "filter": {"_id": 0},
+                    "update": {"$set": {"_id": 0, "n": 100, "even": true}}, "upsert": false})]
+    );
+
+    // Saved without a change: matched, not modified (golden "matched, not modified")
+    server.respond(
+        "update_one",
+        wire(r#"{"matched_count":1,"modified_count":0}"#),
+    );
+    open_edit_of_first_user(&mut app).await;
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Dokumentum változatlan (nincs módosítás)")
+    );
+
+    // Deleted meanwhile (golden "no match")
+    server.respond(
+        "update_one",
+        wire(r#"{"matched_count":0,"modified_count":0}"#),
+    );
+    open_edit_of_first_user(&mut app).await;
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Dokumentum nem található")
+    );
+}
+
+#[tokio::test]
+async fn test_insert_reports_inserted_id_as_sent() {
+    let server = two_collections();
+    // golden "no _id": the server reports every `_id` as a string
+    server.respond("insert_one", wire(r#"{"inserted_id":"31"}"#));
+    let mut app = app_with_server(&server).await;
+
+    press(&mut app, KeyCode::Char('i')).await;
+    assert_eq!(app.modal, Some(Modal::Insert));
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+
+    assert_eq!(server.calls_to("insert_one").len(), 1);
+    assert_eq!(app.modal, None);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Dokumentum beszúrva, _id: 31")
+    );
+}
+
+#[tokio::test]
+async fn test_insert_into_fake_server_stores_the_document() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+
+    press(&mut app, KeyCode::Char('i')).await;
+    app.insert.lines = vec![r#"{"_id": "k-1", "n": 7}"#.to_string()];
+    press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
+
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Dokumentum beszúrva, _id: k-1")
+    );
+    assert_eq!(app.collections[0].doc_count, Some(31));
+}
+
+/// Actions -> x (index modal), then `n` (create form) with `field` typed in
+async fn open_index_create_form(app: &mut App, field: &str) {
+    press(app, KeyCode::Char('a')).await;
+    press(app, KeyCode::Char('x')).await;
+    assert_eq!(app.modal, Some(Modal::Index));
+    press(app, KeyCode::Char('n')).await;
+    assert!(app.index_state.is_creating);
+    type_text(app, field).await;
+}
+
+#[tokio::test]
+async fn test_index_create_reports_the_server_index_name() {
+    let server = two_collections();
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
+    // golden "btree single"
+    server.respond(
+        "index_create",
+        wire(r#"{"index_name":"users_n","field":"n","unique":false,"sparse":false}"#),
+    );
+    let mut app = app_with_server(&server).await;
+
+    open_index_create_form(&mut app, "n").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.index_state.error, None);
+    assert_eq!(
+        app.index_state.message.as_deref(),
+        Some("Index: n létrehozva (users_n)")
+    );
+    assert_eq!(
+        server.calls_to("index_create"),
+        vec![json!({"type": "btree", "collection": "users", "field": "n",
+                    "unique": false, "sparse": false})]
+    );
+}
+
+#[tokio::test]
+async fn test_index_create_rejects_a_response_of_another_tool() {
+    let server = two_collections();
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
+    // Not an `index_create` shape (an `index_drop` answer)
+    server.respond(
+        "index_create",
+        wire(r#"{"success":true,"dropped":"users_n"}"#),
+    );
+    let mut app = app_with_server(&server).await;
+
+    open_index_create_form(&mut app, "n").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.index_state.message, None);
+    let error = app.index_state.error.clone().unwrap_or_default();
+    assert!(error.contains("index_create"), "{error}");
+}
+
+#[tokio::test]
+async fn test_vector_index_create_reports_name_or_rejects_bad_response() {
+    use crate::state::vector::VectorTab;
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+
+    shift(&mut app, 'V').await;
+    press(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.vector_state.active_tab, VectorTab::CreateIndex);
+    type_text(&mut app, "emb").await;
+    app.vector_state.dimension = 3;
+
+    // A response without `index_name`: an error, not "Index '' created!"
+    server.respond("index_create", wire(r#"{"success":true}"#));
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.vector_state.message, None);
+    assert!(app.vector_state.error.is_some());
+
+    // golden "vector defaults" shape, from the built-in answer
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    shift(&mut app, 'V').await;
+    press(&mut app, KeyCode::Tab).await;
+    type_text(&mut app, "emb").await;
+    app.vector_state.dimension = 3;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.vector_state.error, None);
+    assert_eq!(
+        app.vector_state.message.as_deref(),
+        Some("Index 'users_vec_emb' created!")
+    );
+    assert_eq!(
+        server.calls_to("index_create"),
+        vec![
+            json!({"type": "vector", "collection": "users", "field": "emb", "dim": 3,
+                    "metric": "cosine", "max_vectors": 100000, "m": 16,
+                    "ef_construction": 200, "ef_search": 50})
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_index_analyze_and_collection_create_drop_use_built_ins() {
+    let server = two_collections();
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+
+    press(&mut app, KeyCode::Char('a')).await;
+    press(&mut app, KeyCode::Char('x')).await;
+    press(&mut app, KeyCode::Char('a')).await;
+    assert_eq!(
+        server.calls_to("index_stats_refresh"),
+        vec![json!({"collection": "users"})]
+    );
+    assert_eq!(app.index_state.error, None);
+    assert_eq!(
+        app.index_state.message.as_deref(),
+        Some("Index statistics frissítve!")
+    );
+    press(&mut app, KeyCode::Esc).await;
+
+    app.open_new_collection();
+    type_text(&mut app, "logs").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        server.calls_to("collection_create"),
+        vec![json!({"collection": "logs"})]
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Kollekció létrehozva: logs")
+    );
+    assert_eq!(app.current_collection_name(), Some("logs"));
 }

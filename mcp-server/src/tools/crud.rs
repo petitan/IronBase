@@ -8,7 +8,10 @@ use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
-use ironbase_mcp_types::responses::{CountResponse, FindResponse};
+use ironbase_mcp_types::responses::{
+    CountResponse, DeleteResponse, FindResponse, InsertManyResponse, InsertOneResponse,
+    UpdateManyResponse, UpdateOneResponse,
+};
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -237,27 +240,40 @@ fn refresh_auto_embeddings(
     Ok(refreshed)
 }
 
-/// Re-embed after an update and report the outcome in `response`. The
-/// update is already stored, so an embedding failure is reported, not
-/// returned as the tool's error.
+/// Outcome of re-embedding after an update, as the update responses report
+/// it: the number of re-embedded documents (absent when none) or the error
+#[derive(Default)]
+struct RefreshReport {
+    auto_embedded_count: Option<usize>,
+    auto_embed_error: Option<String>,
+}
+
+/// Re-embed after an update and report the outcome. The update is already
+/// stored, so an embedding failure is reported, not returned as the tool's
+/// error.
 fn report_refresh(
-    response: &mut Value,
     adapter: &IronBaseAdapter,
     collection: &str,
     config: &ironbase_core::storage::AutoEmbeddingConfig,
     manager: &EmbeddingManager,
     ids: &[Value],
-) {
+) -> RefreshReport {
     match refresh_auto_embeddings(adapter, collection, config, manager, ids) {
-        Ok(0) => {}
-        Ok(n) => response["auto_embedded_count"] = json!(n),
+        Ok(0) => RefreshReport::default(),
+        Ok(n) => RefreshReport {
+            auto_embedded_count: Some(n),
+            auto_embed_error: None,
+        },
         Err(e) => {
             tracing::warn!(
                 "Auto-embedding after update failed in '{}': {}",
                 collection,
                 e
             );
-            response["auto_embed_error"] = json!(e.to_string());
+            RefreshReport {
+                auto_embedded_count: None,
+                auto_embed_error: Some(e.to_string()),
+            }
         }
     }
 }
@@ -285,13 +301,12 @@ fn handle_insert_one(
         }
     }
 
-    let id = adapter.insert_one(&p.collection, document)?;
+    let inserted_id = adapter.insert_one(&p.collection, document)?;
 
-    let mut response = json!({"inserted_id": id});
-    if embedding_applied {
-        response["auto_embedded"] = json!(true);
-    }
-    Ok(response)
+    Ok(serde_json::to_value(InsertOneResponse {
+        inserted_id,
+        auto_embedded: embedding_applied.then_some(true),
+    })?)
 }
 
 fn handle_insert_many(
@@ -370,16 +385,13 @@ fn handle_insert_many(
         }
     }
 
-    let ids = adapter.insert_many(&p.collection, documents)?;
+    let inserted_ids = adapter.insert_many(&p.collection, documents)?;
 
-    let mut response = json!({
-        "inserted_ids": ids,
-        "inserted_count": ids.len()
-    });
-    if embeddings_applied > 0 {
-        response["auto_embedded_count"] = json!(embeddings_applied);
-    }
-    Ok(response)
+    Ok(serde_json::to_value(InsertManyResponse {
+        inserted_count: inserted_ids.len(),
+        inserted_ids,
+        auto_embedded_count: (embeddings_applied > 0).then_some(embeddings_applied),
+    })?)
 }
 
 fn handle_find(
@@ -477,17 +489,9 @@ fn handle_update_one(
     // Use update_one_with_options for upsert support
     let result = adapter.update_one_with_options(&p.collection, filter, p.update, p.upsert)?;
 
-    // Build response - include upserted_id if present
-    let mut response = json!({
-        "matched_count": result.matched_count,
-        "modified_count": result.modified_count
-    });
-
     let mut embedding_applied = false;
 
     if let Some(ref upserted_id) = result.upserted_id {
-        response["upserted_id"] = json!(upserted_id);
-
         // FIX: Apply auto-embedding to newly upserted document
         // When upsert creates a new document, it bypasses the insert_one handler
         // which normally applies auto-embedding. We need to do it here.
@@ -510,27 +514,25 @@ fn handle_update_one(
         }
     }
 
-    if embedding_applied {
-        response["auto_embedded"] = json!(true);
-    }
-
     // Matched, not modified: an update that leaves the document as it was
     // still refreshes a vector stored without a source hash (the hash
     // check skips documents whose vector matches their text)
+    let mut refresh = RefreshReport::default();
     if let (Some(config), Some(id), Some(manager)) = (&reembed, target_id, embedding_manager) {
         if result.matched_count > 0 {
-            report_refresh(
-                &mut response,
-                adapter,
-                &p.collection,
-                config,
-                manager,
-                &[id],
-            );
+            refresh = report_refresh(adapter, &p.collection, config, manager, &[id]);
         }
     }
 
-    Ok(response)
+    // upserted_id only when the upsert inserted
+    Ok(serde_json::to_value(UpdateOneResponse {
+        matched_count: result.matched_count,
+        modified_count: result.modified_count,
+        upserted_id: result.upserted_id,
+        auto_embedded: embedding_applied.then_some(true),
+        auto_embedded_count: refresh.auto_embedded_count,
+        auto_embed_error: refresh.auto_embed_error,
+    })?)
 }
 
 fn handle_update_many(
@@ -567,16 +569,18 @@ fn handle_update_many(
     };
 
     let result = adapter.update_many(&p.collection, p.filter, p.update)?;
-    let mut response = json!({
-        "matched_count": result.matched_count,
-        "modified_count": result.modified_count
-    });
+    let mut refresh = RefreshReport::default();
     if let (Some(config), Some(manager)) = (&reembed, embedding_manager) {
         if result.matched_count > 0 {
-            report_refresh(&mut response, adapter, &p.collection, config, manager, &ids);
+            refresh = report_refresh(adapter, &p.collection, config, manager, &ids);
         }
     }
-    Ok(response)
+    Ok(serde_json::to_value(UpdateManyResponse {
+        matched_count: result.matched_count,
+        modified_count: result.modified_count,
+        auto_embedded_count: refresh.auto_embedded_count,
+        auto_embed_error: refresh.auto_embed_error,
+    })?)
 }
 
 fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -586,8 +590,8 @@ fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     validate_collection_name(&p.collection)?;
     validate_filter(&p.filter)?;
 
-    let count = adapter.delete_one(&p.collection, p.filter)?;
-    Ok(json!({"deleted_count": count}))
+    let deleted_count = adapter.delete_one(&p.collection, p.filter)?;
+    Ok(serde_json::to_value(DeleteResponse { deleted_count })?)
 }
 
 fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -597,8 +601,8 @@ fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
     validate_collection_name(&p.collection)?;
     validate_filter(&p.filter)?;
 
-    let count = adapter.delete_many(&p.collection, p.filter)?;
-    Ok(json!({"deleted_count": count}))
+    let deleted_count = adapter.delete_many(&p.collection, p.filter)?;
+    Ok(serde_json::to_value(DeleteResponse { deleted_count })?)
 }
 
 fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

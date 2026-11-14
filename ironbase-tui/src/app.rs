@@ -6,8 +6,15 @@ use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
 use crate::theme::{Theme, ThemeName};
-use ironbase_mcp_types::params::{CountParams, ExplainParams, FindParams, NoParams};
-use ironbase_mcp_types::tools::{Count, DbStats, Explain, Find};
+use ironbase_mcp_types::params::{
+    CollectionCreateParams, CollectionDropParams, CountParams, DeleteParams, ExplainParams,
+    FindParams, IndexCreateArgs, IndexCreateParams, IndexDropParams, IndexListParams,
+    InsertOneParams, NoParams, UpdateOneParams,
+};
+use ironbase_mcp_types::tools::{
+    CollectionCreate, CollectionDrop, Count, DbStats, DeleteOne, Explain, Find, IndexCreate,
+    IndexDrop, IndexStatsRefresh, InsertOne, UpdateOne,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -1071,8 +1078,11 @@ impl App {
             return;
         };
 
-        match db.create_collection(&name).await {
-            Ok(()) => {
+        let args = CollectionCreateParams {
+            collection: name.clone(),
+        };
+        match db.call::<CollectionCreate>(&args).await {
+            Ok(_) => {
                 self.close_modal();
                 self.set_status(format!("Kollekció létrehozva: {}", name));
                 self.reload_collections_async().await;
@@ -1721,9 +1731,14 @@ impl App {
     /// Actually drop a vector index (async)
     async fn do_drop_vector_index_async(&mut self, collection: &str, index_name: &str) {
         if let Some(ref db) = self.db {
-            match db.drop_vector_index(collection, index_name).await {
-                Ok(()) => {
-                    self.vector_state.message = Some(format!("Index '{}' deleted!", index_name));
+            let args = IndexDropParams {
+                collection: collection.to_string(),
+                index_name: index_name.to_string(),
+            };
+            match db.call::<IndexDrop>(&args).await {
+                Ok(dropped) => {
+                    self.vector_state.message =
+                        Some(format!("Index '{}' deleted!", dropped.dropped));
 
                     // Refresh index list
                     if let Ok(indexes) = db.vector_indexes(collection).await {
@@ -1799,9 +1814,13 @@ impl App {
             return;
         };
 
-        match db.delete_document(collection, doc_id).await {
-            Ok(count) => {
-                if count > 0 {
+        let args = DeleteParams {
+            collection: collection.to_string(),
+            filter: serde_json::json!({"_id": doc_id}),
+        };
+        match db.call::<DeleteOne>(&args).await {
+            Ok(deleted) => {
+                if deleted.deleted_count > 0 {
                     self.set_status("Dokumentum törölve");
                     self.reload_collections_async().await;
                 } else {
@@ -1821,9 +1840,12 @@ impl App {
             return;
         };
 
-        match db.drop_collection(name).await {
-            Ok(()) => {
-                self.set_status(format!("Kollekció törölve: {}", name));
+        let args = CollectionDropParams {
+            collection: name.to_string(),
+        };
+        match db.call::<CollectionDrop>(&args).await {
+            Ok(dropped) => {
+                self.set_status(format!("Kollekció törölve: {}", dropped.dropped));
                 // Reset selection (also drops the dropped collection's
                 // filter/sort) and refresh
                 self.set_selected_collection(0);
@@ -1865,14 +1887,21 @@ impl App {
                 return;
             };
 
-            let update = serde_json::json!({"$set": doc});
-            match db.update_document(&collection, doc_id, &update).await {
-                Ok(count) => {
+            let args = UpdateOneParams {
+                collection,
+                filter: serde_json::json!({"_id": doc_id}),
+                update: serde_json::json!({"$set": doc}),
+                upsert: false,
+            };
+            match db.call::<UpdateOne>(&args).await {
+                Ok(updated) => {
                     self.close_modal();
-                    if count > 0 {
-                        self.set_status("Dokumentum frissítve");
-                    } else {
+                    if updated.matched_count == 0 {
                         self.set_status("Dokumentum nem található");
+                    } else if updated.modified_count == 0 {
+                        self.set_status("Dokumentum változatlan (nincs módosítás)");
+                    } else {
+                        self.set_status("Dokumentum frissítve");
                     }
                     self.reload_collections_async().await;
                 }
@@ -1881,10 +1910,17 @@ impl App {
                 }
             }
         } else {
-            match db.insert_document(&collection, &doc).await {
-                Ok(id) => {
+            let args = InsertOneParams {
+                collection,
+                document: doc,
+            };
+            match db.call::<InsertOne>(&args).await {
+                Ok(inserted) => {
                     self.close_modal();
-                    self.set_status(format!("Dokumentum beszúrva, _id: {}", id));
+                    self.set_status(format!(
+                        "Dokumentum beszúrva, _id: {}",
+                        inserted.inserted_id
+                    ));
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
@@ -1915,18 +1951,23 @@ impl App {
             return;
         };
 
-        let result = if is_compound && fields.len() > 1 {
+        let (field, compound_fields) = if is_compound && fields.len() > 1 {
             // Compound index
-            db.create_compound_index(&collection, &fields, unique, sparse)
-                .await
+            (None, Some(fields.clone()))
         } else {
             // Single field index
-            let field = fields.first().map(|s| s.as_str()).unwrap_or("");
-            db.create_index(&collection, field, unique, sparse).await
+            (Some(fields.first().cloned().unwrap_or_default()), None)
         };
+        let args = IndexCreateArgs::BTree(IndexCreateParams {
+            collection,
+            field,
+            fields: compound_fields,
+            unique,
+            sparse,
+        });
 
-        match result {
-            Ok(()) => {
+        match db.call::<IndexCreate>(&args).await {
+            Ok(created) => {
                 let mut flags = Vec::new();
                 if unique {
                     flags.push("unique");
@@ -1949,7 +1990,11 @@ impl App {
                         flags_str
                     )
                 };
-                self.index_state.message = Some(format!("{} létrehozva", index_desc));
+                self.index_state.message = Some(format!(
+                    "{} létrehozva ({})",
+                    index_desc,
+                    created.index_name()
+                ));
                 self.index_state.cancel_create();
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Refresh collection list to update index_count
@@ -1968,9 +2013,13 @@ impl App {
             return;
         };
 
-        match db.drop_index(collection, index_name).await {
-            Ok(()) => {
-                self.index_state.message = Some(format!("Index törölve: {}", index_name));
+        let args = IndexDropParams {
+            collection: collection.to_string(),
+            index_name: index_name.to_string(),
+        };
+        match db.call::<IndexDrop>(&args).await {
+            Ok(dropped) => {
+                self.index_state.message = Some(format!("Index törölve: {}", dropped.dropped));
                 self.index_state.error = None;
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Adjust selection after deletion
@@ -2002,8 +2051,12 @@ impl App {
         self.index_state.message = Some("Analyzing indexes...".to_string());
 
         // Refresh statistics
-        match db.refresh_index_stats(&collection).await {
-            Ok(()) => {
+        let args = IndexListParams {
+            collection: collection.clone(),
+            index_type: None,
+        };
+        match db.call::<IndexStatsRefresh>(&args).await {
+            Ok(_) => {
                 // Load updated statistics
                 match db.btree_index_statistics(&collection).await {
                     Ok(stats) => {

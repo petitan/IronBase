@@ -158,3 +158,527 @@ out: {"database":{"path":"<path>","file_size_bytes":"<file_size_bytes>","file_si
 in:  {}
 out: {"database":{"path":"<path>","file_size_bytes":"<file_size_bytes>","file_size":"<file_size>"},"collections":[{"name":"empty","document_count":0,"btree_index_count":1,"btree_indexes":["empty_id"],"vector_index_count":0,"vector_indexes":[],"total_vectors":0},{"name":"users","document_count":4,"btree_index_count":7,"btree_indexes":["users_age","users_bio_fts","users_city_age","users_email","users_id","users_name_fuzzy","users_vec_emb"],"vector_index_count":1,"vector_indexes":[{"name":"users_vec_emb","field":"emb","dim":3,"metric":"dotproduct","vector_count":3}],"total_vectors":3}],"summary":{"collection_count":2,"total_documents":4,"total_btree_indexes":8,"total_vector_indexes":1,"total_vectors":3},"server":{"version":"<version>","protocol":"http","host":"127.0.0.1","port":8080,"require_api_key":true},"storage_wastage":{"file_size_bytes":"<file_size_bytes>","file_size_mb":"<file_size_mb>","estimated_live_bytes":"<estimated_live_bytes>","estimated_live_mb":"<estimated_live_mb>","bloat_ratio":"infinity (never compacted)","total_writes":4,"total_live":4,"dead_writes":0}}
 
+## insert_one / int _id
+in:  {"collection":"w","document":{"_id":10,"name":"Dani"}}
+out: {"inserted_id":"10"}
+
+## insert_one / string _id
+in:  {"collection":"w","document":{"_id":"e-1","name":"Edit"}}
+out: {"inserted_id":"e-1"}
+
+## insert_one / ObjectId-like _id
+in:  {"collection":"w","document":{"_id":{"$oid":"507f1f77bcf86cd799439011"},"name":"Feri"}}
+err: SerializationError Invalid _id format: data did not match any variant of untagged enum DocumentId
+
+## insert_one / object _id
+in:  {"collection":"w","document":{"_id":{"k":1},"name":"Gizi"}}
+err: SerializationError Invalid _id format: data did not match any variant of untagged enum DocumentId
+
+## insert_one / no _id
+in:  {"collection":"w","document":{"name":"Hugó"}}
+out: {"inserted_id":"11"}
+
+## insert_one / no _id again
+in:  {"collection":"w","document":{"name":"Ilona"}}
+out: {"inserted_id":"12"}
+
+## insert_one / null _id
+in:  {"collection":"w","document":{"_id":null,"name":"Jani"}}
+err: SerializationError Invalid _id format: data did not match any variant of untagged enum DocumentId
+
+## insert_one / duplicate _id
+in:  {"collection":"w","document":{"_id":1,"name":"Anna2"}}
+err: IndexError Duplicate key: Int(1) (unique index)
+
+## insert_one / new collection
+in:  {"collection":"fresh","document":{"a":1}}
+out: {"inserted_id":"1"}
+
+## insert_one / empty document
+in:  {"collection":"w","document":{}}
+out: {"inserted_id":"13"}
+
+## insert_one / non-object document
+in:  {"collection":"w","document":[1,2]}
+err: InvalidParams document must be a JSON object
+
+## insert_one / missing document
+in:  {"collection":"w"}
+err: InvalidParams missing field `document`
+
+## insert_one / empty collection name
+in:  {"collection":"","document":{"a":1}}
+err: InvalidParams Collection name cannot be empty
+
+## insert_one / invalid collection name
+in:  {"collection":"a$b","document":{"a":1}}
+err: InvalidParams Collection name can only contain alphanumeric characters, underscores, and hyphens
+
+## insert_many / mixed _ids
+in:  {"collection":"w","documents":[{"_id":20,"n":1},{"_id":"s-21","n":2},{"n":3}]}
+out: {"inserted_ids":["20","s-21","14"],"inserted_count":3}
+
+## insert_many / single
+in:  {"collection":"w","documents":[{"_id":22}]}
+out: {"inserted_ids":["22"],"inserted_count":1}
+
+## insert_many / empty list
+in:  {"collection":"w","documents":[]}
+out: {"inserted_ids":[],"inserted_count":0}
+
+## insert_many / duplicate _id in batch
+in:  {"collection":"w","documents":[{"_id":30},{"_id":30}]}
+err: IndexError Duplicate key: Int(30) (unique index)
+
+## insert_many / duplicate existing _id
+in:  {"collection":"w","documents":[{"_id":31},{"_id":1}]}
+err: IndexError Duplicate key: Int(1) (unique index)
+
+## insert_many / non-object item
+in:  {"collection":"w","documents":[{"_id":32},5]}
+err: IndexError Duplicate key: Int(32) (unique index)
+
+## insert_many / documents not array
+in:  {"collection":"w","documents":{"_id":33}}
+err: InvalidParams invalid type: map, expected a sequence
+
+## insert_many / missing documents
+in:  {"collection":"w"}
+err: InvalidParams missing field `documents`
+
+## update_one / matched and modified
+in:  {"collection":"w","filter":{"_id":1},"update":{"$set":{"age":31}}}
+out: {"matched_count":1,"modified_count":1}
+
+## update_one / matched, not modified
+in:  {"collection":"w","filter":{"_id":1},"update":{"$set":{"age":31}}}
+out: {"matched_count":1,"modified_count":0}
+
+## update_one / query alias
+in:  {"collection":"w","query":{"_id":2},"update":{"$inc":{"age":1}}}
+out: {"matched_count":1,"modified_count":1}
+
+## update_one / no match
+in:  {"collection":"w","filter":{"_id":999},"update":{"$set":{"x":1}}}
+out: {"matched_count":0,"modified_count":0}
+
+## update_one / upsert inserts
+in:  {"collection":"w","filter":{"name":"Upsert"},"update":{"$set":{"age":5}},"upsert":true}
+out: {"matched_count":0,"modified_count":0,"upserted_id":"33"}
+
+## update_one / upsert with _id inserts
+in:  {"collection":"w","filter":{"_id":"u-1"},"update":{"$set":{"age":6}},"upsert":true}
+out: {"matched_count":0,"modified_count":0,"upserted_id":"u-1"}
+
+## update_one / upsert matches
+in:  {"collection":"w","filter":{"name":"Upsert"},"update":{"$set":{"age":7}},"upsert":true}
+out: {"matched_count":1,"modified_count":1}
+
+## update_one / multiple matches updates one
+in:  {"collection":"w","filter":{"team":"x"},"update":{"$set":{"flag":true}}}
+out: {"matched_count":1,"modified_count":1}
+
+## update_one / missing collection
+in:  {"collection":"nope","filter":{"_id":1},"update":{"$set":{"x":1}}}
+err: CollectionNotFound Collection 'nope' not found
+
+## update_one / replacement document
+in:  {"collection":"w","filter":{"_id":1},"update":{"age":1}}
+err: InvalidParams Unsupported update operator: age
+
+## update_one / unknown operator
+in:  {"collection":"w","filter":{"_id":1},"update":{"$bogus":{"age":1}}}
+err: InvalidParams Unsupported update operator: $bogus
+
+## update_one / empty update
+in:  {"collection":"w","filter":{"_id":1},"update":{}}
+out: {"matched_count":1,"modified_count":0}
+
+## update_one / missing update
+in:  {"collection":"w","filter":{"_id":1}}
+err: InvalidParams missing field `update`
+
+## update_one / update _id
+in:  {"collection":"w","filter":{"_id":1},"update":{"$set":{"_id":99}}}
+err: InvalidParams Performing an update on the path '_id' would modify the immutable field '_id'
+
+## update_many / matched and modified
+in:  {"collection":"w","filter":{"age":{"$gte":30}},"update":{"$set":{"seen":true}}}
+out: {"matched_count":3,"modified_count":3}
+
+## update_many / matched, not modified
+in:  {"collection":"w","filter":{"age":{"$gte":30}},"update":{"$set":{"seen":true}}}
+out: {"matched_count":3,"modified_count":0}
+
+## update_many / no match
+in:  {"collection":"w","filter":{"age":1000},"update":{"$set":{"x":1}}}
+out: {"matched_count":0,"modified_count":0}
+
+## update_many / empty filter
+in:  {"collection":"w","filter":{},"update":{"$inc":{"v":1}}}
+out: {"matched_count":14,"modified_count":14}
+
+## update_many / upsert ignored
+in:  {"collection":"w","filter":{"name":"Nobody"},"update":{"$set":{"x":1}},"upsert":true}
+out: {"matched_count":0,"modified_count":0}
+
+## update_many / missing collection
+in:  {"collection":"nope","filter":{},"update":{"$set":{"x":1}}}
+err: CollectionNotFound Collection 'nope' not found
+
+## update_many / replacement document
+in:  {"collection":"w","filter":{},"update":{"x":1}}
+err: InvalidParams Unsupported update operator: x
+
+## delete_one / deleted
+in:  {"collection":"w","filter":{"_id":10}}
+out: {"deleted_count":1}
+
+## delete_one / not found
+in:  {"collection":"w","filter":{"_id":10}}
+out: {"deleted_count":0}
+
+## delete_one / query alias
+in:  {"collection":"w","query":{"_id":"e-1"}}
+out: {"deleted_count":1}
+
+## delete_one / string _id
+in:  {"collection":"w","filter":{"_id":"s-21"}}
+out: {"deleted_count":1}
+
+## delete_one / multiple matches deletes one
+in:  {"collection":"w","filter":{"seen":true}}
+out: {"deleted_count":1}
+
+## delete_one / missing collection
+in:  {"collection":"nope","filter":{"_id":1}}
+err: CollectionNotFound Collection 'nope' not found
+
+## delete_one / invalid filter
+in:  {"collection":"w","filter":{"$bogus":1}}
+err: InvalidParams Unknown query operator: $bogus
+
+## delete_many / deleted
+in:  {"collection":"w","filter":{"seen":true}}
+out: {"deleted_count":2}
+
+## delete_many / not found
+in:  {"collection":"w","filter":{"seen":true}}
+out: {"deleted_count":0}
+
+## delete_many / missing collection
+in:  {"collection":"nope","filter":{}}
+err: CollectionNotFound Collection 'nope' not found
+
+## collection_create / new
+in:  {"collection":"c1"}
+out: {"success":true,"collection":"c1"}
+
+## collection_create / already exists
+in:  {"collection":"c1"}
+out: {"success":true,"collection":"c1"}
+
+## collection_create / existing with documents
+in:  {"collection":"w"}
+out: {"success":true,"collection":"w"}
+
+## collection_create / empty name
+in:  {"collection":""}
+err: InvalidParams Collection name cannot be empty
+
+## collection_create / invalid name
+in:  {"collection":"bad name!"}
+err: InvalidParams Collection name can only contain alphanumeric characters, underscores, and hyphens
+
+## collection_create / system prefix
+in:  {"collection":"_system_x"}
+out: {"success":true,"collection":"_system_x"}
+
+## collection_create / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## collection_drop / existing
+in:  {"collection":"drop_me"}
+out: {"success":true,"dropped":"drop_me","acl_deleted":false}
+
+## collection_drop / not found
+in:  {"collection":"drop_me"}
+err: CollectionNotFound Collection 'drop_me' not found
+
+## collection_drop / empty collection
+in:  {"collection":"c1"}
+out: {"success":true,"dropped":"c1","acl_deleted":false}
+
+## collection_drop / missing collection
+in:  {}
+err: InvalidParams missing field `collection`
+
+## index_create / btree single
+in:  {"collection":"w","field":"name"}
+out: {"index_name":"w_name","field":"name","unique":false,"sparse":false}
+
+## index_create / btree explicit type
+in:  {"type":"btree","collection":"w","field":"n"}
+out: {"index_name":"w_n","field":"n","unique":false,"sparse":false}
+
+## index_create / btree unique
+in:  {"collection":"u","field":"email","unique":true}
+out: {"index_name":"u_email","field":"email","unique":true,"sparse":false}
+
+## index_create / unique on a field most documents lack
+in:  {"collection":"w","field":"uniq_field","unique":true}
+err: IndexError Duplicate key: Null (unique index)
+
+## index_create / btree sparse
+in:  {"collection":"w","field":"tags","sparse":true}
+out: {"index_name":"w_tags","field":"tags","unique":false,"sparse":true}
+
+## index_create / btree unique sparse
+in:  {"collection":"w","field":"code","unique":true,"sparse":true}
+out: {"index_name":"w_code","field":"code","unique":true,"sparse":true}
+
+## index_create / compound
+in:  {"collection":"w","fields":["name","age"]}
+out: {"index_name":"w_name_age","fields":["name","age"],"unique":false,"sparse":false}
+
+## index_create / compound unique sparse
+in:  {"collection":"w","fields":["age","flag"],"unique":true,"sparse":true}
+out: {"index_name":"w_age_flag","fields":["age","flag"],"unique":true,"sparse":true}
+
+## index_create / fields wins over field
+in:  {"collection":"w","field":"x","fields":["v","age"]}
+out: {"index_name":"w_v_age","fields":["v","age"],"unique":false,"sparse":false}
+
+## index_create / single-item fields
+in:  {"collection":"w","fields":["v"]}
+out: {"index_name":"w_v","fields":["v"],"unique":false,"sparse":false}
+
+## index_create / duplicate single
+in:  {"collection":"w","field":"name"}
+err: IndexError Index already exists: w_name
+
+## index_create / duplicate compound
+in:  {"collection":"w","fields":["name","age"]}
+err: IndexError Index already exists: w_name_age
+
+## index_create / unique on duplicate data
+in:  {"collection":"u","field":"grp","unique":true}
+err: IndexError Duplicate key: Int(1) (unique index)
+
+## index_create / empty fields
+in:  {"collection":"w","fields":[]}
+err: InvalidParams fields array is empty
+
+## index_create / neither field nor fields
+in:  {"collection":"w"}
+err: InvalidParams Either 'field' or 'fields' must be provided
+
+## index_create / new collection
+in:  {"collection":"idx_new","field":"a"}
+out: {"index_name":"idx_new_a","field":"a","unique":false,"sparse":false}
+
+## index_create / fulltext defaults
+in:  {"type":"fulltext","collection":"w","field":"name"}
+out: {"index_name":"w_name_fts","field":"name","language":"none","min_word_length":2,"accent_folding":true}
+
+## index_create / fulltext full
+in:  {"type":"fulltext","collection":"u","field":"bio","language":"hungarian","min_word_length":3,"accent_folding":false}
+out: {"index_name":"u_bio_fts","field":"bio","language":"hungarian","min_word_length":3,"accent_folding":false}
+
+## index_create / fulltext on a field without text
+in:  {"type":"fulltext","collection":"w","field":"no_text"}
+err: IndexError Fulltext index 'w_no_text_fts' has no documents - field 'no_text' may not exist or contain text
+
+## index_create / fulltext duplicate
+in:  {"type":"fulltext","collection":"w","field":"name"}
+err: IndexError Index already exists: w_name_fts
+
+## index_create / fulltext missing field
+in:  {"type":"fulltext","collection":"w"}
+err: InvalidParams missing field `field`
+
+## index_create / fuzzy defaults
+in:  {"type":"fuzzy","collection":"w","field":"name"}
+out: {"index_name":"w_name_fuzzy","field":"name","algorithm":"jaro_winkler","threshold":0.8}
+
+## index_create / fuzzy full
+in:  {"type":"fuzzy","collection":"w","field":"nick","algorithm":"levenshtein","threshold":0.65}
+out: {"index_name":"w_nick_fuzzy","field":"nick","algorithm":"levenshtein","threshold":0.65}
+
+## index_create / fuzzy integer threshold
+in:  {"type":"fuzzy","collection":"w","field":"city","threshold":1}
+out: {"index_name":"w_city_fuzzy","field":"city","algorithm":"jaro_winkler","threshold":1.0}
+
+## index_create / fuzzy duplicate
+in:  {"type":"fuzzy","collection":"w","field":"name"}
+err: IndexError Index already exists: w_name_fuzzy
+
+## index_create / vector defaults
+in:  {"type":"vector","collection":"w","field":"emb","dim":3}
+out: {"index_name":"w_vec_emb","field":"emb","dim":3,"metric":"cosine","max_vectors":100000,"hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}
+
+## index_create / vector full
+in:  {"type":"vector","collection":"w","field":"emb2","dim":4,"metric":"dot_product","max_vectors":500,"m":8,"ef_construction":100,"ef_search":20}
+out: {"index_name":"w_vec_emb2","field":"emb2","dim":4,"metric":"dot_product","max_vectors":500,"hnsw_params":{"m":8,"ef_construction":100,"ef_search":20}}
+
+## index_create / vector euclidean
+in:  {"type":"vector","collection":"w","field":"emb3","dim":2,"metric":"euclidean"}
+out: {"index_name":"w_vec_emb3","field":"emb3","dim":2,"metric":"euclidean","max_vectors":100000,"hnsw_params":{"m":16,"ef_construction":200,"ef_search":50}}
+
+## index_create / vector duplicate
+in:  {"type":"vector","collection":"w","field":"emb","dim":3}
+err: IndexError Vector index 'w_vec_emb' already exists
+
+## index_create / vector unknown metric
+in:  {"type":"vector","collection":"w","field":"emb4","dim":3,"metric":"manhattan"}
+err: InvalidParams Unknown distance metric 'manhattan'. Use: cosine, euclidean, or dot_product
+
+## index_create / vector zero dim
+in:  {"type":"vector","collection":"w","field":"emb5","dim":0}
+err: IndexError Vector dimension must be specified (dim > 0)
+
+## index_create / vector missing dim
+in:  {"type":"vector","collection":"w","field":"emb6"}
+err: InvalidParams missing field `dim`
+
+## index_create / unknown type
+in:  {"type":"hash","collection":"w","field":"name"}
+err: InvalidParams Unknown index type 'hash'. Use one of: btree, fulltext, fuzzy, vector
+
+## index_create / non-string type
+in:  {"type":7,"collection":"w","field":"type7"}
+out: {"index_name":"w_type7","field":"type7","unique":false,"sparse":false}
+
+## index_create / empty collection name
+in:  {"collection":"","field":"a"}
+err: InvalidParams Collection name cannot be empty
+
+## index_create / wrong-typed field
+in:  {"collection":5,"field":"a"}
+err: InvalidParams invalid type: integer `5`, expected a string
+
+## index_create / vector wrong-typed dim
+in:  {"type":"vector","collection":"w","field":"e","dim":"3"}
+err: InvalidParams invalid type: string "3", expected usize
+
+## index_create / not an object
+in:  "w"
+err: InvalidParams invalid type: string "w", expected struct IndexCreateParams
+
+## index_create / null
+in:  null
+err: InvalidParams invalid type: null, expected struct IndexCreateParams
+
+## index_drop / btree
+in:  {"collection":"w","index_name":"w_name"}
+out: {"success":true,"dropped":"w_name"}
+
+## index_drop / compound
+in:  {"collection":"w","index_name":"w_name_age"}
+out: {"success":true,"dropped":"w_name_age"}
+
+## index_drop / fulltext
+in:  {"collection":"w","index_name":"w_name_fts"}
+out: {"success":true,"dropped":"w_name_fts"}
+
+## index_drop / fuzzy
+in:  {"collection":"w","index_name":"w_name_fuzzy"}
+out: {"success":true,"dropped":"w_name_fuzzy"}
+
+## index_drop / vector
+in:  {"collection":"w","index_name":"w_vec_emb"}
+out: {"success":true,"dropped":"w_vec_emb"}
+
+## index_drop / primary _id index
+in:  {"collection":"w","index_name":"w_id"}
+err: IndexError cannot drop _id index 'w_id'
+
+## index_drop / not found
+in:  {"collection":"w","index_name":"w_name"}
+err: IndexError Index not found: w_name
+
+## index_drop / missing collection
+in:  {"collection":"nope","index_name":"nope_age"}
+err: IndexError Index not found: nope_age
+
+## index_drop / missing index_name
+in:  {"collection":"w"}
+err: InvalidParams missing field `index_name`
+
+## index_stats_refresh / collection
+in:  {"collection":"w"}
+out: {"success":true,"message":"Index statistics refreshed for collection 'w'"}
+
+## index_stats_refresh / type ignored
+in:  {"collection":"w","type":"vector"}
+out: {"success":true,"message":"Index statistics refreshed for collection 'w'"}
+
+## index_stats_refresh / collection without documents
+in:  {"collection":"c2_missing"}
+err: CollectionNotFound Collection 'c2_missing' not found
+
+## index_stats_refresh / missing collection param
+in:  {}
+err: InvalidParams missing field `collection`
+
+## insert_one / auto-embedded
+in:  {"collection":"kb","document":{"_id":10,"content":"hello"}}
+out: {"inserted_id":"10","auto_embedded":true}
+
+## insert_one / vector given
+in:  {"collection":"kb","document":{"_id":11,"content":"hi","embedding":[9.0,9.0]}}
+out: {"inserted_id":"11"}
+
+## insert_one / no source field
+in:  {"collection":"kb","document":{"_id":12}}
+out: {"inserted_id":"12"}
+
+## insert_one / embedding fails
+in:  {"collection":"kb","document":{"_id":13,"content":"fail"}}
+err: InternalError Embedding generation failed: Embedding failed: cannot embed 'fail'
+
+## insert_many / auto-embedded
+in:  {"collection":"kb","documents":[{"_id":20,"content":"a"},{"_id":21,"content":"bb"},{"_id":22}]}
+out: {"inserted_ids":["20","21","22"],"inserted_count":3,"auto_embedded_count":2}
+
+## insert_many / none embedded
+in:  {"collection":"kb","documents":[{"_id":23}]}
+out: {"inserted_ids":["23"],"inserted_count":1}
+
+## insert_many / embedding fails
+in:  {"collection":"kb","documents":[{"_id":24,"content":"fail"}]}
+err: InternalError Batch embedding failed: Embedding failed: cannot embed 'fail'
+
+## update_one / re-embedded
+in:  {"collection":"kb","filter":{"_id":1},"update":{"$set":{"content":"abcdef"}}}
+out: {"matched_count":1,"modified_count":1,"auto_embedded_count":1}
+
+## update_one / source untouched
+in:  {"collection":"kb","filter":{"_id":1},"update":{"$set":{"group":"h"}}}
+out: {"matched_count":1,"modified_count":1}
+
+## update_one / re-embedding fails
+in:  {"collection":"kb","filter":{"_id":2},"update":{"$set":{"content":"fail now"}}}
+out: {"matched_count":1,"modified_count":1,"auto_embed_error":"Embedding generation failed: Embedding failed: cannot embed 'fail now'"}
+
+## update_one / upsert auto-embedded
+in:  {"collection":"kb","filter":{"_id":30},"update":{"$set":{"content":"new"}},"upsert":true}
+out: {"matched_count":0,"modified_count":0,"upserted_id":"30","auto_embedded":true}
+
+## update_one / no match
+in:  {"collection":"kb","filter":{"_id":999},"update":{"$set":{"content":"x"}}}
+out: {"matched_count":0,"modified_count":0}
+
+## update_many / re-embedded
+in:  {"collection":"kb","filter":{"group":"g"},"update":{"$set":{"content":"same"}}}
+out: {"matched_count":1,"modified_count":1,"auto_embedded_count":1}
+
+## update_many / re-embedding fails
+in:  {"collection":"kb","filter":{"group":"g"},"update":{"$set":{"content":"fail all"}}}
+out: {"matched_count":1,"modified_count":1,"auto_embed_error":"Embedding generation failed: Embedding failed: cannot embed 'fail all'"}
+
+## update_many / no match
+in:  {"collection":"kb","filter":{"group":"none"},"update":{"$set":{"content":"x"}}}
+out: {"matched_count":0,"modified_count":0}
+

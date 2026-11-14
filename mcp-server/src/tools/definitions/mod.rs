@@ -163,8 +163,7 @@ mod tests {
         }
 
         // No marker yet: tools without arguments (except collection_list and
-        // db_stats, which take `NoParams`), and index_create (four argument shapes
-        // selected by `type`).
+        // db_stats, which take `NoParams`).
         let mut without_marker: Vec<&str> = registered
             .iter()
             .copied()
@@ -181,7 +180,6 @@ mod tests {
                 "embed_cache_clear",
                 "embed_cache_stats",
                 "embed_models_list",
-                "index_create",
                 "listener_list",
                 "transaction_begin",
                 "transaction_status",
