@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: ratatui 0.30, safer terminal lifecycle, file logging (ironbase-core 0.3.461, mcp-server 1.0.659)
+
+Phase 1b of the Tuti TUI overhaul. The screens are byte-identical to the previous build.
+
+- **ratatui 0.28 → 0.30 and crossterm 0.28 → 0.29.** `tuti-tui` now declares `rust-version = "1.88"`
+  (required by ratatui 0.30).
+- **Terminal lifecycle:** `ratatui::try_init` / `try_restore` replace the hand-written setup and panic
+  hook. The terminal is restored on every exit path, including an error between setup and the event
+  loop, and the configuration save and server shutdown still run if the restore itself fails.
+- **Not a terminal:** when stdout is not a TTY, `tuti-tui` prints one line on stderr and exits with
+  code 2 instead of failing in raw-mode setup. `--help` still works when piped.
+- **Added: file logging.** Nothing is written to the screen. Default file:
+  `<state dir>/ironbase-tui/tuti-tui.log` (`~/.local/state` on Linux, `~/Library/Application Support` on
+  macOS, `%LOCALAPPDATA%` on Windows), mode 0600 on Unix, rotated to `.log.1` (also 0600) above 5 MB —
+  at startup and while running; a rotation that fails never stops logging.
+  New `--log-file <path>` flag; level through `TUTI_TUI_LOG` (`off`…`trace`, default `info`). Logged:
+  startup, connect, every MCP tool call (name, duration, outcome), errors shown in the status bar (not
+  yet the errors shown inside a modal window), config load/save, shutdown. Never logged: API key, admin
+  key, tool results; tool arguments only at `debug`, with secret-looking fields masked (name contains
+  `password`/`secret`/`token`/`authorization`/`apikey`/`adminkey`/`credential` or ends in `key`,
+  ignoring case, `_` and `-`). Every logged error text and argument line is sanitised: the API key, the
+  admin key and a key created in the session are masked wherever they occur, URLs lose their userinfo
+  and query string (a secret in a URL *path* is not recognised), control characters are escaped (a
+  server message cannot forge a log line). If the file cannot be opened the TUI starts without logging
+  and says so once.
+- **Fixed:** the remembered database (`last_db_path`) is no longer erased from the config when the
+  session never opened one (terminal setup failed, or the connection failed).
+
 ### Changed — Tuti TUI: library/binary split, dead code removed, test harness (ironbase-core 0.3.460, mcp-server 1.0.658)
 
 Phase 1a of the Tuti TUI overhaul. No user-visible behaviour change.

@@ -92,6 +92,10 @@ impl ApiKeyState {
     pub fn new() -> Self {
         // Try to get admin key from environment
         let admin_key = std::env::var("IRONBASE_ADMIN_KEY").ok();
+        // Never in the log, even if the server echoes it in an error text
+        if let Some(key) = &admin_key {
+            crate::logging::register_secret(key);
+        }
 
         Self {
             mode: ApiKeyModalMode::List,

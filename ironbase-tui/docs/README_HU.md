@@ -46,6 +46,7 @@ Options:
   -k, --api-key <API_KEY>  API key [env: IRONBASE_API_KEY]
       --insecure           Accept self-signed TLS certificates
       --server <SERVER>    MCP server executable (stdio transport)
+      --log-file <LOG_FILE>  Log file path (lásd: Naplózás)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -192,6 +193,19 @@ mcp_insecure = false
 # Téma: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
 ```
+
+## Naplózás
+
+A TUI csak fájlba naplóz (a terminálra soha): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) vagy `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). A `--log-file <path>` felülírja a helyet.
+
+| Beállítás | Érték |
+|-----------|-------|
+| Szint | Alapértelmezés `info`; a `TUTI_TUI_LOG=debug` (off/error/warn/info/debug/trace) felülírja |
+| Tartalom | Indulás, kapcsolódás, minden MCP tool hívás (név, időtartam, eredmény), az állapotsorban megjelenő hibák (a modális ablakokban megjelenő hibák még nem kerülnek a naplóba), konfiguráció betöltése/mentése, leállás |
+| Titkok | API kulcs, admin kulcs és fejléc soha nem kerül a naplóba; tool argumentumok csak `debug` szinten, a titkos mezők kitakarva (a név tartalmazza: `password`, `secret`, `token`, `authorization`, `apikey`, `adminkey`, `credential`, vagy `key`-re végződik; kis-/nagybetű, `_` és `-` nem számít) |
+| Hibaszöveg | Írás előtt megtisztítva: az API kulcs, az admin kulcs és a munkamenetben létrehozott kulcs bárhol kitakarva (a 6 karakternél rövidebb értékeket nem követi); az URL-ekből a séma, a host és az útvonal marad, a felhasználói rész és a query string kitakarva; a vezérlőkarakterek escape-elve (`\n`). Az URL útvonalában lévő titkot nem ismeri fel |
+| Méret | 5 MB fölött a fájl `tuti-tui.log.1` névre kerül (egy korábbi generáció marad meg), induláskor és futás közben is. Ha a forgatás nem sikerül, a naplózás a meglévő fájlban folytatódik. Két, ugyanabba a fájlba író TUI folyamat nincs összehangolva: az élő fájlból sor nem vész el, de a korábbi generáció idő előtt felülíródhat |
+| Jogosultság | Unixon `0600`, a korábbi generációra is |
 
 ## Architektúra
 

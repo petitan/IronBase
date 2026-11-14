@@ -46,6 +46,7 @@ Options:
   -k, --api-key <API_KEY>  API key [env: IRONBASE_API_KEY]
       --insecure           Accept self-signed TLS certificates
       --server <SERVER>    MCP server executable (stdio transport)
+      --log-file <LOG_FILE>  Log file path (see Logging)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -192,6 +193,19 @@ mcp_insecure = false
 # Theme: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
 ```
+
+## Logging
+
+The TUI logs to a file only (never to the terminal): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) or `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). `--log-file <path>` overrides the location.
+
+| Setting | Value |
+|---------|-------|
+| Level | `info` by default; `TUTI_TUI_LOG=debug` (off/error/warn/info/debug/trace) overrides it |
+| Content | Startup, connection, every MCP tool call (name, duration, outcome), errors shown in the status bar (errors shown inside a modal window are not logged yet), config load/save, shutdown |
+| Secrets | API key, admin key and headers are never logged; tool arguments only at `debug`, with secret fields redacted (name contains `password`, `secret`, `token`, `authorization`, `apikey`, `adminkey`, `credential`, or ends in `key`; case, `_` and `-` ignored) |
+| Error text | Sanitised before it is written: the API key, the admin key and a key created in the session are masked wherever they occur (values shorter than 6 characters are not tracked); URLs keep scheme, host and path, the userinfo and the query string are masked; control characters are escaped (`\n`). A secret in a URL path is not recognised |
+| Size | Above 5 MB the file is rotated to `tuti-tui.log.1` (one previous generation is kept), at startup and while running. If the rotation fails, logging continues in the current file. Two TUI processes sharing one file are not coordinated: no line is lost from the live file, but the previous generation can be replaced early |
+| Permissions | `0600` on Unix, for the previous generation too |
 
 ## Architecture
 

@@ -6,6 +6,7 @@ pub mod base64_detect;
 pub mod config;
 pub mod db;
 pub mod handlers;
+pub mod logging;
 pub mod mcp;
 pub mod modals;
 pub mod panes;
