@@ -55,8 +55,8 @@
 //! the same in-test provider, registered as "length" (the default) and
 //! "other". It normalises the order of `embed_models_list.models` (hash-map
 //! order: sorted by `provider`); an error listing the providers is recorded
-//! with one provider only, for the same reason. The one backfill job is run
-//! to its end before the next case. The job group (`embed_job_list`,
+//! with one provider only, for the same reason. The two jobs (a backfill and
+//! a re-embed) are each run to their end before the next case. The job group (`embed_job_list`,
 //! `embed_job_status`, `embed_job_cancel`) runs on jobs set up directly in a
 //! job manager; it normalises the jobs' `created_at_secs` and
 //! `updated_at_secs` (ages in seconds, measured at the call) and the order of
@@ -1124,17 +1124,40 @@ fn render_embedding_group(out: &mut String) {
         json!({"collection": "jobbed", "source_field": "content", "target_field": "embedding"}),
     );
     let job_manager = jobs.as_ref().unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while job_manager
-        .get_job_info("job_1")
-        .is_some_and(|info| !info.status.is_terminal())
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "backfill job did not finish"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_job(job_manager, "job_1");
+
+    // A re-embed with a job manager: the message comes before the job id
+    // (the server inserts them in that order)
+    dispatch_ok(
+        &adapter,
+        "insert_one",
+        json!({"collection": "rejobbed", "document": {"_id": 1, "content": "abc", "embedding": [3.0, 1.0]}}),
+    );
+    adapter
+        .set_auto_embedding_config(
+            "rejobbed",
+            Some(ironbase_core::storage::AutoEmbeddingConfig {
+                enabled: true,
+                source_field: "content".to_string(),
+                target_field: "embedding".to_string(),
+                provider: "length".to_string(),
+                model: Some("older".to_string()),
+                dimension: Some(2),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    record_full(
+        out,
+        &adapter,
+        None,
+        &manager,
+        &jobs,
+        "auto_embed_enable",
+        "re-embed job started",
+        json!({"collection": "rejobbed", "source_field": "content", "target_field": "embedding"}),
+    );
+    wait_for_job(job_manager, "job_2");
     job_manager.shutdown();
 
     case!(&manager, "auto_embed_disable",
@@ -1143,6 +1166,21 @@ fn render_embedding_group(out: &mut String) {
         "missing collection param" => {},
     );
     case!(&manager, "auto_embed_status", "after disable" => {"collection": "plain"});
+}
+
+/// Waits (at most 30 s) until the job `id` has finished
+fn wait_for_job(job_manager: &JobManager, id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while job_manager
+        .get_job_info(id)
+        .is_some_and(|info| !info.status.is_terminal())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job {id} did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// The job tools (`embed_job_list`, `embed_job_status`, `embed_job_cancel`) on
@@ -1332,5 +1370,5 @@ fn embedding_group_golden_parses_as_the_shared_response_types() {
             _ => return None,
         })
     });
-    assert_eq!(checked, 40);
+    assert_eq!(checked, 41);
 }

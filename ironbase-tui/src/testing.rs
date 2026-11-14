@@ -449,7 +449,6 @@ impl Transport for FakeServer {
     }
 }
 
-/// A built-in answer: the response struct as the server serializes it
 /// A 2-dimensional embedding provider registered as `provider`
 pub(crate) fn model_info(provider: &str) -> ModelInfo {
     ModelInfo {
@@ -461,6 +460,7 @@ pub(crate) fn model_info(provider: &str) -> ModelInfo {
     }
 }
 
+/// A built-in answer: the response struct as the server serializes it
 fn to_result<T: serde::Serialize>(response: T) -> Result<Value, String> {
     serde_json::to_value(response).map_err(|e| e.to_string())
 }

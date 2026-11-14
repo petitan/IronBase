@@ -1279,7 +1279,11 @@ pub struct AutoEmbedEnabledConfig {
 }
 
 /// `auto_embed_enable` response
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Serialized by hand: the server writes `message` right after `reembed` for a
+/// re-embed (before `backfill_job_id`), and after `backfill_job_id` for a
+/// plain backfill.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AutoEmbedEnableResponse {
     pub success: bool,
     pub collection: String,
@@ -1303,6 +1307,37 @@ pub struct AutoEmbedEnableResponse {
     /// vectors the verbatim auto-embedding will not reproduce
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+impl Serialize for AutoEmbedEnableResponse {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("success", &self.success)?;
+        map.serialize_entry("collection", &self.collection)?;
+        map.serialize_entry("config", &self.config)?;
+        map.serialize_entry("existing_documents", &self.existing_documents)?;
+        if let Some(reembed) = &self.reembed {
+            map.serialize_entry("reembed", reembed)?;
+        }
+        let message_first = self.reembed.is_some();
+        if message_first {
+            if let Some(message) = &self.message {
+                map.serialize_entry("message", message)?;
+            }
+        }
+        if let Some(job_id) = &self.backfill_job_id {
+            map.serialize_entry("backfill_job_id", job_id)?;
+        }
+        if !message_first {
+            if let Some(message) = &self.message {
+                map.serialize_entry("message", message)?;
+            }
+        }
+        if let Some(warning) = &self.warning {
+            map.serialize_entry("warning", warning)?;
+        }
+        map.end()
+    }
 }
 
 /// `auto_embed_disable` response

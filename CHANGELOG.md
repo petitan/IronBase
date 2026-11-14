@@ -21,7 +21,7 @@ Phase 2e of the Tuti TUI overhaul. The server's response JSON keeps its shape.
   (markers added for the three argument-less ones). The job types (`JobInfo`, `JobStatus`, `JobType`),
   `CacheStats` and `ModelInfo` move there; the server re-exports them under their old paths. Responses
   whose shape depends on a flag (`enabled`, `found`, `success`) are enums told apart by the flag's value
-  (`Flag<true>` / `Flag<false>`). The response golden test grew from 260 to 320 cases (recorded on the
+  (`Flag<true>` / `Flag<false>`). The response golden test grew from 260 to 321 cases (recorded on the
   previous code, before the cache fix) and every recorded response of the group round-trips through the
   shared types byte for byte.
 - **Tuti TUI RAG modal, Models and Jobs tabs** (all showed placeholders or wrong values):

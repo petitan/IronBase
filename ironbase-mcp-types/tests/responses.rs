@@ -675,3 +675,18 @@ fn job_info_status_and_type_shapes() {
     let parsed = same_bytes::<<tools::EmbedJobCancel as Tool>::Resp>(terminal);
     assert_eq!(parsed.status, Some(JobStatus::Cancelled));
 }
+
+/// The server writes `message` before `backfill_job_id` for a re-embed and
+/// after it for a plain backfill; both orders round-trip byte for byte
+#[test]
+fn auto_embed_enable_message_position_follows_the_server() {
+    let config = r#""config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1"#;
+    let reembed = format!(
+        r#"{{"success":true,"collection":"kb",{config},"reembed":true,"message":"M","backfill_job_id":"job_2"}}"#
+    );
+    let backfill = format!(
+        r#"{{"success":true,"collection":"kb",{config},"backfill_job_id":"job_1","message":"M","warning":"W"}}"#
+    );
+    same_bytes::<AutoEmbedEnableResponse>(&reembed);
+    same_bytes::<AutoEmbedEnableResponse>(&backfill);
+}

@@ -1194,6 +1194,10 @@ out: {"collection":"vecs","enabled":true,"config":{"source_field":"content","tar
 in:  {"collection":"jobbed","source_field":"content","target_field":"embedding"}
 out: {"success":true,"collection":"jobbed","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"backfill_job_id":"job_1","message":"Auto-embedding enabled. Backfill job started for existing documents."}
 
+## auto_embed_enable / re-embed job started
+in:  {"collection":"rejobbed","source_field":"content","target_field":"embedding"}
+out: {"success":true,"collection":"rejobbed","config":{"enabled":true,"source_field":"content","target_field":"embedding","provider":"length","model":"length","dimension":2,"skip_if_exists":false,"chunking":null},"existing_documents":1,"reembed":true,"message":"Auto-embedding enabled with a different provider, model, preprocessing, dimension or source field: all existing vectors are being re-embedded (retried on startup until done).","backfill_job_id":"job_2"}
+
 ## auto_embed_disable / enabled
 in:  {"collection":"plain"}
 out: {"success":true,"collection":"plain","message":"Auto-embedding disabled"}
