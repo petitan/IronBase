@@ -54,8 +54,6 @@ pub struct Theme {
     pub error: Color,
     /// Muted text color (hints, disabled)
     pub muted: Color,
-    /// Selection background
-    pub selection_bg: Color,
     /// Header background
     pub header_bg: Color,
 }
@@ -73,7 +71,6 @@ impl Theme {
             warning: Color::Rgb(217, 168, 87),    // Warm yellow
             error: Color::Rgb(204, 102, 102),     // Soft red
             muted: Color::Rgb(120, 110, 100),     // Muted warm gray
-            selection_bg: Color::Rgb(60, 50, 45), // Selection
             header_bg: Color::Rgb(45, 40, 38),    // Header
         }
     }
@@ -89,7 +86,6 @@ impl Theme {
             warning: Color::Rgb(255, 193, 7),
             error: Color::Rgb(239, 83, 80),
             muted: Color::Rgb(100, 100, 100),
-            selection_bg: Color::Rgb(40, 44, 52),
             header_bg: Color::Rgb(30, 32, 38),
         }
     }
@@ -105,7 +101,6 @@ impl Theme {
             warning: Color::Rgb(255, 152, 0),
             error: Color::Rgb(220, 53, 69),
             muted: Color::Rgb(140, 140, 140),
-            selection_bg: Color::Rgb(230, 240, 250),
             header_bg: Color::Rgb(240, 240, 245),
         }
     }
@@ -121,7 +116,6 @@ impl Theme {
             warning: Color::Rgb(241, 196, 15),
             error: Color::Rgb(231, 76, 60),
             muted: Color::Rgb(80, 100, 120),
-            selection_bg: Color::Rgb(30, 50, 65),
             header_bg: Color::Rgb(20, 40, 55),
         }
     }

@@ -11,7 +11,6 @@ pub struct ApiKeyInfo {
     pub id: u64,
     pub name: String,
     pub key_preview: String,
-    pub created_at: String,
     pub enabled: bool,
 }
 
@@ -29,11 +28,6 @@ impl ApiKeyInfo {
                 .get("key_preview")
                 .and_then(|v| v.as_str())
                 .unwrap_or("***")
-                .to_string(),
-            created_at: value
-                .get("created_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
                 .to_string(),
             enabled: value
                 .get("enabled")

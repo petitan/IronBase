@@ -12,8 +12,6 @@ pub struct ListenerInfo {
     pub bind: String,
     pub tls: bool,
     pub enabled: bool,
-    pub cert_path: Option<String>,
-    pub key_path: Option<String>,
 }
 
 impl ListenerInfo {
@@ -30,14 +28,6 @@ impl ListenerInfo {
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            cert_path: value
-                .get("cert_path")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            key_path: value
-                .get("key_path")
-                .and_then(|v| v.as_str())
-                .map(String::from),
         })
     }
 }

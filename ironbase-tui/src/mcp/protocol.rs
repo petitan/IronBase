@@ -68,7 +68,11 @@ impl JsonRpcRequest {
 /// JSON-RPC 2.0 Response
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcResponse {
+    // Deserialization target: part of the JSON-RPC envelope, not read by the client
+    #[allow(dead_code)]
     pub jsonrpc: String,
+    // Deserialization target: part of the JSON-RPC envelope, not read by the client
+    #[allow(dead_code)]
     pub id: Option<u64>,
     #[serde(default)]
     pub result: Option<Value>,
@@ -76,27 +80,13 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
-impl JsonRpcResponse {
-    /// Check if response is successful
-    pub fn is_success(&self) -> bool {
-        self.error.is_none() && self.result.is_some()
-    }
-
-    /// Get result or error
-    pub fn into_result(self) -> Result<Value, JsonRpcError> {
-        if let Some(error) = self.error {
-            Err(error)
-        } else {
-            Ok(self.result.unwrap_or(Value::Null))
-        }
-    }
-}
-
 /// JSON-RPC 2.0 Error
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
+    // Deserialization target: optional JSON-RPC error payload, not read by the client
+    #[allow(dead_code)]
     #[serde(default)]
     pub data: Option<Value>,
 }
@@ -137,12 +127,6 @@ impl ToolCallResult {
         }
         None
     }
-
-    /// Parse text content as JSON
-    pub fn parse_json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        let text = self.text().unwrap_or("null");
-        serde_json::from_str(text)
-    }
 }
 
 #[cfg(test)]
@@ -161,6 +145,6 @@ mod tests {
     fn test_response_deserialization() {
         let json = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"[]"}]}}"#;
         let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.is_success());
+        assert!(resp.error.is_none() && resp.result.is_some());
     }
 }

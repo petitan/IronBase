@@ -100,11 +100,6 @@ impl QueryState {
         }
     }
 
-    /// Get current query string
-    pub fn get_query_string(&self) -> String {
-        self.lines.join("\n")
-    }
-
     /// Clear results (when user edits query)
     pub fn clear_results(&mut self) {
         self.results = None;
@@ -284,5 +279,157 @@ impl QueryState {
     pub fn parse_query(&self) -> Result<Value, String> {
         let text = self.get_query_text();
         serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn query(lines: &[&str], line: usize, col: usize) -> QueryState {
+        QueryState {
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            cursor_line: line,
+            cursor_col: col,
+            ..QueryState::default()
+        }
+    }
+
+    #[test]
+    fn test_new_query_is_an_empty_object_with_cursor_inside() {
+        let state = QueryState::new("users".to_string());
+        assert_eq!(state.lines, vec!["{", "  ", "}"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 2));
+        assert_eq!(state.parse_query(), Ok(json!({})));
+    }
+
+    #[test]
+    fn test_insert_is_by_character_not_byte() {
+        let mut state = query(&["{\"név\": \"\"}"], 0, 9);
+        state.insert_char('É');
+        state.insert_char('v');
+        state.insert_char('a');
+        assert_eq!(state.lines, vec!["{\"név\": \"Éva\"}"]);
+        assert_eq!(state.cursor_col, 12);
+        assert_eq!(state.parse_query(), Ok(json!({"név": "Éva"})));
+    }
+
+    #[test]
+    fn test_backspace_with_multibyte_and_at_line_start() {
+        let mut state = query(&["őá", "űé"], 1, 1);
+        state.backspace();
+        assert_eq!(state.lines, vec!["őá", "é"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+
+        // At line start: joins with the previous line, cursor at the seam
+        state.backspace();
+        assert_eq!(state.lines, vec!["őáé"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 2));
+
+        // First line, first column: nothing
+        state.cursor_col = 0;
+        state.backspace();
+        assert_eq!(state.lines, vec!["őáé"]);
+    }
+
+    #[test]
+    fn test_newline_and_tab() {
+        let mut state = query(&["{űő}"], 0, 2);
+        state.insert_newline();
+        assert_eq!(state.lines, vec!["{ű", "ő}"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+        state.insert_tab();
+        assert_eq!(state.lines, vec!["{ű", "  ő}"]);
+        assert_eq!(state.cursor_col, 2);
+    }
+
+    #[test]
+    fn test_cursor_movement_wraps_and_clamps() {
+        let mut state = query(&["hosszú", "ű", ""], 0, 6);
+        state.cursor_right();
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+        state.cursor_left();
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 6));
+        state.cursor_down();
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 1));
+        state.cursor_down();
+        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
+        state.cursor_down();
+        state.cursor_right();
+        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
+        state.cursor_up();
+        state.cursor_up();
+        state.cursor_up();
+        state.cursor_left();
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
+    }
+
+    /// Editing drops the results of the previous run and the error
+    #[test]
+    fn test_editing_clears_results_and_error() {
+        let mut state = QueryState::new("users".to_string());
+        state.results = Some(vec![json!({"_id": 1}), json!({"_id": 2})]);
+        state.total_count = 2;
+        state.explain_result = Some(json!({"plan": "scan"}));
+        state.show_explain = true;
+        state.error = Some("hiba".to_string());
+        state.result_down();
+        assert_eq!(state.result_index, 1);
+        state.result_down();
+        assert_eq!(state.result_index, 1);
+
+        state.insert_char('x');
+
+        assert_eq!(state.results, None);
+        assert_eq!((state.result_index, state.total_count), (0, 0));
+        assert_eq!(state.explain_result, None);
+        assert!(!state.show_explain);
+        assert_eq!(state.error, None);
+        assert!(!state.has_results());
+    }
+
+    #[test]
+    fn test_templates() {
+        let mut state = QueryState::new("users".to_string());
+        state.toggle_templates();
+        assert!(state.show_templates);
+        state.template_up();
+        assert_eq!(state.template_index, 0);
+        for _ in 0..QUERY_TEMPLATES.len() + 3 {
+            state.template_down();
+        }
+        assert_eq!(state.template_index, QUERY_TEMPLATES.len() - 1);
+        state.template_index = 3;
+        state.apply_template();
+        assert!(!state.show_templates);
+        assert_eq!(state.lines, vec!["{\"field\": {\"$gt\": 0}}"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 21));
+        assert_eq!(state.parse_query(), Ok(json!({"field": {"$gt": 0}})));
+
+        // Every template is valid JSON
+        for (index, (name, _)) in QUERY_TEMPLATES.iter().enumerate() {
+            state.template_index = index;
+            state.apply_template();
+            assert!(state.parse_query().is_ok(), "{}", name);
+        }
+    }
+
+    #[test]
+    fn test_explain_view_toggles_only_with_something_to_show() {
+        let mut state = QueryState::new("users".to_string());
+        state.toggle_explain_view();
+        assert!(!state.show_explain);
+        state.results = Some(vec![]);
+        state.toggle_explain_view();
+        assert!(state.show_explain);
+        state.toggle_explain_view();
+        assert!(!state.show_explain);
+    }
+
+    #[test]
+    fn test_invalid_query_is_an_error() {
+        let state = query(&["{\"a\": }"], 0, 0);
+        assert!(state.parse_query().is_err());
     }
 }

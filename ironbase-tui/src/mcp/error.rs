@@ -36,10 +36,6 @@ pub enum McpError {
     /// Server not initialized
     #[error("Server not initialized")]
     NotInitialized,
-
-    /// Timeout waiting for response
-    #[error("Request timeout")]
-    Timeout,
 }
 
 impl McpError {

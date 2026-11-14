@@ -570,47 +570,261 @@ impl ScriptState {
             self.tag_input_active = false;
         }
     }
+}
 
-    pub fn remove_selected_tag(&mut self) {
-        if !self.tags.is_empty() && self.selected_tag < self.tags.len() {
-            self.tags.remove(self.selected_tag);
-            if self.selected_tag > 0 {
-                self.selected_tag -= 1;
-            }
-            self.dirty = true;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor(lines: &[&str], line: usize, col: usize) -> ScriptState {
+        ScriptState {
+            lines: lines.iter().map(|l| l.to_string()).collect(),
+            cursor_line: line,
+            cursor_col: col,
+            focus: ScriptFocus::Editor,
+            mode: ScriptMode::Edit,
+            ..ScriptState::default()
         }
     }
 
-    pub fn select_prev_tag(&mut self) {
-        if self.selected_tag > 0 {
-            self.selected_tag -= 1;
+    #[test]
+    fn test_editor_insert_is_by_character_not_byte() {
+        let mut state = editor(&["árvíz"], 0, 2);
+        state.insert_char('ő');
+        assert_eq!(state.lines, vec!["árővíz"]);
+        assert_eq!(state.cursor_col, 3);
+        assert!(state.dirty);
+
+        // At the end of the line
+        state.cursor_end();
+        assert_eq!(state.cursor_col, 6);
+        state.insert_char('🙂');
+        assert_eq!(state.lines, vec!["árővíz🙂"]);
+        assert_eq!(state.cursor_col, 7);
+    }
+
+    #[test]
+    fn test_editor_backspace_and_delete_with_multibyte() {
+        let mut state = editor(&["tűzőgép"], 0, 2);
+        state.backspace();
+        assert_eq!(state.lines, vec!["tzőgép"]);
+        assert_eq!(state.cursor_col, 1);
+
+        state.delete_char();
+        assert_eq!(state.lines, vec!["tőgép"]);
+        assert_eq!(state.cursor_col, 1);
+        state.delete_char();
+        assert_eq!(state.lines, vec!["tgép"]);
+    }
+
+    #[test]
+    fn test_editor_backspace_at_line_start_joins_lines() {
+        let mut state = editor(&["első", "második"], 1, 0);
+        state.backspace();
+        assert_eq!(state.lines, vec!["elsőmásodik"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 4));
+        assert!(state.dirty);
+
+        // First line, first column: nothing to join, not dirty
+        let mut state = editor(&["a"], 0, 0);
+        state.backspace();
+        assert_eq!(state.lines, vec!["a"]);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn test_editor_delete_at_line_end_joins_next_line() {
+        let mut state = editor(&["ab", "cd"], 0, 2);
+        state.delete_char();
+        assert_eq!(state.lines, vec!["abcd"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 2));
+
+        // Last line end: nothing happens
+        let mut state = editor(&["ab"], 0, 2);
+        state.delete_char();
+        assert_eq!(state.lines, vec!["ab"]);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn test_editor_newline_splits_at_character_position() {
+        let mut state = editor(&["őzláb"], 0, 2);
+        state.insert_newline();
+        assert_eq!(state.lines, vec!["őz", "láb"]);
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+
+        state.insert_tab();
+        assert_eq!(state.lines, vec!["őz", "  láb"]);
+        assert_eq!(state.cursor_col, 2);
+    }
+
+    #[test]
+    fn test_editor_cursor_movement_wraps_and_clamps() {
+        let mut state = editor(&["hosszú sor", "űr", ""], 0, 10);
+        // Right at line end: start of the next line
+        state.cursor_right();
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+        // Left at line start: end of the previous line (in characters)
+        state.cursor_left();
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 10));
+        // Down clamps the column to the shorter line
+        state.cursor_down();
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 2));
+        state.cursor_down();
+        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
+        // Last line: stays
+        state.cursor_down();
+        state.cursor_right();
+        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
+        // Up keeps the (clamped) column
+        state.cursor_up();
+        state.cursor_up();
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
+        state.cursor_up();
+        state.cursor_left();
+        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
+
+        state.cursor_end();
+        assert_eq!(state.cursor_col, 10);
+        state.cursor_home();
+        assert_eq!(state.cursor_col, 0);
+    }
+
+    #[test]
+    fn test_name_and_description_editing_with_multibyte() {
+        let mut state = ScriptState::new();
+        state.start_new();
+        assert_eq!(state.focus, ScriptFocus::Name);
+        for c in "név".chars() {
+            state.insert_char(c);
         }
+        assert_eq!((state.name.as_str(), state.name_cursor), ("név", 3));
+        state.cursor_left();
+        state.backspace();
+        assert_eq!((state.name.as_str(), state.name_cursor), ("nv", 1));
+        state.cursor_home();
+        state.backspace();
+        assert_eq!(state.name, "nv");
+        state.cursor_end();
+        state.cursor_right();
+        assert_eq!(state.name_cursor, 2);
+        assert!(state.dirty);
+
+        state.next_focus();
+        assert_eq!(state.focus, ScriptFocus::Description);
+        state.insert_char('é');
+        state.insert_char('k');
+        state.cursor_left();
+        state.cursor_left();
+        state.cursor_left();
+        state.insert_char('ű');
+        assert_eq!((state.description.as_str(), state.desc_cursor), ("űék", 1));
     }
 
-    pub fn select_next_tag(&mut self) {
-        if self.selected_tag + 1 < self.tags.len() {
-            self.selected_tag += 1;
+    /// Params start as "{}" with the cursor after it; editing them does not
+    /// mark the script dirty
+    #[test]
+    fn test_params_editing() {
+        let mut state = ScriptState::new();
+        state.start_new();
+        state.focus = ScriptFocus::Params;
+        assert_eq!(
+            (state.params_input.as_str(), state.params_cursor),
+            ("{}", 2)
+        );
+        state.cursor_left();
+        state.insert_char('é');
+        assert_eq!(state.params_input, "{é}");
+        state.backspace();
+        assert_eq!(
+            (state.params_input.as_str(), state.params_cursor),
+            ("{}", 1)
+        );
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn test_tags_and_focus_cycle() {
+        let mut state = ScriptState::new();
+        state.start_new();
+        state.focus = ScriptFocus::Tags;
+
+        // Typing only reaches the tag input while it is active
+        state.insert_char('x');
+        assert_eq!(state.tag_input, "");
+        state.tag_input_active = true;
+        for c in " etl ".chars() {
+            state.insert_char(c);
         }
-    }
+        state.backspace();
+        assert_eq!(state.tag_input, " etl");
+        state.add_tag();
+        assert_eq!(state.tags, vec!["etl"]);
+        assert!(!state.tag_input_active);
+        assert!(state.dirty);
 
-    pub fn toggle_tag_input(&mut self) {
-        self.tag_input_active = !self.tag_input_active;
-        if self.tag_input_active {
-            self.tag_input.clear();
+        // A duplicate is dropped, the input is cleared all the same
+        state.tag_input = "etl".to_string();
+        state.add_tag();
+        assert_eq!(state.tags, vec!["etl"]);
+        assert_eq!(state.tag_input, "");
+
+        // Name -> Description -> Tags -> Editor -> Params -> Name
+        state.focus = ScriptFocus::Name;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            state.next_focus();
+            seen.push(state.focus);
         }
+        assert_eq!(
+            seen,
+            vec![
+                ScriptFocus::Description,
+                ScriptFocus::Tags,
+                ScriptFocus::Editor,
+                ScriptFocus::Params,
+                ScriptFocus::Name
+            ]
+        );
+        state.prev_focus();
+        assert_eq!(state.focus, ScriptFocus::Params);
+        // Browse/History focus is not part of the cycle
+        state.focus = ScriptFocus::List;
+        state.next_focus();
+        assert_eq!(state.focus, ScriptFocus::List);
     }
 
-    // === Utility ===
+    #[test]
+    fn test_mode_transitions_reset_the_editor() {
+        let mut state = ScriptState::new();
+        state.load_script(
+            "cleanup".to_string(),
+            "let a = 1;\nlet b = 2;".to_string(),
+            Some("leírás".to_string()),
+            vec!["etl".to_string()],
+            3,
+        );
+        assert_eq!(state.mode, ScriptMode::Edit);
+        assert_eq!(state.focus, ScriptFocus::Editor);
+        assert_eq!(state.lines, vec!["let a = 1;", "let b = 2;"]);
+        assert_eq!((state.name_cursor, state.desc_cursor), (7, 6));
+        assert_eq!(state.version, 3);
+        assert!(!state.dirty);
 
-    pub fn get_code(&self) -> String {
-        self.lines.join("\n")
-    }
+        // Empty code still has one line to type into
+        state.load_script("empty".to_string(), String::new(), None, vec![], 1);
+        assert_eq!(state.lines, vec![""]);
 
-    pub fn get_selected_script(&self) -> Option<&ScriptInfo> {
-        self.scripts.get(self.selected_script)
-    }
+        state.enter_inline();
+        assert_eq!(state.mode, ScriptMode::Inline);
+        assert_eq!(state.name, "[inline]");
+        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
 
-    pub fn get_selected_version(&self) -> Option<&ScriptVersion> {
-        self.versions.get(self.selected_version)
+        state.insert_char('x');
+        assert!(state.dirty);
+        state.reset_to_browse();
+        assert_eq!(state.mode, ScriptMode::Browse);
+        assert_eq!(state.focus, ScriptFocus::List);
+        assert!(!state.dirty);
     }
 }

@@ -30,14 +30,6 @@ impl Default for InsertState {
 }
 
 impl InsertState {
-    pub fn new(collection: String) -> Self {
-        Self {
-            collection,
-            mode: EditorMode::Insert,
-            ..Default::default()
-        }
-    }
-
     /// Create insert state with template (from existing document or default)
     pub fn with_template(collection: String, template: Option<Value>) -> Self {
         let lines = if let Some(val) = template {
@@ -79,15 +71,6 @@ impl InsertState {
             mode: EditorMode::Edit,
             original_doc_id: doc_id,
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.lines = vec!["{".to_string(), "  ".to_string(), "}".to_string()];
-        self.cursor_line = 1;
-        self.cursor_col = 2;
-        self.error = None;
-        self.mode = EditorMode::Insert;
-        self.original_doc_id = None;
     }
 
     pub fn is_edit_mode(&self) -> bool {

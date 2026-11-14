@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: library/binary split, dead code removed, test harness (ironbase-core 0.3.460, mcp-server 1.0.658)
+
+Phase 1a of the Tuti TUI overhaul. No user-visible behaviour change.
+
+- **`tuti-tui` is now a library plus a thin binary.** The key handlers moved verbatim out of `main.rs`
+  (3291 → 304 lines) into `src/handlers/`, one file per modal, behind a single `handlers::handle_key`
+  entry, so tests can drive them.
+- **The crate-wide `allow(dead_code)` / `allow(unused_imports)` are gone,** and the dead code they hid is
+  deleted: unused client and wrapper methods, unused state helpers, the empty `widgets` module, the
+  impl-less `Pane` trait, the unused `rhai` dependency, and the stale `ironbase-tui/Cargo.lock` (ignored
+  by cargo since the crate joined the workspace).
+- **`Config`:** the unused `anthropic_api_key` and `recipes_dir` fields are removed. A `config.toml` that
+  still contains them loads unchanged (covered by a test).
+- **Test support (`crate::testing`):** a scriptable in-memory MCP server with a call log, an `App` builder
+  wired to it, key-press helpers and a `TestBackend` screen renderer.
+- **Tests: 53 → 112.** The new ones pin current behaviour through the real handler entry: navigation,
+  collection switch, delete with confirm, index drop (including the `_id` refusal), the execution of
+  every confirmed action (vector index drop, script rollback, auto-embed disable, cache clear, job
+  cancel), Shift+P ACL loading and refusal, database switch with a failing collection list, text entry,
+  and a render smoke test for the main screen and modals at 120x36, 80x24 and 20x6.
+
 ### Fixed — Tuti TUI data-loss and wrong-display bugs; `_id` index can no longer be dropped (ironbase-core 0.3.459, mcp-server 1.0.657)
 
 Phase 0 of the Tuti TUI overhaul: targeted safety fixes, no restructuring.

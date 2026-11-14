@@ -55,11 +55,6 @@ impl ExportState {
         self.update_extension();
     }
 
-    pub fn set_format(&mut self, format: ExportFormat) {
-        self.format = format;
-        self.update_extension();
-    }
-
     fn update_extension(&mut self) {
         // Replace the extension of the final path component only
         // (a dot in a directory name is not an extension)

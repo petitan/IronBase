@@ -13,7 +13,6 @@ pub struct SearchResult {
 #[derive(Debug, Clone)]
 pub struct DocSearchMatch {
     pub line: usize,
-    pub col_start: usize,
 }
 
 /// Search state
@@ -39,23 +38,6 @@ impl SearchState {
             input_active: true,
             ..Default::default()
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.query_input.clear();
-        self.cursor_pos = 0;
-        self.results.clear();
-        self.selected_result = 0;
-        self.result_offset = 0;
-        self.last_search.clear();
-        self.doc_matches.clear();
-        self.current_match = 0;
-    }
-
-    /// Clear only document search state (keep query)
-    pub fn clear_doc_matches(&mut self) {
-        self.doc_matches.clear();
-        self.current_match = 0;
     }
 
     /// Navigate to next match

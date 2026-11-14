@@ -98,9 +98,4 @@ impl FulltextState {
             self.selected_result += 1;
         }
     }
-
-    pub fn clear_results(&mut self) {
-        self.results.clear();
-        self.selected_result = 0;
-    }
 }

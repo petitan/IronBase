@@ -7,6 +7,10 @@ repository.workspace = true
 license.workspace = true
 description = "TUTI-TUI - Intelligent TUI for IronBase NoSQL database"
 
+[lib]
+name = "tuti_tui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tuti-tui"
 path = "src/main.rs"
@@ -30,9 +34,6 @@ thiserror = { workspace = true }
 # Config & paths
 dirs = "5.0"
 toml = "0.8"
-
-# Scripting (Rhai)
-rhai = { workspace = true }
 
 # Async HTTP & MCP client
 reqwest = { workspace = true }
