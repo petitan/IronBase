@@ -203,13 +203,13 @@ fn merge_adjacent_runs<T>(
                         raw_text
                     };
 
-                    if res_idx == best_idx_in_run {
-                        best_offset = Some(merged_text.len());
-                    }
                     if i == 0 {
+                        if res_idx == best_idx_in_run {
+                            best_offset = Some(merged_text.len());
+                        }
                         merged_text.push_str(chunk_text);
                     } else {
-                        // Calculate overlap from start_char/end_char if available
+                        // Calculate overlap (or gap) from start_char/end_char if available
                         let prev_end = doc(&results[run[i - 1].1])
                             .get("end_char")
                             .and_then(|v| v.as_u64());
@@ -234,6 +234,19 @@ fn merge_adjacent_runs<T>(
                                 chunk_text
                             };
 
+                        // The chunker drops the whitespace between two chunks:
+                        // put a separator into the gap instead of gluing words
+                        if let (Some(pe), Some(cs)) = (prev_end, curr_start) {
+                            merged_text.push_str(gap_separator(
+                                cs.saturating_sub(pe),
+                                &merged_text,
+                                text_to_append,
+                            ));
+                        }
+
+                        if res_idx == best_idx_in_run {
+                            best_offset = Some(merged_text.len());
+                        }
                         merged_text.push_str(text_to_append);
                     }
 
@@ -284,4 +297,26 @@ fn merge_adjacent_runs<T>(
     }
 
     removed
+}
+
+/// What goes between two merged chunks `gap` characters apart in the source
+/// (`start_char` of the next minus `end_char` of the previous). The chunker
+/// drops that text, which is whitespace, and the chunk documents do not keep
+/// it: a one-character gap becomes a space (between sentences), or a line
+/// break between two markdown table rows (the chunker splits a table at its
+/// line ends), and a longer gap a paragraph break. Nothing when the chunks
+/// touch or overlap, or when the stored text keeps whitespace at the boundary.
+fn gap_separator(gap: u64, before: &str, after: &str) -> &'static str {
+    let boundary_space = before.ends_with(char::is_whitespace)
+        || after.starts_with(char::is_whitespace)
+        || before.is_empty()
+        || after.is_empty();
+    let table_rows = before.ends_with('|') && after.starts_with('|');
+    match gap {
+        _ if boundary_space => "",
+        0 => "",
+        1 if table_rows => "\n",
+        1 => " ",
+        _ => "\n\n",
+    }
 }

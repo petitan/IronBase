@@ -1408,7 +1408,7 @@ out: {"collection":"kb","rag_enabled":true,"config":{"embedding_field":"embeddin
 
 ## rag_chunks_load / one document
 in:  {"collection":"kb","doc_ids":["d1"]}
-out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.Második bekezdés a folyóról és a hídról.Harmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék"}],"count":1,"chunks_merged":2,"scored":false}
+out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.\n\nMásodik bekezdés a folyóról és a hídról.\n\nHarmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék"}],"count":1,"chunks_merged":2,"scored":false}
 
 ## rag_chunks_load / unmerged
 in:  {"collection":"kb","doc_ids":["d1","d2"],"merge_chunks":false}
@@ -1428,7 +1428,7 @@ out: {"results":[{"_id":2,"chunk_index":1,"chunk_total":3,"content":"Második be
 
 ## rag_chunks_load / scored, merged
 in:  {"collection":"kb","doc_ids":["d1"],"query":"bekezdés"}
-out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.Második bekezdés a folyóról és a hídról.Harmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék","_score":1.1668020169302684}],"count":1,"chunks_merged":2,"scored":true}
+out: {"results":[{"_id":3,"chunk_index":0,"chunk_merged":true,"chunk_total":3,"chunks_in_merge":3,"content":"Első bekezdés a királyról és a várról.\n\nMásodik bekezdés a folyóról és a hídról.\n\nHarmadik bekezdés a hegyről.","doc_id":"d1","embedding":[28.0,1.0],"end_char":110,"start_char":0,"title":"Mesék","_score":1.1668020169302684}],"count":1,"chunks_merged":2,"scored":true}
 
 ## rag_chunks_load / no doc_ids
 in:  {"collection":"kb","doc_ids":[]}

@@ -418,6 +418,85 @@ fn test_merge_three_consecutive() {
     assert_eq!(merged_text, "AAAA BBBB CCCC DDDD EEEE FFFF GGGG");
 }
 
+/// The chunker drops the whitespace between two chunks (`end_char` of one
+/// below `start_char` of the next): the merge puts a separator into the gap
+/// instead of gluing the words ("vár.Második"): a space for a one-character
+/// gap, a paragraph break for a longer one
+#[test]
+fn test_merge_separates_chunks_across_a_gap() {
+    let mut results = vec![
+        make_chunk("c0", "docA", 0, "Első bekezdés a várról.", 0, 23, 0.02),
+        make_chunk("c1", "docA", 1, "Második bekezdés.", 25, 42, 0.03),
+        make_chunk("c2", "docA", 2, "Harmadik mondat.", 43, 59, 0.01),
+    ];
+    assert_eq!(merge_adjacent_chunks(&mut results, "content"), 2);
+    assert_eq!(
+        results[0].doc["content"],
+        "Első bekezdés a várról.\n\nMásodik bekezdés. Harmadik mondat."
+    );
+}
+
+/// Markdown table chunks are split at line ends: rows stay on their own
+/// lines (the stripped header of a continuation chunk included)
+#[test]
+fn test_merge_keeps_table_rows_on_their_own_lines() {
+    let mut first = make_chunk(
+        "c0",
+        "docA",
+        0,
+        "| név | kor |\n|---|---|\n| Álmos | 30 |",
+        0,
+        41,
+        0.02,
+    );
+    first.doc["table_header"] = json!("| név | kor |\n|---|---|");
+    let mut second = make_chunk(
+        "c1",
+        "docA",
+        1,
+        "| név | kor |\n|---|---|\n| Bea | 25 |",
+        42,
+        54,
+        0.03,
+    );
+    second.doc["table_header"] = json!("| név | kor |\n|---|---|");
+    let mut results = vec![first, second];
+    assert_eq!(merge_adjacent_chunks(&mut results, "content"), 1);
+    assert_eq!(
+        results[0].doc["content"],
+        "| név | kor |\n|---|---|\n| Álmos | 30 |\n| Bea | 25 |"
+    );
+}
+
+/// No separator where the chunks touch, or where the stored text already
+/// keeps the whitespace at the boundary
+#[test]
+fn test_merge_adds_no_separator_without_a_gap() {
+    let mut results = vec![
+        make_chunk("c0", "docA", 0, "alpha", 0, 5, 0.02),
+        make_chunk("c1", "docA", 1, "beta ", 5, 10, 0.03),
+        make_chunk("c2", "docA", 2, "gamma", 12, 17, 0.01),
+    ];
+    assert_eq!(merge_adjacent_chunks(&mut results, "content"), 2);
+    assert_eq!(results[0].doc["content"], "alphabeta gamma");
+}
+
+/// The best chunk's offset in a grouped merge points past the separator
+#[test]
+fn grouped_merge_best_offset_skips_the_separator() {
+    let mut chunks = vec![
+        json!({"doc_id": "t", "chunk_index": 1, "content": "Második.",
+               "start_char": 10, "end_char": 18}),
+        json!({"doc_id": "t", "chunk_index": 0, "content": "Első.",
+               "start_char": 0, "end_char": 8}),
+    ];
+    merge_adjacent_values(&mut chunks, "content");
+    let merged = chunks[0]["content"].as_str().unwrap();
+    assert_eq!(merged, "Első.\n\nMásodik.");
+    let offset = chunks[0][MERGE_BEST_OFFSET_KEY].as_u64().unwrap() as usize;
+    assert!(merged[offset..].starts_with("Második"), "{offset}");
+}
+
 /// Regression for #64: merge must only touch the text field it is given;
 /// other fields (e.g. `title`, identical across chunks) must stay intact.
 /// The original bug merged a mis-resolved field (`title`), concatenating it

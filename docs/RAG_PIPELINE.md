@@ -250,6 +250,12 @@ feloldás kiküszöböli.
 - **Tábla-fejléc dedup** (#63): a 2…N. chunkból a stored `table_header` mező +
   `"\n"` prefix **pontosan** kivágva — **NEM** újraszámolva (CRLF/whitespace-safe).
   Ezután fut az overlap-vágás. A merged eredmény egyszer mutatja a fejlécet.
+- **Rés-elválasztó** (v0.3.468): a chunker a két chunk közti whitespace-t elhagyja
+  (`curr_start > prev_end`), és a chunk-dokumentum nem tárolja: a merge a résbe
+  elválasztót tesz — 1 karakteres rés: szóköz, két markdown táblasor (`|` a határ két
+  oldalán) között újsor; hosszabb rés: bekezdéstörés (`"\n\n"`). Érintkező / átfedő
+  chunkoknál, vagy ha a tárolt szöveg a határon whitespace-szel végződik/kezdődik, nincs.
+  Korábban a szavak összeragadtak („várról.Második").
 
 ---
 

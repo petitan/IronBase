@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — merged chunks no longer glue words together (ironbase-core 0.3.468, mcp-server 1.0.666)
+
+- **Adjacent chunk merge keeps the whitespace between chunks.** The chunker drops the whitespace between
+  two chunks (`start_char` of the next above `end_char` of the previous) and the chunk documents do not
+  keep it; `merge_adjacent_chunks` / `merge_adjacent_values` only handled overlap and joined chunks across
+  such a gap without a separator ("várról.Második", table rows run together). The merge now puts a
+  separator into the gap: a space for a one-character gap, a line break between two markdown table rows,
+  a paragraph break for a longer gap; nothing where chunks touch or overlap or the stored text keeps the
+  whitespace. A grouped merge's best-chunk offset points past the separator. This changes the merged text
+  of `search` (`merge_chunks`), `rag_chunks_load` and Rhai `db_hybrid_search`; two response golden cases
+  (`rag_chunks_load`) change accordingly.
+
 ### Fixed — Tuti TUI RAG import and collection screens; typed MCP responses for the RAG tools (ironbase-core 0.3.467, mcp-server 1.0.665)
 
 Phase 2f of the Tuti TUI overhaul. The server's response JSON is unchanged.
@@ -27,9 +39,8 @@ Phase 2f of the Tuti TUI overhaul. The server's response JSON is unchanged.
   - creating a RAG collection says which of its indexes already existed and the vector dimension,
     instead of "created!" (the server reports `collection_created: true` for an existing collection
     too, so the message does not claim either).
-- Known server behaviour, pinned by the golden test and not changed here: merging adjacent chunks
-  (`rag_chunks_load`, and the `merge_chunks` of `search`) joins chunks separated by a gap, such as a
-  paragraph break the chunker dropped, without any separator ("várról.Második"); `embed_document`
+- Known server behaviour, pinned by the golden test and not changed here (the chunk merge separator is
+  fixed in 0.3.468): `embed_document`
   reports `provider: null` when the default provider embedded the chunks, and its `inserted_ids` are
   strings; `rag_collection_stats` of a missing collection creates it (the index listing opens the
   collection with the creating accessor) and answers with zero counts instead of an error;
