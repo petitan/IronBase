@@ -506,6 +506,39 @@ fn test_index_create_and_list() {
         !btree_indexes.is_empty(),
         "Should have at least the email index"
     );
+
+    // With a `type`, only that subtype comes back, under `indexes`
+    let result = dispatch_ok(
+        &adapter,
+        "index_list",
+        json!({"collection": "users", "type": "btree"}),
+    );
+    assert!(result["indexes"].is_array(), "{result}");
+    assert!(result.get("btree_indexes").is_none(), "{result}");
+    let result = dispatch_ok(
+        &adapter,
+        "index_list",
+        json!({"collection": "users", "type": "vector"}),
+    );
+    assert_eq!(result["count"], 0, "{result}");
+
+    // A `type` that is not a string was always ignored: every subtype is listed
+    let result = dispatch_ok(
+        &adapter,
+        "index_list",
+        json!({"collection": "users", "type": 7}),
+    );
+    assert!(result["btree_indexes"].is_array(), "{result}");
+
+    // index_stats defaults to btree and honours `type`
+    let result = dispatch_ok(&adapter, "index_stats", json!({"collection": "users"}));
+    let default_stats = result.clone();
+    let result = dispatch_ok(
+        &adapter,
+        "index_stats",
+        json!({"collection": "users", "type": "btree"}),
+    );
+    assert_eq!(result, default_stats);
 }
 
 #[test]

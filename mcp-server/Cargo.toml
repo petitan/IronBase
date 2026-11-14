@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.659"
+version = "1.0.660"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -58,6 +58,9 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 # IronBase integration
 ironbase-core = { path = "../ironbase-core", features = ["rag"] }
+
+# Tool argument types shared with clients
+ironbase-mcp-types = { path = "../ironbase-mcp-types" }
 
 # Embedding support
 ureq = { version = "3", features = ["json"] }

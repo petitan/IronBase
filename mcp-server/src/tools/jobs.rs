@@ -2,34 +2,13 @@
 
 use crate::error::{McpError, Result};
 use crate::jobs::JobManager;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::params::ParseParams;
 
-// ============================================================================
-// Parameter Structs
-// ============================================================================
-
-/// Parameters for `embed_job_status` tool
-#[derive(Debug, Deserialize)]
-pub struct JobStatusParams {
-    pub job_id: String,
-}
-
-/// Parameters for `embed_job_list` tool
-#[derive(Debug, Deserialize)]
-pub struct JobListParams {
-    #[serde(default)]
-    pub active_only: bool,
-}
-
-/// Parameters for `embed_job_cancel` tool
-#[derive(Debug, Deserialize)]
-pub struct JobCancelParams {
-    pub job_id: String,
-}
+// Parameter structs: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::params::{JobCancelParams, JobListParams, JobStatusParams};
 
 // ============================================================================
 // Dispatch

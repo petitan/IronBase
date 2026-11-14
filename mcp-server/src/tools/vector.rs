@@ -2,67 +2,15 @@
 
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::defaults::{default_embedding_field, default_vector_limit, DEFAULT_MAX_VECTORS};
 use super::helpers::{parse_projection_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::ParseParams;
 
-// ============================================================================
-// Parameter Structs
-// ============================================================================
-
-/// Parameters for the vector sub-route of `index_create` (type='vector')
-#[derive(Debug, Deserialize)]
-pub struct VectorIndexCreateParams {
-    pub collection: String,
-    pub field: String,
-    pub dim: usize,
-    #[serde(default = "default_metric")]
-    pub metric: String,
-    #[serde(default = "default_max_vectors")]
-    pub max_vectors: usize,
-    #[serde(default = "default_m")]
-    pub m: usize,
-    #[serde(default = "default_ef_construction")]
-    pub ef_construction: usize,
-    #[serde(default = "default_ef_search")]
-    pub ef_search: usize,
-}
-
-fn default_metric() -> String {
-    "cosine".to_string()
-}
-fn default_max_vectors() -> usize {
-    DEFAULT_MAX_VECTORS
-}
-fn default_m() -> usize {
-    16
-}
-fn default_ef_construction() -> usize {
-    200
-}
-fn default_ef_search() -> usize {
-    50
-}
-
-/// Parameters for `vector_search` tool
-///
-/// Field default matches RAG schema: "embedding"
-#[derive(Debug, Deserialize)]
-pub struct VectorSearchParams {
-    pub collection: String,
-    /// Field with vector index (default: "embedding")
-    #[serde(default = "default_embedding_field")]
-    pub field: String,
-    pub vector: Vec<f64>,
-    #[serde(default = "default_vector_limit")]
-    pub limit: usize,
-    pub projection: Option<Value>,
-}
+// Parameter structs: shared with clients, re-exported under their old path.
+pub use ironbase_mcp_types::params::{VectorIndexCreateParams, VectorSearchParams};
 
 // ============================================================================
 // Dispatch

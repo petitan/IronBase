@@ -9,13 +9,15 @@
 use crate::adapter::IronBaseAdapter;
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::hybrid::{build_doc_groups, retrieve_and_fuse};
-use super::params::{deserialize_nonempty_filter, HybridSearchParams, ParseParams};
+use super::params::{HybridSearchParams, ParseParams};
+
+// Parameter struct: shared with clients, re-exported under its old path.
+pub use ironbase_mcp_types::params::SearchParams;
 
 mod contract;
 
@@ -45,31 +47,6 @@ const REJECTED_MECHANISM_KEYS: &[&str] = &[
     "provider",
     "projection",
 ];
-
-#[derive(Debug, Deserialize)]
-pub struct SearchParams {
-    pub collection: String,
-    pub query: String,
-    /// Structured metadata filter (e.g. {"year": 2026}). Empty `{}` → None.
-    #[serde(default, deserialize_with = "deserialize_nonempty_filter")]
-    pub filter: Option<Value>,
-    /// Max documents (coarse intent). Default from `default_search_limit`.
-    #[serde(default = "default_search_limit")]
-    pub limit: usize,
-    /// "structured" (default) | "context_block".
-    #[serde(default = "default_format")]
-    pub format: String,
-    /// Include the diagnostics block (default false).
-    #[serde(default)]
-    pub debug: bool,
-}
-
-fn default_search_limit() -> usize {
-    5
-}
-fn default_format() -> String {
-    "structured".to_string()
-}
 
 /// Dispatch retrieval tool calls.
 pub fn dispatch(
