@@ -59,10 +59,8 @@ tools! {
     Aggregate => "aggregate", AggregateParams;
 
     // Index management & search
-    /// The index type is selected by a `type` argument that `IndexListParams` does not carry yet.
     IndexList => "index_list", IndexListParams;
     IndexDrop => "index_drop", IndexDropParams;
-    /// The index type is selected by a `type` argument that `IndexListParams` does not carry yet.
     IndexStats => "index_stats", IndexListParams;
     IndexStatsRefresh => "index_stats_refresh", IndexListParams;
     FuzzySearch => "fuzzy_search", FuzzySearchParams;

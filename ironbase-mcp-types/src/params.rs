@@ -34,6 +34,20 @@ where
     Ok(v.filter(|val| !val.as_object().is_some_and(|m| m.is_empty())))
 }
 
+/// Deserialize an optional string, mapping any non-string value to `None`.
+///
+/// For arguments the handlers used to read with `params.get(..).and_then(as_str)`:
+/// a wrong-typed value was ignored, not rejected, and must stay that way.
+pub fn deserialize_lenient_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<Value> = Option::deserialize(deserializer)?;
+    Ok(v.and_then(|val| val.as_str().map(str::to_string)))
+}
+
 // ============================================================================
 // CRUD Tool Parameters
 // ============================================================================
@@ -174,6 +188,16 @@ pub struct IndexCreateParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexListParams {
     pub collection: String,
+    /// Index subtype: `btree`, `fulltext`, `fuzzy` or `vector`. `index_list` returns
+    /// every subtype without it; `index_stats` defaults to `btree`. A value that is
+    /// not a string is ignored, as the handlers always did.
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_lenient_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub index_type: Option<String>,
 }
 
 /// Parameters for `index_drop` tool

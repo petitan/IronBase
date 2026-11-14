@@ -25,6 +25,8 @@ Phase 2a of the Tuti TUI overhaul. No change to the wire format or to server beh
 - **Wire-format safety net:** `mcp-server/tests/params_wire_golden.rs` pins 239 argument-parsing cases
   over all 72 structs (parsed values and exact error code + message). The golden file was captured on
   the previous code and is byte-identical after the move.
+- **`IndexListParams` carries the `type` selector** of `index_list` / `index_stats`, which the handlers
+  used to read from the raw JSON; a non-string `type` is still ignored, as before.
 - A server test asserts that every `Tool::NAME` is a registered tool and lists the 13 tools that have
   no typed arguments yet.
 

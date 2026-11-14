@@ -131,7 +131,9 @@ fn render() -> String {
     );
     golden!(out, IndexListParams,
         "minimal" => {"collection": "users"},
-        "type ignored" => {"collection": "users", "type": "vector"},
+        "with type" => {"collection": "users", "type": "vector"},
+        "non-string type ignored" => {"collection": "users", "type": 7},
+        "null type" => {"collection": "users", "type": null},
         "missing collection" => {},
     );
     golden!(out, IndexDropParams,

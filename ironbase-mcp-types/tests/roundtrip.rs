@@ -111,7 +111,7 @@ roundtrip_tests! {
         {"collection": "users", "field": "age", "fields": ["a", "b"], "unique": true, "sparse": true};
     index_list: IndexListParams,
         {"collection": "users"},
-        {"collection": "users"};
+        {"collection": "users", "type": "vector"};
     index_drop: IndexDropParams,
         {"collection": "users", "index_name": "users_age"},
         {"collection": "users", "index_name": "users_age"};

@@ -216,11 +216,19 @@ err: InvalidParams invalid type: string "age", expected a sequence
 
 ## IndexListParams / minimal
 in:  {"collection":"users"}
-ok:  IndexListParams { collection: "users" }
+ok:  IndexListParams { collection: "users", index_type: None }
 
-## IndexListParams / type ignored
+## IndexListParams / with type
 in:  {"collection":"users","type":"vector"}
-ok:  IndexListParams { collection: "users" }
+ok:  IndexListParams { collection: "users", index_type: Some("vector") }
+
+## IndexListParams / non-string type ignored
+in:  {"collection":"users","type":7}
+ok:  IndexListParams { collection: "users", index_type: None }
+
+## IndexListParams / null type
+in:  {"collection":"users","type":null}
+ok:  IndexListParams { collection: "users", index_type: None }
 
 ## IndexListParams / missing collection
 in:  {}
