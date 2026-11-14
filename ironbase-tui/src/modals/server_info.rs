@@ -215,7 +215,9 @@ pub fn render(
             summary.total_btree_indexes.to_string(),
         ));
         lines.push(row(
-            "Vektor index:       ",
+            // The engine's index list already contains the vector indexes:
+            // this line is a breakdown of the total above, not an addition
+            "  ebbol vektor:     ",
             format!(
                 "{} ({} vektor)",
                 summary.total_vector_indexes, summary.total_vectors

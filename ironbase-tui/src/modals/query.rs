@@ -265,7 +265,9 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
         let index_name = plan.index_used.as_deref().unwrap_or("-");
         let estimated_rows = explain
             .estimated_rows
-            .map(|n| format!("{}", n))
+            // The planner estimate is a float (e.g. 33.333…); show whole rows
+            // like the engine's own selection reason does
+            .map(|n| format!("{:.0}", n))
             .unwrap_or_else(|| "-".to_string());
         let stage = plan.stage.as_deref().unwrap_or("-");
         let cost = plan.estimated_cost.as_deref().unwrap_or("-");

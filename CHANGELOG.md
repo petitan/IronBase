@@ -16,14 +16,15 @@ Phase 2b of the Tuti TUI overhaul. The server's response JSON is unchanged.
   struct. `index_list` is an untagged enum (its shape depends on `type`), `index_stats` is tagged by
   `type`, and the engine's query plan in `explain` stays open JSON with a typed `summary()` view.
 - **The server builds these seven responses from the shared structs.** A new golden test
-  (`mcp-server/tests/response_wire_golden.rs`, 41 cases) was recorded on the previous code and is
+  (`mcp-server/tests/response_wire_golden.rs`, 40 cases) was recorded on the previous code and is
   reproduced byte for byte; it normalises only file sizes, paths, timestamps, the server version and
   hash-map ordering.
 - **Tuti TUI reads them through one typed call** (`McpClient::call::<T>()`); a missing field is now an
   error instead of a silent `0` / `"?"`. Fixed with it:
   - the explain modal always showed "Unknown" (it read field names the server never sends); it now shows
     the plan, index, estimated rows, stage, cost and reason;
-  - server info never showed index totals;
+  - server info never showed index totals (now the engine's index count, with the vector indexes as a
+    breakdown of it);
   - fuzzy indexes were missing from the index list (now shown as `[FZ]`);
   - vector index dimension showed 0 (`dimension` vs the server's `dim`) and the `dotproduct` metric was
     not recognised.

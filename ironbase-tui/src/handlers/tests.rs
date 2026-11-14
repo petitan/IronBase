@@ -925,7 +925,7 @@ async fn test_explain_modal_shows_real_plan_fields() {
     server.respond(
         "explain",
         wire(
-            r#"{"plan":{"chosenPlan":{"queryPlan":"IndexScan","indexUsed":"users_email","field":"email","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"String(\"bea@example.com\")","estimatedCost":"O(log n)"},"selectionReason":"Index users_email on field email (selectivity: 0.2500, method: uniform, est. rows: 1)","estimatedRows":1.0,"candidates":[],"candidateCount":1}}"#,
+            r#"{"plan":{"chosenPlan":{"queryPlan":"IndexScan","indexUsed":"users_email","field":"email","stage":"FETCH_WITH_INDEX","indexType":"equality","searchKey":"String(\"bea@example.com\")","estimatedCost":"O(log n)"},"selectionReason":"Index users_email on field email (selectivity: 0.2500, method: uniform, est. rows: 1)","estimatedRows":33.333333333333336,"candidates":[],"candidateCount":1}}"#,
         ),
     );
     let mut app = app_with_server(&server).await;
@@ -945,7 +945,9 @@ async fn test_explain_modal_shows_real_plan_fields() {
         line_with(&screen, "Index:").contains("users_email"),
         "{screen}"
     );
-    assert!(line_with(&screen, "Est. rows:").contains('1'), "{screen}");
+    let rows_line = line_with(&screen, "Est. rows:");
+    assert!(rows_line.contains("33"), "{screen}");
+    assert!(!rows_line.contains("33.3"), "{screen}");
     assert!(
         line_with(&screen, "Stage:").contains("FETCH_WITH_INDEX"),
         "{screen}"
@@ -974,7 +976,7 @@ async fn test_server_info_shows_index_totals() {
         "{screen}"
     );
     assert!(
-        line_with(&screen, "Vektor index:").contains("1 (3 vektor)"),
+        line_with(&screen, "ebbol vektor:").contains("1 (3 vektor)"),
         "{screen}"
     );
     assert!(
