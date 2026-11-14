@@ -694,6 +694,28 @@ fn grouped_merge_is_bounded_around_the_best_chunk() {
     );
 }
 
+/// The separators put into the gaps count toward the cap: four 1000-byte
+/// chunks 2 characters apart (best: chunk 1) stay within
+/// `MAX_MERGED_PASSAGE_CHARS` (3004 bytes without counting them)
+#[test]
+fn grouped_merge_cap_counts_the_separators() {
+    let order = [1u64, 0, 2, 3];
+    let mut chunks: Vec<Value> = order
+        .iter()
+        .map(|&ci| {
+            let start = ci * 1002;
+            json!({"doc_id": "t", "chunk_index": ci,
+                   "content": format!("<{ci}>{}", "x".repeat(997)),
+                   "start_char": start, "end_char": start + 1000})
+        })
+        .collect();
+    merge_adjacent_values(&mut chunks, "content");
+    for c in &chunks {
+        let len = c["content"].as_str().unwrap().len();
+        assert!(len <= MAX_MERGED_PASSAGE_CHARS, "passage of {len} bytes");
+    }
+}
+
 /// The flat merge (Rhai / `hybrid_search` results) keeps whole runs and
 /// adds no internal key
 #[test]

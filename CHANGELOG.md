@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such a gap without a separator ("várról.Második", table rows run together). The merge now puts a
   separator into the gap: a space for a one-character gap, a line break between two markdown table rows,
   a paragraph break for a longer gap; nothing where chunks touch or overlap or the stored text keeps the
-  whitespace. A grouped merge's best-chunk offset points past the separator. This changes the merged text
+  whitespace. A grouped merge's best-chunk offset points past the separator, and its
+  `MAX_MERGED_PASSAGE_CHARS` window counts the separator of each join across a gap. This changes the merged text
   of `search` (`merge_chunks`), `rag_chunks_load` and Rhai `db_hybrid_search`; two response golden cases
   (`rag_chunks_load`) change accordingly.
 

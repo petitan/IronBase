@@ -134,29 +134,53 @@ fn merge_adjacent_runs<T>(
                 // nearer side first) while the window stays within `max_chars`
                 let (mut lo, mut hi) = (best_pos, best_pos);
                 if let Some(cap) = max_chars {
+                    // A neighbour costs its text, and the separator its join
+                    // may add (`gap_separator`) when the two are apart
                     let len = |pos: usize| {
                         doc(&results[range[pos].1])
                             .get(text_field)
                             .and_then(|v| v.as_str())
                             .map_or(0, str::len)
                     };
+                    let offset = |pos: usize, key: &str| {
+                        doc(&results[range[pos].1])
+                            .get(key)
+                            .and_then(|v| v.as_u64())
+                    };
+                    // Cost of joining `next` to the window edge `edge`
+                    let join = |edge: usize, next: usize| {
+                        let (first, second) = if next < edge {
+                            (next, edge)
+                        } else {
+                            (edge, next)
+                        };
+                        let apart = matches!(
+                            (offset(first, "end_char"), offset(second, "start_char")),
+                            (Some(end), Some(start)) if start > end
+                        );
+                        len(next) + if apart { MAX_SEPARATOR_BYTES } else { 0 }
+                    };
                     let mut total = len(best_pos);
                     loop {
-                        let left = (lo > 0).then(|| lo - 1).filter(|&p| total + len(p) <= cap);
+                        let left = (lo > 0)
+                            .then(|| lo - 1)
+                            .map(|p| (p, join(lo, p)))
+                            .filter(|&(_, cost)| total + cost <= cap);
                         let right = (hi + 1 < range.len())
                             .then_some(hi + 1)
-                            .filter(|&p| total + len(p) <= cap);
+                            .map(|p| (p, join(hi, p)))
+                            .filter(|&(_, cost)| total + cost <= cap);
                         match (left, right) {
-                            (Some(l), Some(r)) if best_pos - l <= r - best_pos => {
-                                total += len(l);
+                            (Some((l, cost)), Some((r, _))) if best_pos - l <= r - best_pos => {
+                                total += cost;
                                 lo = l;
                             }
-                            (_, Some(r)) => {
-                                total += len(r);
+                            (_, Some((r, cost))) => {
+                                total += cost;
                                 hi = r;
                             }
-                            (Some(l), None) => {
-                                total += len(l);
+                            (Some((l, cost)), None) => {
+                                total += cost;
                                 lo = l;
                             }
                             (None, None) => break,
@@ -298,6 +322,9 @@ fn merge_adjacent_runs<T>(
 
     removed
 }
+
+/// The most bytes [`gap_separator`] puts between two chunks
+const MAX_SEPARATOR_BYTES: usize = 2;
 
 /// What goes between two merged chunks `gap` characters apart in the source
 /// (`start_char` of the next minus `end_char` of the previous). The chunker
