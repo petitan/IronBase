@@ -7,8 +7,8 @@ use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use ironbase_mcp_types::responses::{
     BTreeIndexStats, DatabaseStats, DbStatsCollection, DbStatsDatabase, DbStatsSummary,
-    DbStatsVectorIndex, FulltextIndexInfo, FuzzyIndexInfo, HnswParams, VectorIndexInfo,
-    VectorMetric,
+    DbStatsVectorIndex, FulltextHighlight, FulltextIndexInfo, FuzzyIndexInfo, HnswParams,
+    VectorIndexInfo, VectorMetric,
 };
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -182,14 +182,7 @@ pub struct FulltextSearchResult {
     pub document: Value,
     pub score: f64,
     pub matched_tokens: Vec<String>,
-    pub highlights: Option<Vec<HighlightResultJson>>,
-}
-
-/// Highlight result for JSON serialization
-#[derive(Debug, serde::Serialize)]
-pub struct HighlightResultJson {
-    pub field: String,
-    pub snippets: Vec<String>,
+    pub highlights: Option<Vec<FulltextHighlight>>,
 }
 
 /// Options for extended fuzzy search (adapter-level)
@@ -1617,7 +1610,7 @@ impl IronBaseAdapter {
                 matched_tokens: r.matched_tokens,
                 highlights: r.highlights.map(|hs| {
                     hs.into_iter()
-                        .map(|h| HighlightResultJson {
+                        .map(|h| FulltextHighlight {
                             field: h.field,
                             snippets: h.snippets,
                         })
@@ -1678,7 +1671,7 @@ impl IronBaseAdapter {
                 matched_tokens: r.matched_tokens,
                 highlights: r.highlights.map(|hs| {
                     hs.into_iter()
-                        .map(|h| HighlightResultJson {
+                        .map(|h| FulltextHighlight {
                             field: h.field,
                             snippets: h.snippets,
                         })

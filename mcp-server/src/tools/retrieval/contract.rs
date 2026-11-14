@@ -9,7 +9,10 @@
 
 use crate::error::Result;
 use ironbase_core::search::hybrid::DocGroup;
-use serde_json::{json, Map, Value};
+use ironbase_mcp_types::responses::{
+    SearchBody, SearchDiagnostics, SearchDocument, SearchPassage, SearchResponse, SearchVerdict,
+};
+use serde_json::{Map, Value};
 
 /// Chunk-level structural / RAG-bookkeeping keys never surfaced to the model.
 const CHUNK_TRACKING_KEYS: &[&str] = &[
@@ -52,7 +55,7 @@ pub(crate) fn assemble(
     text_field: &str,
     format: &str,
     debug: bool,
-) -> Result<Value> {
+) -> Result<SearchResponse> {
     let mut used_chars: usize = 0;
     let mut trimmed = false;
     // Groups whose chunks carried no body text under `text_field` (body under a
@@ -196,67 +199,52 @@ pub(crate) fn assemble(
         trimmed = true;
     }
 
-    // Build the document objects (relevance order preserved).
-    let mut documents: Vec<Value> = Vec::with_capacity(included.len());
-    for &i in &included {
-        let s = &staged[i];
-        let mut doc = Map::new();
-        doc.insert("doc_id".to_string(), json!(s.doc_id));
-        for (k, v) in &s.doc_fields {
-            doc.insert(k.clone(), v.clone());
-        }
-        doc.insert("relevance".to_string(), json!(s.relevance));
-        let passages: Vec<Value> = s.texts[..s.emitted]
-            .iter()
-            .map(|t| json!({ "text": t }))
-            .collect();
-        doc.insert("passages".to_string(), json!(passages));
-        documents.push(Value::Object(doc));
-    }
+    // Build the documents (relevance order preserved).
+    let documents: Vec<SearchDocument> = included
+        .iter()
+        .map(|&i| {
+            let s = &staged[i];
+            SearchDocument {
+                doc_id: Value::String(s.doc_id.clone()),
+                fields: s.doc_fields.clone(),
+                relevance: s.relevance,
+                passages: s.texts[..s.emitted]
+                    .iter()
+                    .map(|t| SearchPassage { text: t.clone() })
+                    .collect(),
+            }
+        })
+        .collect();
+    let count = documents.len();
 
-    let mut out = Map::new();
-    // Stage A: no calibration → honest "unknown" (redesign §9 four-state contract).
-    out.insert("verdict".to_string(), json!("unknown"));
-
-    if format == "context_block" {
-        out.insert(
-            "context".to_string(),
-            json!(render_context_block(&documents)),
-        );
+    let body = if format == "context_block" {
+        SearchBody::Context(render_context_block(&documents))
     } else {
-        out.insert("documents".to_string(), json!(documents));
-    }
-    out.insert("count".to_string(), json!(documents.len()));
-    out.insert("trimmed".to_string(), json!(trimmed));
-    if dropped_empty > 0 {
+        SearchBody::Documents(documents)
+    };
+
+    Ok(SearchResponse {
+        // Stage A: no calibration → honest "unknown" (redesign §9 four-state contract).
+        verdict: SearchVerdict::Unknown,
+        body,
+        count,
+        trimmed,
         // Surfaced anomaly (P6): qualified documents whose body text was not under
         // the resolved text field — silently shrinking the result set is forbidden.
-        out.insert("dropped_empty_documents".to_string(), json!(dropped_empty));
-    }
-    if dropped_due_to_budget > 0 {
+        dropped_empty_documents: (dropped_empty > 0).then_some(dropped_empty),
         // Surfaced (P6): matched documents dropped because the context budget was
         // already full — the caller sees that more matches exist beyond `count`.
-        out.insert(
-            "dropped_due_to_budget".to_string(),
-            json!(dropped_due_to_budget),
-        );
-    }
-
-    if debug {
-        out.insert(
-            "diagnostics".to_string(),
-            json!({
-                "stage": "A",
-                "fusion": "rrf (existing)",
-                "calibration": "off",
-                "hyde": "off",
-                "total_chunks": total_chunks,
-                "qualified_doc_ids": qualified_doc_count,
-            }),
-        );
-    }
-
-    Ok(Value::Object(out))
+        dropped_due_to_budget: (dropped_due_to_budget > 0).then_some(dropped_due_to_budget),
+        diagnostics: debug.then(|| SearchDiagnostics {
+            stage: "A".to_string(),
+            fusion: "rrf (existing)".to_string(),
+            calibration: "off".to_string(),
+            hyde: "off".to_string(),
+            total_chunks,
+            qualified_doc_ids: qualified_doc_count,
+        }),
+        degraded: None,
+    })
 }
 
 /// `text` cut to at most `max` bytes on character boundaries, starting at its
@@ -278,24 +266,29 @@ fn shorten_around(text: &str, best_offset: usize, max: usize) -> String {
 }
 
 /// Render a citation-marked plain-text block ready to paste into a prompt.
-fn render_context_block(documents: &[Value]) -> String {
+///
+/// A document field named `doc_id` (a one-chunk document's own) overrides the
+/// group's `doc_id` on the wire, so it is the one cited (`?` when not a string).
+fn render_context_block(documents: &[SearchDocument]) -> String {
     let mut s = String::new();
     for doc in documents {
-        let Some(o) = doc.as_object() else { continue };
-        let doc_id = o.get("doc_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let title = o.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let doc_id = match doc.fields.get("doc_id") {
+            Some(v) => v.as_str().unwrap_or("?"),
+            None => doc.doc_id.as_str().unwrap_or("?"),
+        };
+        let title = doc
+            .fields
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if title.is_empty() {
             s.push_str(&format!("[{}]\n", doc_id));
         } else {
             s.push_str(&format!("[{}] {}\n", doc_id, title));
         }
-        if let Some(passages) = o.get("passages").and_then(|v| v.as_array()) {
-            for p in passages {
-                if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
-                    s.push_str(t);
-                    s.push_str("\n\n");
-                }
-            }
+        for p in &doc.passages {
+            s.push_str(&p.text);
+            s.push_str("\n\n");
         }
     }
     s
@@ -305,6 +298,27 @@ fn render_context_block(documents: &[Value]) -> String {
 mod tests {
     use super::*;
     use ironbase_core::search::hybrid::DocGroup;
+    use serde_json::json;
+
+    /// [`assemble`]'s response as the server sends it
+    fn assemble_json(
+        groups: &[DocGroup],
+        total_chunks: usize,
+        qualified_doc_count: Option<usize>,
+        text_field: &str,
+        format: &str,
+        debug: bool,
+    ) -> Result<Value> {
+        let response = assemble(
+            groups,
+            total_chunks,
+            qualified_doc_count,
+            text_field,
+            format,
+            debug,
+        )?;
+        Ok(serde_json::to_value(response)?)
+    }
 
     const F: &str = "content_text";
 
@@ -339,7 +353,7 @@ mod tests {
         for i in 0..60 {
             groups.push(group(&format!("d{i}"), 0.9 - i as f64 * 0.001, &[300]));
         }
-        let out = assemble(&groups, 1000, None, F, "structured", false).unwrap();
+        let out = assemble_json(&groups, 1000, None, F, "structured", false).unwrap();
 
         let count = out.get("count").unwrap().as_u64().unwrap();
         assert!(
@@ -368,7 +382,7 @@ mod tests {
         for i in 0..100 {
             groups.push(group(&format!("d{i}"), 1.0 - i as f64 * 0.001, &[500, 500]));
         }
-        let out = assemble(&groups, 200, None, F, "structured", false).unwrap();
+        let out = assemble_json(&groups, 200, None, F, "structured", false).unwrap();
         let total: usize = docs(&out)
             .iter()
             .flat_map(|d| d["passages"].as_array().unwrap())
@@ -385,7 +399,7 @@ mod tests {
     #[test]
     fn never_empty_for_oversized_first_doc() {
         let groups = vec![group("big", 1.0, &[DEFAULT_MAX_CONTEXT_CHARS + 5000])];
-        let out = assemble(&groups, 1, None, F, "structured", false).unwrap();
+        let out = assemble_json(&groups, 1, None, F, "structured", false).unwrap();
         assert_eq!(out.get("count").unwrap().as_u64().unwrap(), 1);
         assert_eq!(docs(&out)[0]["passages"].as_array().unwrap().len(), 1);
     }
@@ -400,7 +414,7 @@ mod tests {
             lifted: Map::new(),
             chunks: vec![json!({"doc_id": "x", "other": "y"})],
         };
-        let out = assemble(&[g], 1, None, F, "structured", false).unwrap();
+        let out = assemble_json(&[g], 1, None, F, "structured", false).unwrap();
         assert_eq!(out.get("count").unwrap().as_u64().unwrap(), 0);
         assert_eq!(
             out.get("dropped_empty_documents").and_then(|v| v.as_u64()),
@@ -422,7 +436,7 @@ mod tests {
                 "chunk_index": 2, "_text_score": 3.0, "title": "T"
             })],
         };
-        let out = assemble(&[g], 5, None, F, "structured", false).unwrap();
+        let out = assemble_json(&[g], 5, None, F, "structured", false).unwrap();
         assert_eq!(out.get("verdict").unwrap(), &json!("unknown"));
         let obj = docs(&out)[0].as_object().unwrap();
         assert!(!obj.contains_key("embedding"));
@@ -436,7 +450,7 @@ mod tests {
     /// `context_block` format renders citation-marked text with the doc_id.
     #[test]
     fn context_block_contains_doc_id() {
-        let out = assemble(
+        let out = assemble_json(
             &[group("alpha", 1.0, &[100])],
             5,
             None,
@@ -480,7 +494,7 @@ mod tests {
             .enumerate()
             .map(|(i, &n)| group(&format!("d{i}"), 1.0 - i as f64 * 0.01, &[n]))
             .collect();
-        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let out = assemble_json(&groups, 10, None, F, "structured", false).unwrap();
         let want: Vec<String> = (0..10).map(|i| format!("d{i}")).collect();
         assert_eq!(ids(&out), want);
         assert!(out.get("dropped_due_to_budget").is_none());
@@ -513,7 +527,7 @@ mod tests {
                     group(&format!("d{i}"), 1.0 - i as f64 * 1e-3, &[len, 300])
                 })
                 .collect();
-            let out = assemble(&groups, n, None, F, "structured", false).unwrap();
+            let out = assemble_json(&groups, n, None, F, "structured", false).unwrap();
             let got = ids(&out);
             let want: Vec<String> = (0..got.len()).map(|i| format!("d{i}")).collect();
             assert_eq!(got, want, "round {round}");
@@ -542,7 +556,7 @@ mod tests {
         for i in 0..9 {
             groups.push(group(&format!("d{i}"), 0.5, &[2000]));
         }
-        let out = assemble(&groups, 10, None, F, "structured", false).unwrap();
+        let out = assemble_json(&groups, 10, None, F, "structured", false).unwrap();
         let first = docs(&out)[0]["passages"][0]["text"].as_str().unwrap();
         assert!(first.starts_with("NEEDLE"), "{}", &first[..20]);
         // Near the end the window moves back instead of running short

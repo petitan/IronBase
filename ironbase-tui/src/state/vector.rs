@@ -1,6 +1,6 @@
 //! Vector search state
 
-use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric};
+use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric, VectorSearchHit};
 use serde_json::Value;
 
 /// Distance metric for vector search
@@ -90,17 +90,6 @@ impl From<&IndexInfo> for VectorIndexInfo {
     }
 }
 
-/// Vector search result
-#[derive(Debug, Clone)]
-pub struct VectorSearchResult {
-    /// Flat result Value (doc fields at the top level, `_score` from the engine).
-    pub document: Value,
-    /// Similarity score from `_score` (cosine/L2/IP per the index metric). Higher
-    /// is more similar for cosine/dot-product; the field is named score (not
-    /// distance) to match what `vector_search` actually returns.
-    pub score: f64,
-}
-
 /// Vector search state
 #[derive(Debug, Clone, Default)]
 pub struct VectorSearchState {
@@ -119,8 +108,9 @@ pub struct VectorSearchState {
     pub k: usize,
     /// Optional filter query (JSON string)
     pub filter_input: String,
-    /// Search results
-    pub results: Vec<VectorSearchResult>,
+    /// Search results: each hit's document and `_score` (cosine/L2/IP per the
+    /// index metric; higher is more similar for cosine/dot-product)
+    pub results: Vec<VectorSearchHit>,
     /// Selected result index
     pub selected_result: usize,
 
@@ -208,16 +198,9 @@ impl VectorSearchState {
         }
     }
 
-    /// Update search results (flat shape, v1.0.501+ #68 follow-up): each hit is
-    /// a Value::Object with the doc's fields plus `_score`.
-    pub fn update_results(&mut self, results: Vec<Value>) {
-        self.results = results
-            .into_iter()
-            .map(|v| {
-                let score = v.get("_score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-                VectorSearchResult { document: v, score }
-            })
-            .collect();
+    /// Update search results
+    pub fn update_results(&mut self, results: Vec<VectorSearchHit>) {
+        self.results = results;
         self.selected_result = 0;
         self.is_loading = false;
     }

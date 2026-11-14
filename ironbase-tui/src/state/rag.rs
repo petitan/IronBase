@@ -1,5 +1,6 @@
 //! RAG & Embedding state
 
+use ironbase_mcp_types::responses::{SearchBody, SearchDocument, SearchResponse};
 use serde_json::Value;
 
 /// Active tab in RAG modal
@@ -44,17 +45,20 @@ pub struct RagState {
     pub active_tab: RagTab,
 
     // === Search tab ===
+    // (`search` is intent-only: weights, RRF K and the like are server-owned)
     pub search_query: String,
     pub search_limit: usize,
-    /// Search mode preset: "balanced", "semantic", "keyword"
-    pub search_mode: String,
-    pub search_rrf_k: f64,
-    pub search_results: Vec<Value>,
+    /// Documents of the last `search`
+    pub search_results: Vec<SearchDocument>,
+    /// The last `search` shortened or left out passages, or dropped documents
+    pub search_trimmed: bool,
+    /// Documents that matched but did not fit the server's context budget
+    pub search_dropped_due_to_budget: usize,
+    /// Documents that matched but had no body text
+    pub search_dropped_empty: usize,
     pub selected_result: usize,
-    /// Focus: 0=query, 1=options (limit/mode/rrf_k cycle)
+    /// Focus: 0=query, 1=limit
     pub search_focus: usize,
-    /// Which option is focused (0=limit, 1=mode, 2=rrf_k)
-    pub search_option_idx: usize,
 
     // === Import tab ===
     pub import_content: String,
@@ -104,8 +108,6 @@ impl RagState {
             collection,
             active_tab: RagTab::Search,
             search_limit: 10,
-            search_mode: "balanced".to_string(),
-            search_rrf_k: 20.0,
             import_chunk_size: 1000,
             import_overlap: 100,
             import_mode: "auto".to_string(),
@@ -197,14 +199,46 @@ impl RagState {
         })
     }
 
-    /// Cycle search mode: balanced → semantic → keyword → balanced
-    pub fn toggle_search_mode(&mut self) {
-        self.search_mode = match self.search_mode.as_str() {
-            "balanced" => "semantic".to_string(),
-            "semantic" => "keyword".to_string(),
-            "keyword" => "balanced".to_string(),
-            _ => "balanced".to_string(),
+    /// Take a `search` response: its documents and what the server left out
+    pub fn set_search_response(&mut self, response: SearchResponse) -> Result<(), String> {
+        let SearchBody::Documents(documents) = response.body else {
+            return Err("search: expected documents, got a context block".to_string());
         };
+        self.search_results = documents;
+        self.search_trimmed = response.trimmed;
+        self.search_dropped_due_to_budget = response.dropped_due_to_budget.unwrap_or(0);
+        self.search_dropped_empty = response.dropped_empty_documents.unwrap_or(0);
+        self.selected_result = 0;
+        Ok(())
+    }
+
+    /// The last `search` did not return everything that matched
+    pub fn search_incomplete(&self) -> bool {
+        self.search_trimmed
+            || self.search_dropped_due_to_budget > 0
+            || self.search_dropped_empty > 0
+    }
+
+    /// "Found N results", with what the server left out
+    pub fn search_summary(&self) -> String {
+        let found = format!("Found {} results", self.search_results.len());
+        if !self.search_incomplete() {
+            return found;
+        }
+        let mut left_out = Vec::new();
+        if self.search_dropped_due_to_budget > 0 {
+            left_out.push(format!(
+                "{} more over the context budget",
+                self.search_dropped_due_to_budget
+            ));
+        }
+        if self.search_dropped_empty > 0 {
+            left_out.push(format!("{} without body text", self.search_dropped_empty));
+        }
+        if left_out.is_empty() {
+            left_out.push("passages shortened".to_string());
+        }
+        format!("{} (trimmed: {})", found, left_out.join(", "))
     }
 
     // === Import tab ===

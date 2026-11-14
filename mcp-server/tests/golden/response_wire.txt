@@ -682,3 +682,319 @@ out: {"matched_count":1,"modified_count":1,"auto_embed_error":"Embedding generat
 in:  {"collection":"kb","filter":{"group":"none"},"update":{"$set":{"content":"x"}}}
 out: {"matched_count":0,"modified_count":0}
 
+## fulltext_search / or mode (default)
+in:  {"collection":"kb","field":"content","query":"rust language"}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":2.303391978429191,"_matched_tokens":["rust","languag"]},{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":1.1982950133433956,"_matched_tokens":["languag"]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"]}],"count":4,"match_scope":"chunk"}
+
+## fulltext_search / field defaults to content
+in:  {"collection":"kb","query":"tomatoes"}
+out: {"results":[{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":2.189928240167623,"_matched_tokens":["tomato"]}],"count":1,"match_scope":"chunk"}
+
+## fulltext_search / explicit or mode
+in:  {"collection":"kb","field":"content","query":"rust python","mode":"or"}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":1.713856883609444,"_matched_tokens":["python"]},{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0114801671683427,"_matched_tokens":["rust"]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"]}],"count":4,"match_scope":"chunk"}
+
+## fulltext_search / and mode, document scope
+in:  {"collection":"kb","field":"content","query":"safe ownership","mode":"and"}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.8477519526414317,"_matched_tokens":["safe"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":1.598055742825022,"_matched_tokens":["ownership"]}],"count":2,"match_scope":"document","qualified_doc_ids":1}
+
+## fulltext_search / and mode, chunk scope
+in:  {"collection":"kb","field":"content","query":"safe ownership","mode":"and","match_scope":"chunk"}
+out: {"results":[],"count":0,"match_scope":"chunk"}
+
+## fulltext_search / and mode, explicit document scope
+in:  {"collection":"kb","field":"content","query":"rust search","mode":"and","match_scope":"document"}
+out: {"results":[{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":2.652041386490226,"_matched_tokens":["rust","search"]}],"count":1,"match_scope":"document","qualified_doc_ids":1}
+
+## fulltext_search / chunk scope in or mode
+in:  {"collection":"kb","field":"content","query":"rust","match_scope":"chunk"}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0114801671683427,"_matched_tokens":["rust"]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"]}],"count":3,"match_scope":"chunk"}
+
+## fulltext_search / invalid match_scope
+in:  {"collection":"kb","field":"content","query":"rust","match_scope":"page"}
+err: InvalidParams Invalid match_scope 'page'. Use: 'document' or 'chunk'
+
+## fulltext_search / multi-field
+in:  {"collection":"kb","fields":["content","title"],"query":"rust guide"}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":1.9459101490553132,"_matched_tokens":["guid"]},{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0986122886681098,"_matched_tokens":["rust"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":1.0986122886681098,"_matched_tokens":["rust"]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":6,"chunk_index":0,"doc_id":"d5","embedding":[2.0,1.0],"heading":"Rust Without Body","title":"Rust Without Body","year":2021,"_score":0.9120554849320158,"_matched_tokens":["rust"]}],"count":5,"match_scope":"chunk"}
+
+## fulltext_search / multi-field and mode
+in:  {"collection":"kb","fields":["content","title"],"query":"python guide","mode":"and"}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":3.8918202981106265,"_matched_tokens":["guid","python"]}],"count":1,"match_scope":"document","qualified_doc_ids":1}
+
+## fulltext_search / highlight
+in:  {"collection":"kb","field":"content","query":"rust","highlight":true}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0114801671683427,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["<mark>Rust</mark> is a safe systems programming language"]}]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["An embedded database written in <mark>Rust</mark> with fast search"]}]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["Ownership and borrowing are the core of <mark>Rust</mark> memory safety rules"]}]}],"count":3,"match_scope":"chunk"}
+
+## fulltext_search / highlight context and snippets
+in:  {"collection":"kb","field":"content","query":"rust safe","highlight":true,"highlight_context":8,"highlight_max_snippets":1}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":2.859232119809774,"_matched_tokens":["rust","safe"],"_highlights":[{"field":"content","snippets":["<mark>Rust</mark> is a sa..."]}]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["...tten in <mark>Rust</mark> with fa..."]}]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["...core of <mark>Rust</mark> memory ..."]}]}],"count":3,"match_scope":"chunk"}
+
+## fulltext_search / min_score
+in:  {"collection":"kb","field":"content","query":"rust language","min_score":1.0}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":2.303391978429191,"_matched_tokens":["rust","languag"]},{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":1.1982950133433956,"_matched_tokens":["languag"]}],"count":2,"match_scope":"chunk"}
+
+## fulltext_search / filter
+in:  {"collection":"kb","field":"content","query":"rust","filter":{"year":{"$gte":2025}}}
+out: {"results":[{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]}],"count":1,"match_scope":"chunk"}
+
+## fulltext_search / empty filter
+in:  {"collection":"kb","field":"content","query":"rust","filter":{}}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0114801671683427,"_matched_tokens":["rust"]},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.8747936580915396,"_matched_tokens":["rust"]}],"count":3,"match_scope":"chunk"}
+
+## fulltext_search / limit
+in:  {"collection":"kb","field":"content","query":"rust","limit":1}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":1.0114801671683427,"_matched_tokens":["rust"]}],"count":1,"match_scope":"chunk"}
+
+## fulltext_search / limit and skip
+in:  {"collection":"kb","field":"content","query":"rust","limit":1,"skip":1}
+out: {"results":[{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9381845028807818,"_matched_tokens":["rust"]}],"count":1,"match_scope":"chunk"}
+
+## fulltext_search / projection
+in:  {"collection":"kb","field":"content","query":"rust","projection":{"title":1}}
+out: {"results":[{"_id":1,"title":"Rust Handbook","_score":1.0114801671683427,"_matched_tokens":["rust"]},{"_id":4,"title":"Embedded Databases","_score":0.9381845028807818,"_matched_tokens":["rust"]},{"_id":2,"title":"Rust Handbook","_score":0.8747936580915396,"_matched_tokens":["rust"]}],"count":3,"match_scope":"chunk"}
+
+## fulltext_search / no match
+in:  {"collection":"kb","field":"content","query":"quantum"}
+out: {"results":[],"count":0,"match_scope":"chunk"}
+
+## fulltext_search / empty query
+in:  {"collection":"kb","field":"content","query":""}
+err: InvalidParams Query cannot be empty
+
+## fulltext_search / field without index
+in:  {"collection":"kb","field":"year","query":"rust"}
+err: IndexError No fulltext index found for field 'year'
+
+## fulltext_search / missing collection
+in:  {"collection":"nope","field":"content","query":"rust"}
+err: CollectionNotFound Collection 'nope' not found
+
+## fulltext_search / missing query
+in:  {"collection":"kb","field":"content"}
+err: InvalidParams missing field `query`
+
+## fulltext_analyze / defaults
+in:  {"text":"The Árvíztűrő tükörfúrógép"}
+out: {"input":"The Árvíztűrő tükörfúrógép","language":"None","accent_folding":true,"min_word_length":2,"tokens":[{"original":"The","normalized":"the","stemmed":"the","kept":true},{"original":"Árvíztűrő","normalized":"arvizturo","stemmed":"arvizturo","kept":true},{"original":"tükörfúrógép","normalized":"tukorfurogep","stemmed":"tukorfurogep","kept":true}],"stop_words_removed":[],"final_tokens":["the","arvizturo","tukorfurogep"],"inherited_from_index":false}
+
+## fulltext_analyze / hungarian
+in:  {"text":"A királyok és a királynők","language":"hungarian"}
+out: {"input":"A királyok és a királynők","language":"Hungarian","accent_folding":true,"min_word_length":2,"tokens":[{"original":"A","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királyok","normalized":"kiralyok","stemmed":"kiraly","kept":true},{"original":"és","normalized":"es","stemmed":"es","kept":false,"filtered_reason":"Stop word"},{"original":"a","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királynők","normalized":"kiralynok","stemmed":"kiralyno","kept":true}],"stop_words_removed":["és"],"final_tokens":["kiraly","kiralyno"],"inherited_from_index":false}
+
+## fulltext_analyze / english, no folding, min length 4
+in:  {"text":"The running dogs ran","language":"en","accent_folding":false,"min_word_length":4}
+out: {"input":"The running dogs ran","language":"English","accent_folding":false,"min_word_length":4,"tokens":[{"original":"The","normalized":"the","stemmed":"the","kept":false,"filtered_reason":"Too short (min: 4 chars)"},{"original":"running","normalized":"running","stemmed":"run","kept":true},{"original":"dogs","normalized":"dogs","stemmed":"dog","kept":true},{"original":"ran","normalized":"ran","stemmed":"ran","kept":false,"filtered_reason":"Too short (min: 4 chars)"}],"stop_words_removed":[],"final_tokens":["run","dog"],"inherited_from_index":false}
+
+## fulltext_analyze / german
+in:  {"text":"Die Häuser und die Bäume","language":"german"}
+out: {"input":"Die Häuser und die Bäume","language":"German","accent_folding":true,"min_word_length":2,"tokens":[{"original":"Die","normalized":"die","stemmed":"die","kept":false,"filtered_reason":"Stop word"},{"original":"Häuser","normalized":"hauser","stemmed":"haus","kept":true},{"original":"und","normalized":"und","stemmed":"und","kept":false,"filtered_reason":"Stop word"},{"original":"die","normalized":"die","stemmed":"die","kept":false,"filtered_reason":"Stop word"},{"original":"Bäume","normalized":"baume","stemmed":"baum","kept":true}],"stop_words_removed":["Die","und","die"],"final_tokens":["haus","baum"],"inherited_from_index":false}
+
+## fulltext_analyze / inherited from index
+in:  {"text":"Running Rust programs","collection":"kb","field":"content"}
+out: {"input":"Running Rust programs","language":"English","accent_folding":true,"min_word_length":2,"tokens":[{"original":"Running","normalized":"running","stemmed":"run","kept":true},{"original":"Rust","normalized":"rust","stemmed":"rust","kept":true},{"original":"programs","normalized":"programs","stemmed":"program","kept":true}],"stop_words_removed":[],"final_tokens":["run","rust","program"],"inherited_from_index":true}
+
+## fulltext_analyze / punctuation only
+in:  {"text":"-- !!"}
+out: {"input":"-- !!","language":"None","accent_folding":true,"min_word_length":2,"tokens":[],"stop_words_removed":[],"final_tokens":[],"inherited_from_index":false}
+
+## fulltext_analyze / collection without field
+in:  {"text":"x","collection":"kb"}
+err: InvalidParams fulltext_analyze: 'collection' and 'field' must be provided together
+
+## fulltext_analyze / field without collection
+in:  {"text":"x","field":"content"}
+err: InvalidParams fulltext_analyze: 'collection' and 'field' must be provided together
+
+## fulltext_analyze / index missing
+in:  {"text":"x","collection":"kb","field":"year"}
+err: IndexError No fulltext index found for field 'year'
+
+## fulltext_analyze / missing text
+in:  {"language":"english"}
+err: InvalidParams missing field `text`
+
+## fuzzy_search / default algorithm
+in:  {"collection":"kb","field":"heading","query":"Rust Basic"}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":0.9818181818181818,"_matched_value":"Rust Basics"}],"count":1}
+
+## fuzzy_search / levenshtein
+in:  {"collection":"kb","field":"heading","query":"Pyton Guide","algorithm":"levenshtein","threshold":0.5}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":0.9166666666666666,"_matched_value":"Python Guide"}],"count":1}
+
+## fuzzy_search / damerau_levenshtein
+in:  {"collection":"kb","field":"heading","query":"Gardenign","algorithm":"damerau_levenshtein","threshold":0.7}
+out: {"results":[{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":0.8888888888888888,"_matched_value":"Gardening"}],"count":1}
+
+## fuzzy_search / jaro_winkler threshold
+in:  {"collection":"kb","field":"heading","query":"Embeded Databases","algorithm":"jaro_winkler","threshold":0.9}
+out: {"results":[{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.965359477124183,"_matched_value":"Embedded Databases"}],"count":1}
+
+## fuzzy_search / unknown algorithm
+in:  {"collection":"kb","field":"heading","query":"Gardening","algorithm":"soundex"}
+out: {"results":[{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":1.0,"_matched_value":"Gardening"}],"count":1}
+
+## fuzzy_search / low threshold
+in:  {"collection":"kb","field":"heading","query":"Rust","threshold":0.3}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":0.8727272727272728,"_matched_value":"Rust Basics"},{"_id":6,"chunk_index":0,"doc_id":"d5","embedding":[2.0,1.0],"heading":"Rust Without Body","title":"Rust Without Body","year":2021,"_score":0.8470588235294118,"_matched_value":"Rust Without Body"},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.5392156862745098,"_matched_value":"Ownership in Rust"},{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":0.4537037037037037,"_matched_value":"Gardening"},{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":0.4444444444444444,"_matched_value":"Python Guide"},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.4351851851851852,"_matched_value":"Embedded Databases"}],"count":6}
+
+## fuzzy_search / filter
+in:  {"collection":"kb","field":"heading","query":"Rust","threshold":0.3,"filter":{"year":2024}}
+out: {"results":[{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":0.8727272727272728,"_matched_value":"Rust Basics"},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.5392156862745098,"_matched_value":"Ownership in Rust"}],"count":2}
+
+## fuzzy_search / highlight
+in:  {"collection":"kb","field":"heading","query":"Gardenin","highlight":true}
+out: {"results":[{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":0.9777777777777777,"_matched_value":"Gardening","_highlight":"<mark>Gardening</mark>"}],"count":1}
+
+## fuzzy_search / limit and skip
+in:  {"collection":"kb","field":"heading","query":"Rust","threshold":0.3,"limit":1,"skip":1}
+out: {"results":[{"_id":6,"chunk_index":0,"doc_id":"d5","embedding":[2.0,1.0],"heading":"Rust Without Body","title":"Rust Without Body","year":2021,"_score":0.8470588235294118,"_matched_value":"Rust Without Body"}],"count":1}
+
+## fuzzy_search / projection
+in:  {"collection":"kb","field":"heading","query":"Python Guid","projection":{"heading":1,"year":1}}
+out: {"results":[{"_id":3,"heading":"Python Guide","year":2023,"_score":0.9833333333333333,"_matched_value":"Python Guide"}],"count":1}
+
+## fuzzy_search / no match
+in:  {"collection":"kb","field":"heading","query":"zzzz"}
+out: {"results":[],"count":0}
+
+## fuzzy_search / field without index
+in:  {"collection":"kb","field":"content","query":"rust"}
+err: IndexError No fuzzy index found for field 'content'
+
+## fuzzy_search / missing collection
+in:  {"collection":"nope","field":"heading","query":"x"}
+err: CollectionNotFound Collection 'nope' not found
+
+## fuzzy_search / missing query
+in:  {"collection":"kb","field":"heading"}
+err: InvalidParams missing field `query`
+
+## vector_search / default limit
+in:  {"collection":"kb","vector":[60.0,1.0]}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":0.9999997615814209},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.999999463558197},{"_id":4,"chunk_index":0,"content":"An embedded database written in Rust with fast search","doc_id":"d3","embedding":[54.0,1.0],"heading":"Embedded Databases","title":"Embedded Databases","year":2025,"_score":0.9999983310699463},{"_id":1,"chunk_index":0,"content":"Rust is a safe systems programming language","doc_id":"d1","embedding":[43.0,1.0],"heading":"Rust Basics","title":"Rust Handbook","year":2024,"_score":0.9999783635139465},{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":0.9997928738594055},{"_id":6,"chunk_index":0,"doc_id":"d5","embedding":[2.0,1.0],"heading":"Rust Without Body","title":"Rust Without Body","year":2021,"_score":0.9017555117607117}],"count":6}
+
+## vector_search / limit
+in:  {"collection":"kb","field":"embedding","vector":[60.0,1.0],"limit":2}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":0.9999997615814209},{"_id":2,"chunk_index":1,"content":"Ownership and borrowing are the core of Rust memory safety rules","doc_id":"d1","embedding":[64.0,1.0],"heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"_score":0.999999463558197}],"count":2}
+
+## vector_search / include projection
+in:  {"collection":"kb","field":"embedding","vector":[30.0,1.0],"limit":2,"projection":{"title":1}}
+out: {"results":[{"_score":0.9999931454658508,"_id":5,"title":"Gardening"},{"_score":0.9999492168426514,"_id":1,"title":"Rust Handbook"}],"count":2}
+
+## vector_search / include projection without _id
+in:  {"collection":"kb","field":"embedding","vector":[30.0,1.0],"limit":1,"projection":{"title":1,"_id":0}}
+out: {"results":[{"_score":0.9999931454658508,"title":"Gardening"}],"count":1}
+
+## vector_search / exclude projection
+in:  {"collection":"kb","field":"embedding","vector":[2.0,1.0],"limit":2,"projection":{"embedding":0,"content":0}}
+out: {"results":[{"_score":1.0,"_id":6,"chunk_index":0,"doc_id":"d5","heading":"Rust Without Body","title":"Rust Without Body","year":2021},{"_score":0.910366415977478,"_id":5,"chunk_index":0,"doc_id":"d4","heading":"Gardening","title":"Gardening","year":2022}],"count":2}
+
+## vector_search / opposite vector
+in:  {"collection":"kb","field":"embedding","vector":[-1.0,0.0],"limit":2}
+out: {"results":[{"_id":6,"chunk_index":0,"doc_id":"d5","embedding":[2.0,1.0],"heading":"Rust Without Body","title":"Rust Without Body","year":2021,"_score":-0.8944271802902222},{"_id":5,"chunk_index":0,"content":"Planting tomatoes in spring","doc_id":"d4","embedding":[27.0,1.0],"heading":"Gardening","title":"Gardening","year":2022,"_score":-0.9993147850036621}],"count":2}
+
+## vector_search / wrong dimension
+in:  {"collection":"kb","field":"embedding","vector":[1.0,2.0,3.0]}
+err: InvalidParams Query vector dimension mismatch: expected 2, got 3
+
+## vector_search / field without index
+in:  {"collection":"kb","field":"title","vector":[1.0,2.0]}
+err: IndexError No vector index found for field 'title' in collection 'kb'
+
+## vector_search / missing collection
+in:  {"collection":"nope","vector":[1.0,2.0]}
+err: IndexError No vector index found for field 'embedding' in collection 'nope'
+
+## vector_search / missing vector
+in:  {"collection":"kb"}
+err: InvalidParams missing field `vector`
+
+## vector_search / filter is not an argument
+in:  {"collection":"kb","vector":[60.0,1.0],"limit":1,"filter":{"year":2023}}
+out: {"results":[{"_id":3,"chunk_index":0,"content":"Python is a dynamic language that is easy to learn for beginners","doc_id":"d2","embedding":[63.0,1.0],"heading":"Python Guide","title":"Python Guide","year":2023,"_score":0.9999997615814209}],"count":1}
+
+## search / structured
+in:  {"collection":"kb","query":"rust"}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.04840067340067341,"passages":[{"text":"An embedded database written in Rust with fast search"}]},{"doc_id":"d1","heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"relevance":0.044694435998783824,"passages":[{"text":"Rust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules"}]},{"doc_id":"d2","heading":"Python Guide","title":"Python Guide","year":2023,"relevance":0.02,"passages":[{"text":"Python is a dynamic language that is easy to learn for beginners"}]},{"doc_id":"d4","heading":"Gardening","title":"Gardening","year":2022,"relevance":0.01904761904761905,"passages":[{"text":"Planting tomatoes in spring"}]}],"count":4,"trimmed":false,"dropped_empty_documents":1}
+
+## search / context_block
+in:  {"collection":"kb","query":"rust","format":"context_block"}
+out: {"verdict":"unknown","context":"[d3] Embedded Databases\nAn embedded database written in Rust with fast search\n\n[d1] Rust Handbook\nRust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules\n\n[d2] Python Guide\nPython is a dynamic language that is easy to learn for beginners\n\n[d4] Gardening\nPlanting tomatoes in spring\n\n","count":4,"trimmed":false,"dropped_empty_documents":1}
+
+## search / debug
+in:  {"collection":"kb","query":"rust memory","debug":true}
+out: {"verdict":"unknown","documents":[{"doc_id":"d1","heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"relevance":0.07766233766233768,"passages":[{"text":"Rust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules"}]},{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.04830917874396135,"passages":[{"text":"An embedded database written in Rust with fast search"}]},{"doc_id":"d2","heading":"Python Guide","title":"Python Guide","year":2023,"relevance":0.020833333333333332,"passages":[{"text":"Python is a dynamic language that is easy to learn for beginners"}]},{"doc_id":"d4","heading":"Gardening","title":"Gardening","year":2022,"relevance":0.01904761904761905,"passages":[{"text":"Planting tomatoes in spring"}]}],"count":4,"trimmed":false,"dropped_empty_documents":1,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":5,"qualified_doc_ids":null}}
+
+## search / debug context_block
+in:  {"collection":"kb","query":"python","format":"context_block","debug":true}
+out: {"verdict":"unknown","context":"[d2] Python Guide\nPython is a dynamic language that is easy to learn for beginners\n\n[d3] Embedded Databases\nAn embedded database written in Rust with fast search\n\n[d1] Rust Handbook\nRust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules\n\n[d4] Gardening\nPlanting tomatoes in spring\n\n","count":4,"trimmed":false,"dropped_empty_documents":1,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":5,"qualified_doc_ids":null}}
+
+## search / filter
+in:  {"collection":"kb","query":"rust","filter":{"year":2025}}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.05291005291005291,"passages":[{"text":"An embedded database written in Rust with fast search"}]}],"count":1,"trimmed":false}
+
+## search / empty filter
+in:  {"collection":"kb","query":"rust","filter":{}}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.04840067340067341,"passages":[{"text":"An embedded database written in Rust with fast search"}]},{"doc_id":"d1","heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"relevance":0.044694435998783824,"passages":[{"text":"Rust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules"}]},{"doc_id":"d2","heading":"Python Guide","title":"Python Guide","year":2023,"relevance":0.02,"passages":[{"text":"Python is a dynamic language that is easy to learn for beginners"}]},{"doc_id":"d4","heading":"Gardening","title":"Gardening","year":2022,"relevance":0.01904761904761905,"passages":[{"text":"Planting tomatoes in spring"}]}],"count":4,"trimmed":false,"dropped_empty_documents":1}
+
+## search / limit
+in:  {"collection":"kb","query":"rust","limit":1}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.04840067340067341,"passages":[{"text":"An embedded database written in Rust with fast search"}]}],"count":1,"trimmed":false}
+
+## search / no lexical match
+in:  {"collection":"kb","query":"quantum"}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.021739130434782608,"passages":[{"text":"An embedded database written in Rust with fast search"}]},{"doc_id":"d2","heading":"Python Guide","title":"Python Guide","year":2023,"relevance":0.020833333333333332,"passages":[{"text":"Python is a dynamic language that is easy to learn for beginners"}]},{"doc_id":"d1","heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"relevance":0.02,"passages":[{"text":"Rust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules"}]},{"doc_id":"d4","heading":"Gardening","title":"Gardening","year":2022,"relevance":0.01904761904761905,"passages":[{"text":"Planting tomatoes in spring"}]}],"count":4,"trimmed":false,"dropped_empty_documents":1}
+
+## search / mechanism parameter rejected
+in:  {"collection":"kb","query":"rust","rrf_k":60}
+err: InvalidParams Parameter 'rrf_k' is not accepted by `search` (intent-only surface). Retrieval mechanism (weights, rrf_k, match_scope, merge, caps, …) is server-owned. Use: collection, query, filter, limit, format, debug.
+
+## search / projection rejected
+in:  {"collection":"kb","query":"rust","projection":{"title":1}}
+err: InvalidParams Parameter 'projection' is not accepted by `search` (intent-only surface). Retrieval mechanism (weights, rrf_k, match_scope, merge, caps, …) is server-owned. Use: collection, query, filter, limit, format, debug.
+
+## search / invalid format
+in:  {"collection":"kb","query":"rust","format":"markdown"}
+err: InvalidParams Invalid format 'markdown'. Use: 'structured' or 'context_block'
+
+## search / empty query
+in:  {"collection":"kb","query":""}
+err: InvalidParams Query cannot be empty
+
+## search / missing query
+in:  {"collection":"kb"}
+err: InvalidParams missing field `query`
+
+## search / not an object
+in:  ["kb","rust"]
+err: InvalidParams `search` arguments must be a JSON object with at least {collection, query}.
+
+## search / missing collection
+in:  {"collection":"nope","query":"rust"}
+err: IndexError No vector index found for field 'embedding' in collection 'nope'
+
+## search / invalid collection name
+in:  {"collection":"a$b","query":"rust"}
+err: InvalidParams Collection name can only contain alphanumeric characters, underscores, and hyphens
+
+## search / without embedding provider
+in:  {"collection":"kb","query":"rust","debug":true}
+out: {"verdict":"unknown","documents":[{"doc_id":"d3","heading":"Embedded Databases","title":"Embedded Databases","year":2025,"relevance":0.05050505050505051,"passages":[{"text":"An embedded database written in Rust with fast search"}]},{"doc_id":"d1","heading":"Ownership in Rust","title":"Rust Handbook","year":2024,"relevance":0.04743083003952569,"passages":[{"text":"Rust is a safe systems programming languageOwnership and borrowing are the core of Rust memory safety rules"}]}],"count":2,"trimmed":false,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":2,"qualified_doc_ids":null},"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
+
+## search / without embedding provider, context_block
+in:  {"collection":"kb","query":"python","format":"context_block"}
+out: {"verdict":"unknown","context":"[d2] Python Guide\nPython is a dynamic language that is easy to learn for beginners\n\n","count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
+
+## search / numeric doc_id field
+in:  {"collection":"odd","query":"rust"}
+out: {"verdict":"unknown","documents":[{"doc_id":7,"relevance":0.04285714285714286,"passages":[{"text":"a rust chunk with a numeric doc id"}]}],"count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
+
+## search / numeric doc_id field, context_block
+in:  {"collection":"odd","query":"rust","format":"context_block"}
+out: {"verdict":"unknown","context":"[?]\na rust chunk with a numeric doc id\n\n","count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
+
+## search / context budget
+in:  {"collection":"big","query":"needle","limit":70,"debug":true}
+out: {"verdict":"unknown","documents":[{"doc_id":"b00","relevance":0.04920634920634921,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b01","relevance":0.0469208211143695,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b02","relevance":0.04483695652173913,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b03","relevance":0.04292929292929293,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b04","relevance":0.041176470588235294,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b05","relevance":0.03956043956043956,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b06","relevance":0.03806584362139917,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b07","relevance":0.036679536679536676,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b08","relevance":0.0353901996370236,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b09","relevance":0.034188034188034185,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b10","relevance":0.03306451612903225,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b11","relevance":0.03201219512195122,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b12","relevance":0.031024531024531024,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b13","relevance":0.030095759233926128,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b14","relevance":0.02922077922077922,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b15","relevance":0.02839506172839506,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b16","relevance":0.027614571092831965,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b17","relevance":0.026875699888017912,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b18","relevance":0.026175213675213672,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b19","relevance":0.025510204081632654,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b20","relevance":0.024878048780487806,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b21","relevance":0.024276377217553685,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b22","relevance":0.02370304114490161,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b23","relevance":0.023156089193825044,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b24","relevance":0.02263374485596708,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b25","relevance":0.022134387351778653,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b26","relevance":0.021656534954407294,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b27","relevance":0.021198830409356724,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b28","relevance":0.020760028149190708,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b29","relevance":0.020338983050847456,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b30","relevance":0.019934640522875816,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b31","relevance":0.019546027742749057,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b32","relevance":0.019172245891661593,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b33","relevance":0.018812463256907698,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b34","relevance":0.01846590909090909,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b35","relevance":0.01813186813186813,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b36","relevance":0.017809675704412546,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b37","relevance":0.017498713329902212,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b38","relevance":0.01719840478564307,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b39","relevance":0.016908212560386476,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b40","relevance":0.016627634660421546,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b41","relevance":0.01635620172648796,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b42","relevance":0.01609347442680776,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b43","relevance":0.015839041095890412,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b44","relevance":0.015592515592515595,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b45","relevance":0.015353535353535355,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b46","relevance":0.015121759622937941,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b47","relevance":0.014896867838044307,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b48","relevance":0.014678558156819026,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b49","relevance":0.014466546112115734,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b50","relevance":0.01426056338028169,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b51","relevance":0.014060356652949246,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b52","relevance":0.013865686602071499,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b53","relevance":0.013676326929338978,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b54","relevance":0.013492063492063493,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b55","relevance":0.013312693498452011,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b56","relevance":0.013138024765931743,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b57","relevance":0.012967875036840555,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b58","relevance":0.012802071346375146,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]},{"doc_id":"b59","relevance":0.012640449438202249,"passages":[{"text":"needle filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler fill"}]}],"count":60,"trimmed":true,"dropped_due_to_budget":1,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":61,"qualified_doc_ids":null},"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}
+

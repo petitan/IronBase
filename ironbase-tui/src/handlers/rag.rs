@@ -2,6 +2,8 @@
 
 use crate::app::{App, Modal, RagState};
 use crossterm::event::{KeyCode, KeyModifiers};
+use ironbase_mcp_types::params::SearchParams;
+use ironbase_mcp_types::tools::Search;
 
 /// Open RAG & Embedding modal
 pub(crate) async fn handle_rag_open(app: &mut App) {
@@ -87,52 +89,35 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
                 return;
             }
 
-            let collection = app.rag_state.collection.clone();
-            let query = app.rag_state.search_query.clone();
-            let limit = app.rag_state.search_limit;
-            let mode = app.rag_state.search_mode.clone();
-            let rrf_k = app.rag_state.search_rrf_k;
+            let args = SearchParams {
+                collection: app.rag_state.collection.clone(),
+                query: app.rag_state.search_query.clone(),
+                filter: None,
+                limit: app.rag_state.search_limit,
+                format: "structured".to_string(),
+                debug: false,
+            };
 
             app.rag_state.is_loading = true;
             app.rag_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db
-                    .hybrid_search_rag(&collection, &query, limit, &mode, rrf_k)
+                let result = db
+                    .call::<Search>(&args)
                     .await
-                {
-                    Ok(result) => {
-                        let results: Vec<serde_json::Value> = result
-                            .get("results")
-                            .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            .unwrap_or_default();
-                        let count = results.len();
-                        app.rag_state.search_results = results;
-                        app.rag_state.selected_result = 0;
-                        app.rag_state.is_loading = false;
-                        app.rag_state.message = Some(format!("Found {} results", count));
-                    }
-                    Err(e) => {
-                        app.rag_state.is_loading = false;
-                        app.rag_state.error = Some(format!("{}", e));
-                    }
+                    .map_err(|e| e.to_string())
+                    .and_then(|response| app.rag_state.set_search_response(response));
+                app.rag_state.is_loading = false;
+                match result {
+                    Ok(()) => app.rag_state.message = Some(app.rag_state.search_summary()),
+                    Err(e) => app.rag_state.error = Some(e),
                 }
             }
         }
 
-        // Switch focus between query and options
+        // Switch focus between query and limit
         (KeyCode::Tab, KeyModifiers::NONE) => {
-            if app.rag_state.search_focus == 0 {
-                app.rag_state.search_focus = 1;
-                app.rag_state.search_option_idx = 0;
-            } else {
-                // Cycle through options, then back to query
-                if app.rag_state.search_option_idx < 2 {
-                    app.rag_state.search_option_idx += 1;
-                } else {
-                    app.rag_state.search_focus = 0;
-                }
-            }
+            app.rag_state.search_focus = 1 - app.rag_state.search_focus.min(1);
         }
 
         // Navigate results (plain j/k belong to the query input)
@@ -147,33 +132,15 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
             app.rag_state.search_result_down();
         }
 
-        // Adjust option values with Up/Down when focus is on options
+        // Adjust the limit with Up/Down when it has the focus
         (KeyCode::Up, _) if app.rag_state.search_focus == 1 => {
-            match app.rag_state.search_option_idx {
-                0 if app.rag_state.search_limit < 100 => {
-                    app.rag_state.search_limit += 1;
-                }
-                1 => {
-                    app.rag_state.toggle_search_mode();
-                }
-                2 => {
-                    app.rag_state.search_rrf_k += 5.0;
-                }
-                _ => {}
+            if app.rag_state.search_limit < 100 {
+                app.rag_state.search_limit += 1;
             }
         }
         (KeyCode::Down, _) if app.rag_state.search_focus == 1 => {
-            match app.rag_state.search_option_idx {
-                0 if app.rag_state.search_limit > 1 => {
-                    app.rag_state.search_limit -= 1;
-                }
-                1 => {
-                    app.rag_state.toggle_search_mode();
-                }
-                2 if app.rag_state.search_rrf_k > 5.0 => {
-                    app.rag_state.search_rrf_k -= 5.0;
-                }
-                _ => {}
+            if app.rag_state.search_limit > 1 {
+                app.rag_state.search_limit -= 1;
             }
         }
 

@@ -8,14 +8,16 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use ironbase_mcp_types::responses::{
-    BTreeIndexCreated, CompoundIndexCreated, ExplainResponse, FulltextIndexCreated,
-    FuzzyIndexCreated, IndexCreateResponse, IndexDropResponse, IndexListAll, IndexListResponse,
-    IndexStatsRefreshResponse, IndexStatsResponse, TypedIndexList,
+    BTreeIndexCreated, CompoundIndexCreated, ExplainResponse, FulltextAnalyzeResponse, FulltextHit,
+    FulltextIndexCreated, FulltextSearchResponse, FuzzyHit, FuzzyIndexCreated, FuzzySearchResponse,
+    IndexCreateResponse, IndexDropResponse, IndexListAll, IndexListResponse,
+    IndexStatsRefreshResponse, IndexStatsResponse, MatchScope, TokenAnalysis, TypedIndexList,
 };
 
 use super::fusion::apply_document_qualification;
 use super::helpers::{
-    parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT,
+    document_fields, parse_projection_value, parse_sort_value, validate_collection_name,
+    DEFAULT_QUERY_LIMIT,
 };
 use super::params::{
     ExplainParams, FindWithHintParams, FulltextAnalyzeParams, FulltextIndexParams,
@@ -288,25 +290,24 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     // Core handles everything: filter, projection, highlight
     let results = adapter.fuzzy_search_ext(&p.collection, &p.field, &p.query, options)?;
 
-    // Format results
     // Flat shape, consistent with fulltext_search and hybrid_search (#68 follow-up,
     // v1.0.501): document fields at the top level + `_`-prefixed engine metadata.
-    let documents: Vec<Value> = results
+    let results = results
         .into_iter()
         .map(|r| {
-            let mut result = r.document;
-            if let Value::Object(ref mut obj) = result {
-                obj.insert("_score".to_string(), json!(r.score));
-                obj.insert("_matched_value".to_string(), json!(r.matched_value));
-                if let Some(highlight) = r.highlight {
-                    obj.insert("_highlight".to_string(), json!(highlight));
-                }
-            }
-            result
+            Ok(FuzzyHit {
+                document: document_fields(r.document)?,
+                score: r.score,
+                matched_value: r.matched_value,
+                highlight: r.highlight,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
-    Ok(json!({"results": documents, "count": documents.len()}))
+    Ok(serde_json::to_value(FuzzySearchResponse {
+        count: results.len(),
+        results,
+    })?)
 }
 
 fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -361,36 +362,30 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     // Flat shape, consistent with hybrid_search (#68, v1.0.501): document fields
     // at the top level, engine metadata with `_`-prefix to avoid colliding with
     // a user field named e.g. "score". Clients write one parser for both tools.
-    let documents: Vec<Value> = results
+    let results = results
         .into_iter()
         .map(|res| {
-            let mut result = res.document;
-            if let Value::Object(ref mut obj) = result {
-                obj.insert("_score".to_string(), json!(res.score));
-                obj.insert("_matched_tokens".to_string(), json!(res.matched_tokens));
-                if let Some(highlights) = res.highlights {
-                    obj.insert("_highlights".to_string(), json!(highlights));
-                }
-            }
-            result
+            Ok(FulltextHit {
+                document: document_fields(res.document)?,
+                score: res.score,
+                matched_tokens: res.matched_tokens,
+                highlights: res.highlights,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // #4: Always include match_scope in response (consistent with hybrid_search)
     let match_scope = if qual.is_doc_scope {
-        "document"
+        MatchScope::Document
     } else {
-        "chunk"
+        MatchScope::Chunk
     };
-    let mut response = json!({
-        "results": documents,
-        "count": documents.len(),
-        "match_scope": match_scope
-    });
-    if let Some(count) = qual.qualified_doc_count {
-        response["qualified_doc_ids"] = json!(count);
-    }
-    Ok(response)
+    Ok(serde_json::to_value(FulltextSearchResponse {
+        count: results.len(),
+        results,
+        match_scope,
+        qualified_doc_ids: qual.qualified_doc_count,
+    })?)
 }
 
 /// Handle fulltext_analyze - debug tokenization process
@@ -431,11 +426,26 @@ fn handle_fulltext_analyze(params: Value, adapter: &Arc<IronBaseAdapter>) -> Res
     };
 
     let result = analyze_text(&p.text, &options);
-    let mut out = json!(result);
-    if let Value::Object(ref mut obj) = out {
-        obj.insert("inherited_from_index".to_string(), json!(inherited));
-    }
-    Ok(out)
+    Ok(serde_json::to_value(FulltextAnalyzeResponse {
+        input: result.input,
+        language: result.language,
+        accent_folding: result.accent_folding,
+        min_word_length: result.min_word_length,
+        tokens: result
+            .tokens
+            .into_iter()
+            .map(|t| TokenAnalysis {
+                original: t.original,
+                normalized: t.normalized,
+                stemmed: t.stemmed,
+                kept: t.kept,
+                filtered_reason: t.filtered_reason,
+            })
+            .collect(),
+        stop_words_removed: result.stop_words_removed,
+        final_tokens: result.final_tokens,
+        inherited_from_index: inherited,
+    })?)
 }
 
 fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

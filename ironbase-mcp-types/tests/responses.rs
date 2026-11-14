@@ -309,3 +309,128 @@ fn index_create_shapes() {
         r#"{"success":true,"message":"Index statistics refreshed for collection 'w'"}"#,
     );
 }
+
+// === Search tool group (golden "fulltext_search" … "search" cases) ===
+
+#[test]
+fn fulltext_search_hits_are_flat_documents_with_typed_metadata() {
+    let text = r#"{"results":[{"_id":1,"content":"Rust is a safe systems programming language","year":2024,"_score":2.859232119809774,"_matched_tokens":["rust","safe"],"_highlights":[{"field":"content","snippets":["<mark>Rust</mark> is a sa..."]}]},{"_id":4,"content":"An embedded database written in Rust with fast search","_score":0.9381845028807818,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["...tten in <mark>Rust</mark> with fa..."]}]}],"count":2,"match_scope":"chunk"}"#;
+    let r = same_bytes::<<tools::FulltextSearch as Tool>::Resp>(text);
+    assert_eq!(r.match_scope, MatchScope::Chunk);
+    assert_eq!(r.qualified_doc_ids, None);
+    let hit = &r.results[0];
+    assert_eq!(hit.score, 2.859232119809774);
+    assert_eq!(hit.matched_tokens, ["rust", "safe"]);
+    assert_eq!(hit.highlights.as_ref().unwrap()[0].field, "content");
+    // The engine metadata is not part of the document
+    assert_eq!(
+        hit.document.keys().collect::<Vec<_>>(),
+        ["_id", "content", "year"]
+    );
+
+    let scoped = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_id":4,"_score":2.652041386490226,"_matched_tokens":["rust","search"]}],"count":1,"match_scope":"document","qualified_doc_ids":1}"#,
+    );
+    assert_eq!(scoped.match_scope, MatchScope::Document);
+    assert_eq!(scoped.qualified_doc_ids, Some(1));
+    assert_eq!(scoped.results[0].highlights, None);
+
+    for field in ["_score", "_matched_tokens", "match_scope", "count"] {
+        requires::<FulltextSearchResponse>(text, field);
+    }
+}
+
+#[test]
+fn fulltext_analyze() {
+    let text = r#"{"input":"A királyok és a királynők","language":"Hungarian","accent_folding":true,"min_word_length":2,"tokens":[{"original":"A","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királyok","normalized":"kiralyok","stemmed":"kiraly","kept":true},{"original":"és","normalized":"es","stemmed":"es","kept":false,"filtered_reason":"Stop word"},{"original":"a","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királynők","normalized":"kiralynok","stemmed":"kiralyno","kept":true}],"stop_words_removed":["és"],"final_tokens":["kiraly","kiralyno"],"inherited_from_index":false}"#;
+    let r = same_bytes::<<tools::FulltextAnalyze as Tool>::Resp>(text);
+    assert_eq!(r.final_tokens, ["kiraly", "kiralyno"]);
+    assert_eq!(r.tokens[1].filtered_reason, None);
+    assert!(!r.inherited_from_index);
+    requires::<FulltextAnalyzeResponse>(text, "inherited_from_index");
+    requires::<FulltextAnalyzeResponse>(text, "kept");
+}
+
+#[test]
+fn fuzzy_search_hits() {
+    let text = r#"{"results":[{"_id":5,"heading":"Gardening","year":2022,"_score":0.9777777777777777,"_matched_value":"Gardening","_highlight":"<mark>Gardening</mark>"}],"count":1}"#;
+    let r = same_bytes::<<tools::FuzzySearch as Tool>::Resp>(text);
+    assert_eq!(r.results[0].matched_value, "Gardening");
+    assert_eq!(
+        r.results[0].highlight.as_deref(),
+        Some("<mark>Gardening</mark>")
+    );
+    let plain = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_id":3,"heading":"Python Guide","year":2023,"_score":0.9833333333333333,"_matched_value":"Python Guide"}],"count":1}"#,
+    );
+    assert_eq!(plain.results[0].highlight, None);
+    requires::<FuzzySearchResponse>(text, "_matched_value");
+    requires::<FuzzySearchResponse>(text, "_score");
+}
+
+#[test]
+fn vector_search_score_position_follows_the_projection() {
+    // No projection: `_score` after the document's fields
+    let last = r#"{"results":[{"_id":3,"embedding":[63.0,1.0],"title":"Python Guide","_score":0.9999997615814209}],"count":1}"#;
+    let r = same_bytes::<<tools::VectorSearch as Tool>::Resp>(last);
+    assert_eq!(r.results[0].score_position, ScorePosition::Last);
+    assert_eq!(r.results[0].score, 0.9999997615814209);
+    assert!(!r.results[0].document.contains_key("_score"));
+    // With a projection: `_score` first
+    let first = r#"{"results":[{"_score":0.9999931454658508,"_id":5,"title":"Gardening"},{"_score":1.0,"title":"Rust"}],"count":2}"#;
+    let r = same_bytes::<VectorSearchResponse>(first);
+    assert_eq!(r.results[0].score_position, ScorePosition::First);
+    assert_eq!(r.results[1].document.len(), 1);
+
+    requires::<VectorSearchResponse>(last, "_score");
+    let wrong: Result<VectorSearchResponse, _> =
+        serde_json::from_str(r#"{"results":[{"_id":1,"_score":"high"}],"count":1}"#);
+    assert!(wrong.is_err());
+}
+
+#[test]
+fn search_documents_and_context_block() {
+    let structured = r#"{"verdict":"unknown","documents":[{"doc_id":"d3","title":"Embedded Databases","year":2025,"relevance":0.04840067340067341,"passages":[{"text":"An embedded database written in Rust with fast search"}]}],"count":1,"trimmed":false}"#;
+    let r = same_bytes::<<tools::Search as Tool>::Resp>(structured);
+    assert_eq!(r.verdict, SearchVerdict::Unknown);
+    let SearchBody::Documents(docs) = &r.body else {
+        panic!("{r:?}")
+    };
+    assert_eq!(docs[0].doc_id, "d3");
+    assert_eq!(docs[0].fields.keys().collect::<Vec<_>>(), ["title", "year"]);
+    assert_eq!(docs[0].passages.len(), 1);
+
+    let context = r#"{"verdict":"unknown","context":"[d2] Python Guide\nPython is a dynamic language\n\n","count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}"#;
+    let r = same_bytes::<SearchResponse>(context);
+    assert!(matches!(r.body, SearchBody::Context(ref c) if c.starts_with("[d2]")));
+    assert!(r.degraded.is_some());
+
+    let budget = r#"{"verdict":"unknown","documents":[],"count":0,"trimmed":true,"dropped_empty_documents":1,"dropped_due_to_budget":2,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":61,"qualified_doc_ids":null}}"#;
+    let r = same_bytes::<SearchResponse>(budget);
+    assert_eq!(r.dropped_due_to_budget, Some(2));
+    assert_eq!(r.dropped_empty_documents, Some(1));
+    assert_eq!(r.diagnostics.as_ref().unwrap().qualified_doc_ids, None);
+
+    for field in [
+        "verdict",
+        "count",
+        "trimmed",
+        "relevance",
+        "passages",
+        "doc_id",
+    ] {
+        requires::<SearchResponse>(structured, field);
+    }
+    requires::<SearchResponse>(structured, "documents");
+    requires::<SearchResponse>(budget, "total_chunks");
+    // A one-chunk document's own non-string `doc_id` reaches the wire as is
+    // (golden "search / numeric doc_id field"); it must not fail the whole list
+    let numeric: SearchResponse = serde_json::from_str(
+        r#"{"verdict":"unknown","documents":[{"doc_id":7,"relevance":0.04285714285714286,"passages":[{"text":"a rust chunk"}]}],"count":1,"trimmed":false}"#,
+    )
+    .unwrap();
+    match numeric.body {
+        SearchBody::Documents(docs) => assert_eq!(docs[0].doc_id, serde_json::json!(7)),
+        other => panic!("{other:?}"),
+    }
+}

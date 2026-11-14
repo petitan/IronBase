@@ -77,9 +77,9 @@ tools! {
     IndexDrop => "index_drop", IndexDropParams => IndexDropResponse;
     IndexStats => "index_stats", IndexListParams => IndexStatsResponse;
     IndexStatsRefresh => "index_stats_refresh", IndexListParams => IndexStatsRefreshResponse;
-    FuzzySearch => "fuzzy_search", FuzzySearchParams;
-    FulltextSearch => "fulltext_search", FulltextSearchParams;
-    FulltextAnalyze => "fulltext_analyze", FulltextAnalyzeParams;
+    FuzzySearch => "fuzzy_search", FuzzySearchParams => FuzzySearchResponse;
+    FulltextSearch => "fulltext_search", FulltextSearchParams => FulltextSearchResponse;
+    FulltextAnalyze => "fulltext_analyze", FulltextAnalyzeParams => FulltextAnalyzeResponse;
     Explain => "explain", ExplainParams => ExplainResponse;
     FindWithHint => "find_with_hint", FindWithHintParams;
 
@@ -137,8 +137,8 @@ tools! {
     AdminApikeyDelete => "admin_apikey_delete", AdminApiKeyIdParams;
 
     // Vector & retrieval
-    VectorSearch => "vector_search", VectorSearchParams;
-    Search => "search", SearchParams;
+    VectorSearch => "vector_search", VectorSearchParams => VectorSearchResponse;
+    Search => "search", SearchParams => SearchResponse;
 
     // Embedding
     EmbedText => "embed_text", EmbedTextParams;

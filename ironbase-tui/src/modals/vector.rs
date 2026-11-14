@@ -177,16 +177,12 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
             };
 
             // Format: similarity score + document preview
-            let doc_preview = match &r.document {
-                serde_json::Value::Object(obj) => {
-                    let id = obj
-                        .get("_id")
-                        .map(|v| format!("{}", v))
-                        .unwrap_or_else(|| "?".to_string());
-                    format!("id:{}", id)
-                }
-                _ => "?".to_string(),
-            };
+            let id = r
+                .document
+                .get("_id")
+                .map(|v| format!("{}", v))
+                .unwrap_or_else(|| "?".to_string());
+            let doc_preview = format!("id:{}", id);
 
             let text = format!("  {:.4}  {}", r.score, doc_preview);
             ListItem::new(text).style(style)

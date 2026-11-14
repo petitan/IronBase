@@ -2,13 +2,18 @@
 
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::helpers::{parse_projection_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
+use super::helpers::{
+    document_fields, parse_projection_value, validate_collection_name, DEFAULT_QUERY_LIMIT,
+};
 use super::params::ParseParams;
-use ironbase_mcp_types::responses::{HnswParams, IndexCreateResponse, VectorIndexCreated};
+use ironbase_mcp_types::responses::{
+    HnswParams, IndexCreateResponse, ScorePosition, VectorIndexCreated, VectorSearchHit,
+    VectorSearchResponse,
+};
 
 // Parameter structs: shared with clients, re-exported under their old path.
 pub use ironbase_mcp_types::params::{VectorIndexCreateParams, VectorSearchParams};
@@ -79,44 +84,44 @@ fn handle_vector_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     let results = adapter.vector_search(&p.collection, &p.field, &query_vector, limit)?;
 
     // Apply projection if specified, or convert to simple format
-    let results_json: Vec<Value> = if let Some(proj) = projection {
+    let results = if let Some(proj) = projection {
         apply_projection_to_results(results, &proj)
     } else {
-        results_to_json(results)
+        results_to_hits(results)?
     };
 
-    Ok(json!({
-        "results": results_json,
-        "count": results_json.len()
-    }))
+    Ok(serde_json::to_value(VectorSearchResponse {
+        count: results.len(),
+        results,
+    })?)
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-/// Convert vector search results to JSON array
-fn results_to_json(results: Vec<(Value, f32)>) -> Vec<Value> {
+/// Vector search results as hits: the document with `_score` appended
+fn results_to_hits(results: Vec<(Value, f32)>) -> Result<Vec<VectorSearchHit>> {
     results
         .into_iter()
         .map(|(doc, score)| {
-            let mut result = doc;
-            if let Value::Object(ref mut obj) = result {
-                obj.insert("_score".to_string(), json!(score));
-            }
-            result
+            Ok(VectorSearchHit {
+                document: document_fields(doc)?,
+                score: f64::from(score),
+                score_position: ScorePosition::Last,
+            })
         })
         .collect()
 }
 
-/// Apply projection to vector search results
+/// Apply projection to vector search results (`_score` first in each hit)
 /// Follows MongoDB projection semantics:
 /// - In include mode: only include specified fields; _id is included by default unless explicitly excluded
 /// - In exclude mode: exclude specified fields; _id is always included
 fn apply_projection_to_results(
     results: Vec<(Value, f32)>,
     projection: &HashMap<String, i32>,
-) -> Vec<Value> {
+) -> Vec<VectorSearchHit> {
     let is_include_mode = projection.values().any(|&v| v == 1);
     // Check if _id is explicitly excluded ({"_id": 0})
     let id_explicitly_excluded = projection.get("_id").copied() == Some(0);
@@ -124,7 +129,7 @@ fn apply_projection_to_results(
     results
         .into_iter()
         .map(|(doc, score)| {
-            let mut result = json!({ "_score": score });
+            let mut document = Map::new();
             if let Value::Object(obj) = doc {
                 for (key, value) in obj {
                     let should_include = if is_include_mode {
@@ -140,11 +145,15 @@ fn apply_projection_to_results(
                         projection.get(&key).copied().unwrap_or(1) != 0
                     };
                     if should_include {
-                        result[&key] = value;
+                        document.insert(key, value);
                     }
                 }
             }
-            result
+            VectorSearchHit {
+                document,
+                score: f64::from(score),
+                score_position: ScorePosition::First,
+            }
         })
         .collect()
 }

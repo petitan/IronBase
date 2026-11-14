@@ -140,14 +140,12 @@ fn handle_search(
         p.debug,
     )?;
     if !semantic_available {
-        if let Value::Object(ref mut o) = out {
-            o.insert(
-                "degraded".to_string(),
-                json!("semantic search unavailable (no embedding provider configured) — BM25-only"),
-            );
-        }
+        out.degraded = Some(
+            "semantic search unavailable (no embedding provider configured) — BM25-only"
+                .to_string(),
+        );
     }
-    Ok(out)
+    Ok(serde_json::to_value(out)?)
 }
 
 /// The embedding, its auto-embed source hash (D4) and the shadow of a
