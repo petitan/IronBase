@@ -1,7 +1,10 @@
 //! Key handlers: fulltext
 
 use crate::app::{App, FulltextState, Modal};
+use crate::state::fulltext::FULLTEXT_LIMIT;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ironbase_mcp_types::params::FulltextSearchParams;
+use ironbase_mcp_types::tools::FulltextSearch;
 
 /// Open fulltext search modal
 pub(crate) async fn handle_fulltext_open(app: &mut App) {
@@ -17,24 +20,15 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
         return;
     }
 
-    // Get list of fulltext indexes for this collection
-    let indexed_fields = if let Some(ref db) = app.db {
-        match db.index_entries(collection).await {
-            Ok(entries) => {
-                // Filter to only fulltext indexes (format: "{collection}_{field}_fts")
-                let prefix = format!("{}_", collection);
-                entries
-                    .into_iter()
-                    .map(|e| e.name)
-                    .filter(|idx| idx.ends_with("_fts"))
-                    .filter_map(|idx| {
-                        // Extract field name: remove "_fts" suffix and collection prefix
-                        let without_suffix = idx.trim_end_matches("_fts");
-                        without_suffix.strip_prefix(&prefix).map(|s| s.to_string())
-                    })
-                    .collect()
+    // The fields of the collection's fulltext indexes, as the server reports them
+    let indexed_fields: Vec<String> = if let Some(ref db) = app.db {
+        match db.fulltext_indexes(collection).await {
+            Ok(indexes) => indexes.into_iter().map(|idx| idx.field).collect(),
+            // A failed listing is not "no index": show why it failed
+            Err(e) => {
+                app.set_error(format!("Fulltext indexek lekerdezese sikertelen: {}", e));
+                return;
             }
-            Err(_) => Vec::new(),
         }
     } else {
         Vec::new()
@@ -82,12 +76,25 @@ pub(crate) async fn handle_fulltext_key_async(
                 let field = app.fulltext_state.field.clone();
                 let query = app.fulltext_state.query.clone();
 
-                match db
-                    .fulltext_search(&collection, &field, &query, Some(50))
-                    .await
-                {
-                    Ok(results) => {
-                        app.fulltext_state.results = results;
+                let args = FulltextSearchParams {
+                    collection,
+                    field,
+                    fields: None,
+                    query,
+                    limit: Some(FULLTEXT_LIMIT),
+                    skip: None,
+                    min_score: None,
+                    projection: None,
+                    mode: None,
+                    match_scope: None,
+                    filter: None,
+                    highlight: false,
+                    highlight_context: None,
+                    highlight_max_snippets: None,
+                };
+                match db.call::<FulltextSearch>(&args).await {
+                    Ok(response) => {
+                        app.fulltext_state.results = response.results;
                         app.fulltext_state.selected_result = 0;
                         app.fulltext_state.error = None;
                     }

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI search screens; typed MCP responses for the search tools (ironbase-core 0.3.465, mcp-server 1.0.663)
+
+Phase 2d of the Tuti TUI overhaul. The server's response JSON is unchanged.
+
+- **`ironbase-mcp-types` gains response types for the search tools:** `fulltext_search`, `fulltext_analyze`,
+  `fuzzy_search`, `vector_search` and the hybrid `search` (verdict, documents or context block, the
+  truncation flags `trimmed` / `dropped_due_to_budget` / `dropped_empty_documents`, diagnostics, `degraded`).
+  Hit documents stay open JSON; scores and per-hit metadata are typed. The server builds these responses
+  from the shared structs; the response golden test grew from 171 to 260 cases (recorded on the previous
+  code) and every recorded search response round-trips through the shared types byte for byte.
+- **A document's own fields named like the metadata do not break a client.** The server writes
+  `_highlights` / `_highlight` only with `highlight: true`, lets a projected document `_score` win in
+  `vector_search`, and writes `_score`, `_matched_tokens`, `_matched_value`, `relevance` and `passages`
+  over a same-named document field in place. The hit types parse such values leniently: a metadata key
+  without the engine's shape (a document's `_highlights: 5`, a `_highlight` other than the matched value
+  in `<mark>`, a non-float `_score`) stays in the hit's document and the metadata is absent, instead of
+  failing the whole result list (the TUI searches without highlight, so one such document broke its
+  fulltext screen). `VectorSearchHit::score` is now `Option<f64>`: `None` for a NaN / infinite score
+  (sent as `null`) or the document's own `_score`; the TUI shows "n/a". Ten golden cases pin these
+  documents' wire format (unchanged), and they round-trip byte for byte.
+- **Tuti TUI search screens:**
+  - the RAG search tab's `Mode` and `RRF K` controls were silently ignored (the `search` tool is
+    intent-only) and are removed; Tab now switches between the query and the limit;
+  - results the server trimmed or dropped (context budget, documents without body text) are reported
+    instead of "Found N results";
+  - switching the fulltext field with Tab no longer leaves the previous field's results on screen (with a
+    single indexed field Tab keeps them: the field does not change);
+  - a failed RAG search no longer leaves the previous search's results and "Found … (trimmed …)" summary
+    next to the error;
+  - opening the fulltext search shows why the index listing failed instead of "Nincs fulltext index";
+  - a full page of fulltext hits says "50+" (more may exist);
+  - fulltext fields come from the index's `field`, not from parsing the index name.
+- Known server quirks, pinned by the golden test and not changed here: a one-chunk document's own
+  non-string `doc_id` field overrides the `doc_id` of a `search` hit (the shared type accepts any JSON
+  there, so a client does not fail on it); `vector_search` puts `_score` first with a projection and last
+  without; a missing collection in `search` / `vector_search` reports "No vector index".
+
 ### Fixed — Tuti TUI reports the real outcome of writes; typed MCP responses for the write tools (ironbase-core 0.3.464, mcp-server 1.0.662)
 
 Phase 2c of the Tuti TUI overhaul. The server's response JSON is unchanged.

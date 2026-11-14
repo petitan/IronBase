@@ -2,14 +2,17 @@
 //!
 //! This module provides async database operations via MCP protocol.
 
-use crate::mcp::McpClient;
+use crate::mcp::{McpClient, McpError};
 use crate::state::index::IndexEntry;
 use anyhow::Result;
-use ironbase_mcp_types::params::{CountParams, FindParams, IndexListParams, NoParams};
-use ironbase_mcp_types::responses::{
-    BTreeIndexStats, IndexListResponse, IndexStatsResponse, VectorIndexInfo,
+use ironbase_mcp_types::params::{
+    CountParams, FindParams, IndexListParams, NoParams, VectorSearchParams,
 };
-use ironbase_mcp_types::tools::{CollectionList, Count, Find, IndexList, IndexStats};
+use ironbase_mcp_types::responses::{
+    BTreeIndexStats, FulltextIndexInfo, IndexListResponse, IndexStatsResponse, VectorIndexInfo,
+    VectorSearchHit,
+};
+use ironbase_mcp_types::tools::{CollectionList, Count, Find, IndexList, IndexStats, VectorSearch};
 use ironbase_mcp_types::Tool;
 use serde_json::Value;
 use std::path::Path;
@@ -150,6 +153,52 @@ impl DbWrapper {
                 other
             )),
         }
+    }
+
+    /// Fulltext indexes of a collection (`index_list` with `type: fulltext`)
+    pub async fn fulltext_indexes(&self, collection: &str) -> Result<Vec<FulltextIndexInfo>> {
+        let args = IndexListParams {
+            collection: collection.to_string(),
+            index_type: Some("fulltext".to_string()),
+        };
+        match self.client.call::<IndexList>(&args).await? {
+            IndexListResponse::Fulltext(list) => Ok(list.indexes),
+            // An empty typed list has no item to tell its subtype by
+            IndexListResponse::BTree(list) if list.indexes.is_empty() => Ok(Vec::new()),
+            other => Err(anyhow::anyhow!(
+                "index_list: expected fulltext indexes, got {:?}",
+                other
+            )),
+        }
+    }
+
+    /// `vector_search` with a metadata filter, applied here: the server's
+    /// `vector_search` takes no filter (the `vector_search_filter` tool was
+    /// removed). Runs over a wider candidate pool (5 × `limit`, at most 500) and
+    /// keeps the hits matching every condition. Only equality filters
+    /// (`{"field": value}`, dotted paths supported) are honored; an operator
+    /// filter (e.g. `{"x": {"$gt": 1}}`) is an explicit error rather than a
+    /// silent mismatch.
+    pub async fn vector_search_filter(
+        &self,
+        args: &VectorSearchParams,
+        filter: &Value,
+    ) -> Result<Vec<VectorSearchHit>> {
+        let conds = filter_equality_conditions(filter)?;
+        let pool = VectorSearchParams {
+            limit: args.limit.saturating_mul(5).clamp(args.limit.max(1), 500),
+            ..args.clone()
+        };
+        let candidates = self.client.call::<VectorSearch>(&pool).await?.results;
+        Ok(candidates
+            .into_iter()
+            .filter(|hit| {
+                conds
+                    .iter()
+                    .all(|(path, want)| get_nested(&hit.document, path) == Some(want))
+            })
+            .take(args.limit)
+            .collect())
     }
 
     /// Statistics of the B+ tree indexes (`index_stats`, default `type`)
@@ -338,23 +387,6 @@ impl DbWrapper {
         Ok(success)
     }
 
-    // === Full-text Search ===
-
-    /// Execute fulltext search
-    pub async fn fulltext_search(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<Value>> {
-        let results = self
-            .client
-            .fulltext_search(collection, field, query, limit)
-            .await?;
-        Ok(results)
-    }
-
     // === ACL Management ===
 
     /// List all ACL rules
@@ -423,39 +455,6 @@ impl DbWrapper {
         Ok(success)
     }
 
-    // === Vector Search ===
-
-    /// Perform vector similarity search
-    pub async fn vector_search(
-        &self,
-        collection: &str,
-        field: &str,
-        vector: &[f64],
-        limit: usize,
-    ) -> Result<Vec<Value>> {
-        let results = self
-            .client
-            .vector_search(collection, field, vector, limit)
-            .await?;
-        Ok(results)
-    }
-
-    /// Perform vector similarity search with filter
-    pub async fn vector_search_filter(
-        &self,
-        collection: &str,
-        field: &str,
-        vector: &[f64],
-        filter: &Value,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
-        let results = self
-            .client
-            .vector_search_filter(collection, field, vector, filter, limit)
-            .await?;
-        Ok(results)
-    }
-
     // === RAG operations ===
 
     pub async fn rag_collection_create(
@@ -485,21 +484,6 @@ impl DbWrapper {
         let result = self
             .client
             .rag_document_import(collection, content, title, chunk_size, overlap, mode)
-            .await?;
-        Ok(result)
-    }
-
-    pub async fn hybrid_search_rag(
-        &self,
-        collection: &str,
-        query: &str,
-        limit: usize,
-        search_mode: &str,
-        rrf_k: f64,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .hybrid_search_rag(collection, query, limit, search_mode, rrf_k)
             .await?;
         Ok(result)
     }
@@ -602,4 +586,36 @@ fn collect_fields(
             collect_fields(nested, &full_name, fields);
         }
     }
+}
+
+/// Flatten a simple equality filter object into (dotted_path, expected_value)
+/// pairs. An operator key (`$...`) or a nested object/array value, which the
+/// client-side matcher cannot honor, is an explicit error, so a removed-tool gap
+/// never silently degrades into wrong results.
+fn filter_equality_conditions(filter: &Value) -> Result<Vec<(String, Value)>> {
+    let Some(obj) = filter.as_object() else {
+        return Ok(vec![]); // no / non-object filter → no constraint
+    };
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        if k.starts_with('$') || v.is_object() || v.is_array() {
+            return Err(McpError::tool(format!(
+                "client-side vector filter supports only equality matches; \
+                 unsupported filter key '{k}' (the vector_search_filter tool was removed)"
+            ))
+            .into());
+        }
+        out.push((k.clone(), v.clone()));
+    }
+    Ok(out)
+}
+
+/// Resolve a dotted path (e.g. `"a.b"`) against a document's fields
+fn get_nested<'a>(document: &'a serde_json::Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let mut parts = path.split('.');
+    let mut cur = document.get(parts.next()?)?;
+    for part in parts {
+        cur = cur.get(part)?;
+    }
+    Some(cur)
 }

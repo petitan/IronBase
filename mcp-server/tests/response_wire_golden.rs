@@ -30,6 +30,25 @@
 //! `auto_embedded_count`, `auto_embed_error`) come from a deterministic in-test
 //! embedding provider.
 //!
+//! The search group (`fulltext_search`, `fulltext_analyze`, `fuzzy_search`,
+//! `vector_search`, `search`, on a third database) normalises only the key order
+//! of the documents its hits carry (hash-map order, as for `find`): a hit's own
+//! document keys are sorted into the positions they occupy, while the engine
+//! metadata keys (`_score`, `_matched_tokens`, `_highlights`, `_matched_value`,
+//! `_highlight`; `search`: `doc_id`, `relevance`, `passages`) keep theirs, so
+//! where the server puts them stays pinned (except where a "clash" document
+//! has its own field of that name: the metadata then stands at the field's
+//! hash-order position and is sorted with the document keys). The
+//! `_matched_tokens` of a
+//! multi-field `fulltext_search` (`fields`) are sorted: the server merges the
+//! fields' tokens through a hash set. Scores are not normalised: the data has no
+//! score ties (tied hits come back in hash order) and the BM25, fuzzy, similarity
+//! and fusion arithmetic is sequential, so the floats are byte-identical from
+//! run to run. `search` embeds with the same in-test provider as the
+//! auto-embedding cases. A second test parses every recorded search-group
+//! response, strictly, with its tool's shared response type
+//! (`ironbase_mcp_types`) and serializes it back to the same bytes.
+//!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
 
@@ -118,6 +137,12 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
             }
             out["server"]["version"] = placeholder("version");
             sort_by_name(&mut out["collections"]);
+        }
+        "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
+            normalize_search(tool, args, out);
+            if tool == "fulltext_search" && args.get("fields").is_some() {
+                sort_matched_tokens(out);
+            }
         }
         _ => {}
     }
@@ -285,6 +310,7 @@ fn render() -> String {
     );
 
     render_write_group(&mut out);
+    render_search_group(&mut out);
     out
 }
 
@@ -558,6 +584,325 @@ fn render_auto_embed_group(out: &mut String) {
     );
 }
 
+/// Engine metadata keys of the `fulltext_search` / `fuzzy_search` /
+/// `vector_search` hits: they keep their position when [`sort_document_keys`]
+/// sorts the document keys
+const HIT_METADATA_KEYS: &[&str] = &[
+    "_score",
+    "_matched_tokens",
+    "_highlights",
+    "_matched_value",
+    "_highlight",
+];
+
+/// The keys the `search` tool writes into each document itself
+const SEARCH_DOCUMENT_KEYS: &[&str] = &["doc_id", "relevance", "passages"];
+
+/// Sort the document keys of a search hit in place: the `fixed` keys stay
+/// where they are, the document's own keys (hash-map order, see the module
+/// docs) are sorted into the remaining positions, recursively
+fn sort_document_keys(hit: &mut Value, fixed: &[&str]) {
+    let Value::Object(map) = hit else { return };
+    let entries: Vec<(String, Value)> = std::mem::take(map).into_iter().collect();
+    let mut own: Vec<(String, Value)> = entries
+        .iter()
+        .filter(|(k, _)| !fixed.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    own.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut own = own.into_iter();
+    for (k, v) in entries {
+        if fixed.contains(&k.as_str()) {
+            map.insert(k, v);
+        } else {
+            let (k, mut v) = own.next().unwrap();
+            sort_keys(&mut v);
+            map.insert(k, v);
+        }
+    }
+}
+
+/// Sort the `_matched_tokens` of every `fulltext_search` hit: a multi-field
+/// search (`fields`) merges the fields' matched tokens through a hash set, so
+/// their order differs from process to process
+fn sort_matched_tokens(out: &mut Value) {
+    for hit in out["results"].as_array_mut().into_iter().flatten() {
+        if let Some(tokens) = hit.get_mut("_matched_tokens").and_then(Value::as_array_mut) {
+            tokens.sort_by_key(|t| t.to_string());
+        }
+    }
+}
+
+/// The search tools' normalisation: the document keys of every hit. In the
+/// "clash" collection a document's own metadata-named field is one of its keys
+/// (hash-map order): where the server writes the metadata over it, the metadata
+/// stands at the field's position, so it is sorted with the document keys. The
+/// exception is the `_score` a `vector_search` with a `projection` writes first:
+/// the document's own `_score` replaces its value there, at a fixed position.
+fn normalize_search(tool: &str, args: &Value, out: &mut Value) {
+    let (list, fixed) = match tool {
+        "search" => (out.get_mut("documents"), SEARCH_DOCUMENT_KEYS),
+        _ => (out.get_mut("results"), HIT_METADATA_KEYS),
+    };
+    let clash = args["collection"] == "clash";
+    let score_first = tool == "vector_search" && args.get("projection").is_some();
+    if let Some(items) = list.and_then(Value::as_array_mut) {
+        for hit in items {
+            let own: &[&str] = if clash { clash_own_keys(hit) } else { &[] };
+            let fixed: Vec<&str> = fixed
+                .iter()
+                .copied()
+                .filter(|k| !own.contains(k) || (score_first && *k == "_score"))
+                .collect();
+            sort_document_keys(hit, &fixed);
+        }
+    }
+}
+
+/// The metadata-named fields of the "clash" document `hit` came from (by its
+/// `_id`, or a `search` document's `doc_id`)
+fn clash_own_keys(hit: &Value) -> &'static [&'static str] {
+    let id = hit["_id"].as_i64().or_else(|| {
+        hit["doc_id"]
+            .as_str()
+            .and_then(|d| d.strip_prefix('c')?.parse().ok())
+    });
+    let id = id.unwrap_or_else(|| panic!("a \"clash\" hit without `_id` / `doc_id`: {hit}"));
+    CLASH_OWN_KEYS
+        .iter()
+        .find(|(n, _)| *n == id)
+        .map_or(&[], |(_, keys)| keys)
+}
+
+/// "kb": RAG-style chunks (`doc_id`, `chunk_index`) with a `content` and a
+/// `title` fulltext index (English), a `heading` fuzzy index and a cosine
+/// `embedding` vector index (dim 2, [`LengthProvider`]'s space); "odd": a chunk
+/// whose own `doc_id` is a number; "big": 61 one-chunk documents of more than
+/// 200 characters each, more than `search`'s context budget holds
+fn seed_search_group(adapter: &Arc<IronBaseAdapter>) {
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "kb", "documents": [
+            {"_id": 1, "doc_id": "d1", "chunk_index": 0, "title": "Rust Handbook", "heading": "Rust Basics", "year": 2024,
+             "content": "Rust is a safe systems programming language", "embedding": [43.0, 1.0]},
+            {"_id": 2, "doc_id": "d1", "chunk_index": 1, "title": "Rust Handbook", "heading": "Ownership in Rust", "year": 2024,
+             "content": "Ownership and borrowing are the core of Rust memory safety rules", "embedding": [64.0, 1.0]},
+            {"_id": 3, "doc_id": "d2", "chunk_index": 0, "title": "Python Guide", "heading": "Python Guide", "year": 2023,
+             "content": "Python is a dynamic language that is easy to learn for beginners", "embedding": [63.0, 1.0]},
+            {"_id": 4, "doc_id": "d3", "chunk_index": 0, "title": "Embedded Databases", "heading": "Embedded Databases", "year": 2025,
+             "content": "An embedded database written in Rust with fast search", "embedding": [54.0, 1.0]},
+            {"_id": 5, "doc_id": "d4", "chunk_index": 0, "title": "Gardening", "heading": "Gardening", "year": 2022,
+             "content": "Planting tomatoes in spring", "embedding": [27.0, 1.0]},
+            {"_id": 6, "doc_id": "d5", "chunk_index": 0, "title": "Rust Without Body", "heading": "Rust Without Body", "year": 2021,
+             "embedding": [2.0, 1.0]},
+        ]}),
+    );
+    for args in [
+        json!({"type": "fulltext", "collection": "kb", "field": "content", "language": "english"}),
+        json!({"type": "fulltext", "collection": "kb", "field": "title", "language": "english"}),
+        json!({"type": "fuzzy", "collection": "kb", "field": "heading"}),
+        json!({"type": "vector", "collection": "kb", "field": "embedding", "dim": 2}),
+    ] {
+        dispatch_ok(adapter, "index_create", args);
+    }
+    dispatch_ok(
+        adapter,
+        "insert_one",
+        json!({"collection": "odd", "document": {"_id": 1, "doc_id": 7, "content": "a rust chunk with a numeric doc id"}}),
+    );
+    dispatch_ok(
+        adapter,
+        "index_create",
+        json!({"type": "fulltext", "collection": "odd", "field": "content", "language": "english"}),
+    );
+    let big: Vec<Value> = (0..61)
+        .map(|i| {
+            let filler = vec!["filler"; 29 + i].join(" ");
+            json!({"_id": i + 1, "doc_id": format!("b{i:02}"), "content": format!("needle {filler}")})
+        })
+        .collect();
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "big", "documents": big}),
+    );
+    dispatch_ok(
+        adapter,
+        "index_create",
+        json!({"type": "fulltext", "collection": "big", "field": "content", "language": "english"}),
+    );
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "clash", "documents": clash_documents()}),
+    );
+    for args in [
+        json!({"type": "fulltext", "collection": "clash", "field": "content", "language": "english"}),
+        json!({"type": "fuzzy", "collection": "clash", "field": "heading"}),
+        json!({"type": "vector", "collection": "clash", "field": "embedding", "dim": 2}),
+    ] {
+        dispatch_ok(adapter, "index_create", args);
+    }
+}
+
+/// "clash": one-chunk documents (`_id` n, `doc_id` "cn") whose own fields are
+/// named like the engine metadata of the search hits (`_highlights`, `_score`,
+/// `_matched_tokens`, `_highlight`, `_matched_value`) and of the `search`
+/// documents (`relevance`, `passages`); seeded after the other collections, so
+/// the earlier cases do not see them
+fn clash_documents() -> Value {
+    json!([
+        {"_id": 1, "doc_id": "c1", "heading": "Clash", "embedding": [1.0, 1.0],
+         "content": "rust highlights", "_highlights": 5},
+        {"_id": 2, "doc_id": "c2", "heading": "Clash Two", "embedding": [3.0, 1.0],
+         "content": "rust overwritten", "_score": "own", "_matched_tokens": "own",
+         "_highlight": "own", "_matched_value": "own"},
+        {"_id": 3, "doc_id": "c3", "heading": "Other", "embedding": [9.0, 1.0],
+         "content": "rust relevance", "relevance": "own", "passages": "own"},
+    ])
+}
+
+/// The metadata-named fields of each "clash" document, by `_id`
+const CLASH_OWN_KEYS: &[(i64, &[&str])] = &[
+    (1, &["_highlights"]),
+    (
+        2,
+        &["_score", "_matched_tokens", "_highlight", "_matched_value"],
+    ),
+    (3, &["relevance", "passages"]),
+];
+
+/// The search tool group (`fulltext_search`, `fulltext_analyze`,
+/// `fuzzy_search`, `vector_search`, `search`) on its own database. `search` runs
+/// with [`LengthProvider`] (hybrid) and without an embedding manager (BM25-only,
+/// `degraded`).
+fn render_search_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    seed_search_group(&adapter);
+    let mut manager = EmbeddingManager::new();
+    manager.register_provider("length", Arc::new(LengthProvider));
+    let manager = Some(Arc::new(manager));
+    let mut local = String::new();
+    macro_rules! case {
+        ($manager:expr, $tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record_with(&mut local, &adapter, None, $manager, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!(&None, "fulltext_search",
+        "or mode (default)" => {"collection": "kb", "field": "content", "query": "rust language"},
+        "field defaults to content" => {"collection": "kb", "query": "tomatoes"},
+        "explicit or mode" => {"collection": "kb", "field": "content", "query": "rust python", "mode": "or"},
+        "and mode, document scope" => {"collection": "kb", "field": "content", "query": "safe ownership", "mode": "and"},
+        "and mode, chunk scope" => {"collection": "kb", "field": "content", "query": "safe ownership", "mode": "and", "match_scope": "chunk"},
+        "and mode, explicit document scope" => {"collection": "kb", "field": "content", "query": "rust search", "mode": "and", "match_scope": "document"},
+        "chunk scope in or mode" => {"collection": "kb", "field": "content", "query": "rust", "match_scope": "chunk"},
+        "invalid match_scope" => {"collection": "kb", "field": "content", "query": "rust", "match_scope": "page"},
+        "multi-field" => {"collection": "kb", "fields": ["content", "title"], "query": "rust guide"},
+        "multi-field and mode" => {"collection": "kb", "fields": ["content", "title"], "query": "python guide", "mode": "and"},
+        "highlight" => {"collection": "kb", "field": "content", "query": "rust", "highlight": true},
+        "highlight context and snippets" => {"collection": "kb", "field": "content", "query": "rust safe", "highlight": true, "highlight_context": 8, "highlight_max_snippets": 1},
+        "min_score" => {"collection": "kb", "field": "content", "query": "rust language", "min_score": 1.0},
+        "filter" => {"collection": "kb", "field": "content", "query": "rust", "filter": {"year": {"$gte": 2025}}},
+        "empty filter" => {"collection": "kb", "field": "content", "query": "rust", "filter": {}},
+        "limit" => {"collection": "kb", "field": "content", "query": "rust", "limit": 1},
+        "limit and skip" => {"collection": "kb", "field": "content", "query": "rust", "limit": 1, "skip": 1},
+        "projection" => {"collection": "kb", "field": "content", "query": "rust", "projection": {"title": 1}},
+        "no match" => {"collection": "kb", "field": "content", "query": "quantum"},
+        "empty query" => {"collection": "kb", "field": "content", "query": ""},
+        "field without index" => {"collection": "kb", "field": "year", "query": "rust"},
+        "missing collection" => {"collection": "nope", "field": "content", "query": "rust"},
+        "missing query" => {"collection": "kb", "field": "content"},
+    );
+    case!(&None, "fulltext_analyze",
+        "defaults" => {"text": "The Árvíztűrő tükörfúrógép"},
+        "hungarian" => {"text": "A királyok és a királynők", "language": "hungarian"},
+        "english, no folding, min length 4" => {"text": "The running dogs ran", "language": "en", "accent_folding": false, "min_word_length": 4},
+        "german" => {"text": "Die Häuser und die Bäume", "language": "german"},
+        "inherited from index" => {"text": "Running Rust programs", "collection": "kb", "field": "content"},
+        "punctuation only" => {"text": "-- !!"},
+        "collection without field" => {"text": "x", "collection": "kb"},
+        "field without collection" => {"text": "x", "field": "content"},
+        "index missing" => {"text": "x", "collection": "kb", "field": "year"},
+        "missing text" => {"language": "english"},
+    );
+    case!(&None, "fuzzy_search",
+        "default algorithm" => {"collection": "kb", "field": "heading", "query": "Rust Basic"},
+        "levenshtein" => {"collection": "kb", "field": "heading", "query": "Pyton Guide", "algorithm": "levenshtein", "threshold": 0.5},
+        "damerau_levenshtein" => {"collection": "kb", "field": "heading", "query": "Gardenign", "algorithm": "damerau_levenshtein", "threshold": 0.7},
+        "jaro_winkler threshold" => {"collection": "kb", "field": "heading", "query": "Embeded Databases", "algorithm": "jaro_winkler", "threshold": 0.9},
+        "unknown algorithm" => {"collection": "kb", "field": "heading", "query": "Gardening", "algorithm": "soundex"},
+        "low threshold" => {"collection": "kb", "field": "heading", "query": "Rust", "threshold": 0.3},
+        "filter" => {"collection": "kb", "field": "heading", "query": "Rust", "threshold": 0.3, "filter": {"year": 2024}},
+        "highlight" => {"collection": "kb", "field": "heading", "query": "Gardenin", "highlight": true},
+        "limit and skip" => {"collection": "kb", "field": "heading", "query": "Rust", "threshold": 0.3, "limit": 1, "skip": 1},
+        "projection" => {"collection": "kb", "field": "heading", "query": "Python Guid", "projection": {"heading": 1, "year": 1}},
+        "no match" => {"collection": "kb", "field": "heading", "query": "zzzz"},
+        "field without index" => {"collection": "kb", "field": "content", "query": "rust"},
+        "missing collection" => {"collection": "nope", "field": "heading", "query": "x"},
+        "missing query" => {"collection": "kb", "field": "heading"},
+    );
+    case!(&None, "vector_search",
+        "default limit" => {"collection": "kb", "vector": [60.0, 1.0]},
+        "limit" => {"collection": "kb", "field": "embedding", "vector": [60.0, 1.0], "limit": 2},
+        "include projection" => {"collection": "kb", "field": "embedding", "vector": [30.0, 1.0], "limit": 2, "projection": {"title": 1}},
+        "include projection without _id" => {"collection": "kb", "field": "embedding", "vector": [30.0, 1.0], "limit": 1, "projection": {"title": 1, "_id": 0}},
+        "exclude projection" => {"collection": "kb", "field": "embedding", "vector": [2.0, 1.0], "limit": 2, "projection": {"embedding": 0, "content": 0}},
+        "opposite vector" => {"collection": "kb", "field": "embedding", "vector": [-1.0, 0.0], "limit": 2},
+        "wrong dimension" => {"collection": "kb", "field": "embedding", "vector": [1.0, 2.0, 3.0]},
+        "field without index" => {"collection": "kb", "field": "title", "vector": [1.0, 2.0]},
+        "missing collection" => {"collection": "nope", "vector": [1.0, 2.0]},
+        "missing vector" => {"collection": "kb"},
+        "filter is not an argument" => {"collection": "kb", "vector": [60.0, 1.0], "limit": 1, "filter": {"year": 2023}},
+    );
+    case!(&manager, "search",
+        "structured" => {"collection": "kb", "query": "rust"},
+        "context_block" => {"collection": "kb", "query": "rust", "format": "context_block"},
+        "debug" => {"collection": "kb", "query": "rust memory", "debug": true},
+        "debug context_block" => {"collection": "kb", "query": "python", "format": "context_block", "debug": true},
+        "filter" => {"collection": "kb", "query": "rust", "filter": {"year": 2025}},
+        "empty filter" => {"collection": "kb", "query": "rust", "filter": {}},
+        "limit" => {"collection": "kb", "query": "rust", "limit": 1},
+        "no lexical match" => {"collection": "kb", "query": "quantum"},
+        "mechanism parameter rejected" => {"collection": "kb", "query": "rust", "rrf_k": 60},
+        "projection rejected" => {"collection": "kb", "query": "rust", "projection": {"title": 1}},
+        "invalid format" => {"collection": "kb", "query": "rust", "format": "markdown"},
+        "empty query" => {"collection": "kb", "query": ""},
+        "missing query" => {"collection": "kb"},
+        "not an object" => ["kb", "rust"],
+        "missing collection" => {"collection": "nope", "query": "rust"},
+        "invalid collection name" => {"collection": "a$b", "query": "rust"},
+    );
+    case!(&None, "search",
+        "without embedding provider" => {"collection": "kb", "query": "rust", "debug": true},
+        "without embedding provider, context_block" => {"collection": "kb", "query": "python", "format": "context_block"},
+        "numeric doc_id field" => {"collection": "odd", "query": "rust"},
+        "numeric doc_id field, context_block" => {"collection": "odd", "query": "rust", "format": "context_block"},
+        "context budget" => {"collection": "big", "query": "needle", "limit": 70, "debug": true},
+    );
+    // A document's own fields named like the metadata ("clash")
+    case!(&None, "fulltext_search",
+        "own _highlights, no highlight" => {"collection": "clash", "query": "highlights"},
+        "own _highlights, highlight" => {"collection": "clash", "query": "highlights", "highlight": true},
+        "own _score and _matched_tokens" => {"collection": "clash", "query": "overwritten"},
+        "own fields, projection" => {"collection": "clash", "query": "rust", "projection": {"_highlights": 1, "_score": 1, "_matched_tokens": 1}},
+    );
+    case!(&None, "fuzzy_search",
+        "own _highlight, no highlight" => {"collection": "clash", "field": "heading", "query": "Clash Two"},
+        "own _highlight, highlight" => {"collection": "clash", "field": "heading", "query": "Clash Two", "highlight": true},
+    );
+    case!(&None, "vector_search",
+        "own _score, no projection" => {"collection": "clash", "vector": [3.0, 1.0], "limit": 3},
+        "own _score, include projection" => {"collection": "clash", "vector": [3.0, 1.0], "limit": 3, "projection": {"_score": 1, "heading": 1}},
+    );
+    case!(&None, "search",
+        "own relevance and passages" => {"collection": "clash", "query": "relevance"},
+        "own relevance and passages, context_block" => {"collection": "clash", "query": "relevance", "format": "context_block"},
+    );
+    out.push_str(&local);
+}
+
 #[test]
 fn response_wire_format_matches_golden() {
     let actual = render();
@@ -574,4 +919,47 @@ fn response_wire_format_matches_golden() {
         GOLDEN.lines().count(),
         "golden line count differs"
     );
+}
+
+/// Every recorded response of the search tool group parses, strictly, into the
+/// tool's shared response type and serializes back to the same bytes,
+/// including a one-chunk `search` document whose own `doc_id` field is a number
+/// and the "clash" documents' own fields named like the metadata.
+#[test]
+fn search_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        FulltextAnalyze, FulltextSearch, FuzzySearch, Search, VectorSearch,
+    };
+    use ironbase_mcp_types::Tool;
+
+    fn same_bytes<T: Tool>(json: &str) -> Result<(), String> {
+        let parsed: T::Resp = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let back = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(back, json, "{} does not round-trip", T::NAME);
+        Ok(())
+    }
+
+    let mut checked = 0;
+    let mut lines = GOLDEN.lines();
+    while let Some(line) = lines.next() {
+        let Some(header) = line.strip_prefix("## ") else {
+            continue;
+        };
+        let (tool, label) = header.split_once(" / ").unwrap();
+        lines.next(); // in:
+        let Some(json) = lines.next().unwrap().strip_prefix("out: ") else {
+            continue; // an error
+        };
+        let parsed = match tool {
+            "fulltext_search" => same_bytes::<FulltextSearch>(json),
+            "fulltext_analyze" => same_bytes::<FulltextAnalyze>(json),
+            "fuzzy_search" => same_bytes::<FuzzySearch>(json),
+            "vector_search" => same_bytes::<VectorSearch>(json),
+            "search" => same_bytes::<Search>(json),
+            _ => continue,
+        };
+        parsed.unwrap_or_else(|e| panic!("{tool} / {label}: {e}"));
+        checked += 1;
+    }
+    assert_eq!(checked, 65);
 }

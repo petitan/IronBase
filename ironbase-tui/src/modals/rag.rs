@@ -103,35 +103,22 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
             });
     frame.render_widget(query_text, chunks[1]);
 
-    // Options row: limit | mode | rrf_k
-    let opts = Layout::horizontal([
-        Constraint::Percentage(33),
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-    ])
-    .split(chunks[2]);
-
-    let opt_labels = [
-        ("Limit", state.search_limit.to_string()),
-        ("Mode", state.search_mode.clone()),
-        ("RRF K", format!("{:.0}", state.search_rrf_k)),
-    ];
-
-    for (i, (label, value)) in opt_labels.iter().enumerate() {
-        let style = if state.search_focus == 1 && state.search_option_idx == i {
-            Style::default().fg(theme.accent)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let block = Block::default()
-            .title(format!(" {} ", label))
-            .borders(Borders::ALL)
-            .border_style(style);
-        let text = Paragraph::new(value.as_str())
-            .block(block)
-            .style(Style::default().fg(theme.fg));
-        frame.render_widget(text, opts[i]);
-    }
+    // Options row: limit (the rest of the retrieval is server-owned)
+    let opts = Layout::horizontal([Constraint::Percentage(33), Constraint::Percentage(67)])
+        .split(chunks[2]);
+    let style = if state.search_focus == 1 {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    let block = Block::default()
+        .title(" Limit ")
+        .borders(Borders::ALL)
+        .border_style(style);
+    let text = Paragraph::new(state.search_limit.to_string())
+        .block(block)
+        .style(Style::default().fg(theme.fg));
+    frame.render_widget(text, opts[0]);
 
     // Results
     render_search_results(frame, chunks[3], state, theme);
@@ -140,6 +127,8 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
     let title = if state.is_loading {
         " Results (loading...) ".to_string()
+    } else if state.search_incomplete() {
+        format!(" Results ({}, trimmed) ", state.search_results.len())
     } else {
         format!(" Results ({}) ", state.search_results.len())
     };
@@ -174,22 +163,21 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme:
                 Style::default().fg(theme.fg)
             };
 
-            let score = r
-                .get("_final_score")
-                .or_else(|| r.get("_rrf_score"))
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-
-            let content_preview = r.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let title_str = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let content_preview = r
+                .passages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let title_str = r.fields.get("title").and_then(|v| v.as_str()).unwrap_or("");
 
             let preview = if !title_str.is_empty() {
-                format!("[{}] {}", title_str, truncate_str(content_preview, 60))
+                format!("[{}] {}", title_str, truncate_str(&content_preview, 60))
             } else {
-                truncate_str(content_preview, 80).to_string()
+                truncate_str(&content_preview, 80).to_string()
             };
 
-            let text = format!("  {:.4}  {}", score, preview);
+            let text = format!("  {:.4}  {}", r.relevance, preview);
             ListItem::new(text).style(style)
         })
         .collect();

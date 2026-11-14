@@ -8,19 +8,23 @@ use crate::db::DbWrapper;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpResult, Transport};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ironbase_mcp_types::params::{
-    CollectionCreateParams, CollectionDropParams, DeleteParams, IndexCreateArgs, IndexDropParams,
-    IndexListParams, InsertOneParams, UpdateOneParams,
+    CollectionCreateParams, CollectionDropParams, DeleteParams, FulltextSearchParams,
+    IndexCreateArgs, IndexDropParams, IndexListParams, InsertOneParams, SearchParams,
+    UpdateOneParams, VectorSearchParams,
 };
 use ironbase_mcp_types::responses::{
     BTreeIndexCreated, CollectionCreateResponse, CollectionDropResponse, CollectionListResponse,
-    CompoundIndexCreated, CountResponse, DeleteResponse, FindResponse, FulltextIndexCreated,
-    FuzzyIndexCreated, HnswParams, IndexCreateResponse, IndexDropResponse, IndexListAll,
-    IndexListResponse, IndexStatsRefreshResponse, InsertOneResponse, TypedIndexList,
-    UpdateOneResponse, VectorIndexCreated,
+    CompoundIndexCreated, CountResponse, DeleteResponse, FindResponse, FulltextHit,
+    FulltextIndexCreated, FulltextSearchResponse, FuzzyIndexCreated, HnswParams,
+    IndexCreateResponse, IndexDropResponse, IndexListAll, IndexListResponse,
+    IndexStatsRefreshResponse, InsertOneResponse, MatchScope, ScorePosition, SearchBody,
+    SearchDocument, SearchPassage, SearchResponse, SearchVerdict, TypedIndexList,
+    UpdateOneResponse, VectorIndexCreated, VectorSearchHit, VectorSearchResponse,
 };
 use ironbase_mcp_types::tools::{
-    CollectionCreate, CollectionDrop, CollectionList, Count, DeleteOne, Find, IndexCreate,
-    IndexDrop, IndexList, IndexStatsRefresh, InsertOne, UpdateOne,
+    CollectionCreate, CollectionDrop, CollectionList, Count, DeleteOne, Find, FulltextSearch,
+    IndexCreate, IndexDrop, IndexList, IndexStatsRefresh, InsertOne, Search, UpdateOne,
+    VectorSearch,
 };
 use ironbase_mcp_types::Tool;
 use ratatui::{backend::TestBackend, Terminal};
@@ -34,8 +38,10 @@ use std::sync::{Arc, Mutex};
 /// (so their shape is the server's): just enough of collection_list / find /
 /// count / index_list (no indexes), insert_one / update_one (`$set` only) /
 /// delete_one with top-level equality filters, collection_create /
-/// collection_drop, and index_create / index_drop / index_stats_refresh (echoed,
-/// not stored). Any tool can be scripted with
+/// collection_drop, index_create / index_drop / index_stats_refresh (echoed,
+/// not stored), and the searches: fulltext_search (case-insensitive substring
+/// of the field), vector_search (dot product) and search (substring of any
+/// string field; the document's `content` is its passage). Any tool can be scripted with
 /// [`FakeServer::respond`] / [`FakeServer::fail`] (scripted answers win over
 /// the built-in ones); an unscripted, unknown tool is an error. Every call is
 /// logged.
@@ -218,6 +224,110 @@ impl FakeServer {
         })
     }
 
+    /// The documents of `collection` (none if it does not exist)
+    fn docs(&self, collection: &str) -> Vec<Value> {
+        self.with_docs(collection, |docs| docs.clone())
+            .unwrap_or_default()
+    }
+
+    fn fulltext_search(&self, p: FulltextSearchParams) -> Result<Value, String> {
+        let query = p.query.to_lowercase();
+        let results: Vec<FulltextHit> = self
+            .docs(&p.collection)
+            .into_iter()
+            .filter(|doc| {
+                doc[&p.field]
+                    .as_str()
+                    .is_some_and(|text| text.to_lowercase().contains(&query))
+            })
+            .take(p.limit.unwrap_or(usize::MAX))
+            .map(|doc| FulltextHit {
+                document: object(doc),
+                score: 1.0,
+                matched_tokens: vec![query.clone()],
+                highlights: None,
+            })
+            .collect();
+        to_result(FulltextSearchResponse {
+            count: results.len(),
+            results,
+            match_scope: MatchScope::Chunk,
+            qualified_doc_ids: None,
+        })
+    }
+
+    fn vector_search(&self, p: VectorSearchParams) -> Result<Value, String> {
+        let mut results: Vec<VectorSearchHit> = self
+            .docs(&p.collection)
+            .into_iter()
+            .filter_map(|doc| {
+                let stored = doc[&p.field].as_array()?;
+                let score = stored
+                    .iter()
+                    .zip(&p.vector)
+                    .map(|(a, b)| a.as_f64().unwrap_or(0.0) * b)
+                    .sum();
+                Some(VectorSearchHit {
+                    document: object(doc),
+                    score: Some(score),
+                    score_position: ScorePosition::Last,
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        results.truncate(p.limit);
+        to_result(VectorSearchResponse {
+            count: results.len(),
+            results,
+        })
+    }
+
+    fn search(&self, p: SearchParams) -> Result<Value, String> {
+        let query = p.query.to_lowercase();
+        let documents: Vec<SearchDocument> = self
+            .docs(&p.collection)
+            .into_iter()
+            .filter(|doc| {
+                doc.as_object().is_some_and(|fields| {
+                    fields.values().any(|v| {
+                        v.as_str()
+                            .is_some_and(|text| text.to_lowercase().contains(&query))
+                    })
+                })
+            })
+            .take(p.limit)
+            .enumerate()
+            .map(|(rank, doc)| {
+                let mut fields = object(doc);
+                let id = fields.shift_remove("_id").unwrap_or_default();
+                let doc_id = match fields.shift_remove("doc_id") {
+                    Some(Value::String(doc_id)) => doc_id,
+                    _ => id.as_str().map_or_else(|| id.to_string(), String::from),
+                };
+                let passages = match fields.shift_remove("content") {
+                    Some(Value::String(text)) => vec![SearchPassage { text }],
+                    _ => vec![],
+                };
+                SearchDocument {
+                    doc_id: Value::String(doc_id),
+                    fields,
+                    relevance: 1.0 / (rank as f64 + 2.0),
+                    passages,
+                }
+            })
+            .collect();
+        to_result(SearchResponse {
+            verdict: SearchVerdict::Unknown,
+            count: documents.len(),
+            body: SearchBody::Documents(documents),
+            trimmed: false,
+            dropped_empty_documents: None,
+            dropped_due_to_budget: None,
+            diagnostics: None,
+            degraded: None,
+        })
+    }
+
     fn call(&self, name: &str, args: &Value) -> Result<Value, String> {
         self.calls
             .lock()
@@ -290,6 +400,9 @@ impl FakeServer {
                     ),
                 })
             }
+            FulltextSearch::NAME => self.fulltext_search(parse(args)?),
+            VectorSearch::NAME => self.vector_search(parse(args)?),
+            Search::NAME => self.search(parse(args)?),
             other => Err(format!("unexpected tool: {}", other)),
         }
     }
@@ -323,6 +436,14 @@ impl Transport for FakeServer {
 /// A built-in answer: the response struct as the server serializes it
 fn to_result<T: serde::Serialize>(response: T) -> Result<Value, String> {
     serde_json::to_value(response).map_err(|e| e.to_string())
+}
+
+/// A stored document's fields (the fake stores objects)
+fn object(doc: Value) -> serde_json::Map<String, Value> {
+    match doc {
+        Value::Object(fields) => fields,
+        _ => serde_json::Map::new(),
+    }
 }
 
 /// The tool's arguments, parsed with the shared argument type

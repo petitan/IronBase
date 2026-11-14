@@ -1,6 +1,9 @@
 //! Full-text search state
 
-use serde_json::Value;
+use ironbase_mcp_types::responses::FulltextHit;
+
+/// Hits asked for per search (`fulltext_search` `limit`)
+pub const FULLTEXT_LIMIT: usize = 50;
 
 /// Full-text search state
 #[derive(Debug, Clone, Default)]
@@ -9,7 +12,8 @@ pub struct FulltextState {
     pub field: String,
     pub query: String,
     pub cursor_pos: usize,
-    pub results: Vec<Value>,
+    /// Hits of the last search on `field`
+    pub results: Vec<FulltextHit>,
     pub selected_result: usize,
     pub error: Option<String>,
     pub loading: bool,
@@ -80,11 +84,26 @@ impl FulltextState {
         }
     }
 
+    /// Switch to the next indexed field; when the field changes, the hits of
+    /// the previous field's search are dropped (they do not belong to the new
+    /// field). With a single indexed field nothing changes.
     pub fn next_field(&mut self) {
         if !self.indexed_fields.is_empty() {
             self.selected_field_idx = (self.selected_field_idx + 1) % self.indexed_fields.len();
-            self.field = self.indexed_fields[self.selected_field_idx].clone();
+            let field = &self.indexed_fields[self.selected_field_idx];
+            if *field != self.field {
+                self.field = field.clone();
+                self.results.clear();
+                self.selected_result = 0;
+                self.error = None;
+            }
         }
+    }
+
+    /// The last search returned a full page ([`FULLTEXT_LIMIT`] hits): more
+    /// documents may match
+    pub fn may_have_more(&self) -> bool {
+        self.results.len() >= FULLTEXT_LIMIT
     }
 
     pub fn select_up(&mut self) {

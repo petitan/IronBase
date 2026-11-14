@@ -309,3 +309,275 @@ fn index_create_shapes() {
         r#"{"success":true,"message":"Index statistics refreshed for collection 'w'"}"#,
     );
 }
+
+// === Search tool group (golden "fulltext_search" … "search" cases) ===
+
+#[test]
+fn fulltext_search_hits_are_flat_documents_with_typed_metadata() {
+    let text = r#"{"results":[{"_id":1,"content":"Rust is a safe systems programming language","year":2024,"_score":2.859232119809774,"_matched_tokens":["rust","safe"],"_highlights":[{"field":"content","snippets":["<mark>Rust</mark> is a sa..."]}]},{"_id":4,"content":"An embedded database written in Rust with fast search","_score":0.9381845028807818,"_matched_tokens":["rust"],"_highlights":[{"field":"content","snippets":["...tten in <mark>Rust</mark> with fa..."]}]}],"count":2,"match_scope":"chunk"}"#;
+    let r = same_bytes::<<tools::FulltextSearch as Tool>::Resp>(text);
+    assert_eq!(r.match_scope, MatchScope::Chunk);
+    assert_eq!(r.qualified_doc_ids, None);
+    let hit = &r.results[0];
+    assert_eq!(hit.score, 2.859232119809774);
+    assert_eq!(hit.matched_tokens, ["rust", "safe"]);
+    assert_eq!(hit.highlights.as_ref().unwrap()[0].field, "content");
+    // The engine metadata is not part of the document
+    assert_eq!(
+        hit.document.keys().collect::<Vec<_>>(),
+        ["_id", "content", "year"]
+    );
+
+    let scoped = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_id":4,"_score":2.652041386490226,"_matched_tokens":["rust","search"]}],"count":1,"match_scope":"document","qualified_doc_ids":1}"#,
+    );
+    assert_eq!(scoped.match_scope, MatchScope::Document);
+    assert_eq!(scoped.qualified_doc_ids, Some(1));
+    assert_eq!(scoped.results[0].highlights, None);
+
+    for field in ["_score", "_matched_tokens", "match_scope", "count"] {
+        requires::<FulltextSearchResponse>(text, field);
+    }
+}
+
+#[test]
+fn fulltext_analyze() {
+    let text = r#"{"input":"A királyok és a királynők","language":"Hungarian","accent_folding":true,"min_word_length":2,"tokens":[{"original":"A","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királyok","normalized":"kiralyok","stemmed":"kiraly","kept":true},{"original":"és","normalized":"es","stemmed":"es","kept":false,"filtered_reason":"Stop word"},{"original":"a","normalized":"a","stemmed":"a","kept":false,"filtered_reason":"Too short (min: 2 chars)"},{"original":"királynők","normalized":"kiralynok","stemmed":"kiralyno","kept":true}],"stop_words_removed":["és"],"final_tokens":["kiraly","kiralyno"],"inherited_from_index":false}"#;
+    let r = same_bytes::<<tools::FulltextAnalyze as Tool>::Resp>(text);
+    assert_eq!(r.final_tokens, ["kiraly", "kiralyno"]);
+    assert_eq!(r.tokens[1].filtered_reason, None);
+    assert!(!r.inherited_from_index);
+    requires::<FulltextAnalyzeResponse>(text, "inherited_from_index");
+    requires::<FulltextAnalyzeResponse>(text, "kept");
+}
+
+#[test]
+fn fuzzy_search_hits() {
+    let text = r#"{"results":[{"_id":5,"heading":"Gardening","year":2022,"_score":0.9777777777777777,"_matched_value":"Gardening","_highlight":"<mark>Gardening</mark>"}],"count":1}"#;
+    let r = same_bytes::<<tools::FuzzySearch as Tool>::Resp>(text);
+    assert_eq!(r.results[0].matched_value, "Gardening");
+    assert_eq!(
+        r.results[0].highlight.as_deref(),
+        Some("<mark>Gardening</mark>")
+    );
+    let plain = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_id":3,"heading":"Python Guide","year":2023,"_score":0.9833333333333333,"_matched_value":"Python Guide"}],"count":1}"#,
+    );
+    assert_eq!(plain.results[0].highlight, None);
+    requires::<FuzzySearchResponse>(text, "_matched_value");
+    requires::<FuzzySearchResponse>(text, "_score");
+}
+
+#[test]
+fn vector_search_score_position_follows_the_projection() {
+    // No projection: `_score` after the document's fields
+    let last = r#"{"results":[{"_id":3,"embedding":[63.0,1.0],"title":"Python Guide","_score":0.9999997615814209}],"count":1}"#;
+    let r = same_bytes::<<tools::VectorSearch as Tool>::Resp>(last);
+    assert_eq!(r.results[0].score_position, ScorePosition::Last);
+    assert_eq!(r.results[0].score, Some(0.9999997615814209));
+    assert!(!r.results[0].document.contains_key("_score"));
+    // With a projection: `_score` first
+    let first = r#"{"results":[{"_score":0.9999931454658508,"_id":5,"title":"Gardening"},{"_score":1.0,"title":"Rust"}],"count":2}"#;
+    let r = same_bytes::<VectorSearchResponse>(first);
+    assert_eq!(r.results[0].score_position, ScorePosition::First);
+    assert_eq!(r.results[1].document.len(), 1);
+
+    requires::<VectorSearchResponse>(last, "_score");
+}
+
+#[test]
+fn search_documents_and_context_block() {
+    let structured = r#"{"verdict":"unknown","documents":[{"doc_id":"d3","title":"Embedded Databases","year":2025,"relevance":0.04840067340067341,"passages":[{"text":"An embedded database written in Rust with fast search"}]}],"count":1,"trimmed":false}"#;
+    let r = same_bytes::<<tools::Search as Tool>::Resp>(structured);
+    assert_eq!(r.verdict, SearchVerdict::Unknown);
+    let SearchBody::Documents(docs) = &r.body else {
+        panic!("{r:?}")
+    };
+    assert_eq!(docs[0].doc_id, "d3");
+    assert_eq!(docs[0].fields.keys().collect::<Vec<_>>(), ["title", "year"]);
+    assert_eq!(docs[0].passages.len(), 1);
+
+    let context = r#"{"verdict":"unknown","context":"[d2] Python Guide\nPython is a dynamic language\n\n","count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}"#;
+    let r = same_bytes::<SearchResponse>(context);
+    assert!(matches!(r.body, SearchBody::Context(ref c) if c.starts_with("[d2]")));
+    assert!(r.degraded.is_some());
+
+    let budget = r#"{"verdict":"unknown","documents":[],"count":0,"trimmed":true,"dropped_empty_documents":1,"dropped_due_to_budget":2,"diagnostics":{"stage":"A","fusion":"rrf (existing)","calibration":"off","hyde":"off","total_chunks":61,"qualified_doc_ids":null}}"#;
+    let r = same_bytes::<SearchResponse>(budget);
+    assert_eq!(r.dropped_due_to_budget, Some(2));
+    assert_eq!(r.dropped_empty_documents, Some(1));
+    assert_eq!(r.diagnostics.as_ref().unwrap().qualified_doc_ids, None);
+
+    for field in [
+        "verdict",
+        "count",
+        "trimmed",
+        "relevance",
+        "passages",
+        "doc_id",
+    ] {
+        requires::<SearchResponse>(structured, field);
+    }
+    requires::<SearchResponse>(structured, "documents");
+    requires::<SearchResponse>(budget, "total_chunks");
+    // A one-chunk document's own non-string `doc_id` reaches the wire as is
+    // (golden "search / numeric doc_id field"); it must not fail the whole list
+    let numeric: SearchResponse = serde_json::from_str(
+        r#"{"verdict":"unknown","documents":[{"doc_id":7,"relevance":0.04285714285714286,"passages":[{"text":"a rust chunk"}]}],"count":1,"trimmed":false}"#,
+    )
+    .unwrap();
+    match numeric.body {
+        SearchBody::Documents(docs) => assert_eq!(docs[0].doc_id, serde_json::json!(7)),
+        other => panic!("{other:?}"),
+    }
+}
+
+// === A document's own fields named like the metadata (golden "clash" cases) ===
+//
+// The server writes `_highlights` / `_highlight` only when highlighting is on,
+// lets a projected document `_score` win in `vector_search`, and writes the
+// always-sent metadata over a same-named document field in place. None of it
+// may fail the whole list, and every response serializes back to its bytes.
+
+#[test]
+fn fulltext_hit_with_its_own_highlights_field() {
+    // golden "fulltext_search / own _highlights, no highlight": the document's
+    // `_highlights: 5` is not the engine's shape
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":1.3862943611198906,"_matched_tokens":["highlight"]}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.highlights, None);
+    assert_eq!(hit.document["_highlights"], 5);
+    assert_eq!(hit.score, 1.3862943611198906);
+    assert_eq!(hit.matched_tokens, ["highlight"]);
+    assert!(!hit.document.contains_key("_score"));
+    // "own _highlights, highlight": the engine's snippets replace it in place
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":[{"field":"content","snippets":["rust <mark>highlights</mark>"]}],"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":1.3862943611198906,"_matched_tokens":["highlight"]}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(
+        hit.highlights.as_ref().unwrap()[0].snippets,
+        ["rust <mark>highlights</mark>"]
+    );
+}
+
+#[test]
+fn fulltext_hit_with_its_own_score_and_matched_tokens() {
+    // golden "fulltext_search / own _score and _matched_tokens": the engine's
+    // values stand at the document fields' positions
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":["overwritten"],"_matched_value":"own","_score":1.3862943611198906,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.score, 1.3862943611198906);
+    assert_eq!(hit.matched_tokens, ["overwritten"]);
+    assert_eq!(hit.highlights, None);
+    // "own fields, projection"
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":5,"_id":1,"_score":0.6931471805599453,"_matched_tokens":["rust"]},{"_id":2,"_matched_tokens":["rust"],"_score":0.6931471805599453},{"_id":3,"_score":0.6931471805599453,"_matched_tokens":["rust"]}],"count":3,"match_scope":"chunk"}"#,
+    );
+    assert_eq!(r.results[0].document["_highlights"], 5);
+    assert_eq!(r.results[0].highlights, None);
+    assert!(r
+        .results
+        .iter()
+        .all(|h| h.score == std::f64::consts::LN_2 && h.matched_tokens == ["rust"]));
+}
+
+#[test]
+fn fuzzy_hit_with_its_own_highlight_field() {
+    // golden "fuzzy_search / own _highlight, no highlight": a string, but not
+    // the matched value in `<mark>`: the document's own field
+    let r = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":"own","_matched_value":"Clash Two","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.9111111111111111,"_matched_value":"Clash"}],"count":2}"#,
+    );
+    assert_eq!(r.results[0].highlight, None);
+    assert_eq!(r.results[0].document["_highlight"], "own");
+    assert_eq!(r.results[0].matched_value, "Clash Two");
+    assert_eq!(r.results[0].score, 1.0);
+    assert_eq!(r.results[1].highlight, None);
+    assert!(!r.results[1].document.contains_key("_highlight"));
+    // "own _highlight, highlight": the engine's highlight replaces it in place
+    let r = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_highlight":"<mark>Clash Two</mark>","_id":2,"_matched_tokens":"own","_matched_value":"Clash Two","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.9111111111111111,"_matched_value":"Clash","_highlight":"<mark>Clash</mark>"}],"count":2}"#,
+    );
+    assert_eq!(
+        r.results[0].highlight.as_deref(),
+        Some("<mark>Clash Two</mark>")
+    );
+    assert_eq!(
+        r.results[1].highlight.as_deref(),
+        Some("<mark>Clash</mark>")
+    );
+    assert!(!r.results[1].document.contains_key("_highlight"));
+}
+
+#[test]
+fn vector_hit_with_its_own_score_field() {
+    // golden "vector_search / own _score, no projection": the engine's score
+    // stands at the document field's position
+    let r = same_bytes::<VectorSearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":"own","_matched_value":"own","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_id":3,"content":"rust relevance","doc_id":"c3","embedding":[9.0,1.0],"heading":"Other","passages":"own","relevance":"own","_score":0.9778023958206177},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.8944271802902222}],"count":3}"#,
+    );
+    let scores: Vec<_> = r.results.iter().map(|h| h.score).collect();
+    assert_eq!(
+        scores,
+        [
+            Some(1.0),
+            Some(0.9778023958206177),
+            Some(0.8944271802902222)
+        ]
+    );
+    // "own _score, include projection": the document's `_score` wins
+    let r = same_bytes::<VectorSearchResponse>(
+        r#"{"results":[{"_score":"own","_id":2,"heading":"Clash Two"},{"_score":0.9778023958206177,"_id":3,"heading":"Other"},{"_score":0.8944271802902222,"_id":1,"heading":"Clash"}],"count":3}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.score, None);
+    assert_eq!(hit.score_position, ScorePosition::First);
+    assert_eq!(hit.document["_score"], "own");
+    assert_eq!(r.results[1].score, Some(0.9778023958206177));
+    assert!(!r.results[1].document.contains_key("_score"));
+}
+
+#[test]
+fn vector_hit_without_a_usable_score() {
+    // A NaN / infinite score is sent as `null`; an integer, string, … is a
+    // document's own `_score`. Score unavailable, the value kept, not an error.
+    for (text, position) in [
+        (
+            r#"{"results":[{"_id":1,"_score":null},{"_id":2,"_score":0.5}],"count":2}"#,
+            ScorePosition::Last,
+        ),
+        (
+            r#"{"results":[{"_id":1,"_score":"high"}],"count":1}"#,
+            ScorePosition::Last,
+        ),
+        (
+            r#"{"results":[{"_score":7,"_id":1}],"count":1}"#,
+            ScorePosition::First,
+        ),
+    ] {
+        let r = same_bytes::<VectorSearchResponse>(text);
+        assert_eq!(r.results[0].score, None, "{text}");
+        assert!(r.results[0].document.contains_key("_score"), "{text}");
+        assert_eq!(r.results[0].score_position, position, "{text}");
+    }
+}
+
+#[test]
+fn search_document_with_its_own_relevance_and_passages() {
+    // golden "search / own relevance and passages": the engine's values stand
+    // at the document fields' positions (here `passages` before `relevance`)
+    let r = same_bytes::<SearchResponse>(
+        r#"{"verdict":"unknown","documents":[{"doc_id":"c3","heading":"Other","passages":[{"text":"rust relevance"}],"relevance":0.049523809523809526}],"count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}"#,
+    );
+    let SearchBody::Documents(docs) = &r.body else {
+        panic!("{r:?}")
+    };
+    assert_eq!(docs[0].relevance, 0.049523809523809526);
+    assert_eq!(docs[0].passages[0].text, "rust relevance");
+    assert_eq!(docs[0].fields["heading"], "Other");
+}

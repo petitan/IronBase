@@ -485,6 +485,18 @@ pub fn validate_document(doc: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The fields of a document the engine returned (a search hit): engine
+/// documents are always JSON objects
+pub fn document_fields(doc: Value) -> Result<serde_json::Map<String, Value>> {
+    match doc {
+        Value::Object(fields) => Ok(fields),
+        other => Err(McpError::internal(format!(
+            "engine returned a non-object document: {}",
+            other
+        ))),
+    }
+}
+
 /// Validate that a value is a JSON object (for filters/queries)
 pub fn validate_filter(filter: &Value) -> Result<()> {
     if !filter.is_object() {

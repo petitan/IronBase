@@ -118,8 +118,10 @@ fn render_search_input(frame: &mut Frame, area: Rect, state: &FulltextState, the
 }
 
 fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
+    // A full page may not be every match: "50+"
+    let more = if state.may_have_more() { "+" } else { "" };
     let block = Block::default()
-        .title(format!(" Talalatok ({}) ", state.results.len()))
+        .title(format!(" Talalatok ({}{}) ", state.results.len(), more))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
@@ -162,12 +164,9 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
                 Style::default().fg(theme.fg)
             };
 
-            // Flat fulltext_search response (v1.0.501+): doc fields are at the top
-            // level, engine metadata is `_`-prefixed.
-            let score = result.get("_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let preview = format_doc_preview(result, 60);
+            let preview = format_doc_preview(&result.document, 60);
 
-            let text = format!(" {:.2}  {}", score, preview);
+            let text = format!(" {:.2}  {}", result.score, preview);
             ListItem::new(text).style(style)
         })
         .collect();
@@ -177,35 +176,29 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
 }
 
 /// BUG FIX: Use char count instead of byte length for UTF-8 safety
-fn format_doc_preview(doc: &serde_json::Value, max_len: usize) -> String {
-    // Try to get a meaningful preview
-    let preview = if let Some(obj) = doc.as_object() {
-        // Skip _id and engine-metadata (`_`-prefixed e.g. _score, _matched_tokens),
-        // show first few doc fields (post-#68 flat shape, v1.0.501).
-        let fields: Vec<String> = obj
-            .iter()
-            .filter(|(k, _)| !k.starts_with('_'))
-            .take(3)
-            .map(|(k, v)| {
-                let val_str = match v {
-                    serde_json::Value::String(s) => {
-                        // UTF-8 safe truncation
-                        if s.chars().count() > 30 {
-                            let truncated: String = s.chars().take(30).collect();
-                            format!("\"{}...\"", truncated)
-                        } else {
-                            format!("\"{}\"", s)
-                        }
+fn format_doc_preview(doc: &serde_json::Map<String, serde_json::Value>, max_len: usize) -> String {
+    // Skip _id and other `_`-prefixed fields, show the first few document fields
+    let preview = doc
+        .iter()
+        .filter(|(k, _)| !k.starts_with('_'))
+        .take(3)
+        .map(|(k, v)| {
+            let val_str = match v {
+                serde_json::Value::String(s) => {
+                    // UTF-8 safe truncation
+                    if s.chars().count() > 30 {
+                        let truncated: String = s.chars().take(30).collect();
+                        format!("\"{}...\"", truncated)
+                    } else {
+                        format!("\"{}\"", s)
                     }
-                    _ => v.to_string(),
-                };
-                format!("{}: {}", k, val_str)
-            })
-            .collect();
-        fields.join(", ")
-    } else {
-        doc.to_string()
-    };
+                }
+                _ => v.to_string(),
+            };
+            format!("{}: {}", k, val_str)
+        })
+        .collect::<Vec<String>>()
+        .join(", ");
 
     // UTF-8 safe truncation
     if preview.chars().count() > max_len {

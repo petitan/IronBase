@@ -59,6 +59,24 @@ fn vector_index(name: &str, field: &str, metric: VectorMetric) -> VectorIndexInf
     }
 }
 
+/// An `index_list` answer with `type: fulltext` (golden "fulltext"): one
+/// index per (name, field)
+fn fulltext_index_list(indexes: &[(&str, &str)]) -> serde_json::Value {
+    let indexes = indexes
+        .iter()
+        .map(|(name, field)| FulltextIndexInfo {
+            name: name.to_string(),
+            field: field.to_string(),
+            language: "english".into(),
+            min_word_length: 2,
+            accent_folding: true,
+            num_documents: 0,
+            num_tokens: 0,
+        })
+        .collect();
+    to_value(IndexListResponse::Fulltext(TypedIndexList::new(indexes))).unwrap()
+}
+
 async fn shift(app: &mut App, c: char) {
     press_with(app, KeyCode::Char(c), KeyModifiers::SHIFT).await;
 }
@@ -714,24 +732,11 @@ async fn test_database_switch_keeps_collection_list_error_visible() {
 #[tokio::test]
 async fn test_j_and_k_go_into_fulltext_query() {
     let server = two_collections();
+    let mut app = app_with_server(&server).await;
     server.respond(
         "index_list",
-        index_list(
-            vec!["users_bio_fts", "users_id"],
-            vec![FulltextIndexInfo {
-                name: "users_bio_fts".into(),
-                field: "bio".into(),
-                language: "english".into(),
-                min_word_length: 2,
-                accent_folding: true,
-                num_documents: 0,
-                num_tokens: 0,
-            }],
-            vec![],
-            vec![],
-        ),
+        fulltext_index_list(&[("users_bio_fts", "bio")]),
     );
-    let mut app = app_with_server(&server).await;
 
     shift(&mut app, 'F').await;
     assert_eq!(app.modal, Some(Modal::Fulltext));
@@ -1309,4 +1314,410 @@ async fn test_index_analyze_and_collection_create_drop_use_built_ins() {
         Some("Kollekció létrehozva: logs")
     );
     assert_eq!(app.current_collection_name(), Some("logs"));
+}
+
+// === Search tool group: the server's real shapes (mcp-server/tests/golden/response_wire.txt) ===
+
+/// "docs": three documents with a `bio`, a `name`, a `title`, a `content` and
+/// a 2-dimensional `emb`
+fn search_docs() -> Arc<FakeServer> {
+    FakeServer::new(vec![(
+        "docs",
+        vec![
+            json!({"_id": 1, "name": "Anna", "bio": "Rust developer", "title": "Anna", "content": "Notes on Rust", "emb": [1.0, 0.0], "even": false}),
+            json!({"_id": 2, "name": "Bela", "bio": "Python developer", "title": "Bela", "content": "Notes on Python", "emb": [0.6, 0.8], "even": true}),
+            json!({"_id": 3, "name": "Cili", "bio": "Gardener", "title": "Cili", "content": "Tomatoes", "emb": [0.0, 1.0], "even": false}),
+        ],
+    )])
+}
+
+/// The fulltext modal open on "users" over the `bio` and `name` fields, as
+/// the open path leaves it
+fn open_fulltext_modal(app: &mut App) {
+    app.fulltext_state =
+        crate::app::FulltextState::new("users".into(), vec!["bio".into(), "name".into()]);
+    app.modal = Some(Modal::Fulltext);
+}
+
+/// A `fulltext_search` answer with `count` hits, as the server sends it
+fn fulltext_hits(count: usize) -> serde_json::Value {
+    let results: Vec<String> = (0..count)
+        .map(|i| {
+            format!(
+                r#"{{"_id":{i},"bio":"Rust developer {i}","_score":{}.5,"_matched_tokens":["rust"]}}"#,
+                count - i
+            )
+        })
+        .collect();
+    wire(&format!(
+        r#"{{"results":[{}],"count":{count},"match_scope":"chunk"}}"#,
+        results.join(",")
+    ))
+}
+
+#[tokio::test]
+async fn test_fulltext_fields_come_from_the_index_field_not_its_name() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    // A fulltext index whose name does not follow `{collection}_{field}_fts`
+    server.respond(
+        "index_list",
+        fulltext_index_list(&[("legacy_body_index", "body"), ("users_bio_fts", "bio")]),
+    );
+
+    shift(&mut app, 'F').await;
+
+    assert_eq!(app.modal, Some(Modal::Fulltext), "{:?}", app.error_message);
+    assert_eq!(app.fulltext_state.indexed_fields, ["body", "bio"]);
+    assert_eq!(app.fulltext_state.field, "body");
+    assert_eq!(
+        server.calls_to("index_list").last().unwrap()["type"],
+        "fulltext"
+    );
+}
+
+#[tokio::test]
+async fn test_fulltext_open_shows_why_the_index_listing_failed() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    server.fail("index_list", "connection reset by peer");
+
+    shift(&mut app, 'F').await;
+
+    assert_eq!(app.modal, None);
+    let error = app.error_message.clone().unwrap_or_default();
+    assert!(error.contains("connection reset by peer"), "{error}");
+    assert!(!error.contains("Nincs fulltext index"), "{error}");
+
+    // An empty listing is "no index"
+    server.respond("index_list", fulltext_index_list(&[]));
+    shift(&mut app, 'F').await;
+    assert_eq!(app.modal, None);
+    let error = app.error_message.clone().unwrap_or_default();
+    assert!(error.contains("Nincs fulltext index"), "{error}");
+}
+
+#[tokio::test]
+async fn test_fulltext_tab_drops_the_previous_fields_results() {
+    let server = two_collections();
+    server.respond("fulltext_search", fulltext_hits(2));
+    let mut app = app_with_server(&server).await;
+    open_fulltext_modal(&mut app);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    press(&mut app, KeyCode::Down).await;
+
+    press(&mut app, KeyCode::Tab).await;
+
+    assert_eq!(app.fulltext_state.field, "name");
+    assert!(app.fulltext_state.results.is_empty());
+    assert_eq!(app.fulltext_state.selected_result, 0);
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("Talalatok (0)"), "{screen}");
+    assert!(!screen.contains("Rust developer"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_fulltext_tab_with_a_single_field_keeps_the_results() {
+    let server = two_collections();
+    server.respond("fulltext_search", fulltext_hits(2));
+    let mut app = app_with_server(&server).await;
+    app.fulltext_state = crate::app::FulltextState::new("users".into(), vec!["bio".into()]);
+    app.modal = Some(Modal::Fulltext);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+    press(&mut app, KeyCode::Down).await;
+
+    // The field does not change: its hits still belong to it
+    press(&mut app, KeyCode::Tab).await;
+
+    assert_eq!(app.fulltext_state.field, "bio");
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    assert_eq!(app.fulltext_state.selected_result, 1);
+}
+
+#[tokio::test]
+async fn test_fulltext_search_keeps_a_documents_own_highlights_field() {
+    let server = two_collections();
+    // golden "fulltext_search / own _highlights, no highlight": the TUI
+    // searches without highlight, the document's own `_highlights` is no snippet
+    server.respond(
+        "fulltext_search",
+        wire(
+            r#"{"results":[{"_highlights":5,"_id":1,"bio":"Rust developer","_score":1.3862943611198906,"_matched_tokens":["rust"]},{"_id":2,"bio":"Rust tester","_score":0.5,"_matched_tokens":["rust"]}],"count":2,"match_scope":"chunk"}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+    open_fulltext_modal(&mut app);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.fulltext_state.error, None);
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    let hit = &app.fulltext_state.results[0];
+    assert_eq!(hit.highlights, None);
+    assert_eq!(hit.document["_highlights"], 5);
+}
+
+#[tokio::test]
+async fn test_fulltext_full_page_says_more_may_exist() {
+    let server = two_collections();
+    server.respond("fulltext_search", fulltext_hits(50));
+    let mut app = app_with_server(&server).await;
+    open_fulltext_modal(&mut app);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(server.calls_to("fulltext_search")[0]["limit"], 50);
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("Talalatok (50+)"), "{screen}");
+
+    // Fewer hits than the limit: every match is shown
+    server.respond("fulltext_search", fulltext_hits(3));
+    press(&mut app, KeyCode::Enter).await;
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("Talalatok (3)"), "{screen}");
+    assert!(
+        line_with(&screen, "Rust developer 0").contains("3.50"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn test_fulltext_search_through_the_fake_server() {
+    let server = search_docs();
+    let mut app = app_with_server(&server).await;
+    server.respond(
+        "index_list",
+        fulltext_index_list(&[("docs_bio_fts", "bio")]),
+    );
+    shift(&mut app, 'F').await;
+    type_text(&mut app, "developer").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.fulltext_state.error, None);
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    assert_eq!(app.fulltext_state.results[0].document["name"], "Anna");
+    let screen = render_to_string(&app, 120, 36);
+    assert!(
+        line_with(&screen, r#"name: "Anna", bio: "Rust developer""#).contains("1.00"),
+        "{screen}"
+    );
+}
+
+/// Open the RAG modal on the selected collection (search tab, query focused)
+async fn open_rag_search(app: &mut App) {
+    shift(app, 'E').await;
+    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.rag_state.active_tab, RagTab::Search);
+}
+
+#[tokio::test]
+async fn test_rag_search_has_no_dead_mode_or_rrf_k_controls() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+
+    let screen = render_to_string(&app, 140, 45);
+    assert!(screen.contains(" Limit "), "{screen}");
+    assert!(!screen.contains("RRF K"), "{screen}");
+    assert!(!screen.contains(" Mode "), "{screen}");
+
+    // Tab: query → limit → query
+    press(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.rag_state.search_focus, 1);
+    press(&mut app, KeyCode::Up).await;
+    assert_eq!(app.rag_state.search_limit, 11);
+    press(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.rag_state.search_focus, 0);
+
+    // The search sends only what `search` takes
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+    let calls = server.calls_to("search");
+    assert_eq!(
+        calls,
+        [
+            json!({"collection": "users", "query": "rust", "limit": 11, "format": "structured", "debug": false})
+        ]
+    );
+}
+
+/// A `search` answer with one document that left documents and passages out
+fn trimmed_search_response() -> serde_json::Value {
+    wire(
+        r#"{"verdict":"unknown","documents":[{"doc_id":"b00","title":"Needles","relevance":0.04920634920634921,"passages":[{"text":"needle filler filler"}]}],"count":1,"trimmed":true,"dropped_due_to_budget":2,"dropped_empty_documents":1}"#,
+    )
+}
+
+#[tokio::test]
+async fn test_rag_search_reports_trimmed_and_dropped_results() {
+    let server = two_collections();
+    server.respond("search", trimmed_search_response());
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "needle").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    let message = app.rag_state.message.clone().unwrap_or_default();
+    assert!(message.contains("trimmed"), "{message}");
+    assert!(message.contains("2 more"), "{message}");
+    assert!(message.contains("1 without body text"), "{message}");
+    let screen = render_to_string(&app, 140, 45);
+    assert!(screen.contains("Results (1, trimmed)"), "{screen}");
+    assert!(
+        line_with(&screen, "[Needles] needle filler filler").contains("0.0492"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn test_rag_search_complete_results_through_the_fake_server() {
+    let server = search_docs();
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "developer").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.rag_state.error, None);
+    assert_eq!(app.rag_state.message.as_deref(), Some("Found 2 results"));
+    let screen = render_to_string(&app, 140, 45);
+    assert!(screen.contains("Results (2)"), "{screen}");
+    assert!(
+        line_with(&screen, "[Anna] Notes on Rust").contains("0.5000"),
+        "{screen}"
+    );
+    assert!(
+        line_with(&screen, "[Bela] Notes on Python").contains("0.3333"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn test_rag_search_rejects_a_malformed_response() {
+    let server = two_collections();
+    server.respond("search", trimmed_search_response());
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "x").await;
+    press(&mut app, KeyCode::Enter).await;
+    // A successful, trimmed search first
+    assert_eq!(app.rag_state.search_results.len(), 1);
+    assert!(app.rag_state.search_incomplete());
+
+    // `relevance` missing: never defaulted to 0
+    server.respond(
+        "search",
+        wire(
+            r#"{"verdict":"unknown","documents":[{"doc_id":"d1","passages":[{"text":"x"}]}],"count":1,"trimmed":false}"#,
+        ),
+    );
+    press(&mut app, KeyCode::Enter).await;
+
+    let error = app.rag_state.error.clone().unwrap_or_default();
+    assert!(error.contains("relevance"), "{error}");
+    // Nothing of the previous search is left next to the error
+    assert!(app.rag_state.search_results.is_empty());
+    assert!(!app.rag_state.search_trimmed);
+    assert_eq!(app.rag_state.search_dropped_due_to_budget, 0);
+    assert_eq!(app.rag_state.search_dropped_empty, 0);
+    assert_eq!(app.rag_state.selected_result, 0);
+    assert_eq!(app.rag_state.message, None);
+    let screen = render_to_string(&app, 140, 45);
+    assert!(!screen.contains("trimmed"), "{screen}");
+    assert!(!screen.contains("Needles"), "{screen}");
+}
+
+/// The vector modal on "docs", the vector `[1.0, 0.0]` typed in
+async fn open_vector_search(app: &mut App) {
+    shift(app, 'V').await;
+    assert_eq!(app.modal, Some(Modal::VectorSearch));
+    app.vector_state.search_field = "emb".into();
+    type_text(app, "[1.0, 0.0]").await;
+}
+
+#[tokio::test]
+async fn test_vector_search_shows_scores_in_order() {
+    let server = search_docs();
+    let mut app = app_with_server(&server).await;
+    open_vector_search(&mut app).await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.vector_state.error, None);
+    assert_eq!(app.vector_state.message.as_deref(), Some("Found 3 results"));
+    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(scores, [Some(1.0), Some(0.6), Some(0.0)]);
+    let screen = render_to_string(&app, 140, 45);
+    assert!(line_with(&screen, "id:2").contains("0.6000"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_vector_search_parses_the_projected_score_first_shape() {
+    let server = search_docs();
+    // golden "vector_search / include projection": `_score` first
+    server.respond(
+        "vector_search",
+        wire(
+            r#"{"results":[{"_score":0.9999931454658508,"_id":5,"title":"Gardening"},{"_score":0.9999492168426514,"_id":1,"title":"Rust Handbook"}],"count":2}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+    open_vector_search(&mut app).await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.vector_state.results.len(), 2);
+    assert_eq!(app.vector_state.results[0].score, Some(0.9999931454658508));
+    assert_eq!(app.vector_state.results[1].document["_id"], 1);
+}
+
+#[tokio::test]
+async fn test_vector_search_shows_an_unavailable_score() {
+    let server = search_docs();
+    // golden "vector_search / own _score, include projection": the document's
+    // own `_score` wins; a NaN score is sent as `null`
+    server.respond(
+        "vector_search",
+        wire(
+            r#"{"results":[{"_score":"own","_id":2,"heading":"Clash Two"},{"_score":0.9778023958206177,"_id":3,"heading":"Other"},{"_id":1,"heading":"Clash","_score":null}],"count":3}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+    open_vector_search(&mut app).await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.vector_state.error, None);
+    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(scores, [None, Some(0.9778023958206177), None]);
+    assert_eq!(app.vector_state.results[0].document["_score"], "own");
+    let screen = render_to_string(&app, 140, 45);
+    assert!(line_with(&screen, "id:2").contains("n/a"), "{screen}");
+    assert!(line_with(&screen, "id:3").contains("0.9778"), "{screen}");
+    assert!(line_with(&screen, "id:1").contains("n/a"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_vector_search_filter_is_applied_to_typed_hits() {
+    let server = search_docs();
+    let mut app = app_with_server(&server).await;
+    open_vector_search(&mut app).await;
+    app.vector_state.k = 1;
+    app.vector_state.filter_input = r#"{"even": false}"#.into();
+    press(&mut app, KeyCode::Enter).await;
+
+    // A wider pool is asked for, then filtered and cut to `k`
+    assert_eq!(server.calls_to("vector_search")[0]["limit"], 5);
+    let ids: Vec<_> = app
+        .vector_state
+        .results
+        .iter()
+        .map(|r| r.document["_id"].clone())
+        .collect();
+    assert_eq!(ids, [json!(1)]);
+
+    // An operator filter is refused, not silently ignored
+    app.vector_state.filter_input = r#"{"emb": {"$exists": true}}"#.into();
+    press(&mut app, KeyCode::Enter).await;
+    let error = app.vector_state.error.clone().unwrap_or_default();
+    assert!(error.contains("only equality matches"), "{error}");
 }
