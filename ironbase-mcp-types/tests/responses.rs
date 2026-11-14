@@ -374,7 +374,7 @@ fn vector_search_score_position_follows_the_projection() {
     let last = r#"{"results":[{"_id":3,"embedding":[63.0,1.0],"title":"Python Guide","_score":0.9999997615814209}],"count":1}"#;
     let r = same_bytes::<<tools::VectorSearch as Tool>::Resp>(last);
     assert_eq!(r.results[0].score_position, ScorePosition::Last);
-    assert_eq!(r.results[0].score, 0.9999997615814209);
+    assert_eq!(r.results[0].score, Some(0.9999997615814209));
     assert!(!r.results[0].document.contains_key("_score"));
     // With a projection: `_score` first
     let first = r#"{"results":[{"_score":0.9999931454658508,"_id":5,"title":"Gardening"},{"_score":1.0,"title":"Rust"}],"count":2}"#;
@@ -383,9 +383,6 @@ fn vector_search_score_position_follows_the_projection() {
     assert_eq!(r.results[1].document.len(), 1);
 
     requires::<VectorSearchResponse>(last, "_score");
-    let wrong: Result<VectorSearchResponse, _> =
-        serde_json::from_str(r#"{"results":[{"_id":1,"_score":"high"}],"count":1}"#);
-    assert!(wrong.is_err());
 }
 
 #[test]
@@ -433,4 +430,154 @@ fn search_documents_and_context_block() {
         SearchBody::Documents(docs) => assert_eq!(docs[0].doc_id, serde_json::json!(7)),
         other => panic!("{other:?}"),
     }
+}
+
+// === A document's own fields named like the metadata (golden "clash" cases) ===
+//
+// The server writes `_highlights` / `_highlight` only when highlighting is on,
+// lets a projected document `_score` win in `vector_search`, and writes the
+// always-sent metadata over a same-named document field in place. None of it
+// may fail the whole list, and every response serializes back to its bytes.
+
+#[test]
+fn fulltext_hit_with_its_own_highlights_field() {
+    // golden "fulltext_search / own _highlights, no highlight": the document's
+    // `_highlights: 5` is not the engine's shape
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":1.3862943611198906,"_matched_tokens":["highlight"]}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.highlights, None);
+    assert_eq!(hit.document["_highlights"], 5);
+    assert_eq!(hit.score, 1.3862943611198906);
+    assert_eq!(hit.matched_tokens, ["highlight"]);
+    assert!(!hit.document.contains_key("_score"));
+    // "own _highlights, highlight": the engine's snippets replace it in place
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":[{"field":"content","snippets":["rust <mark>highlights</mark>"]}],"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":1.3862943611198906,"_matched_tokens":["highlight"]}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(
+        hit.highlights.as_ref().unwrap()[0].snippets,
+        ["rust <mark>highlights</mark>"]
+    );
+}
+
+#[test]
+fn fulltext_hit_with_its_own_score_and_matched_tokens() {
+    // golden "fulltext_search / own _score and _matched_tokens": the engine's
+    // values stand at the document fields' positions
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":["overwritten"],"_matched_value":"own","_score":1.3862943611198906,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"}],"count":1,"match_scope":"chunk"}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.score, 1.3862943611198906);
+    assert_eq!(hit.matched_tokens, ["overwritten"]);
+    assert_eq!(hit.highlights, None);
+    // "own fields, projection"
+    let r = same_bytes::<FulltextSearchResponse>(
+        r#"{"results":[{"_highlights":5,"_id":1,"_score":0.6931471805599453,"_matched_tokens":["rust"]},{"_id":2,"_matched_tokens":["rust"],"_score":0.6931471805599453},{"_id":3,"_score":0.6931471805599453,"_matched_tokens":["rust"]}],"count":3,"match_scope":"chunk"}"#,
+    );
+    assert_eq!(r.results[0].document["_highlights"], 5);
+    assert_eq!(r.results[0].highlights, None);
+    assert!(r
+        .results
+        .iter()
+        .all(|h| h.score == std::f64::consts::LN_2 && h.matched_tokens == ["rust"]));
+}
+
+#[test]
+fn fuzzy_hit_with_its_own_highlight_field() {
+    // golden "fuzzy_search / own _highlight, no highlight": a string, but not
+    // the matched value in `<mark>`: the document's own field
+    let r = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":"own","_matched_value":"Clash Two","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.9111111111111111,"_matched_value":"Clash"}],"count":2}"#,
+    );
+    assert_eq!(r.results[0].highlight, None);
+    assert_eq!(r.results[0].document["_highlight"], "own");
+    assert_eq!(r.results[0].matched_value, "Clash Two");
+    assert_eq!(r.results[0].score, 1.0);
+    assert_eq!(r.results[1].highlight, None);
+    assert!(!r.results[1].document.contains_key("_highlight"));
+    // "own _highlight, highlight": the engine's highlight replaces it in place
+    let r = same_bytes::<FuzzySearchResponse>(
+        r#"{"results":[{"_highlight":"<mark>Clash Two</mark>","_id":2,"_matched_tokens":"own","_matched_value":"Clash Two","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.9111111111111111,"_matched_value":"Clash","_highlight":"<mark>Clash</mark>"}],"count":2}"#,
+    );
+    assert_eq!(
+        r.results[0].highlight.as_deref(),
+        Some("<mark>Clash Two</mark>")
+    );
+    assert_eq!(
+        r.results[1].highlight.as_deref(),
+        Some("<mark>Clash</mark>")
+    );
+    assert!(!r.results[1].document.contains_key("_highlight"));
+}
+
+#[test]
+fn vector_hit_with_its_own_score_field() {
+    // golden "vector_search / own _score, no projection": the engine's score
+    // stands at the document field's position
+    let r = same_bytes::<VectorSearchResponse>(
+        r#"{"results":[{"_highlight":"own","_id":2,"_matched_tokens":"own","_matched_value":"own","_score":1.0,"content":"rust overwritten","doc_id":"c2","embedding":[3.0,1.0],"heading":"Clash Two"},{"_id":3,"content":"rust relevance","doc_id":"c3","embedding":[9.0,1.0],"heading":"Other","passages":"own","relevance":"own","_score":0.9778023958206177},{"_highlights":5,"_id":1,"content":"rust highlights","doc_id":"c1","embedding":[1.0,1.0],"heading":"Clash","_score":0.8944271802902222}],"count":3}"#,
+    );
+    let scores: Vec<_> = r.results.iter().map(|h| h.score).collect();
+    assert_eq!(
+        scores,
+        [
+            Some(1.0),
+            Some(0.9778023958206177),
+            Some(0.8944271802902222)
+        ]
+    );
+    // "own _score, include projection": the document's `_score` wins
+    let r = same_bytes::<VectorSearchResponse>(
+        r#"{"results":[{"_score":"own","_id":2,"heading":"Clash Two"},{"_score":0.9778023958206177,"_id":3,"heading":"Other"},{"_score":0.8944271802902222,"_id":1,"heading":"Clash"}],"count":3}"#,
+    );
+    let hit = &r.results[0];
+    assert_eq!(hit.score, None);
+    assert_eq!(hit.score_position, ScorePosition::First);
+    assert_eq!(hit.document["_score"], "own");
+    assert_eq!(r.results[1].score, Some(0.9778023958206177));
+    assert!(!r.results[1].document.contains_key("_score"));
+}
+
+#[test]
+fn vector_hit_without_a_usable_score() {
+    // A NaN / infinite score is sent as `null`; an integer, string, … is a
+    // document's own `_score`. Score unavailable, the value kept, not an error.
+    for (text, position) in [
+        (
+            r#"{"results":[{"_id":1,"_score":null},{"_id":2,"_score":0.5}],"count":2}"#,
+            ScorePosition::Last,
+        ),
+        (
+            r#"{"results":[{"_id":1,"_score":"high"}],"count":1}"#,
+            ScorePosition::Last,
+        ),
+        (
+            r#"{"results":[{"_score":7,"_id":1}],"count":1}"#,
+            ScorePosition::First,
+        ),
+    ] {
+        let r = same_bytes::<VectorSearchResponse>(text);
+        assert_eq!(r.results[0].score, None, "{text}");
+        assert!(r.results[0].document.contains_key("_score"), "{text}");
+        assert_eq!(r.results[0].score_position, position, "{text}");
+    }
+}
+
+#[test]
+fn search_document_with_its_own_relevance_and_passages() {
+    // golden "search / own relevance and passages": the engine's values stand
+    // at the document fields' positions (here `passages` before `relevance`)
+    let r = same_bytes::<SearchResponse>(
+        r#"{"verdict":"unknown","documents":[{"doc_id":"c3","heading":"Other","passages":[{"text":"rust relevance"}],"relevance":0.049523809523809526}],"count":1,"trimmed":false,"degraded":"semantic search unavailable (no embedding provider configured) — BM25-only"}"#,
+    );
+    let SearchBody::Documents(docs) = &r.body else {
+        panic!("{r:?}")
+    };
+    assert_eq!(docs[0].relevance, 0.049523809523809526);
+    assert_eq!(docs[0].passages[0].text, "rust relevance");
+    assert_eq!(docs[0].fields["heading"], "Other");
 }

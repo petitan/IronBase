@@ -184,7 +184,11 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
                 .unwrap_or_else(|| "?".to_string());
             let doc_preview = format!("id:{}", id);
 
-            let text = format!("  {:.4}  {}", r.score, doc_preview);
+            // No usable score: NaN / infinite, or the document's own `_score`
+            let score = r
+                .score
+                .map_or_else(|| format!("{:>6}", "n/a"), |s| format!("{s:.4}"));
+            let text = format!("  {}  {}", score, doc_preview);
             ListItem::new(text).style(style)
         })
         .collect();

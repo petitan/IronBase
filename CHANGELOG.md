@@ -15,14 +15,28 @@ Phase 2d of the Tuti TUI overhaul. The server's response JSON is unchanged.
   `fuzzy_search`, `vector_search` and the hybrid `search` (verdict, documents or context block, the
   truncation flags `trimmed` / `dropped_due_to_budget` / `dropped_empty_documents`, diagnostics, `degraded`).
   Hit documents stay open JSON; scores and per-hit metadata are typed. The server builds these responses
-  from the shared structs; the response golden test grew from 171 to 250 cases (recorded on the previous
+  from the shared structs; the response golden test grew from 171 to 260 cases (recorded on the previous
   code) and every recorded search response round-trips through the shared types byte for byte.
+- **A document's own fields named like the metadata do not break a client.** The server writes
+  `_highlights` / `_highlight` only with `highlight: true`, lets a projected document `_score` win in
+  `vector_search`, and writes `_score`, `_matched_tokens`, `_matched_value`, `relevance` and `passages`
+  over a same-named document field in place. The hit types parse such values leniently: a metadata key
+  without the engine's shape (a document's `_highlights: 5`, a `_highlight` other than the matched value
+  in `<mark>`, a non-float `_score`) stays in the hit's document and the metadata is absent, instead of
+  failing the whole result list (the TUI searches without highlight, so one such document broke its
+  fulltext screen). `VectorSearchHit::score` is now `Option<f64>`: `None` for a NaN / infinite score
+  (sent as `null`) or the document's own `_score`; the TUI shows "n/a". Ten golden cases pin these
+  documents' wire format (unchanged), and they round-trip byte for byte.
 - **Tuti TUI search screens:**
   - the RAG search tab's `Mode` and `RRF K` controls were silently ignored (the `search` tool is
     intent-only) and are removed; Tab now switches between the query and the limit;
   - results the server trimmed or dropped (context budget, documents without body text) are reported
     instead of "Found N results";
-  - switching the fulltext field with Tab no longer leaves the previous field's results on screen;
+  - switching the fulltext field with Tab no longer leaves the previous field's results on screen (with a
+    single indexed field Tab keeps them: the field does not change);
+  - a failed RAG search no longer leaves the previous search's results and "Found … (trimmed …)" summary
+    next to the error;
+  - opening the fulltext search shows why the index listing failed instead of "Nincs fulltext index";
   - a full page of fulltext hits says "50+" (more may exist);
   - fulltext fields come from the index's `field`, not from parsing the index name.
 - Known server quirks, pinned by the golden test and not changed here: a one-chunk document's own

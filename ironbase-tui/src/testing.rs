@@ -269,12 +269,12 @@ impl FakeServer {
                     .sum();
                 Some(VectorSearchHit {
                     document: object(doc),
-                    score,
+                    score: Some(score),
                     score_position: ScorePosition::Last,
                 })
             })
             .collect();
-        results.sort_by(|a, b| b.score.total_cmp(&a.score));
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
         results.truncate(p.limit);
         to_result(VectorSearchResponse {
             count: results.len(),

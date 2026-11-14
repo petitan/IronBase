@@ -110,7 +110,12 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
                 app.rag_state.is_loading = false;
                 match result {
                     Ok(()) => app.rag_state.message = Some(app.rag_state.search_summary()),
-                    Err(e) => app.rag_state.error = Some(e),
+                    Err(e) => {
+                        // The previous search's results and summary are stale
+                        app.rag_state.clear_search_response();
+                        app.rag_state.message = None;
+                        app.rag_state.error = Some(e);
+                    }
                 }
             }
         }

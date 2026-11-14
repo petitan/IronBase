@@ -107,7 +107,7 @@ fn results_to_hits(results: Vec<(Value, f32)>) -> Result<Vec<VectorSearchHit>> {
         .map(|(doc, score)| {
             Ok(VectorSearchHit {
                 document: document_fields(doc)?,
-                score: f64::from(score),
+                score: Some(f64::from(score)),
                 score_position: ScorePosition::Last,
             })
         })
@@ -151,7 +151,7 @@ fn apply_projection_to_results(
             }
             VectorSearchHit {
                 document,
-                score: f64::from(score),
+                score: Some(f64::from(score)),
                 score_position: ScorePosition::First,
             }
         })

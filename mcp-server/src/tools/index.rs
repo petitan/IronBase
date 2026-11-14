@@ -390,7 +390,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
 /// Handle fulltext_analyze - debug tokenization process
 fn handle_fulltext_analyze(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    use ironbase_core::fulltext::{analyze_text, FtsLanguage, FtsOptions};
+    use ironbase_core::fulltext::{analyze_text, FtsLanguage, FtsOptions, TextAnalysisResult};
 
     let p: FulltextAnalyzeParams = FulltextAnalyzeParams::parse(params)?;
 
@@ -425,25 +425,43 @@ fn handle_fulltext_analyze(params: Value, adapter: &Arc<IronBaseAdapter>) -> Res
         }
     };
 
-    let result = analyze_text(&p.text, &options);
+    // Destructured without `..`: a field added to the core's analysis is a
+    // compile error here, not silently left out of the response
+    let TextAnalysisResult {
+        input,
+        language,
+        accent_folding,
+        min_word_length,
+        tokens,
+        stop_words_removed,
+        final_tokens,
+    } = analyze_text(&p.text, &options);
     Ok(serde_json::to_value(FulltextAnalyzeResponse {
-        input: result.input,
-        language: result.language,
-        accent_folding: result.accent_folding,
-        min_word_length: result.min_word_length,
-        tokens: result
-            .tokens
+        input,
+        language,
+        accent_folding,
+        min_word_length,
+        tokens: tokens
             .into_iter()
-            .map(|t| TokenAnalysis {
-                original: t.original,
-                normalized: t.normalized,
-                stemmed: t.stemmed,
-                kept: t.kept,
-                filtered_reason: t.filtered_reason,
+            .map(|token| {
+                let ironbase_core::fulltext::TokenAnalysis {
+                    original,
+                    normalized,
+                    stemmed,
+                    kept,
+                    filtered_reason,
+                } = token;
+                TokenAnalysis {
+                    original,
+                    normalized,
+                    stemmed,
+                    kept,
+                    filtered_reason,
+                }
             })
             .collect(),
-        stop_words_removed: result.stop_words_removed,
-        final_tokens: result.final_tokens,
+        stop_words_removed,
+        final_tokens,
         inherited_from_index: inherited,
     })?)
 }

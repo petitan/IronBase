@@ -84,15 +84,19 @@ impl FulltextState {
         }
     }
 
-    /// Switch to the next indexed field; the hits of the previous field's
-    /// search are dropped (they do not belong to the new field)
+    /// Switch to the next indexed field; when the field changes, the hits of
+    /// the previous field's search are dropped (they do not belong to the new
+    /// field). With a single indexed field nothing changes.
     pub fn next_field(&mut self) {
         if !self.indexed_fields.is_empty() {
             self.selected_field_idx = (self.selected_field_idx + 1) % self.indexed_fields.len();
-            self.field = self.indexed_fields[self.selected_field_idx].clone();
-            self.results.clear();
-            self.selected_result = 0;
-            self.error = None;
+            let field = &self.indexed_fields[self.selected_field_idx];
+            if *field != self.field {
+                self.field = field.clone();
+                self.results.clear();
+                self.selected_result = 0;
+                self.error = None;
+            }
         }
     }
 

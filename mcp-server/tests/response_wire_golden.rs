@@ -36,7 +36,10 @@
 //! document keys are sorted into the positions they occupy, while the engine
 //! metadata keys (`_score`, `_matched_tokens`, `_highlights`, `_matched_value`,
 //! `_highlight`; `search`: `doc_id`, `relevance`, `passages`) keep theirs, so
-//! where the server puts them stays pinned. The `_matched_tokens` of a
+//! where the server puts them stays pinned (except where a "clash" document
+//! has its own field of that name: the metadata then stands at the field's
+//! hash-order position and is sorted with the document keys). The
+//! `_matched_tokens` of a
 //! multi-field `fulltext_search` (`fields`) are sorted: the server merges the
 //! fields' tokens through a hash set. Scores are not normalised: the data has no
 //! score ties (tied hits come back in hash order) and the BM25, fuzzy, similarity
@@ -136,7 +139,7 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
             sort_by_name(&mut out["collections"]);
         }
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
-            normalize_search(tool, out);
+            normalize_search(tool, args, out);
             if tool == "fulltext_search" && args.get("fields").is_some() {
                 sort_matched_tokens(out);
             }
@@ -630,17 +633,45 @@ fn sort_matched_tokens(out: &mut Value) {
     }
 }
 
-/// The search tools' normalisation: the document keys of every hit
-fn normalize_search(tool: &str, out: &mut Value) {
+/// The search tools' normalisation: the document keys of every hit. In the
+/// "clash" collection a document's own metadata-named field is one of its keys
+/// (hash-map order): where the server writes the metadata over it, the metadata
+/// stands at the field's position, so it is sorted with the document keys. The
+/// exception is the `_score` a `vector_search` with a `projection` writes first:
+/// the document's own `_score` replaces its value there, at a fixed position.
+fn normalize_search(tool: &str, args: &Value, out: &mut Value) {
     let (list, fixed) = match tool {
         "search" => (out.get_mut("documents"), SEARCH_DOCUMENT_KEYS),
         _ => (out.get_mut("results"), HIT_METADATA_KEYS),
     };
+    let clash = args["collection"] == "clash";
+    let score_first = tool == "vector_search" && args.get("projection").is_some();
     if let Some(items) = list.and_then(Value::as_array_mut) {
-        items
-            .iter_mut()
-            .for_each(|hit| sort_document_keys(hit, fixed));
+        for hit in items {
+            let own: &[&str] = if clash { clash_own_keys(hit) } else { &[] };
+            let fixed: Vec<&str> = fixed
+                .iter()
+                .copied()
+                .filter(|k| !own.contains(k) || (score_first && *k == "_score"))
+                .collect();
+            sort_document_keys(hit, &fixed);
+        }
     }
+}
+
+/// The metadata-named fields of the "clash" document `hit` came from (by its
+/// `_id`, or a `search` document's `doc_id`)
+fn clash_own_keys(hit: &Value) -> &'static [&'static str] {
+    let id = hit["_id"].as_i64().or_else(|| {
+        hit["doc_id"]
+            .as_str()
+            .and_then(|d| d.strip_prefix('c')?.parse().ok())
+    });
+    let id = id.unwrap_or_else(|| panic!("a \"clash\" hit without `_id` / `doc_id`: {hit}"));
+    CLASH_OWN_KEYS
+        .iter()
+        .find(|(n, _)| *n == id)
+        .map_or(&[], |(_, keys)| keys)
 }
 
 /// "kb": RAG-style chunks (`doc_id`, `chunk_index`) with a `content` and a
@@ -701,7 +732,46 @@ fn seed_search_group(adapter: &Arc<IronBaseAdapter>) {
         "index_create",
         json!({"type": "fulltext", "collection": "big", "field": "content", "language": "english"}),
     );
+    dispatch_ok(
+        adapter,
+        "insert_many",
+        json!({"collection": "clash", "documents": clash_documents()}),
+    );
+    for args in [
+        json!({"type": "fulltext", "collection": "clash", "field": "content", "language": "english"}),
+        json!({"type": "fuzzy", "collection": "clash", "field": "heading"}),
+        json!({"type": "vector", "collection": "clash", "field": "embedding", "dim": 2}),
+    ] {
+        dispatch_ok(adapter, "index_create", args);
+    }
 }
+
+/// "clash": one-chunk documents (`_id` n, `doc_id` "cn") whose own fields are
+/// named like the engine metadata of the search hits (`_highlights`, `_score`,
+/// `_matched_tokens`, `_highlight`, `_matched_value`) and of the `search`
+/// documents (`relevance`, `passages`); seeded after the other collections, so
+/// the earlier cases do not see them
+fn clash_documents() -> Value {
+    json!([
+        {"_id": 1, "doc_id": "c1", "heading": "Clash", "embedding": [1.0, 1.0],
+         "content": "rust highlights", "_highlights": 5},
+        {"_id": 2, "doc_id": "c2", "heading": "Clash Two", "embedding": [3.0, 1.0],
+         "content": "rust overwritten", "_score": "own", "_matched_tokens": "own",
+         "_highlight": "own", "_matched_value": "own"},
+        {"_id": 3, "doc_id": "c3", "heading": "Other", "embedding": [9.0, 1.0],
+         "content": "rust relevance", "relevance": "own", "passages": "own"},
+    ])
+}
+
+/// The metadata-named fields of each "clash" document, by `_id`
+const CLASH_OWN_KEYS: &[(i64, &[&str])] = &[
+    (1, &["_highlights"]),
+    (
+        2,
+        &["_score", "_matched_tokens", "_highlight", "_matched_value"],
+    ),
+    (3, &["relevance", "passages"]),
+];
 
 /// The search tool group (`fulltext_search`, `fulltext_analyze`,
 /// `fuzzy_search`, `vector_search`, `search`) on its own database. `search` runs
@@ -811,6 +881,25 @@ fn render_search_group(out: &mut String) {
         "numeric doc_id field, context_block" => {"collection": "odd", "query": "rust", "format": "context_block"},
         "context budget" => {"collection": "big", "query": "needle", "limit": 70, "debug": true},
     );
+    // A document's own fields named like the metadata ("clash")
+    case!(&None, "fulltext_search",
+        "own _highlights, no highlight" => {"collection": "clash", "query": "highlights"},
+        "own _highlights, highlight" => {"collection": "clash", "query": "highlights", "highlight": true},
+        "own _score and _matched_tokens" => {"collection": "clash", "query": "overwritten"},
+        "own fields, projection" => {"collection": "clash", "query": "rust", "projection": {"_highlights": 1, "_score": 1, "_matched_tokens": 1}},
+    );
+    case!(&None, "fuzzy_search",
+        "own _highlight, no highlight" => {"collection": "clash", "field": "heading", "query": "Clash Two"},
+        "own _highlight, highlight" => {"collection": "clash", "field": "heading", "query": "Clash Two", "highlight": true},
+    );
+    case!(&None, "vector_search",
+        "own _score, no projection" => {"collection": "clash", "vector": [3.0, 1.0], "limit": 3},
+        "own _score, include projection" => {"collection": "clash", "vector": [3.0, 1.0], "limit": 3, "projection": {"_score": 1, "heading": 1}},
+    );
+    case!(&None, "search",
+        "own relevance and passages" => {"collection": "clash", "query": "relevance"},
+        "own relevance and passages, context_block" => {"collection": "clash", "query": "relevance", "format": "context_block"},
+    );
     out.push_str(&local);
 }
 
@@ -834,7 +923,8 @@ fn response_wire_format_matches_golden() {
 
 /// Every recorded response of the search tool group parses, strictly, into the
 /// tool's shared response type and serializes back to the same bytes,
-/// including a one-chunk `search` document whose own `doc_id` field is a number.
+/// including a one-chunk `search` document whose own `doc_id` field is a number
+/// and the "clash" documents' own fields named like the metadata.
 #[test]
 fn search_group_golden_parses_as_the_shared_response_types() {
     use ironbase_mcp_types::tools::{
@@ -871,5 +961,5 @@ fn search_group_golden_parses_as_the_shared_response_types() {
         parsed.unwrap_or_else(|e| panic!("{tool} / {label}: {e}"));
         checked += 1;
     }
-    assert_eq!(checked, 55);
+    assert_eq!(checked, 65);
 }

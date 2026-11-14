@@ -1377,6 +1377,27 @@ async fn test_fulltext_fields_come_from_the_index_field_not_its_name() {
 }
 
 #[tokio::test]
+async fn test_fulltext_open_shows_why_the_index_listing_failed() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    server.fail("index_list", "connection reset by peer");
+
+    shift(&mut app, 'F').await;
+
+    assert_eq!(app.modal, None);
+    let error = app.error_message.clone().unwrap_or_default();
+    assert!(error.contains("connection reset by peer"), "{error}");
+    assert!(!error.contains("Nincs fulltext index"), "{error}");
+
+    // An empty listing is "no index"
+    server.respond("index_list", fulltext_index_list(&[]));
+    shift(&mut app, 'F').await;
+    assert_eq!(app.modal, None);
+    let error = app.error_message.clone().unwrap_or_default();
+    assert!(error.contains("Nincs fulltext index"), "{error}");
+}
+
+#[tokio::test]
 async fn test_fulltext_tab_drops_the_previous_fields_results() {
     let server = two_collections();
     server.respond("fulltext_search", fulltext_hits(2));
@@ -1395,6 +1416,48 @@ async fn test_fulltext_tab_drops_the_previous_fields_results() {
     let screen = render_to_string(&app, 120, 36);
     assert!(screen.contains("Talalatok (0)"), "{screen}");
     assert!(!screen.contains("Rust developer"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_fulltext_tab_with_a_single_field_keeps_the_results() {
+    let server = two_collections();
+    server.respond("fulltext_search", fulltext_hits(2));
+    let mut app = app_with_server(&server).await;
+    app.fulltext_state = crate::app::FulltextState::new("users".into(), vec!["bio".into()]);
+    app.modal = Some(Modal::Fulltext);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+    press(&mut app, KeyCode::Down).await;
+
+    // The field does not change: its hits still belong to it
+    press(&mut app, KeyCode::Tab).await;
+
+    assert_eq!(app.fulltext_state.field, "bio");
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    assert_eq!(app.fulltext_state.selected_result, 1);
+}
+
+#[tokio::test]
+async fn test_fulltext_search_keeps_a_documents_own_highlights_field() {
+    let server = two_collections();
+    // golden "fulltext_search / own _highlights, no highlight": the TUI
+    // searches without highlight, the document's own `_highlights` is no snippet
+    server.respond(
+        "fulltext_search",
+        wire(
+            r#"{"results":[{"_highlights":5,"_id":1,"bio":"Rust developer","_score":1.3862943611198906,"_matched_tokens":["rust"]},{"_id":2,"bio":"Rust tester","_score":0.5,"_matched_tokens":["rust"]}],"count":2,"match_scope":"chunk"}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+    open_fulltext_modal(&mut app);
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.fulltext_state.error, None);
+    assert_eq!(app.fulltext_state.results.len(), 2);
+    let hit = &app.fulltext_state.results[0];
+    assert_eq!(hit.highlights, None);
+    assert_eq!(hit.document["_highlights"], 5);
 }
 
 #[tokio::test]
@@ -1481,15 +1544,17 @@ async fn test_rag_search_has_no_dead_mode_or_rrf_k_controls() {
     );
 }
 
+/// A `search` answer with one document that left documents and passages out
+fn trimmed_search_response() -> serde_json::Value {
+    wire(
+        r#"{"verdict":"unknown","documents":[{"doc_id":"b00","title":"Needles","relevance":0.04920634920634921,"passages":[{"text":"needle filler filler"}]}],"count":1,"trimmed":true,"dropped_due_to_budget":2,"dropped_empty_documents":1}"#,
+    )
+}
+
 #[tokio::test]
 async fn test_rag_search_reports_trimmed_and_dropped_results() {
     let server = two_collections();
-    server.respond(
-        "search",
-        wire(
-            r#"{"verdict":"unknown","documents":[{"doc_id":"b00","title":"Needles","relevance":0.04920634920634921,"passages":[{"text":"needle filler filler"}]}],"count":1,"trimmed":true,"dropped_due_to_budget":2,"dropped_empty_documents":1}"#,
-        ),
-    );
+    server.respond("search", trimmed_search_response());
     let mut app = app_with_server(&server).await;
     open_rag_search(&mut app).await;
     type_text(&mut app, "needle").await;
@@ -1532,6 +1597,15 @@ async fn test_rag_search_complete_results_through_the_fake_server() {
 #[tokio::test]
 async fn test_rag_search_rejects_a_malformed_response() {
     let server = two_collections();
+    server.respond("search", trimmed_search_response());
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "x").await;
+    press(&mut app, KeyCode::Enter).await;
+    // A successful, trimmed search first
+    assert_eq!(app.rag_state.search_results.len(), 1);
+    assert!(app.rag_state.search_incomplete());
+
     // `relevance` missing: never defaulted to 0
     server.respond(
         "search",
@@ -1539,14 +1613,20 @@ async fn test_rag_search_rejects_a_malformed_response() {
             r#"{"verdict":"unknown","documents":[{"doc_id":"d1","passages":[{"text":"x"}]}],"count":1,"trimmed":false}"#,
         ),
     );
-    let mut app = app_with_server(&server).await;
-    open_rag_search(&mut app).await;
-    type_text(&mut app, "x").await;
     press(&mut app, KeyCode::Enter).await;
 
     let error = app.rag_state.error.clone().unwrap_or_default();
     assert!(error.contains("relevance"), "{error}");
+    // Nothing of the previous search is left next to the error
     assert!(app.rag_state.search_results.is_empty());
+    assert!(!app.rag_state.search_trimmed);
+    assert_eq!(app.rag_state.search_dropped_due_to_budget, 0);
+    assert_eq!(app.rag_state.search_dropped_empty, 0);
+    assert_eq!(app.rag_state.selected_result, 0);
+    assert_eq!(app.rag_state.message, None);
+    let screen = render_to_string(&app, 140, 45);
+    assert!(!screen.contains("trimmed"), "{screen}");
+    assert!(!screen.contains("Needles"), "{screen}");
 }
 
 /// The vector modal on "docs", the vector `[1.0, 0.0]` typed in
@@ -1566,8 +1646,8 @@ async fn test_vector_search_shows_scores_in_order() {
 
     assert_eq!(app.vector_state.error, None);
     assert_eq!(app.vector_state.message.as_deref(), Some("Found 3 results"));
-    let scores: Vec<f64> = app.vector_state.results.iter().map(|r| r.score).collect();
-    assert_eq!(scores, [1.0, 0.6, 0.0]);
+    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(scores, [Some(1.0), Some(0.6), Some(0.0)]);
     let screen = render_to_string(&app, 140, 45);
     assert!(line_with(&screen, "id:2").contains("0.6000"), "{screen}");
 }
@@ -1587,8 +1667,33 @@ async fn test_vector_search_parses_the_projected_score_first_shape() {
     press(&mut app, KeyCode::Enter).await;
 
     assert_eq!(app.vector_state.results.len(), 2);
-    assert_eq!(app.vector_state.results[0].score, 0.9999931454658508);
+    assert_eq!(app.vector_state.results[0].score, Some(0.9999931454658508));
     assert_eq!(app.vector_state.results[1].document["_id"], 1);
+}
+
+#[tokio::test]
+async fn test_vector_search_shows_an_unavailable_score() {
+    let server = search_docs();
+    // golden "vector_search / own _score, include projection": the document's
+    // own `_score` wins; a NaN score is sent as `null`
+    server.respond(
+        "vector_search",
+        wire(
+            r#"{"results":[{"_score":"own","_id":2,"heading":"Clash Two"},{"_score":0.9778023958206177,"_id":3,"heading":"Other"},{"_id":1,"heading":"Clash","_score":null}],"count":3}"#,
+        ),
+    );
+    let mut app = app_with_server(&server).await;
+    open_vector_search(&mut app).await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.vector_state.error, None);
+    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(scores, [None, Some(0.9778023958206177), None]);
+    assert_eq!(app.vector_state.results[0].document["_score"], "own");
+    let screen = render_to_string(&app, 140, 45);
+    assert!(line_with(&screen, "id:2").contains("n/a"), "{screen}");
+    assert!(line_with(&screen, "id:3").contains("0.9778"), "{screen}");
+    assert!(line_with(&screen, "id:1").contains("n/a"), "{screen}");
 }
 
 #[tokio::test]

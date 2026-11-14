@@ -21,10 +21,14 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
     }
 
     // The fields of the collection's fulltext indexes, as the server reports them
-    let indexed_fields = if let Some(ref db) = app.db {
+    let indexed_fields: Vec<String> = if let Some(ref db) = app.db {
         match db.fulltext_indexes(collection).await {
             Ok(indexes) => indexes.into_iter().map(|idx| idx.field).collect(),
-            Err(_) => Vec::new(),
+            // A failed listing is not "no index": show why it failed
+            Err(e) => {
+                app.set_error(format!("Fulltext indexek lekerdezese sikertelen: {}", e));
+                return;
+            }
         }
     } else {
         Vec::new()

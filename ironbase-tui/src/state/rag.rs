@@ -212,6 +212,16 @@ impl RagState {
         Ok(())
     }
 
+    /// Drop the last `search`'s documents and what it left out (a failed
+    /// search: they do not belong to the query shown)
+    pub fn clear_search_response(&mut self) {
+        self.search_results.clear();
+        self.search_trimmed = false;
+        self.search_dropped_due_to_budget = 0;
+        self.search_dropped_empty = 0;
+        self.selected_result = 0;
+    }
+
     /// The last `search` did not return everything that matched
     pub fn search_incomplete(&self) -> bool {
         self.search_trimmed

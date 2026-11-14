@@ -583,9 +583,112 @@ pub struct IndexStatsRefreshResponse {
 // The hits of `fulltext_search`, `fuzzy_search` and `vector_search` are the
 // matched documents themselves, flat: the document's own fields at the top
 // level, then the engine's metadata under `_`-prefixed keys. The document stays
-// an open `Map` (`#[serde(flatten)]`); the metadata is typed. A document field
-// named like a metadata key is overwritten by the metadata on the wire (the
-// server builds the hit as one JSON object).
+// an open `Map`; the metadata is typed. The server builds a hit as one JSON
+// object, so a document field named like a metadata key (or, in a `search`
+// document, `relevance` / `passages`) meets the metadata on the wire:
+//
+// - Always written, so always the engine's: `_score` and `_matched_tokens`
+//   (`fulltext_search`), `_score` and `_matched_value` (`fuzzy_search`),
+//   `_score` (`vector_search` without a `projection`), `relevance` and
+//   `passages` (`search`). The metadata replaces the field's value at the
+//   field's position; the document's own value is not sent.
+// - Written only when enabled: `_highlights` (`fulltext_search`) and
+//   `_highlight` (`fuzzy_search`) with `highlight: true`. Otherwise the
+//   document's own field reaches the wire as it is.
+// - `vector_search` with a `projection` writes `_score` first, then the
+//   document: a document `_score` the projection keeps replaces the engine's
+//   score (any JSON value). A NaN or infinite score is sent as `null`.
+//
+// So a client parses leniently: a metadata key whose value does not have the
+// engine's shape (an optional or overridable key) is taken as a document
+// field and the metadata as absent; one hit never fails the whole list. A
+// metadata key that stands among the document's fields (not after them) also
+// stays in `document`, marking its position; on the way out, the typed
+// metadata is written there. Either way a parsed hit serializes back to the
+// same bytes. The shape of an enabled-only key is not always decisive: a
+// document's own `_highlights` shaped like the engine's is taken as the
+// metadata.
+
+/// Takes the engine metadata `keys` (in the order the server appends them) out
+/// of a hit's JSON object `map`. The trailing run of `keys`, in that order,
+/// whose values `is_engine` accepts is removed; a key of `keys` still in `map`
+/// whose value `is_engine` accepts is also returned, but stays in `map` (the
+/// metadata stands at the document field's position). A key whose value
+/// `is_engine` rejects is a document field: `None`, left in `map`.
+fn take_metadata<const N: usize>(
+    map: &mut Map<String, Value>,
+    keys: [&str; N],
+    is_engine: impl Fn(&str, &Value) -> bool,
+) -> [Option<Value>; N] {
+    let mut found: [Option<Value>; N] = std::array::from_fn(|_| None);
+    let mut below = N;
+    while let Some((key, value)) = map.iter().next_back() {
+        match keys[..below].iter().position(|k| k == key) {
+            Some(i) if is_engine(key, value) => {
+                let key = key.clone();
+                found[i] = map.shift_remove(&key);
+                below = i;
+            }
+            _ => break,
+        }
+    }
+    for (slot, key) in found.iter_mut().zip(keys) {
+        if slot.is_none() {
+            *slot = map.get(key).filter(|v| is_engine(key, v)).cloned();
+        }
+    }
+    found
+}
+
+/// A required metadata value of [`take_metadata`] as `T`
+fn required_metadata<T: serde::de::DeserializeOwned, E: serde::de::Error>(
+    value: Option<Value>,
+    key: &'static str,
+) -> Result<T, E> {
+    let value = value.ok_or_else(|| E::missing_field(key))?;
+    serde_json::from_value(value).map_err(|e| E::custom(format!("`{key}`: {e}")))
+}
+
+/// Serializes a hit as the server builds it: `leading` first, then the
+/// `document` (without the `leading` key), each document field named like a
+/// present `metadata` key with the metadata's value, then the other present
+/// `metadata`, in order
+fn serialize_hit<S: Serializer>(
+    serializer: S,
+    leading: Option<(&str, &Value)>,
+    document: &Map<String, Value>,
+    metadata: &[(&str, Option<Value>)],
+) -> Result<S::Ok, S::Error> {
+    let leading_key = leading.map(|(k, _)| k);
+    let fields = document
+        .iter()
+        .filter(|(k, _)| Some(k.as_str()) != leading_key);
+    let appended = metadata
+        .iter()
+        .filter(|(k, v)| v.is_some() && !document.contains_key(*k));
+    let mut map = serializer.serialize_map(Some(
+        usize::from(leading.is_some()) + fields.clone().count() + appended.clone().count(),
+    ))?;
+    if let Some((k, v)) = leading {
+        map.serialize_entry(k, v)?;
+    }
+    for (k, v) in fields {
+        let meta = metadata
+            .iter()
+            .find(|(m, _)| m == k)
+            .and_then(|(_, v)| v.as_ref());
+        map.serialize_entry(k, meta.unwrap_or(v))?;
+    }
+    for (k, v) in appended {
+        map.serialize_entry(k, v)?;
+    }
+    map.end()
+}
+
+/// A metadata value as JSON, for [`serialize_hit`]
+fn metadata_value<T: Serialize, E: serde::ser::Error>(value: &T) -> Result<Value, E> {
+    serde_json::to_value(value).map_err(E::custom)
+}
 
 /// The snippets of one field (`fulltext_search` with `highlight`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -595,25 +698,57 @@ pub struct FulltextHighlight {
     pub snippets: Vec<String>,
 }
 
-/// A `fulltext_search` hit
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A `fulltext_search` hit. (De)serialized by hand: see the section notes on
+/// document fields named like the metadata.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FulltextHit {
-    /// The document's fields (after `projection`)
-    #[serde(flatten)]
+    /// The document's fields (after `projection`); also a document
+    /// `_highlights` that is not shaped like the engine's
     pub document: Map<String, Value>,
-    /// BM25 score
-    #[serde(rename = "_score")]
+    /// BM25 score (`_score`)
     pub score: f64,
-    /// The query tokens (stemmed) the document matched
-    #[serde(rename = "_matched_tokens")]
+    /// The query tokens (stemmed) the document matched (`_matched_tokens`)
     pub matched_tokens: Vec<String>,
-    /// Snippets per field; only with `highlight: true`
-    #[serde(
-        rename = "_highlights",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// Snippets per field (`_highlights`); only with `highlight: true`
     pub highlights: Option<Vec<FulltextHighlight>>,
+}
+
+impl Serialize for FulltextHit {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let metadata = [
+            ("_score", Some(metadata_value(&self.score)?)),
+            (
+                "_matched_tokens",
+                Some(metadata_value(&self.matched_tokens)?),
+            ),
+            (
+                "_highlights",
+                self.highlights.as_ref().map(metadata_value).transpose()?,
+            ),
+        ];
+        serialize_hit(serializer, None, &self.document, &metadata)
+    }
+}
+
+impl<'de> Deserialize<'de> for FulltextHit {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut document = Map::<String, Value>::deserialize(deserializer)?;
+        let [score, matched_tokens, highlights] = take_metadata(
+            &mut document,
+            ["_score", "_matched_tokens", "_highlights"],
+            |key, value| {
+                key != "_highlights" || Vec::<FulltextHighlight>::deserialize(value).is_ok()
+            },
+        );
+        Ok(Self {
+            score: required_metadata(score, "_score")?,
+            matched_tokens: required_metadata(matched_tokens, "_matched_tokens")?,
+            highlights: highlights
+                .map(|v| required_metadata(Some(v), "_highlights"))
+                .transpose()?,
+            document,
+        })
+    }
 }
 
 /// Which documents an AND (`mode: and`) query qualifies: all terms in one chunk,
@@ -678,25 +813,63 @@ pub struct FulltextAnalyzeResponse {
     pub inherited_from_index: bool,
 }
 
-/// A `fuzzy_search` hit
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A `fuzzy_search` hit. (De)serialized by hand: see the section notes on
+/// document fields named like the metadata.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FuzzyHit {
-    /// The document's fields (after `projection`)
-    #[serde(flatten)]
+    /// The document's fields (after `projection`); also a document
+    /// `_highlight` other than the engine's
     pub document: Map<String, Value>,
-    /// Similarity (0.0–1.0)
-    #[serde(rename = "_score")]
+    /// Similarity, 0.0–1.0 (`_score`)
     pub score: f64,
-    /// The indexed value that matched
-    #[serde(rename = "_matched_value")]
+    /// The indexed value that matched (`_matched_value`)
     pub matched_value: String,
-    /// The matched value wrapped in `<mark>`…`</mark>`; only with `highlight: true`
-    #[serde(
-        rename = "_highlight",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// The matched value wrapped in `<mark>`…`</mark>` (`_highlight`); only with
+    /// `highlight: true` and a non-empty matched value. Any other `_highlight`
+    /// is the document's own field.
     pub highlight: Option<String>,
+}
+
+impl Serialize for FuzzyHit {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let metadata = [
+            ("_score", Some(metadata_value(&self.score)?)),
+            (
+                "_matched_value",
+                Some(Value::from(self.matched_value.as_str())),
+            ),
+            ("_highlight", self.highlight.as_deref().map(Value::from)),
+        ];
+        serialize_hit(serializer, None, &self.document, &metadata)
+    }
+}
+
+impl<'de> Deserialize<'de> for FuzzyHit {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut document = Map::<String, Value>::deserialize(deserializer)?;
+        // The engine's highlight, as the core builds it
+        let engine_highlight = document
+            .get("_matched_value")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .map(|m| format!("<mark>{m}</mark>"));
+        let [score, matched_value, highlight] = take_metadata(
+            &mut document,
+            ["_score", "_matched_value", "_highlight"],
+            |key, value| {
+                key != "_highlight"
+                    || engine_highlight.is_some() && value.as_str() == engine_highlight.as_deref()
+            },
+        );
+        Ok(Self {
+            score: required_metadata(score, "_score")?,
+            matched_value: required_metadata(matched_value, "_matched_value")?,
+            highlight: highlight
+                .map(|v| required_metadata(Some(v), "_highlight"))
+                .transpose()?,
+            document,
+        })
+    }
 }
 
 /// `fuzzy_search` response
@@ -721,48 +894,64 @@ pub enum ScorePosition {
 ///
 /// The one irregular hit: the server appends `_score` to the document, but with
 /// a `projection` it builds a new object that starts with `_score`
-/// ([`ScorePosition`]). (De)serialized by hand to keep that order; on the way
-/// in, `_score` is required and a number, and the position is read from where
-/// it stands (a key-order-preserving `serde_json`, as in this workspace).
+/// ([`ScorePosition`]), and there a document `_score` the projection keeps
+/// replaces the engine's. (De)serialized by hand to keep that order; on the way
+/// in, `_score` is required, the position is read from where it stands (a
+/// key-order-preserving `serde_json`, as in this workspace), and a `_score`
+/// that is not a float (a document's own value, or `null` for a NaN / infinite
+/// score) stays in `document`, the score unavailable (`None`). See the section
+/// notes on document fields named like the metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorSearchHit {
-    /// The document's fields (after `projection`)
+    /// The document's fields (after `projection`); also a `_score` that is not
+    /// the engine's number
     pub document: Map<String, Value>,
     /// The engine's similarity score under the index metric. Computed as
-    /// `f32` and sent widened to `f64` (e.g. `0.9999997615814209`).
-    pub score: f64,
+    /// `f32` and sent widened to `f64` (e.g. `0.9999997615814209`). `None`
+    /// when the hit carries no usable score: NaN / infinite (sent as `null`),
+    /// or replaced by the document's own `_score` (`document["_score"]`).
+    pub score: Option<f64>,
     pub score_position: ScorePosition,
 }
 
 impl Serialize for VectorSearchHit {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(self.document.len() + 1))?;
-        if self.score_position == ScorePosition::First {
-            map.serialize_entry("_score", &self.score)?;
+        let score = self.score.as_ref().map(metadata_value).transpose()?;
+        match self.score_position {
+            // The document's own `_score` replaces the engine's
+            ScorePosition::First => {
+                let leading = self.document.get("_score").or(score.as_ref());
+                serialize_hit(
+                    serializer,
+                    leading.map(|v| ("_score", v)),
+                    &self.document,
+                    &[],
+                )
+            }
+            ScorePosition::Last => {
+                serialize_hit(serializer, None, &self.document, &[("_score", score)])
+            }
         }
-        for (k, v) in &self.document {
-            map.serialize_entry(k, v)?;
-        }
-        if self.score_position == ScorePosition::Last {
-            map.serialize_entry("_score", &self.score)?;
-        }
-        map.end()
     }
 }
 
 impl<'de> Deserialize<'de> for VectorSearchHit {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut document = Map::<String, Value>::deserialize(deserializer)?;
+        if !document.contains_key("_score") {
+            return Err(D::Error::missing_field("_score"));
+        }
         let score_position = match document.keys().next() {
             Some(first) if first == "_score" => ScorePosition::First,
             _ => ScorePosition::Last,
         };
-        let score = document
-            .shift_remove("_score")
-            .ok_or_else(|| D::Error::missing_field("_score"))?;
-        let score = score
-            .as_f64()
-            .ok_or_else(|| D::Error::custom(format!("`_score` is not a number: {score}")))?;
+        // The engine's score is a float: an integer, string, `null`, … is a
+        // document's own `_score` (or a NaN score)
+        let [score] = take_metadata(&mut document, ["_score"], |_, v| v.is_f64());
+        let score = score.and_then(|v| v.as_f64());
+        if score_position == ScorePosition::First && score.is_some() {
+            document.shift_remove("_score");
+        }
         Ok(Self {
             document,
             score,
@@ -808,18 +997,56 @@ pub struct SearchPassage {
 /// string sends that value instead (the document fields overwrite it on the
 /// wire), so the type is open JSON: a client must not fail a whole result list
 /// on one such document.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// A document field named `relevance` or `passages` stands among the fields on
+/// the wire, with the engine's value; it stays in `fields`, marking the
+/// position (see the section notes on document fields named like the metadata).
+/// (De)serialized by hand for that.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchDocument {
     pub doc_id: Value,
     /// Document-level fields (those shared by every chunk, or the single
     /// chunk's), without the body text and the engine / chunk bookkeeping
-    #[serde(flatten)]
     pub fields: Map<String, Value>,
     /// The document's best fused score (higher is more relevant; a rank-fusion
     /// score, not a probability)
     pub relevance: f64,
     /// Its passages in relevance order; never empty
     pub passages: Vec<SearchPassage>,
+}
+
+impl Serialize for SearchDocument {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // A `doc_id` in the fields replaces the parent's (see above)
+        let doc_id = self.fields.get("doc_id").unwrap_or(&self.doc_id);
+        let metadata = [
+            ("relevance", Some(metadata_value(&self.relevance)?)),
+            ("passages", Some(metadata_value(&self.passages)?)),
+        ];
+        serialize_hit(
+            serializer,
+            Some(("doc_id", doc_id)),
+            &self.fields,
+            &metadata,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for SearchDocument {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut fields = Map::<String, Value>::deserialize(deserializer)?;
+        let doc_id = fields
+            .shift_remove("doc_id")
+            .ok_or_else(|| D::Error::missing_field("doc_id"))?;
+        let [relevance, passages] =
+            take_metadata(&mut fields, ["relevance", "passages"], |_, _| true);
+        Ok(Self {
+            doc_id,
+            relevance: required_metadata(relevance, "relevance")?,
+            passages: required_metadata(passages, "passages")?,
+            fields,
+        })
+    }
 }
 
 /// The body of a `search` response, selected by `format`: the documents
