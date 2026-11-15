@@ -249,54 +249,49 @@ pub fn create_api_key(
 }
 
 /// List all API keys (without showing full key values)
-pub fn list_api_keys(adapter: &Arc<IronBaseAdapter>) -> Result<Vec<serde_json::Value>, String> {
+pub fn list_api_keys(
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<Vec<ironbase_mcp_types::responses::ApiKeyEntry>, String> {
     let options = FindOptions {
         sort: Some(vec![("_id".to_string(), 1)]),
         ..Default::default()
     };
 
     match adapter.find("_system.api_keys", serde_json::json!({}), options) {
-        Ok(result) => {
-            let masked: Vec<serde_json::Value> = result
-                .documents
-                .into_iter()
-                .map(|doc| {
-                    let id = doc.get("_id").cloned().unwrap_or(serde_json::Value::Null);
-                    let name = doc
-                        .get("name")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::String("".to_string()));
-                    let created_at = doc
-                        .get("created_at")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::String("".to_string()));
-                    let enabled = doc
-                        .get("enabled")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Bool(false));
-                    let key = doc
-                        .get("key")
+        Ok(result) => Ok(result
+            .documents
+            .into_iter()
+            .map(|doc| {
+                let text = |field: &str| {
+                    doc.get(field)
                         .and_then(|v| v.as_str())
-                        .map(|k| {
-                            if k.len() > 8 {
-                                format!("{}...{}", &k[..6], &k[k.len() - 4..])
-                            } else {
-                                "***".to_string()
-                            }
-                        })
-                        .unwrap_or_else(|| "***".to_string());
-
-                    serde_json::json!({
-                        "_id": id,
-                        "name": name,
-                        "key_preview": key,
-                        "created_at": created_at,
-                        "enabled": enabled
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                // Masked: the first 6 and last 4 characters of a long key
+                let key_preview = doc
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .map(|k| {
+                        if k.len() > 8 {
+                            format!("{}...{}", &k[..6], &k[k.len() - 4..])
+                        } else {
+                            "***".to_string()
+                        }
                     })
-                })
-                .collect();
-            Ok(masked)
-        }
+                    .unwrap_or_else(|| "***".to_string());
+                ironbase_mcp_types::responses::ApiKeyEntry {
+                    id: doc.get("_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                    name: text("name"),
+                    key_preview,
+                    created_at: text("created_at"),
+                    enabled: doc
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                }
+            })
+            .collect()),
         Err(e) => Err(format!("Failed to list API keys: {}", e)),
     }
 }

@@ -29,6 +29,13 @@
 //! `acl_delete`, `acl_cleanup`, `listener_list`, `listener_get`,
 //! `listener_create`, `listener_delete`, `listener_enable`,
 //! `listener_disable`.
+//!
+//! Script, API key and database tool group: `script_save`, `script_list`,
+//! `script_get`, `script_delete`, `script_run`, `script_exec`,
+//! `script_history`, `script_rollback`, `script_version_get`,
+//! `script_tags_add`, `script_tags_remove`, `script_stats`,
+//! `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`,
+//! `admin_apikey_delete`, `db_open`.
 
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
@@ -1900,4 +1907,263 @@ pub struct ListenerDisableResponse {
     pub id: String,
     pub disabled: bool,
     pub note: String,
+}
+
+// ============================================================================
+// Scripts
+// ============================================================================
+
+/// Script metadata returned by list operations (without code).
+///
+/// Used for listing scripts without loading their full code content,
+/// which is more efficient for displaying script catalogs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptInfo {
+    /// Unique script name/identifier.
+    pub name: String,
+
+    /// Human-readable description of what the script does.
+    pub description: Option<String>,
+
+    /// ISO 8601 timestamp when the script was created.
+    pub created_at: Option<String>,
+
+    /// Current version number (increments on each save).
+    pub version: u32,
+
+    /// Tags for categorization and filtering.
+    pub tags: Vec<String>,
+
+    /// Number of times the script has been executed.
+    pub execution_count: u64,
+
+    /// ISO 8601 timestamp of the last execution.
+    pub last_run_at: Option<String>,
+}
+
+/// Full script with code and all metadata.
+///
+/// Contains the complete script definition including code,
+/// version history metadata, and dependencies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Script {
+    /// Unique script name/identifier.
+    pub name: String,
+
+    /// The Rhai script code.
+    pub code: String,
+
+    /// Human-readable description.
+    pub description: Option<String>,
+
+    /// ISO 8601 timestamp when the script was created.
+    pub created_at: Option<String>,
+
+    /// ISO 8601 timestamp when the script was last updated.
+    pub updated_at: Option<String>,
+
+    /// Current version number (increments on each save).
+    pub version: u32,
+
+    /// Tags for categorization.
+    pub tags: Vec<String>,
+
+    /// Dependencies on other scripts (executed before this one).
+    pub dependencies: Vec<String>,
+}
+
+/// Script version history entry.
+///
+/// Represents a historical version of a script, stored in the
+/// `_system.script_versions` collection for rollback support.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptVersion {
+    /// Name of the script this version belongs to.
+    pub script_name: String,
+
+    /// Version number of this snapshot.
+    pub version: u32,
+
+    /// The Rhai code at this version.
+    pub code: String,
+
+    /// Description at this version.
+    pub description: Option<String>,
+
+    /// Tags at this version.
+    pub tags: Vec<String>,
+
+    /// Dependencies at this version.
+    pub dependencies: Vec<String>,
+
+    /// ISO 8601 timestamp when this version was archived.
+    pub created_at: String,
+}
+
+/// Script execution statistics.
+///
+/// Tracks execution metrics for a script, useful for monitoring
+/// and performance analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptStats {
+    /// Script name.
+    pub name: String,
+
+    /// Total number of executions.
+    pub execution_count: u64,
+
+    /// ISO 8601 timestamp of last execution.
+    pub last_run_at: Option<String>,
+
+    /// Whether the last execution succeeded.
+    pub last_run_success: Option<bool>,
+
+    /// Total execution time across all runs (milliseconds).
+    pub total_execution_time_ms: u64,
+
+    /// Average execution time (total / count).
+    pub avg_execution_time_ms: f64,
+}
+
+/// Result of script execution.
+///
+/// Contains the return value, captured logs, and timing information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptResult {
+    /// The value returned by the script (as JSON).
+    pub result: Value,
+
+    /// Log entries captured from `print()` calls.
+    pub logs: Vec<String>,
+
+    /// Execution time in milliseconds.
+    pub execution_time_ms: u64,
+}
+
+/// `script_save` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptSaveResponse {
+    pub success: bool,
+    pub name: String,
+    /// The version the save created
+    pub version: u32,
+}
+
+/// `script_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptListResponse {
+    pub scripts: Vec<ScriptInfo>,
+    pub count: usize,
+}
+
+/// `script_delete` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptDeleteResponse {
+    pub success: bool,
+    /// The deleted script's name
+    pub deleted: String,
+}
+
+/// `script_run` / `script_exec` response: the script's value, its `print`
+/// output and its run time
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptRunResponse {
+    pub success: bool,
+    #[serde(flatten)]
+    pub run: ScriptResult,
+}
+
+/// `script_history` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptHistoryResponse {
+    /// The archived versions (the current one is not among them)
+    pub history: Vec<ScriptVersion>,
+    pub count: usize,
+}
+
+/// `script_rollback` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptRollbackResponse {
+    pub success: bool,
+    pub name: String,
+    /// The new version, holding the rolled-back code
+    pub new_version: u32,
+}
+
+/// `script_tags_add` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptTagsAddResponse {
+    pub success: bool,
+    pub name: String,
+    pub added_tags: Vec<String>,
+}
+
+/// `script_tags_remove` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptTagsRemoveResponse {
+    pub success: bool,
+    pub name: String,
+    pub removed_tags: Vec<String>,
+}
+
+// ============================================================================
+// API keys and the database file
+// ============================================================================
+
+/// `admin_apikey_create` response: the only time the key is shown
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKeyCreateResponse {
+    pub success: bool,
+    pub id: u64,
+    pub key: String,
+    pub name: String,
+    pub created_at: String,
+    pub note: String,
+}
+
+/// An API key as `admin_apikey_list` shows it: masked
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKeyEntry {
+    #[serde(rename = "_id")]
+    pub id: u64,
+    pub name: String,
+    /// The key's first 6 and last 4 characters (`***` for a short key)
+    pub key_preview: String,
+    pub created_at: String,
+    /// `false` once revoked
+    pub enabled: bool,
+}
+
+/// `admin_apikey_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKeyListResponse {
+    pub success: bool,
+    pub keys: Vec<ApiKeyEntry>,
+    pub count: usize,
+}
+
+/// `admin_apikey_revoke` / `admin_apikey_delete` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ApiKeyChangeResponse {
+    Done {
+        success: Flag<true>,
+        id: u64,
+        /// `revoked` or `deleted`
+        status: String,
+    },
+    NotFound {
+        success: Flag<false>,
+        id: u64,
+        error: String,
+    },
+}
+
+/// `db_open` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DbOpenResponse {
+    pub success: bool,
+    /// The database file now open, as given
+    pub path: String,
+    pub message: String,
 }

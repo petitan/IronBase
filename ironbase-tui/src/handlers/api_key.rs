@@ -1,8 +1,46 @@
 //! Key handlers: api_key
 
 use crate::app::App;
+use crate::db::DbWrapper;
 use crate::modals;
 use crossterm::event::KeyCode;
+use ironbase_mcp_types::params::{AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminKeyParams};
+use ironbase_mcp_types::responses::ApiKeyChangeResponse;
+use ironbase_mcp_types::tools::{
+    AdminApikeyCreate, AdminApikeyDelete, AdminApikeyList, AdminApikeyRevoke,
+};
+
+/// The server's API keys, masked (`admin_apikey_list`)
+pub(crate) async fn load_api_keys(
+    db: &DbWrapper,
+    admin_key: &str,
+) -> anyhow::Result<Vec<modals::api_key::ApiKeyInfo>> {
+    let args = AdminKeyParams {
+        admin_key: Some(admin_key.to_string()),
+    };
+    Ok(db.call::<AdminApikeyList>(&args).await?.keys)
+}
+
+/// Reload the key list after a change; a failed reload is reported next to
+/// the change's own outcome (which it does not hide)
+async fn refresh_api_keys(app: &mut App, admin_key: &str) {
+    let Some(ref db) = app.db else { return };
+    match load_api_keys(db, admin_key).await {
+        Ok(keys) => app.api_key_state.set_keys(keys),
+        Err(e) => {
+            let outcome = app
+                .api_key_state
+                .success
+                .take()
+                .or(app.api_key_state.error.take());
+            let reload = format!("reloading the API key list failed: {}", e);
+            app.api_key_state.set_error(match outcome {
+                Some(outcome) => format!("{} ({})", outcome, reload),
+                None => reload,
+            });
+        }
+    }
+}
 
 /// Handle API Key modal keys
 pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
@@ -55,64 +93,65 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
 
                 if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
                     if let Some(ref db) = app.db {
-                        match db.create_api_key(admin_key, &name).await {
-                            Ok(result) => {
-                                // Extract the full key from the result
+                        let args = AdminApiKeyCreateParams {
+                            name: name.clone(),
+                            admin_key: Some(admin_key.clone()),
+                        };
+                        match db.call::<AdminApikeyCreate>(&args).await {
+                            Ok(created) => {
+                                let key = created.key.as_str();
                                 let mut saved_path: Option<String> = None;
-                                if let Some(key) = result.get("key").and_then(|v| v.as_str()) {
-                                    // The TUI holds the new key from here: masked in the log
-                                    crate::logging::register_secret(key);
-                                    app.api_key_state.new_key = Some(key.to_string());
-                                    // Save key to config directory for easy copying
-                                    if let Some(config_dir) = dirs::config_dir() {
-                                        let tui_dir = config_dir.join("ironbase-tui");
-                                        let _ = std::fs::create_dir_all(&tui_dir);
-                                        let key_file = tui_dir.join("new_key.txt");
+                                // The TUI holds the new key from here: masked in the log
+                                crate::logging::register_secret(key);
+                                app.api_key_state.new_key = Some(key.to_string());
+                                // Save key to config directory for easy copying
+                                if let Some(config_dir) = dirs::config_dir() {
+                                    let tui_dir = config_dir.join("ironbase-tui");
+                                    let _ = std::fs::create_dir_all(&tui_dir);
+                                    let key_file = tui_dir.join("new_key.txt");
 
-                                        // Write file with restrictive permissions from the start
-                                        let write_result = {
-                                            #[cfg(unix)]
-                                            {
-                                                use std::fs::OpenOptions;
-                                                use std::io::Write;
-                                                use std::os::unix::fs::OpenOptionsExt;
-                                                OpenOptions::new()
-                                                    .write(true)
-                                                    .create(true)
-                                                    .truncate(true)
-                                                    .mode(0o600)
-                                                    .open(&key_file)
-                                                    .and_then(|mut f| {
-                                                        f.write_all(format!("{}\n", key).as_bytes())
-                                                    })
-                                            }
-                                            #[cfg(not(unix))]
-                                            {
-                                                std::fs::write(&key_file, format!("{}\n", key))
-                                            }
-                                        };
+                                    // Write file with restrictive permissions from the start
+                                    let write_result = {
+                                        #[cfg(unix)]
+                                        {
+                                            use std::fs::OpenOptions;
+                                            use std::io::Write;
+                                            use std::os::unix::fs::OpenOptionsExt;
+                                            OpenOptions::new()
+                                                .write(true)
+                                                .create(true)
+                                                .truncate(true)
+                                                .mode(0o600)
+                                                .open(&key_file)
+                                                .and_then(|mut f| {
+                                                    f.write_all(format!("{}\n", key).as_bytes())
+                                                })
+                                        }
+                                        #[cfg(not(unix))]
+                                        {
+                                            std::fs::write(&key_file, format!("{}\n", key))
+                                        }
+                                    };
 
-                                        if write_result.is_ok() {
-                                            saved_path = Some(key_file.display().to_string());
+                                    if write_result.is_ok() {
+                                        saved_path = Some(key_file.display().to_string());
 
-                                            #[cfg(windows)]
-                                            {
-                                                // Use icacls to set owner-only permissions
-                                                use std::os::windows::process::CommandExt;
-                                                if let Some(path_str) = key_file.to_str() {
-                                                    if let Ok(username) = std::env::var("USERNAME")
-                                                    {
-                                                        // Quote the path for spaces
-                                                        let _ = std::process::Command::new("icacls")
-                                                            .args([
-                                                                &format!("\"{}\"", path_str),
-                                                                "/inheritance:r",
-                                                                "/grant:r",
-                                                                &format!("\"{}\":F", username),
-                                                            ])
-                                                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                                                            .output();
-                                                    }
+                                        #[cfg(windows)]
+                                        {
+                                            // Use icacls to set owner-only permissions
+                                            use std::os::windows::process::CommandExt;
+                                            if let Some(path_str) = key_file.to_str() {
+                                                if let Ok(username) = std::env::var("USERNAME") {
+                                                    // Quote the path for spaces
+                                                    let _ = std::process::Command::new("icacls")
+                                                        .args([
+                                                            &format!("\"{}\"", path_str),
+                                                            "/inheritance:r",
+                                                            "/grant:r",
+                                                            &format!("\"{}\":F", username),
+                                                        ])
+                                                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                                                        .output();
                                                 }
                                             }
                                         }
@@ -129,13 +168,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                 app.api_key_state.input.clear();
 
                                 // Refresh the keys list
-                                if let Ok(keys) = db.list_api_keys(admin_key).await {
-                                    let infos: Vec<_> = keys
-                                        .iter()
-                                        .filter_map(modals::api_key::ApiKeyInfo::from_value)
-                                        .collect();
-                                    app.api_key_state.set_keys(infos);
-                                }
+                                refresh_api_keys(app, admin_key).await;
                             }
                             Err(e) => {
                                 app.api_key_state
@@ -164,15 +197,23 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
 
                     if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
                         if let Some(ref db) = app.db {
+                            let args = AdminApiKeyIdParams {
+                                id,
+                                admin_key: Some(admin_key.clone()),
+                            };
                             let result = match app.api_key_state.confirm_action {
                                 Some(ConfirmAction::Revoke) => {
-                                    db.revoke_api_key(admin_key, id).await
+                                    db.call::<AdminApikeyRevoke>(&args).await
                                 }
                                 Some(ConfirmAction::Delete) => {
-                                    db.delete_api_key(admin_key, id).await
+                                    db.call::<AdminApikeyDelete>(&args).await
                                 }
-                                None => Ok(false),
-                            };
+                                None => {
+                                    app.api_key_state.cancel();
+                                    return;
+                                }
+                            }
+                            .map(|response| matches!(response, ApiKeyChangeResponse::Done { .. }));
 
                             match result {
                                 Ok(true) => {
@@ -187,13 +228,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                     app.api_key_state.confirm_action = None;
 
                                     // Refresh the keys list
-                                    if let Ok(keys) = db.list_api_keys(admin_key).await {
-                                        let infos: Vec<_> = keys
-                                            .iter()
-                                            .filter_map(modals::api_key::ApiKeyInfo::from_value)
-                                            .collect();
-                                        app.api_key_state.set_keys(infos);
-                                    }
+                                    refresh_api_keys(app, admin_key).await;
                                 }
                                 Ok(false) => {
                                     app.api_key_state.set_error("Key not found".to_string());

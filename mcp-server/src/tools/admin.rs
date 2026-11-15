@@ -8,7 +8,10 @@ use crate::compaction::{run_compact_job, CompactGuard};
 use crate::error::{McpError, Result};
 use crate::jobs::{JobManager, JobType};
 use crate::ServerInfo;
-use ironbase_mcp_types::responses::{DbStatsResponse, DbStatsServer, StorageWastage};
+use ironbase_mcp_types::responses::{
+    ApiKeyChangeResponse, ApiKeyCreateResponse, ApiKeyListResponse, DbOpenResponse,
+    DbStatsResponse, DbStatsServer, Flag, StorageWastage,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -50,11 +53,16 @@ fn handle_db_open(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
     let p: DbOpenParams = DbOpenParams::parse(params)?;
     let new_path = adapter.switch_database(&p.path, p.create)?;
 
-    Ok(json!({
-        "success": true,
-        "path": new_path,
-        "message": if p.create { "Database created" } else { "Database opened" }
-    }))
+    Ok(serde_json::to_value(DbOpenResponse {
+        success: true,
+        path: new_path,
+        message: if p.create {
+            "Database created"
+        } else {
+            "Database opened"
+        }
+        .to_string(),
+    })?)
 }
 
 fn handle_db_stats(
@@ -222,14 +230,14 @@ fn handle_admin_apikey_create(
     };
 
     match crate::api_keys::create_api_key(adapter, &p.name, cache) {
-        Ok(api_key) => Ok(json!({
-            "success": true,
-            "id": api_key._id,
-            "key": api_key.key,
-            "name": api_key.name,
-            "created_at": api_key.created_at,
-            "note": "Save this key now - it cannot be retrieved later!"
-        })),
+        Ok(api_key) => Ok(serde_json::to_value(ApiKeyCreateResponse {
+            success: true,
+            id: api_key._id,
+            key: api_key.key,
+            name: api_key.name,
+            created_at: api_key.created_at,
+            note: "Save this key now - it cannot be retrieved later!".to_string(),
+        })?),
         Err(e) => Err(McpError::internal(e)),
     }
 }
@@ -237,11 +245,11 @@ fn handle_admin_apikey_create(
 fn handle_admin_apikey_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     AdminKeyParams::parse(params)?; // validate params; admin key gated centrally
     match crate::api_keys::list_api_keys(adapter) {
-        Ok(keys) => Ok(json!({
-            "success": true,
-            "keys": keys,
-            "count": keys.len()
-        })),
+        Ok(keys) => Ok(serde_json::to_value(ApiKeyListResponse {
+            success: true,
+            count: keys.len(),
+            keys,
+        })?),
         Err(e) => Err(McpError::internal(e)),
     }
 }
@@ -264,8 +272,9 @@ fn handle_admin_apikey_revoke(
     };
 
     match crate::api_keys::revoke_api_key(adapter, p.id, cache) {
-        Ok(true) => Ok(json!({"success": true, "id": p.id, "status": "revoked"})),
-        Ok(false) => Ok(json!({"success": false, "id": p.id, "error": "API key not found"})),
+        Ok(found) => Ok(serde_json::to_value(api_key_change(
+            found, p.id, "revoked",
+        ))?),
         Err(e) => Err(McpError::internal(e)),
     }
 }
@@ -288,8 +297,26 @@ fn handle_admin_apikey_delete(
     };
 
     match crate::api_keys::delete_api_key(adapter, p.id, cache) {
-        Ok(true) => Ok(json!({"success": true, "id": p.id, "status": "deleted"})),
-        Ok(false) => Ok(json!({"success": false, "id": p.id, "error": "API key not found"})),
+        Ok(found) => Ok(serde_json::to_value(api_key_change(
+            found, p.id, "deleted",
+        ))?),
         Err(e) => Err(McpError::internal(e)),
+    }
+}
+
+/// The answer of a revoke / delete of API key `id`
+fn api_key_change(found: bool, id: u64, status: &str) -> ApiKeyChangeResponse {
+    if found {
+        ApiKeyChangeResponse::Done {
+            success: Flag,
+            id,
+            status: status.to_string(),
+        }
+    } else {
+        ApiKeyChangeResponse::NotFound {
+            success: Flag,
+            id,
+            error: "API key not found".to_string(),
+        }
     }
 }

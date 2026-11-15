@@ -20,7 +20,7 @@ use ironbase_mcp_types::responses::{
     RagCreatedConfig, RagCreatedIndexes, RagDocumentImportResponse, RagImported, RagStats,
     TypedIndexList, VectorIndexInfo, VectorMetric,
 };
-use serde_json::{json, to_value};
+use serde_json::{json, to_value, Value};
 use std::sync::Arc;
 
 /// "users" (30 docs) and "visits" (5 docs)
@@ -370,19 +370,26 @@ async fn test_script_rollback_executes_with_captured_names() {
     let server = two_collections();
     server.respond(
         "script_list",
-        json!({"scripts": [{"name": "cleanup", "version": 3}]}),
+        json!({"scripts": [script_info("cleanup", 3)], "count": 1}),
     );
     server.respond(
         "script_get",
-        json!({"name": "cleanup", "code": "1 + 1", "version": 3}),
+        json!({
+            "name": "cleanup", "code": "1 + 1", "description": null,
+            "created_at": "2026-11-15T10:00:00Z", "updated_at": "2026-11-15T10:00:00Z",
+            "version": 3, "tags": [], "dependencies": []
+        }),
     );
     server.respond(
         "script_history",
-        json!({"history": [{"version": 3, "code": "a"}, {"version": 2, "code": "b"}]}),
+        json!({
+            "history": [script_version("cleanup", 3, "a"), script_version("cleanup", 2, "b")],
+            "count": 2
+        }),
     );
     server.respond(
         "script_rollback",
-        json!({"success": true, "new_version": 4}),
+        json!({"success": true, "name": "cleanup", "new_version": 4}),
     );
     let mut app = app_with_server(&server).await;
 
@@ -727,14 +734,33 @@ async fn test_rag_open_reports_a_failing_models_list() {
 
 // === Script modal's own confirm ===
 
+/// A `script_list` entry as the server sends it
+fn script_info(name: &str, version: u32) -> Value {
+    json!({
+        "name": name, "description": null, "created_at": "2026-11-15T10:00:00Z",
+        "version": version, "tags": [], "execution_count": 0, "last_run_at": null
+    })
+}
+
+/// A `script_history` entry as the server sends it
+fn script_version(name: &str, version: u32, code: &str) -> Value {
+    json!({
+        "script_name": name, "version": version, "code": code, "description": null,
+        "tags": [], "dependencies": [], "created_at": "2026-11-15T10:00:00Z"
+    })
+}
+
 #[tokio::test]
 async fn test_script_delete_confirm_enter_does_not_confirm() {
     let server = two_collections();
     server.respond(
         "script_list",
-        json!({"scripts": [{"name": "cleanup", "version": 3}]}),
+        json!({"scripts": [script_info("cleanup", 3)], "count": 1}),
     );
-    server.respond("script_delete", json!({"success": true}));
+    server.respond(
+        "script_delete",
+        json!({"success": true, "deleted": "cleanup"}),
+    );
     let mut app = app_with_server(&server).await;
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('s')).await;
@@ -908,7 +934,10 @@ async fn open_database_modal_with_path(app: &mut App, path: &str) {
 #[tokio::test]
 async fn test_database_switch_reports_success() {
     let server = two_collections();
-    server.respond("db_open", json!({"success": true}));
+    server.respond(
+        "db_open",
+        json!({"success": true, "path": "/data/New.mlite", "message": "Database opened"}),
+    );
     let mut app = app_with_server(&server).await;
     open_database_modal_with_path(&mut app, "/data/New.mlite").await;
     server.clear_calls();
@@ -930,7 +959,10 @@ async fn test_database_switch_reports_success() {
 #[tokio::test]
 async fn test_database_switch_keeps_collection_list_error_visible() {
     let server = two_collections();
-    server.respond("db_open", json!({"success": true}));
+    server.respond(
+        "db_open",
+        json!({"success": true, "path": "/data/new.mlite", "message": "Database opened"}),
+    );
     let mut app = app_with_server(&server).await;
     open_database_modal_with_path(&mut app, "/data/new.mlite").await;
     server.fail("collection_list", "list failed");
@@ -2216,4 +2248,111 @@ async fn test_listener_disable_reports_a_failed_reload() {
         "{:?}",
         app.listener_state.error
     );
+}
+
+#[tokio::test]
+async fn test_script_run_shows_the_servers_result_logs_and_time() {
+    let server = two_collections();
+    server.respond(
+        "script_exec",
+        json!({"success": true, "result": 10, "logs": ["hi"], "execution_time_ms": 4242}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.script_state.lines = vec!["print(\"hi\"); 10".to_string()];
+
+    app.run_script_async().await;
+
+    let result = app.script_state.result.clone().unwrap();
+    assert!(result.success);
+    assert_eq!(result.result, json!(10));
+    assert_eq!(result.logs, vec!["hi".to_string()]);
+    // The script's own run time on the server, not the round trip
+    assert_eq!(result.execution_time_ms, 4242);
+    assert_eq!(
+        server.calls_to("script_exec"),
+        vec![json!({"code": "print(\"hi\"); 10"})]
+    );
+}
+
+#[tokio::test]
+async fn test_script_list_with_a_malformed_entry_is_an_error_not_a_guess() {
+    let server = two_collections();
+    // No version: the list used to show it as v1
+    server.respond(
+        "script_list",
+        json!({"scripts": [{"name": "cleanup"}], "count": 1}),
+    );
+    let mut app = app_with_server(&server).await;
+
+    app.load_scripts_async().await;
+
+    assert!(app.script_state.scripts.is_empty());
+    let error = app.script_state.error.clone().unwrap_or_default();
+    assert!(error.contains("Script lista"), "{}", error);
+}
+
+#[tokio::test]
+async fn test_api_key_revoke_reports_a_failed_list_reload() {
+    use crate::modals::api_key::{ApiKeyInfo, ApiKeyModalMode, ConfirmAction};
+
+    let server = two_collections();
+    server.respond(
+        "admin_apikey_revoke",
+        json!({"success": true, "id": 7, "status": "revoked"}),
+    );
+    server.fail("admin_apikey_list", "list failed");
+    let mut app = app_with_server(&server).await;
+    app.modal = Some(Modal::ApiKey);
+    app.api_key_state.admin_key = Some("adm".to_string());
+    app.api_key_state.is_localhost = true;
+    app.api_key_state.set_keys(vec![ApiKeyInfo {
+        id: 7,
+        name: "ci".to_string(),
+        key_preview: "ib_abc...wxyz".to_string(),
+        created_at: "2026-11-15T10:00:00Z".to_string(),
+        enabled: true,
+    }]);
+    app.api_key_state.mode = ApiKeyModalMode::Confirm;
+    app.api_key_state.confirm_action = Some(ConfirmAction::Revoke);
+
+    press(&mut app, KeyCode::Char('y')).await;
+
+    assert_eq!(
+        server.calls_to("admin_apikey_revoke"),
+        vec![json!({"id": 7, "admin_key": "adm"})]
+    );
+    // The revoke happened; the stale list is not silently kept as current
+    let error = app.api_key_state.error.clone().unwrap_or_default();
+    assert!(error.contains("Key 'ci' revoked!"), "{}", error);
+    assert!(error.contains("list failed"), "{}", error);
+}
+
+#[tokio::test]
+async fn test_api_key_revoke_of_a_missing_key_says_so() {
+    use crate::modals::api_key::{ApiKeyInfo, ApiKeyModalMode, ConfirmAction};
+
+    let server = two_collections();
+    server.respond(
+        "admin_apikey_revoke",
+        json!({"success": false, "id": 7, "error": "API key not found"}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.modal = Some(Modal::ApiKey);
+    app.api_key_state.admin_key = Some("adm".to_string());
+    app.api_key_state.is_localhost = true;
+    app.api_key_state.set_keys(vec![ApiKeyInfo {
+        id: 7,
+        name: "ci".to_string(),
+        key_preview: "***".to_string(),
+        created_at: String::new(),
+        enabled: true,
+    }]);
+    app.api_key_state.mode = ApiKeyModalMode::Confirm;
+    app.api_key_state.confirm_action = Some(ConfirmAction::Revoke);
+
+    press(&mut app, KeyCode::Char('y')).await;
+
+    assert_eq!(app.api_key_state.error.as_deref(), Some("Key not found"));
+    assert_eq!(app.api_key_state.mode, ApiKeyModalMode::List);
+    assert!(server.calls_to("admin_apikey_list").is_empty());
 }

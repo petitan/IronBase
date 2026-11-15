@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI script and API key screens; typed MCP responses for the script, API key and `db_open` tools (ironbase-core 0.3.473, mcp-server 1.0.671)
+
+Phase 2h of the Tuti TUI overhaul. The server's response values are unchanged.
+
+- **`ironbase-mcp-types` gains response types for the script, API key and `db_open` tools:** the twelve
+  `script_*` tools, `admin_apikey_create` / `_list` / `_revoke` / `_delete` and `db_open`. The script
+  metadata types (`Script`, `ScriptInfo`, `ScriptVersion`, `ScriptStats`, `ScriptResult`) move to the shared
+  crate; the server re-exports them under their old paths and returns them as they are instead of rebuilding
+  them field by field. An API key list entry is `ApiKeyEntry`; a revoke / delete answers the untagged
+  `ApiKeyChangeResponse` (`Done` or `NotFound`, told apart by `success`). The response golden test grew from
+  405 to 452 cases (recorded on the previous code; run times and keys are normalized, numbers to zero of
+  their own kind) and every recorded response of the group round-trips through the shared types byte for
+  byte.
+- **Tuti TUI script and API key screens:**
+  - a script run shows the script's own run time on the server (it showed the round trip measured by the
+    TUI);
+  - a malformed script list or history entry is an error instead of a guess (a missing version showed as
+    `v1`, a missing history entry was dropped silently);
+  - a failed reload of the API key list after a revoke, delete or create is reported next to the change's
+    own outcome instead of being ignored;
+  - the hand-written script, API key and `db_open` calls of the client are gone; the screens call the typed
+    tools.
+- Known server behaviour, pinned by the golden test and not changed here: saving a new script version
+  without `description` / `tags` clears them; `db_open` of the database already open answers "locked by
+  another process".
+
 ### Fixed — Tuti TUI ACL and listener screens; typed MCP responses for the ACL and listener tools (ironbase-core 0.3.472, mcp-server 1.0.670)
 
 Phase 2g of the Tuti TUI overhaul. The server's response values are unchanged, except for a stored ACL

@@ -4,6 +4,8 @@ use crate::app::{App, Modal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
 use crossterm::event::KeyCode;
+use ironbase_mcp_types::params::DbOpenParams;
+use ironbase_mcp_types::tools::DbOpen;
 
 /// Open database modal
 pub(crate) fn handle_database_open(app: &mut App) {
@@ -40,8 +42,12 @@ pub(crate) async fn handle_database_key_async(app: &mut App, key: KeyCode) {
                     app.database_state.loading = true;
                     app.database_state.error = None;
 
-                    match db.db_open(&path, create).await {
-                        Ok(()) => {
+                    let args = DbOpenParams {
+                        path: path.clone(),
+                        create,
+                    };
+                    match db.call::<DbOpen>(&args).await {
+                        Ok(_) => {
                             app.database_state.loading = false;
                             let action = if create { "letrehozva" } else { "megnyitva" };
                             app.database_state.message = Some(format!("Sikeresen {}!", action));

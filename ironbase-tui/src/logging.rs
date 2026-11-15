@@ -352,6 +352,28 @@ pub fn url_host(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::testing::{app_with_server, FakeServer};
+    use ironbase_mcp_types::params::{AdminApiKeyCreateParams, AdminKeyParams};
+    use ironbase_mcp_types::tools::{AdminApikeyCreate, AdminApikeyList};
+
+    /// `admin_apikey_create` arguments
+    fn create_args(admin_key: &str, name: &str) -> AdminApiKeyCreateParams {
+        AdminApiKeyCreateParams {
+            name: name.to_string(),
+            admin_key: Some(admin_key.to_string()),
+        }
+    }
+
+    /// An `admin_apikey_create` answer handing out `key`
+    fn created_key(name: &str, key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "success": true,
+            "id": 1,
+            "key": key,
+            "name": name,
+            "created_at": "2026-11-15T10:00:00Z",
+            "note": "Save this key now - it cannot be retrieved later!"
+        })
+    }
 
     fn temp_log_path(name: &str) -> PathBuf {
         let dir =
@@ -603,9 +625,11 @@ mod tests {
             .unwrap()
             .contains("sk-echoed-7c1d"));
         // Debug argument line: a registered value under an unsuspicious name
-        server.respond("admin_apikey_create", serde_json::json!({}));
+        server.respond("admin_apikey_create", created_key("sk-echoed-7c1d", "k-1"));
         let db = app.db.as_ref().unwrap();
-        db.create_api_key("adm-x", "sk-echoed-7c1d").await.unwrap();
+        db.call::<AdminApikeyCreate>(&create_args("adm-x", "sk-echoed-7c1d"))
+            .await
+            .unwrap();
 
         let log = std::fs::read_to_string(&path).unwrap();
         assert!(log.contains("admin_apikey_create"), "{log}");
@@ -731,14 +755,17 @@ mod tests {
         let app = app_with_server(&server).await;
         server.respond(
             "admin_apikey_create",
-            serde_json::json!({"key": "sk-new-key"}),
+            created_key("ci-runner", "sk-new-key"),
         );
         let db = app.db.as_ref().unwrap();
-        db.create_api_key("adm-top-secret", "ci-runner")
+        db.call::<AdminApikeyCreate>(&create_args("adm-top-secret", "ci-runner"))
             .await
             .unwrap();
         server.fail("admin_apikey_list", "invalid admin key");
-        assert!(db.list_api_keys("adm-top-secret").await.is_err());
+        let list = AdminKeyParams {
+            admin_key: Some("adm-top-secret".to_string()),
+        };
+        assert!(db.call::<AdminApikeyList>(&list).await.is_err());
 
         // The key did reach the server...
         assert_eq!(

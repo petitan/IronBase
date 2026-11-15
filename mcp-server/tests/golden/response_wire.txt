@@ -1618,3 +1618,191 @@ err: InvalidParams Cannot delete the default listener. Use listener_disable inst
 in:  {}
 err: InvalidParams missing field `id`
 
+## script_list / none
+in:  {}
+out: {"scripts":[],"count":0}
+
+## script_save / new
+in:  {"name":"greet","code":"let n = params.name; print(\"hi \" + n); n.len()","description":"Greets","tags":["demo","text"]}
+out: {"success":true,"name":"greet","version":1}
+
+## script_save / second version
+in:  {"name":"greet","code":"params.name.len() * 2"}
+out: {"success":true,"name":"greet","version":2}
+
+## script_save / other
+in:  {"name":"sum","code":"1 + 2","dependencies":[]}
+out: {"success":true,"name":"sum","version":1}
+
+## script_save / invalid name
+in:  {"name":"bad name!","code":"1"}
+err: InvalidParams Script name can only contain alphanumeric characters, underscores, dots, and hyphens
+
+## script_save / missing code
+in:  {"name":"x"}
+err: InvalidParams missing field `code`
+
+## script_list / all
+in:  {}
+out: {"scripts":[{"name":"greet","description":null,"created_at":"<created_at>","version":2,"tags":[],"execution_count":0,"last_run_at":null},{"name":"sum","description":null,"created_at":"<created_at>","version":1,"tags":[],"execution_count":0,"last_run_at":null}],"count":2}
+
+## script_list / by tag
+in:  {"tags":["demo"]}
+out: {"scripts":[],"count":0}
+
+## script_list / all tags
+in:  {"tags":["demo","nope"],"match_all":true}
+out: {"scripts":[],"count":0}
+
+## script_get / existing
+in:  {"name":"greet"}
+out: {"name":"greet","code":"params.name.len() * 2","description":null,"created_at":"<created_at>","updated_at":"<updated_at>","version":2,"tags":[],"dependencies":[]}
+
+## script_get / missing
+in:  {"name":"nope"}
+err: InvalidParams Script 'nope' not found
+
+## script_run / with params
+in:  {"name":"greet","params":{"name":"Álmos"}}
+out: {"success":true,"result":10,"logs":[],"execution_time_ms":0}
+
+## script_run / failing
+in:  {"name":"greet"}
+err: ScriptError Variable not found: params
+
+## script_run / missing
+in:  {"name":"nope"}
+err: ScriptError Script 'nope' not found
+
+## script_exec / value
+in:  {"code":"print(\"x\"); #{a: 1, b: [1, 2]}"}
+out: {"success":true,"result":{"a":1,"b":[1,2]},"logs":["x"],"execution_time_ms":0}
+
+## script_exec / syntax error
+in:  {"code":"let = ;"}
+err: ScriptError Script parse error: Expecting name of a variable
+
+## script_exec / operation limit
+in:  {"code":"let i = 0; loop { i += 1; }","max_operations":1000}
+err: ScriptError Script exceeded maximum operations limit (1000)
+
+## script_history / two versions
+in:  {"name":"greet"}
+out: {"history":[{"script_name":"greet","version":1,"code":"let n = params.name; print(\"hi \" + n); n.len()","description":"Greets","tags":["demo","text"],"dependencies":[],"created_at":"<created_at>"}],"count":1}
+
+## script_history / limited
+in:  {"name":"greet","limit":1}
+out: {"history":[{"script_name":"greet","version":1,"code":"let n = params.name; print(\"hi \" + n); n.len()","description":"Greets","tags":["demo","text"],"dependencies":[],"created_at":"<created_at>"}],"count":1}
+
+## script_history / missing
+in:  {"name":"nope"}
+out: {"history":[],"count":0}
+
+## script_version_get / first
+in:  {"name":"greet","version":1}
+out: {"script_name":"greet","version":1,"code":"let n = params.name; print(\"hi \" + n); n.len()","description":"Greets","tags":["demo","text"],"dependencies":[],"created_at":"<created_at>"}
+
+## script_version_get / missing version
+in:  {"name":"greet","version":99}
+err: InvalidParams Version 99 of script 'greet' not found
+
+## script_rollback / to first
+in:  {"name":"greet","version":1}
+out: {"success":true,"name":"greet","new_version":3}
+
+## script_rollback / missing version
+in:  {"name":"greet","version":99}
+err: ScriptError Version 99 of script 'greet' not found
+
+## script_tags_add / new tag
+in:  {"name":"greet","tags":["new"]}
+out: {"success":true,"name":"greet","added_tags":["new"]}
+
+## script_tags_remove / a tag
+in:  {"name":"greet","tags":["text"]}
+out: {"success":true,"name":"greet","removed_tags":["text"]}
+
+## script_stats / run
+in:  {"name":"greet"}
+out: {"name":"greet","execution_count":2,"last_run_at":"<last_run_at>","last_run_success":false,"total_execution_time_ms":0,"avg_execution_time_ms":0.0}
+
+## script_stats / never run
+in:  {"name":"sum"}
+out: {"name":"sum","execution_count":0,"last_run_at":null,"last_run_success":null,"total_execution_time_ms":0,"avg_execution_time_ms":0.0}
+
+## script_stats / missing
+in:  {"name":"nope"}
+err: InvalidParams Script 'nope' not found
+
+## script_delete / existing
+in:  {"name":"sum"}
+out: {"success":true,"deleted":"sum"}
+
+## script_delete / missing
+in:  {"name":"sum"}
+err: InvalidParams Script 'sum' not found
+
+## admin_apikey_list / none
+in:  {"admin_key":"golden-admin"}
+out: {"success":true,"keys":[],"count":0}
+
+## admin_apikey_create / first
+in:  {"name":"ci","admin_key":"golden-admin"}
+out: {"success":true,"id":1,"key":"<key>","name":"ci","created_at":"<created_at>","note":"Save this key now - it cannot be retrieved later!"}
+
+## admin_apikey_create / second
+in:  {"name":"tui","admin_key":"golden-admin"}
+out: {"success":true,"id":2,"key":"<key>","name":"tui","created_at":"<created_at>","note":"Save this key now - it cannot be retrieved later!"}
+
+## admin_apikey_create / wrong admin key
+in:  {"name":"x","admin_key":"nope"}
+err: InvalidParams Admin authentication failed
+
+## admin_apikey_create / no admin key
+in:  {"name":"x"}
+err: InvalidParams Admin authentication failed
+
+## admin_apikey_list / two
+in:  {"admin_key":"golden-admin"}
+out: {"success":true,"keys":[{"_id":1,"name":"ci","key_preview":"<key_preview>","created_at":"<created_at>","enabled":true},{"_id":2,"name":"tui","key_preview":"<key_preview>","created_at":"<created_at>","enabled":true}],"count":2}
+
+## admin_apikey_revoke / existing
+in:  {"id":1,"admin_key":"golden-admin"}
+out: {"success":true,"id":1,"status":"revoked"}
+
+## admin_apikey_revoke / missing
+in:  {"id":99,"admin_key":"golden-admin"}
+out: {"success":false,"id":99,"error":"API key not found"}
+
+## admin_apikey_delete / existing
+in:  {"id":2,"admin_key":"golden-admin"}
+out: {"success":true,"id":2,"status":"deleted"}
+
+## admin_apikey_delete / missing
+in:  {"id":99,"admin_key":"golden-admin"}
+out: {"success":false,"id":99,"error":"API key not found"}
+
+## admin_apikey_list / one revoked
+in:  {"admin_key":"golden-admin"}
+out: {"success":true,"keys":[{"_id":1,"name":"ci","key_preview":"<key_preview>","created_at":"<created_at>","enabled":false}],"count":1}
+
+## db_open / missing file
+in:  {"path":"/nonexistent/dir/x.mlite"}
+err: InvalidParams Database file does not exist: /nonexistent/dir/x.mlite
+
+## db_open / create
+in:  {"path":"<dir>/other.mlite","create":true}
+out: {"success":true,"path":"<dir>/other.mlite","message":"Database created"}
+
+## db_open / create second
+in:  {"path":"<dir>/first.mlite","create":true}
+out: {"success":true,"path":"<dir>/first.mlite","message":"Database created"}
+
+## db_open / open existing
+in:  {"path":"<dir>/other.mlite"}
+out: {"success":true,"path":"<dir>/other.mlite","message":"Database opened"}
+
+## db_open / reopen the open one
+in:  {"path":"<dir>/other.mlite"}
+err: InternalError Failed to open database: Database '<dir>/other.mlite' is locked by another process
+

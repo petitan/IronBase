@@ -5,37 +5,8 @@ use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-/// API Key information from the server
-#[derive(Debug, Clone)]
-pub struct ApiKeyInfo {
-    pub id: u64,
-    pub name: String,
-    pub key_preview: String,
-    pub enabled: bool,
-}
-
-impl ApiKeyInfo {
-    /// Parse from JSON value
-    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        Some(Self {
-            id: value.get("_id").and_then(|v| v.as_u64())?,
-            name: value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            key_preview: value
-                .get("key_preview")
-                .and_then(|v| v.as_str())
-                .unwrap_or("***")
-                .to_string(),
-            enabled: value
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        })
-    }
-}
+/// API Key information from the server (`admin_apikey_list`)
+pub use ironbase_mcp_types::responses::ApiKeyEntry as ApiKeyInfo;
 
 /// Modal mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
