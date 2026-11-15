@@ -136,6 +136,41 @@ fn normalize_job_ages(job: &mut Value) {
     }
 }
 
+/// The clock and the key generator of the script and API key tools:
+/// timestamps, run times and the generated key (when set)
+fn normalize_times_and_keys(v: &mut Value) {
+    const KEYS: &[&str] = &[
+        "created_at",
+        "updated_at",
+        "last_run_at",
+        "execution_time_ms",
+        "total_execution_time_ms",
+        "avg_execution_time_ms",
+        "key",
+        "key_preview",
+    ];
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                if KEYS.contains(&k.as_str()) && !child.is_null() {
+                    // A number stays a number of its kind, so the record keeps its type
+                    *child = if child.is_f64() {
+                        Value::from(0.0)
+                    } else if child.is_number() {
+                        Value::from(0)
+                    } else {
+                        placeholder(k)
+                    };
+                } else {
+                    normalize_times_and_keys(child);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_times_and_keys),
+        _ => {}
+    }
+}
+
 fn sort_by_key(list: &mut Value, key: &str) {
     if let Some(items) = list.as_array_mut() {
         items.sort_by(|a, b| a[key].to_string().cmp(&b[key].to_string()));
@@ -218,6 +253,9 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
         }
         // The list in storage order
         "acl_list" => sort_by_key(&mut out["rules"], "collection"),
+        _ if tool.starts_with("script_") || tool.starts_with("admin_apikey_") => {
+            normalize_times_and_keys(out)
+        }
         "listener_list" => sort_by_key(&mut out["listeners"], "_id"),
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
             normalize_search(tool, args, out);
@@ -419,6 +457,7 @@ fn render() -> String {
     render_job_group(&mut out);
     render_rag_group(&mut out);
     render_acl_listener_group(&mut out);
+    render_script_admin_group(&mut out);
     out
 }
 
@@ -1480,6 +1519,128 @@ fn render_acl_listener_group(out: &mut String) {
     );
 }
 
+/// The script tools (`script_*`), the API key tools (`admin_apikey_*`, with
+/// the admin key set) and `db_open`, on a seventh database
+fn render_script_admin_group(out: &mut String) {
+    let (adapter, dir) = create_test_adapter();
+    std::env::set_var("IRONBASE_ADMIN_KEY", "golden-admin");
+    macro_rules! case {
+        ($tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record(out, &adapter, None, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!("script_list", "none" => {});
+    case!("script_save",
+        "new" => {"name": "greet", "code": "let n = params.name; print(\"hi \" + n); n.len()",
+            "description": "Greets", "tags": ["demo", "text"]},
+        "second version" => {"name": "greet", "code": "params.name.len() * 2"},
+        "other" => {"name": "sum", "code": "1 + 2", "dependencies": []},
+        "invalid name" => {"name": "bad name!", "code": "1"},
+        "missing code" => {"name": "x"},
+    );
+    case!("script_list",
+        "all" => {},
+        "by tag" => {"tags": ["demo"]},
+        "all tags" => {"tags": ["demo", "nope"], "match_all": true},
+    );
+    case!("script_get",
+        "existing" => {"name": "greet"},
+        "missing" => {"name": "nope"},
+    );
+    case!("script_run",
+        "with params" => {"name": "greet", "params": {"name": "Álmos"}},
+        "failing" => {"name": "greet"},
+        "missing" => {"name": "nope"},
+    );
+    case!("script_exec",
+        "value" => {"code": "print(\"x\"); #{a: 1, b: [1, 2]}"},
+        "syntax error" => {"code": "let = ;"},
+        "operation limit" => {"code": "let i = 0; loop { i += 1; }", "max_operations": 1000},
+    );
+    case!("script_history",
+        "two versions" => {"name": "greet"},
+        "limited" => {"name": "greet", "limit": 1},
+        "missing" => {"name": "nope"},
+    );
+    case!("script_version_get",
+        "first" => {"name": "greet", "version": 1},
+        "missing version" => {"name": "greet", "version": 99},
+    );
+    case!("script_rollback",
+        "to first" => {"name": "greet", "version": 1},
+        "missing version" => {"name": "greet", "version": 99},
+    );
+    case!("script_tags_add", "new tag" => {"name": "greet", "tags": ["new"]});
+    case!("script_tags_remove", "a tag" => {"name": "greet", "tags": ["text"]});
+    case!("script_stats",
+        "run" => {"name": "greet"},
+        "never run" => {"name": "sum"},
+        "missing" => {"name": "nope"},
+    );
+    case!("script_delete",
+        "existing" => {"name": "sum"},
+        "missing" => {"name": "sum"},
+    );
+
+    case!("admin_apikey_list", "none" => {"admin_key": "golden-admin"});
+    case!("admin_apikey_create",
+        "first" => {"name": "ci", "admin_key": "golden-admin"},
+        "second" => {"name": "tui", "admin_key": "golden-admin"},
+        "wrong admin key" => {"name": "x", "admin_key": "nope"},
+        "no admin key" => {"name": "x"},
+    );
+    case!("admin_apikey_list", "two" => {"admin_key": "golden-admin"});
+    case!("admin_apikey_revoke",
+        "existing" => {"id": 1, "admin_key": "golden-admin"},
+        "missing" => {"id": 99, "admin_key": "golden-admin"},
+    );
+    case!("admin_apikey_delete",
+        "existing" => {"id": 2, "admin_key": "golden-admin"},
+        "missing" => {"id": 99, "admin_key": "golden-admin"},
+    );
+    case!("admin_apikey_list", "one revoked" => {"admin_key": "golden-admin"});
+    // A key written past `admin_apikey_create` with a negative `_id` (the
+    // collection's schema allows any integer): still listed, as the auth cache
+    // accepts it, with id 0
+    adapter
+        .insert_one(
+            "_system.api_keys",
+            json!({
+                "_id": -5,
+                "key": "sk-handmade0123456789abcdefghijklmnopq",
+                "name": "handmade",
+                "created_at": "2026-11-15T10:00:00Z",
+                "enabled": true
+            }),
+        )
+        .unwrap();
+    case!("admin_apikey_list", "handmade document" => {"admin_key": "golden-admin"});
+
+    // The temporary directory is "<dir>" in the input, the output and the errors
+    let dir_path = dir.path().to_str().unwrap().to_string();
+    let other = format!("{dir_path}/other.mlite");
+    let first = format!("{dir_path}/first.mlite");
+    case!("db_open", "missing file" => {"path": "/nonexistent/dir/x.mlite"});
+    let start = out.len();
+    for (label, args) in [
+        ("create", json!({"path": other, "create": true})),
+        ("create second", json!({"path": first, "create": true})),
+        // Back to a closed, existing file
+        ("open existing", json!({"path": other})),
+        // The open one again: "locked by another process"
+        ("reopen the open one", json!({"path": other})),
+    ] {
+        record(out, &adapter, None, "db_open", label, args);
+    }
+    // (JSON lines escape a Windows path's backslashes, error lines do not)
+    let tail = out
+        .split_off(start)
+        .replace(&dir_path.replace('\\', "\\\\"), "<dir>")
+        .replace(&dir_path, "<dir>");
+    out.push_str(&tail);
+}
+
 #[test]
 fn response_wire_format_matches_golden() {
     let actual = render();
@@ -1639,4 +1800,40 @@ fn acl_listener_group_golden_parses_as_the_shared_response_types() {
         })
     });
     assert_eq!(checked, 27);
+}
+
+/// Every recorded response of the script, API key and `db_open` tool group
+/// parses, strictly, into the tool's shared response type and serializes back
+/// to the same bytes
+#[test]
+fn script_admin_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        AdminApikeyCreate, AdminApikeyDelete, AdminApikeyList, AdminApikeyRevoke, DbOpen,
+        ScriptDelete, ScriptExec, ScriptGet, ScriptHistory, ScriptList, ScriptRollback, ScriptRun,
+        ScriptSave, ScriptStats, ScriptTagsAdd, ScriptTagsRemove, ScriptVersionGet,
+    };
+
+    let checked = check_golden(|tool, json| {
+        Some(match tool {
+            "script_save" => same_bytes::<ScriptSave>(json),
+            "script_list" => same_bytes::<ScriptList>(json),
+            "script_get" => same_bytes::<ScriptGet>(json),
+            "script_delete" => same_bytes::<ScriptDelete>(json),
+            "script_run" => same_bytes::<ScriptRun>(json),
+            "script_exec" => same_bytes::<ScriptExec>(json),
+            "script_history" => same_bytes::<ScriptHistory>(json),
+            "script_rollback" => same_bytes::<ScriptRollback>(json),
+            "script_version_get" => same_bytes::<ScriptVersionGet>(json),
+            "script_tags_add" => same_bytes::<ScriptTagsAdd>(json),
+            "script_tags_remove" => same_bytes::<ScriptTagsRemove>(json),
+            "script_stats" => same_bytes::<ScriptStats>(json),
+            "admin_apikey_create" => same_bytes::<AdminApikeyCreate>(json),
+            "admin_apikey_list" => same_bytes::<AdminApikeyList>(json),
+            "admin_apikey_revoke" => same_bytes::<AdminApikeyRevoke>(json),
+            "admin_apikey_delete" => same_bytes::<AdminApikeyDelete>(json),
+            "db_open" => same_bytes::<DbOpen>(json),
+            _ => return None,
+        })
+    });
+    assert_eq!(checked, 33);
 }

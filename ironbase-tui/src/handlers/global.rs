@@ -170,13 +170,9 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                 if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
                     if let Some(ref db) = app.db {
                         app.api_key_state.loading = true;
-                        match db.list_api_keys(admin_key).await {
+                        match super::api_key::load_api_keys(db, admin_key).await {
                             Ok(keys) => {
-                                let infos: Vec<_> = keys
-                                    .iter()
-                                    .filter_map(modals::api_key::ApiKeyInfo::from_value)
-                                    .collect();
-                                app.api_key_state.set_keys(infos);
+                                app.api_key_state.set_keys(keys);
                                 app.api_key_state.loading = false;
                             }
                             Err(e) => {

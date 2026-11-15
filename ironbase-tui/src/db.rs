@@ -216,15 +216,6 @@ impl DbWrapper {
         }
     }
 
-    /// Open or create a database file (switches the current database)
-    pub async fn db_open(&self, path: &str, create: bool) -> Result<()> {
-        self.client
-            .db_open(path, create)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        Ok(())
-    }
-
     /// Get list of available MCP tools
     pub async fn tools_list(&self) -> Result<Vec<Value>> {
         self.client
@@ -307,89 +298,6 @@ impl DbWrapper {
         self.client.close().await?;
         Ok(())
     }
-
-    // === IronRhai Script operations ===
-
-    /// List all saved scripts
-    pub async fn script_list(&self) -> Result<Vec<Value>> {
-        let scripts = self.client.script_list().await?;
-        Ok(scripts)
-    }
-
-    /// Get a script by name
-    pub async fn script_get(&self, name: &str) -> Result<Value> {
-        let script = self.client.script_get(name).await?;
-        Ok(script)
-    }
-
-    /// Save a script (create or update)
-    pub async fn script_save(
-        &self,
-        name: &str,
-        code: &str,
-        description: Option<&str>,
-        tags: Option<&[String]>,
-    ) -> Result<Value> {
-        let result = self
-            .client
-            .script_save(name, code, description, tags)
-            .await?;
-        Ok(result)
-    }
-
-    /// Delete a script
-    pub async fn script_delete(&self, name: &str) -> Result<()> {
-        self.client.script_delete(name).await?;
-        Ok(())
-    }
-
-    /// Execute inline script code (not saved)
-    pub async fn script_exec(&self, code: &str, params: Option<&Value>) -> Result<Value> {
-        let result = self.client.script_exec(code, params).await?;
-        Ok(result)
-    }
-
-    /// Get script version history
-    pub async fn script_history(&self, name: &str, limit: Option<usize>) -> Result<Vec<Value>> {
-        let history = self.client.script_history(name, limit).await?;
-        Ok(history)
-    }
-
-    /// Rollback script to a specific version
-    pub async fn script_rollback(&self, name: &str, version: u32) -> Result<u32> {
-        let new_version = self.client.script_rollback(name, version).await?;
-        Ok(new_version)
-    }
-
-    // === API Key Management ===
-
-    /// List all API keys (requires admin key)
-    pub async fn list_api_keys(&self, admin_key: &str) -> Result<Vec<Value>> {
-        let keys = self.client.list_api_keys(admin_key).await?;
-        Ok(keys)
-    }
-
-    /// Create a new API key (requires admin key)
-    pub async fn create_api_key(&self, admin_key: &str, name: &str) -> Result<Value> {
-        let result = self.client.create_api_key(admin_key, name).await?;
-        Ok(result)
-    }
-
-    /// Revoke (disable) an API key by ID (requires admin key)
-    pub async fn revoke_api_key(&self, admin_key: &str, id: u64) -> Result<bool> {
-        let success = self.client.revoke_api_key(admin_key, id).await?;
-        Ok(success)
-    }
-
-    /// Delete an API key by ID (requires admin key)
-    pub async fn delete_api_key(&self, admin_key: &str, id: u64) -> Result<bool> {
-        let success = self.client.delete_api_key(admin_key, id).await?;
-        Ok(success)
-    }
-
-    // === ACL Management ===
-
-    // === RAG operations ===
 }
 
 /// Recursively collect field names and types

@@ -35,25 +35,8 @@ pub enum ScriptFocus {
     History,
 }
 
-/// Script info for browse list (without code)
-#[derive(Debug, Clone)]
-pub struct ScriptInfo {
-    pub name: String,
-    pub description: Option<String>,
-    pub version: u32,
-    pub tags: Vec<String>,
-    pub execution_count: u64,
-    pub last_run_at: Option<String>,
-}
-
-/// Script version for history
-#[derive(Debug, Clone)]
-pub struct ScriptVersion {
-    pub version: u32,
-    pub code: String,
-    pub description: Option<String>,
-    pub created_at: String,
-}
+// The browse list entries and the history versions: the server's own types
+pub use ironbase_mcp_types::responses::{ScriptInfo, ScriptVersion};
 
 /// Script execution result
 #[derive(Debug, Clone)]

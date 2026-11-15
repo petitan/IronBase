@@ -3,123 +3,14 @@
 //! Defines structures for scripts, their metadata, versions, and execution results.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 // ============================================================
 // Script Metadata Types
 // ============================================================
 
-/// Script metadata returned by list operations (without code).
-///
-/// Used for listing scripts without loading their full code content,
-/// which is more efficient for displaying script catalogs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptInfo {
-    /// Unique script name/identifier.
-    pub name: String,
-
-    /// Human-readable description of what the script does.
-    pub description: Option<String>,
-
-    /// ISO 8601 timestamp when the script was created.
-    pub created_at: Option<String>,
-
-    /// Current version number (increments on each save).
-    pub version: u32,
-
-    /// Tags for categorization and filtering.
-    pub tags: Vec<String>,
-
-    /// Number of times the script has been executed.
-    pub execution_count: u64,
-
-    /// ISO 8601 timestamp of the last execution.
-    pub last_run_at: Option<String>,
-}
-
-/// Full script with code and all metadata.
-///
-/// Contains the complete script definition including code,
-/// version history metadata, and dependencies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Script {
-    /// Unique script name/identifier.
-    pub name: String,
-
-    /// The Rhai script code.
-    pub code: String,
-
-    /// Human-readable description.
-    pub description: Option<String>,
-
-    /// ISO 8601 timestamp when the script was created.
-    pub created_at: Option<String>,
-
-    /// ISO 8601 timestamp when the script was last updated.
-    pub updated_at: Option<String>,
-
-    /// Current version number (increments on each save).
-    pub version: u32,
-
-    /// Tags for categorization.
-    pub tags: Vec<String>,
-
-    /// Dependencies on other scripts (executed before this one).
-    pub dependencies: Vec<String>,
-}
-
-/// Script version history entry.
-///
-/// Represents a historical version of a script, stored in the
-/// `_system.script_versions` collection for rollback support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptVersion {
-    /// Name of the script this version belongs to.
-    pub script_name: String,
-
-    /// Version number of this snapshot.
-    pub version: u32,
-
-    /// The Rhai code at this version.
-    pub code: String,
-
-    /// Description at this version.
-    pub description: Option<String>,
-
-    /// Tags at this version.
-    pub tags: Vec<String>,
-
-    /// Dependencies at this version.
-    pub dependencies: Vec<String>,
-
-    /// ISO 8601 timestamp when this version was archived.
-    pub created_at: String,
-}
-
-/// Script execution statistics.
-///
-/// Tracks execution metrics for a script, useful for monitoring
-/// and performance analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptStats {
-    /// Script name.
-    pub name: String,
-
-    /// Total number of executions.
-    pub execution_count: u64,
-
-    /// ISO 8601 timestamp of last execution.
-    pub last_run_at: Option<String>,
-
-    /// Whether the last execution succeeded.
-    pub last_run_success: Option<bool>,
-
-    /// Total execution time across all runs (milliseconds).
-    pub total_execution_time_ms: u64,
-
-    /// Average execution time (total / count).
-    pub avg_execution_time_ms: f64,
-}
+// Script metadata, versions, statistics: shared with clients, re-exported under
+// their old path.
+pub use ironbase_mcp_types::responses::{Script, ScriptInfo, ScriptStats, ScriptVersion};
 
 // ============================================================
 // Script Filtering
@@ -142,20 +33,8 @@ pub struct ScriptListFilter {
 // Execution Results
 // ============================================================
 
-/// Result of script execution.
-///
-/// Contains the return value, captured logs, and timing information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptResult {
-    /// The value returned by the script (as JSON).
-    pub result: Value,
-
-    /// Log entries captured from `print()` calls.
-    pub logs: Vec<String>,
-
-    /// Execution time in milliseconds.
-    pub execution_time_ms: u64,
-}
+// Execution result: shared with clients, re-exported under its old path.
+pub use ironbase_mcp_types::responses::ScriptResult;
 
 // ============================================================
 // Legacy Compatibility

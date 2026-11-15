@@ -101,18 +101,18 @@ tools! {
     TransactionDeleteOne => "transaction_delete_one", TransactionDeleteParams;
 
     // Scripts
-    ScriptSave => "script_save", ScriptSaveParams;
-    ScriptList => "script_list", ScriptListParams;
-    ScriptGet => "script_get", ScriptNameParams;
-    ScriptDelete => "script_delete", ScriptNameParams;
-    ScriptRun => "script_run", ScriptRunParams;
-    ScriptExec => "script_exec", ScriptExecParams;
-    ScriptHistory => "script_history", ScriptHistoryParams;
-    ScriptRollback => "script_rollback", ScriptVersionParams;
-    ScriptVersionGet => "script_version_get", ScriptVersionParams;
-    ScriptTagsAdd => "script_tags_add", ScriptTagsParams;
-    ScriptTagsRemove => "script_tags_remove", ScriptTagsParams;
-    ScriptStats => "script_stats", ScriptNameParams;
+    ScriptSave => "script_save", ScriptSaveParams => ScriptSaveResponse;
+    ScriptList => "script_list", ScriptListParams => ScriptListResponse;
+    ScriptGet => "script_get", ScriptNameParams => Script;
+    ScriptDelete => "script_delete", ScriptNameParams => ScriptDeleteResponse;
+    ScriptRun => "script_run", ScriptRunParams => ScriptRunResponse;
+    ScriptExec => "script_exec", ScriptExecParams => ScriptRunResponse;
+    ScriptHistory => "script_history", ScriptHistoryParams => ScriptHistoryResponse;
+    ScriptRollback => "script_rollback", ScriptVersionParams => ScriptRollbackResponse;
+    ScriptVersionGet => "script_version_get", ScriptVersionParams => ScriptVersion;
+    ScriptTagsAdd => "script_tags_add", ScriptTagsParams => ScriptTagsAddResponse;
+    ScriptTagsRemove => "script_tags_remove", ScriptTagsParams => ScriptTagsRemoveResponse;
+    ScriptStats => "script_stats", ScriptNameParams => crate::responses::ScriptStats;
 
     // ACL
     AclList => "acl_list", NoParams => AclListResponse;
@@ -131,15 +131,15 @@ tools! {
 
     // Database & admin
     DbStats => "db_stats", NoParams => DbStatsResponse;
-    DbOpen => "db_open", DbOpenParams;
+    DbOpen => "db_open", DbOpenParams => DbOpenResponse;
     AdminCollectionList => "admin_collection_list", AdminKeyParams;
     AdminCollectionCreateSystem => "admin_collection_create_system", AdminCollectionParams;
     AdminCollectionSetFlags => "admin_collection_set_flags", AdminFlagsParams;
     AdminCollectionDropProtected => "admin_collection_drop_protected", AdminCollectionParams;
-    AdminApikeyCreate => "admin_apikey_create", AdminApiKeyCreateParams;
-    AdminApikeyList => "admin_apikey_list", AdminKeyParams;
-    AdminApikeyRevoke => "admin_apikey_revoke", AdminApiKeyIdParams;
-    AdminApikeyDelete => "admin_apikey_delete", AdminApiKeyIdParams;
+    AdminApikeyCreate => "admin_apikey_create", AdminApiKeyCreateParams => ApiKeyCreateResponse;
+    AdminApikeyList => "admin_apikey_list", AdminKeyParams => ApiKeyListResponse;
+    AdminApikeyRevoke => "admin_apikey_revoke", AdminApiKeyIdParams => ApiKeyChangeResponse;
+    AdminApikeyDelete => "admin_apikey_delete", AdminApiKeyIdParams => ApiKeyChangeResponse;
 
     // Vector & retrieval
     VectorSearch => "vector_search", VectorSearchParams => VectorSearchResponse;

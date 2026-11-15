@@ -9,13 +9,16 @@ use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
     AutoEmbedDisableParams, CollectionCreateParams, CollectionDropParams, CountParams,
     DeleteParams, ExplainParams, FindParams, IndexCreateArgs, IndexCreateParams, IndexDropParams,
-    IndexListParams, InsertOneParams, JobCancelParams, JobListParams, NoParams, UpdateOneParams,
+    IndexListParams, InsertOneParams, JobCancelParams, JobListParams, NoParams, ScriptExecParams,
+    ScriptHistoryParams, ScriptListParams, ScriptNameParams, ScriptSaveParams, ScriptVersionParams,
+    UpdateOneParams,
 };
 use ironbase_mcp_types::responses::EmbedCacheClearResponse;
 use ironbase_mcp_types::tools::{
     AutoEmbedDisable, CollectionCreate, CollectionDrop, Count, DbStats, DeleteOne, EmbedCacheClear,
     EmbedJobCancel, EmbedJobList, Explain, Find, IndexCreate, IndexDrop, IndexStatsRefresh,
-    InsertOne, UpdateOne,
+    InsertOne, ScriptDelete, ScriptExec, ScriptGet, ScriptHistory, ScriptList, ScriptRollback,
+    ScriptSave, UpdateOne,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -747,45 +750,9 @@ impl App {
             return;
         };
 
-        match db.script_list().await {
-            Ok(scripts_json) => {
-                let scripts: Vec<ScriptInfo> = scripts_json
-                    .iter()
-                    .filter_map(|v| {
-                        let name = v.get("name")?.as_str()?.to_string();
-                        let description = v
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .map(String::from);
-                        let version = v.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-                        let tags = v
-                            .get("tags")
-                            .and_then(|t| t.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|s| s.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let execution_count = v
-                            .get("execution_count")
-                            .and_then(|e| e.as_u64())
-                            .unwrap_or(0);
-                        let last_run_at = v
-                            .get("last_run_at")
-                            .and_then(|l| l.as_str())
-                            .map(String::from);
-                        Some(ScriptInfo {
-                            name,
-                            description,
-                            version,
-                            tags,
-                            execution_count,
-                            last_run_at,
-                        })
-                    })
-                    .collect();
-                self.script_state.scripts = scripts;
+        match db.call::<ScriptList>(&ScriptListParams::default()).await {
+            Ok(response) => {
+                self.script_state.scripts = response.scripts;
                 self.script_state.selected_script = 0;
                 self.script_state.error = None;
             }
@@ -811,33 +778,18 @@ impl App {
             return;
         };
 
-        match db.script_get(&script_name).await {
-            Ok(script_json) => {
-                let code = script_json
-                    .get("code")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let description = script_json
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .map(String::from);
-                let version = script_json
-                    .get("version")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as u32;
-                let tags = script_json
-                    .get("tags")
-                    .and_then(|t| t.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                self.script_state
-                    .load_script(script_name, code, description, tags, version);
+        let args = ScriptNameParams {
+            name: script_name.clone(),
+        };
+        match db.call::<ScriptGet>(&args).await {
+            Ok(script) => {
+                self.script_state.load_script(
+                    script_name,
+                    script.code,
+                    script.description,
+                    script.tags,
+                    script.version,
+                );
             }
             Err(e) => {
                 self.script_state.error = Some(format!("Script betöltése sikertelen: {}", e));
@@ -857,25 +809,18 @@ impl App {
             return;
         };
 
-        let code = self.script_state.lines.join("\n");
-        let description = if self.script_state.description.is_empty() {
-            None
-        } else {
-            Some(self.script_state.description.as_str())
-        };
-        let tags = if self.script_state.tags.is_empty() {
-            None
-        } else {
-            Some(self.script_state.tags.as_slice())
+        let args = ScriptSaveParams {
+            name: self.script_state.name.clone(),
+            code: self.script_state.lines.join("\n"),
+            description: Some(self.script_state.description.clone())
+                .filter(|description| !description.is_empty()),
+            tags: Some(self.script_state.tags.clone()).filter(|tags| !tags.is_empty()),
+            dependencies: None,
         };
 
-        match db
-            .script_save(&self.script_state.name, &code, description, tags)
-            .await
-        {
-            Ok(result) => {
-                let new_version =
-                    result.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        match db.call::<ScriptSave>(&args).await {
+            Ok(saved) => {
+                let new_version = saved.version;
                 self.script_state.version = new_version;
                 self.script_state.dirty = false;
                 self.script_state.message = Some(format!("Script mentve (v{})", new_version));
@@ -905,7 +850,10 @@ impl App {
             return;
         };
 
-        match db.script_delete(&script_name).await {
+        let args = ScriptNameParams {
+            name: script_name.clone(),
+        };
+        match db.call::<ScriptDelete>(&args).await {
             Ok(_) => {
                 self.script_state.message = Some(format!("Script '{}' törölve", script_name));
                 // Reload list
@@ -943,41 +891,23 @@ impl App {
 
         // Always execute current editor content (not saved version)
         // This ensures "what you see is what runs"
-        let code = self.script_state.lines.join("\n");
-        let result = db.script_exec(&code, params.as_ref()).await;
+        let args = ScriptExecParams {
+            code: self.script_state.lines.join("\n"),
+            params,
+            max_operations: None,
+        };
+        let result = db.call::<ScriptExec>(&args).await;
 
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-
+        // A failed script is a tool error: the server answers a run with its
+        // own result, logs and execution time
         match result {
-            Ok(result_json) => {
-                let success = result_json
-                    .get("success")
-                    .and_then(|s| s.as_bool())
-                    .unwrap_or(true);
-                let output = result_json
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let logs = result_json
-                    .get("logs")
-                    .and_then(|l| l.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let error_msg = result_json
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .map(String::from);
-
+            Ok(response) => {
                 self.script_state.result = Some(ScriptResult {
-                    success,
-                    result: output,
-                    logs,
-                    error: error_msg,
-                    execution_time_ms: elapsed_ms,
+                    success: true,
+                    result: response.run.result,
+                    logs: response.run.logs,
+                    error: None,
+                    execution_time_ms: response.run.execution_time_ms,
                 });
                 self.script_state.error = None;
             }
@@ -987,7 +917,7 @@ impl App {
                     result: serde_json::Value::Null,
                     logs: vec![],
                     error: Some(e.to_string()),
-                    execution_time_ms: elapsed_ms,
+                    execution_time_ms: start.elapsed().as_millis() as u64,
                 });
             }
         }
@@ -1006,31 +936,13 @@ impl App {
             return;
         };
 
-        match db.script_history(&script_name, Some(20)).await {
-            Ok(history_json) => {
-                let versions: Vec<ScriptVersion> = history_json
-                    .iter()
-                    .filter_map(|v| {
-                        let version = v.get("version").and_then(|n| n.as_u64())? as u32;
-                        let code = v.get("code").and_then(|c| c.as_str())?.to_string();
-                        let description = v
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .map(String::from);
-                        let created_at = v
-                            .get("created_at")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        Some(ScriptVersion {
-                            version,
-                            code,
-                            description,
-                            created_at,
-                        })
-                    })
-                    .collect();
-                self.script_state.versions = versions;
+        let args = ScriptHistoryParams {
+            name: script_name,
+            limit: Some(20),
+        };
+        match db.call::<ScriptHistory>(&args).await {
+            Ok(response) => {
+                self.script_state.versions = response.history;
                 self.script_state.selected_version = 0;
                 self.script_state.error = None;
             }
@@ -1048,7 +960,15 @@ impl App {
             return;
         };
 
-        match db.script_rollback(script_name, target_version).await {
+        let args = ScriptVersionParams {
+            name: script_name.to_string(),
+            version: target_version,
+        };
+        match db
+            .call::<ScriptRollback>(&args)
+            .await
+            .map(|r| r.new_version)
+        {
             Ok(new_version) => {
                 self.script_state.message =
                     Some(format!("Rollback sikeres, új verzió: v{}", new_version));
@@ -2962,9 +2882,12 @@ mod tests {
         let mut app = App::new(Config::default());
         app.script_state.name = "cleanup".to_string();
         app.script_state.versions = vec![ScriptVersion {
+            script_name: "greet".to_string(),
             version: 3,
             code: String::new(),
             description: None,
+            tags: vec![],
+            dependencies: vec![],
             created_at: String::new(),
         }];
         app.modal = Some(Modal::Script);

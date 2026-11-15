@@ -249,54 +249,67 @@ pub fn create_api_key(
 }
 
 /// List all API keys (without showing full key values)
-pub fn list_api_keys(adapter: &Arc<IronBaseAdapter>) -> Result<Vec<serde_json::Value>, String> {
+pub fn list_api_keys(
+    adapter: &Arc<IronBaseAdapter>,
+) -> Result<Vec<ironbase_mcp_types::responses::ApiKeyEntry>, String> {
     let options = FindOptions {
         sort: Some(vec![("_id".to_string(), 1)]),
         ..Default::default()
     };
 
     match adapter.find("_system.api_keys", serde_json::json!({}), options) {
-        Ok(result) => {
-            let masked: Vec<serde_json::Value> = result
-                .documents
-                .into_iter()
-                .map(|doc| {
-                    let id = doc.get("_id").cloned().unwrap_or(serde_json::Value::Null);
-                    let name = doc
-                        .get("name")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::String("".to_string()));
-                    let created_at = doc
-                        .get("created_at")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::String("".to_string()));
-                    let enabled = doc
-                        .get("enabled")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Bool(false));
-                    let key = doc
-                        .get("key")
-                        .and_then(|v| v.as_str())
-                        .map(|k| {
-                            if k.len() > 8 {
-                                format!("{}...{}", &k[..6], &k[k.len() - 4..])
-                            } else {
-                                "***".to_string()
-                            }
-                        })
-                        .unwrap_or_else(|| "***".to_string());
-
-                    serde_json::json!({
-                        "_id": id,
-                        "name": name,
-                        "key_preview": key,
-                        "created_at": created_at,
-                        "enabled": enabled
+        Ok(result) => Ok(result
+            .documents
+            .into_iter()
+            .map(|doc| {
+                // A stored key of another shape (written past `create_api_key`)
+                // is still listed: the auth cache accepts any enabled document
+                // with a string `key`, so hiding it would hide a live credential.
+                // Its unusable fields read as empty / 0 / false, with a warning.
+                let malformed = |field: &str| {
+                    tracing::warn!(
+                        "API key document {}: field '{}' is missing or of another type",
+                        doc.get("_id").cloned().unwrap_or(serde_json::Value::Null),
+                        field
+                    );
+                };
+                let text = |field: &str| match doc.get(field).and_then(|v| v.as_str()) {
+                    Some(value) => value.to_string(),
+                    None => {
+                        malformed(field);
+                        String::new()
+                    }
+                };
+                // Masked: the first 6 and last 4 characters of a long key
+                let key_preview = doc
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .map(|k| {
+                        if k.len() > 8 {
+                            format!("{}...{}", &k[..6], &k[k.len() - 4..])
+                        } else {
+                            "***".to_string()
+                        }
                     })
-                })
-                .collect();
-            Ok(masked)
-        }
+                    .unwrap_or_else(|| "***".to_string());
+                ironbase_mcp_types::responses::ApiKeyEntry {
+                    id: doc.get("_id").and_then(|v| v.as_u64()).unwrap_or_else(|| {
+                        malformed("_id");
+                        0
+                    }),
+                    name: text("name"),
+                    key_preview,
+                    created_at: text("created_at"),
+                    enabled: doc
+                        .get("enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_else(|| {
+                            malformed("enabled");
+                            false
+                        }),
+                }
+            })
+            .collect()),
         Err(e) => Err(format!("Failed to list API keys: {}", e)),
     }
 }
