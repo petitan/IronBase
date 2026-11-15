@@ -2,6 +2,9 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
+use ironbase_mcp_types::responses::{
+    AclDocument, AclInterface, AclPermissions, AclPrincipal, AclRule,
+};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -13,50 +16,34 @@ pub struct AclRuleInfo {
 }
 
 impl AclRuleInfo {
-    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let p = value.get("principal")?;
-        let principal = if let Some(ptype) = p.get("type").and_then(|v| v.as_str()) {
-            let pvalue = p
-                .get("value")
-                .and_then(|v| {
-                    v.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| Some(v.to_string()))
-                })
-                .unwrap_or_default();
-            format!("{}:{}", ptype, pvalue)
-        } else {
-            p.to_string()
+    /// The editor's form of a stored rule: `type:value` and the granted
+    /// permissions (`read,write,admin`)
+    pub fn from_rule(rule: &AclRule) -> Self {
+        let principal = match &rule.principal {
+            AclPrincipal::Interface(iface) => {
+                let name = match iface {
+                    AclInterface::Localhost => "localhost",
+                    AclInterface::Internal => "internal",
+                    AclInterface::External => "external",
+                };
+                format!("interface:{}", name)
+            }
+            AclPrincipal::ApiKey(key) => format!("apikey:{}", key),
+            AclPrincipal::Ip(ip) => format!("ip:{}", ip),
+            AclPrincipal::IpRange(range) => format!("iprange:{}", range),
+            AclPrincipal::Anyone => "anyone".to_string(),
         };
-
-        let permissions = if let Some(perms) = value.get("permissions") {
-            let mut perm_list = Vec::new();
-            if perms.get("read").and_then(|v| v.as_bool()).unwrap_or(false) {
-                perm_list.push("read");
-            }
-            if perms
-                .get("write")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                perm_list.push("write");
-            }
-            if perms
-                .get("admin")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                perm_list.push("admin");
-            }
-            perm_list.join(",")
-        } else {
-            String::new()
-        };
-
-        Some(Self {
+        let p = rule.permissions;
+        let permissions = [(p.read, "read"), (p.write, "write"), (p.admin, "admin")]
+            .iter()
+            .filter(|(granted, _)| *granted)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(",");
+        Self {
             principal,
             permissions,
-        })
+        }
     }
 }
 
@@ -71,37 +58,17 @@ pub struct CollectionAclInfo {
 }
 
 impl CollectionAclInfo {
-    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let collection = value
-            .get("collection")
-            .and_then(|v| v.as_str())?
-            .to_string();
-
-        let rules: Vec<AclRuleInfo> = value
-            .get("rules")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(AclRuleInfo::from_value).collect())
-            .unwrap_or_default();
-
-        // Checked on the raw JSON: `rules` above is already a lossy view
-        let uneditable: Vec<String> = match value.get("rules") {
-            None | Some(serde_json::Value::Null) => Vec::new(),
-            Some(serde_json::Value::Array(arr)) => {
-                arr.iter().filter_map(uneditable_reason).collect()
-            }
-            Some(other) => vec![other.to_string()],
-        };
-
+    /// A stored ACL (`acl_list` / `acl_get`)
+    pub fn from_document(doc: &AclDocument) -> Self {
         // Builtin = what the server protects: acl_delete refuses only the
         // "_system.*" rule. A custom "*" ACL is an ordinary, editable one.
-        let is_builtin = collection == "_system.*";
-
-        Some(Self {
-            collection,
-            rules,
+        let is_builtin = doc.collection == "_system.*";
+        Self {
+            collection: doc.collection.clone(),
+            rules: doc.rules.iter().map(AclRuleInfo::from_rule).collect(),
             is_builtin,
-            uneditable,
-        })
+            uneditable: doc.rules.iter().filter_map(uneditable_reason).collect(),
+        }
     }
 
     /// Message for refusing to open the editor (None = the ACL is editable).
@@ -123,43 +90,21 @@ impl CollectionAclInfo {
 ///
 /// The editor keeps a rule as `type:value` + read/write/admin and saves it
 /// through `acl_set`, which re-parses both strings. Only a rule that comes
-/// back from that round trip unchanged may be loaded (so no `anyone` or
-/// unknown principal, no unexpected fields, no permission set that `acl_set`
-/// would normalize).
-fn uneditable_reason(rule: &serde_json::Value) -> Option<String> {
-    let principal = rule.get("principal").and_then(|v| v.as_object());
-    let permissions = rule.get("permissions").and_then(|v| v.as_object());
-    let (Some(principal), Some(permissions)) = (principal, permissions) else {
-        return Some(rule.to_string());
-    };
-    if rule.as_object().map(|obj| obj.len()) != Some(2) {
-        return Some(rule.to_string());
+/// back from that round trip unchanged may be loaded: no `anyone` principal
+/// (the editor has no such type yet), no permission set that `acl_set` would
+/// normalize (write implies read, admin implies write).
+fn uneditable_reason(rule: &AclRule) -> Option<String> {
+    if rule.principal == AclPrincipal::Anyone {
+        return Some("principal anyone".to_string());
     }
-
-    let ptype = principal.get("type").and_then(|v| v.as_str());
-    let known_type = PrincipalType::all()
-        .iter()
-        .any(|t| Some(t.as_str()) == ptype);
-    let string_value = principal.get("value").is_some_and(|v| v.is_string());
-    if !known_type || !string_value || principal.len() != 2 {
-        return Some(format!(
-            "principal {}",
-            serde_json::Value::Object(principal.clone())
-        ));
-    }
-
-    let flag = |name: &str| permissions.get(name).and_then(|v| v.as_bool());
-    match (flag("read"), flag("write"), flag("admin")) {
-        // acl_set normalizes: write implies read, admin implies write
-        (Some(read), Some(write), Some(admin))
-            if permissions.len() == 3 && (read || !write) && (write || !admin) =>
-        {
-            None
-        }
-        _ => Some(format!(
-            "permissions {}",
-            serde_json::Value::Object(permissions.clone())
-        )),
+    let AclPermissions { read, write, admin } = rule.permissions;
+    if (read || !write) && (write || !admin) {
+        None
+    } else {
+        Some(format!(
+            "permissions read={} write={} admin={}",
+            read, write, admin
+        ))
     }
 }
 
@@ -1223,13 +1168,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A stored ACL document of the server's shape
+    fn document(collection: &str, rules: serde_json::Value) -> CollectionAclInfo {
+        let doc: AclDocument =
+            serde_json::from_value(json!({"_id": 1, "collection": collection, "rules": rules}))
+                .unwrap();
+        CollectionAclInfo::from_document(&doc)
+    }
+
     /// Shift+P editor: the rules stored on the server must be in the editor,
     /// otherwise saving (acl_set replaces the whole list) drops them.
     #[test]
     fn test_load_edit_rules_keeps_existing_rules() {
-        let stored = json!({
-            "collection": "users",
-            "rules": [
+        let info = document(
+            "users",
+            json!([
                 {
                     "principal": {"type": "apikey", "value": "abc"},
                     "permissions": {"read": true, "write": true, "admin": false}
@@ -1238,9 +1191,8 @@ mod tests {
                     "principal": {"type": "iprange", "value": "10.0.0.0/8"},
                     "permissions": {"read": true, "write": false, "admin": false}
                 }
-            ]
-        });
-        let info = CollectionAclInfo::from_value(&stored).unwrap();
+            ]),
+        );
 
         let mut state = AclState::new();
         state.start_edit("users".to_string());
@@ -1279,7 +1231,7 @@ mod tests {
     }
 
     fn acl_doc(rules: serde_json::Value) -> CollectionAclInfo {
-        CollectionAclInfo::from_value(&json!({"collection": "users", "rules": rules})).unwrap()
+        document("users", rules)
     }
 
     /// Every rule the editor accepts must be saved back as exactly the JSON
@@ -1331,32 +1283,37 @@ mod tests {
         let unrepresentable = [
             // `anyone` has no value and no editor type
             json!({"principal": {"type": "anyone"}, "permissions": ok_perms}),
-            json!({"principal": {"type": "group", "value": "x"}, "permissions": ok_perms}),
-            json!({"principal": {"type": "apikey", "value": 42}, "permissions": ok_perms}),
-            json!({"principal": "apikey:abc", "permissions": ok_perms}),
-            json!({"permissions": ok_perms}),
             // acl_set would add the implied permissions
             json!({"principal": ok_principal,
                    "permissions": {"read": false, "write": true, "admin": false}}),
             json!({"principal": ok_principal,
                    "permissions": {"read": true, "write": false, "admin": true}}),
-            json!({"principal": ok_principal, "permissions": {"read": true}}),
-            json!({"principal": ok_principal, "permissions": "read"}),
-            // Unknown fields would be dropped
-            json!({"principal": ok_principal, "permissions": ok_perms, "expires": "2030"}),
-            json!({"principal": ok_principal,
-                   "permissions": {"read": true, "write": false, "admin": false, "deny": true}}),
         ];
         for rule in &unrepresentable {
-            assert!(uneditable_reason(rule).is_some(), "accepted: {}", rule);
+            let rule: AclRule = serde_json::from_value(rule.clone()).unwrap();
+            assert!(uneditable_reason(&rule).is_some(), "accepted: {:?}", rule);
         }
+    }
 
-        // A rules field that is not a list at all
-        let info = CollectionAclInfo::from_value(&json!({"collection": "users", "rules": "x"}));
-        assert!(info.unwrap().uneditable_message().is_some());
-        // No custom ACL yet: nothing to mangle
-        let info = CollectionAclInfo::from_value(&json!({"collection": "users", "rules": null}));
-        assert_eq!(info.unwrap().uneditable_message(), None);
+    /// A rule of another shape is not an ACL rule at all: the typed
+    /// `acl_get` / `acl_list` answer is refused, it never reaches the editor
+    #[test]
+    fn test_malformed_rules_do_not_parse() {
+        let ok_perms = json!({"read": true, "write": false, "admin": false});
+        for rule in [
+            json!({"principal": {"type": "group", "value": "x"}, "permissions": ok_perms}),
+            json!({"principal": {"type": "apikey", "value": 42}, "permissions": ok_perms}),
+            json!({"principal": "apikey:abc", "permissions": ok_perms}),
+            json!({"permissions": ok_perms}),
+            json!({"principal": {"type": "apikey", "value": "abc"}, "permissions": {"read": true}}),
+            json!({"principal": {"type": "apikey", "value": "abc"}, "permissions": "read"}),
+        ] {
+            assert!(
+                serde_json::from_value::<AclRule>(rule.clone()).is_err(),
+                "parsed: {}",
+                rule
+            );
+        }
     }
 
     /// The list editor refuses an ACL it would mangle (`anyone` used to be
@@ -1390,14 +1347,13 @@ mod tests {
     /// ACL can be edited and deleted
     #[test]
     fn test_custom_wildcard_acl_is_not_builtin() {
-        let wildcard = CollectionAclInfo::from_value(&json!({
-            "collection": "*",
-            "rules": [{
+        let wildcard = document(
+            "*",
+            json!([{
                 "principal": {"type": "interface", "value": "internal"},
                 "permissions": {"read": true, "write": false, "admin": false}
-            }]
-        }))
-        .unwrap();
+            }]),
+        );
         assert!(!wildcard.is_builtin);
 
         let mut state = AclState::new();
@@ -1408,7 +1364,7 @@ mod tests {
         assert_eq!(state.edit_collection, "*");
         assert_eq!(state.edit_rules.len(), 1);
 
-        let system = CollectionAclInfo::from_value(&json!({"collection": "_system.*"}));
-        assert!(system.unwrap().is_builtin);
+        let system = document("_system.*", json!([]));
+        assert!(system.is_builtin);
     }
 }

@@ -738,3 +738,82 @@ fn rag_collection_stats_without_config() {
     assert!(parsed.config.is_none());
     requires::<RagCollectionStatsResponse>(text, "source_document_count");
 }
+
+// ============================================================================
+// ACL and listener tool group
+// ============================================================================
+
+/// Every principal shape the server stores round-trips; `anyone` has no value
+#[test]
+fn acl_principal_shapes() {
+    for (text, principal) in [
+        (
+            r#"{"type":"interface","value":"localhost"}"#,
+            AclPrincipal::Interface(AclInterface::Localhost),
+        ),
+        (
+            r#"{"type":"apikey","value":"abc"}"#,
+            AclPrincipal::ApiKey("abc".into()),
+        ),
+        (
+            r#"{"type":"ip","value":"10.0.0.5"}"#,
+            AclPrincipal::Ip("10.0.0.5".into()),
+        ),
+        (
+            r#"{"type":"iprange","value":"10.0.0.0/8"}"#,
+            AclPrincipal::IpRange("10.0.0.0/8".into()),
+        ),
+        (r#"{"type":"anyone"}"#, AclPrincipal::Anyone),
+    ] {
+        assert_eq!(same_bytes::<AclPrincipal>(text), principal);
+    }
+    assert!(serde_json::from_str::<AclPrincipal>(r#"{"type":"interface","value":"lan"}"#).is_err());
+}
+
+#[test]
+fn acl_get_variants() {
+    let set = r#"{"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}}]}"#;
+    assert!(matches!(
+        same_bytes::<<tools::AclGet as Tool>::Resp>(set),
+        AclGetResponse::Set(_)
+    ));
+    requires::<AclDocument>(set, "permissions");
+    let not_set = r#"{"collection":"users","rules":null,"note":"No custom ACL for this collection. Default rules apply."}"#;
+    assert!(matches!(
+        same_bytes::<AclGetResponse>(not_set),
+        AclGetResponse::NotSet { .. }
+    ));
+}
+
+#[test]
+fn listener_info_optional_fields() {
+    let http =
+        r#"{"_id":"web","bind":"127.0.0.1:9091","tls":false,"enabled":true,"description":"Web"}"#;
+    let parsed = same_bytes::<<tools::ListenerGet as Tool>::Resp>(http);
+    assert_eq!(parsed.cert_path, None);
+    requires::<ListenerInfo>(http, "enabled");
+    let created = r#"{"success":true,"id":"web","bind":"127.0.0.1:9090","tls":false,"action":"created","note":"Restart server for changes to take effect"}"#;
+    assert_eq!(
+        same_bytes::<<tools::ListenerCreate as Tool>::Resp>(created).action,
+        ListenerAction::Created
+    );
+}
+
+/// A stored ACL with fields the types do not know is refused, not trimmed
+#[test]
+fn acl_types_refuse_unknown_fields() {
+    let rule = r#"{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}"#;
+    for text in [
+        format!(r#"{{"_id":1,"collection":"c","rules":[{rule}}}],"comment":"x"}}"#),
+        format!(r#"{{"_id":1,"collection":"c","rules":[{rule},"expires":"2030"}}]}}"#),
+        r#"{"_id":1,"collection":"c","rules":[{"principal":{"type":"apikey","value":"abc","note":1},"permissions":{"read":true,"write":false,"admin":false}}]}"#.to_string(),
+        r#"{"_id":1,"collection":"c","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false,"deny":true}}]}"#.to_string(),
+    ] {
+        assert!(serde_json::from_str::<AclDocument>(&text).is_err(), "parsed: {text}");
+    }
+    // `anyone` with a null value, as the server also accepts
+    assert_eq!(
+        serde_json::from_str::<AclPrincipal>(r#"{"type":"anyone","value":null}"#).unwrap(),
+        AclPrincipal::Anyone
+    );
+}

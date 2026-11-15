@@ -1442,3 +1442,179 @@ out: {"results":[],"count":0,"chunks_merged":0,"scored":false}
 in:  {"collection":"kb"}
 err: InvalidParams missing field `doc_ids`
 
+## acl_list / none
+in:  {}
+out: {"rules":[],"count":0,"note":"Built-in rules (_system.* protection) are not shown here"}
+
+## acl_get / none
+in:  {"collection":"users"}
+out: {"collection":"users","rules":null,"note":"No custom ACL for this collection. Default rules apply."}
+
+## acl_set / every principal
+in:  {"collection":"users","rules":[{"principal":"apikey:abc","permissions":"read"},{"principal":"interface:localhost","permissions":"admin"},{"principal":"ip:10.0.0.5","permissions":"write"},{"principal":"iprange:10.0.0.0/8","permissions":"none"},{"principal":"anyone:x","permissions":"read,write"}]}
+out: {"success":true,"collection":"users","rules_count":5,"note":"ACL updated and live config reloaded. Changes are active immediately."}
+
+## acl_set / wildcard
+in:  {"collection":"*","rules":[{"principal":"interface:external","permissions":"deny"}]}
+out: {"success":true,"collection":"*","rules_count":1,"note":"ACL updated and live config reloaded. Changes are active immediately."}
+
+## acl_set / orphan to be
+in:  {"collection":"temp","rules":[{"principal":"anyone:x","permissions":"all"}]}
+out: {"success":true,"collection":"temp","rules_count":1,"note":"ACL updated and live config reloaded. Changes are active immediately."}
+
+## acl_set / missing collection
+in:  {"collection":"nope","rules":[]}
+err: InvalidParams Collection 'nope' does not exist. Create it first before setting ACL.
+
+## acl_set / bad principal
+in:  {"collection":"users","rules":[{"principal":"who","permissions":"read"}]}
+err: InvalidParams Invalid principal format: who. Expected 'type:value'
+
+## acl_set / unknown principal type
+in:  {"collection":"users","rules":[{"principal":"user:bob","permissions":"read"}]}
+err: InvalidParams Unknown principal type: user
+
+## acl_set / bad ip
+in:  {"collection":"users","rules":[{"principal":"ip:1.2.3","permissions":"read"}]}
+err: InvalidParams Invalid IP address: invalid IP address syntax
+
+## acl_set / missing permissions
+in:  {"collection":"users","rules":[{"principal":"apikey:abc"}]}
+err: InvalidParams Rule missing 'permissions'
+
+## acl_set / missing rules
+in:  {"collection":"users"}
+err: InvalidParams missing field `rules`
+
+## acl_set / empty rules
+in:  {"collection":"users","rules":[]}
+err: ValidationError Field 'rules' has 0 items, minimum required is 1
+
+## acl_get / set
+in:  {"collection":"users"}
+out: {"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}
+
+## acl_get / wildcard
+in:  {"collection":"*"}
+out: {"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]}
+
+## acl_get / missing collection param
+in:  {}
+err: InvalidParams missing field `collection`
+
+## acl_list / three
+in:  {}
+out: {"rules":[{"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]},{"_id":3,"collection":"temp","rules":[{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":true}}]},{"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}],"count":3,"note":"Built-in rules (_system.* protection) are not shown here"}
+
+## acl_list / after collection drop
+in:  {}
+out: {"rules":[{"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]},{"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}],"count":2,"note":"Built-in rules (_system.* protection) are not shown here"}
+
+## acl_cleanup / one orphan
+in:  {}
+out: {"success":true,"orphans_found":1,"orphans_deleted":1,"collections":["gone"]}
+
+## acl_cleanup / none
+in:  {}
+out: {"success":true,"orphans_found":0,"orphans_deleted":0,"collections":[]}
+
+## acl_delete / set
+in:  {"collection":"users"}
+out: {"success":true,"collection":"users","deleted":true,"note":"ACL deleted and live config reloaded. Default rules now apply."}
+
+## acl_delete / not set
+in:  {"collection":"users"}
+out: {"success":true,"collection":"users","deleted":false,"note":"No custom ACL found for this collection."}
+
+## acl_delete / builtin
+in:  {"collection":"_system.*"}
+err: InvalidParams Cannot delete built-in _system.* ACL rules
+
+## acl_delete / missing collection param
+in:  {}
+err: InvalidParams missing field `collection`
+
+## listener_list / none
+in:  {}
+out: {"listeners":[],"count":0,"collection":"_system.listeners","note":"Changes require server restart to take effect"}
+
+## listener_create / http
+in:  {"id":"web","bind":"127.0.0.1:9090","description":"Web"}
+out: {"success":true,"id":"web","bind":"127.0.0.1:9090","tls":false,"action":"created","note":"Restart server for changes to take effect"}
+
+## listener_create / https
+in:  {"id":"tls","bind":"0.0.0.0:9443","tls":true,"cert_path":"/etc/c.pem","key_path":"/etc/k.pem"}
+out: {"success":true,"id":"tls","bind":"0.0.0.0:9443","tls":true,"action":"created","note":"Restart server for changes to take effect"}
+
+## listener_create / update
+in:  {"id":"web","bind":"127.0.0.1:9091"}
+out: {"success":true,"id":"web","bind":"127.0.0.1:9091","tls":false,"action":"updated","note":"Restart server for changes to take effect"}
+
+## listener_create / tls without cert
+in:  {"id":"bad","bind":"0.0.0.0:9444","tls":true}
+err: InvalidParams TLS enabled but cert_path not specified
+
+## listener_create / bad bind
+in:  {"id":"bad2","bind":"nowhere"}
+err: InvalidParams Listener bind address must include port: nowhere
+
+## listener_create / missing bind
+in:  {"id":"bad3"}
+err: InvalidParams missing field `bind`
+
+## listener_get / http
+in:  {"id":"web"}
+out: {"_id":"web","bind":"127.0.0.1:9091","tls":false,"enabled":true,"description":"Web"}
+
+## listener_get / https
+in:  {"id":"tls"}
+out: {"_id":"tls","bind":"0.0.0.0:9443","tls":true,"cert_path":"/etc/c.pem","key_path":"/etc/k.pem","enabled":true}
+
+## listener_get / missing
+in:  {"id":"nope"}
+err: InvalidParams Listener not found: nope
+
+## listener_get / missing id param
+in:  {}
+err: InvalidParams missing field `id`
+
+## listener_disable / existing
+in:  {"id":"web"}
+out: {"success":true,"id":"web","disabled":true,"note":"Listener disabled. Restart server for changes to take effect."}
+
+## listener_disable / missing
+in:  {"id":"nope"}
+out: {"success":false,"id":"nope","disabled":false,"note":"Listener not found."}
+
+## listener_get / disabled
+in:  {"id":"web"}
+out: {"_id":"web","bind":"127.0.0.1:9091","tls":false,"enabled":false,"description":"Web"}
+
+## listener_enable / existing
+in:  {"id":"web"}
+out: {"success":true,"id":"web","enabled":true,"note":"Listener enabled. Restart server for changes to take effect."}
+
+## listener_enable / missing
+in:  {"id":"nope"}
+out: {"success":false,"id":"nope","enabled":false,"note":"Listener not found."}
+
+## listener_list / two
+in:  {}
+out: {"listeners":[{"_id":"tls","bind":"0.0.0.0:9443","tls":true,"cert_path":"/etc/c.pem","key_path":"/etc/k.pem","enabled":true},{"_id":"web","bind":"127.0.0.1:9091","tls":false,"enabled":true,"description":"Web"}],"count":2,"collection":"_system.listeners","note":"Changes require server restart to take effect"}
+
+## listener_delete / existing
+in:  {"id":"tls"}
+out: {"success":true,"id":"tls","deleted":true,"note":"Listener deleted. Restart server for changes to take effect."}
+
+## listener_delete / missing
+in:  {"id":"nope"}
+out: {"success":false,"id":"nope","deleted":false,"note":"Listener not found."}
+
+## listener_delete / default
+in:  {"id":"default"}
+err: InvalidParams Cannot delete the default listener. Use listener_disable instead.
+
+## listener_delete / missing id param
+in:  {}
+err: InvalidParams missing field `id`
+

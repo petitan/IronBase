@@ -798,6 +798,7 @@ async fn test_shift_p_loads_stored_rules_into_editor() {
     server.respond(
         "acl_get",
         json!({
+            "_id": 1,
             "collection": "users",
             "rules": [{
                 "principal": {"type": "apikey", "value": "abc"},
@@ -831,6 +832,7 @@ async fn test_shift_p_refuses_uneditable_rule() {
     server.respond(
         "acl_get",
         json!({
+            "_id": 1,
             "collection": "users",
             "rules": [{
                 "principal": {"type": "anyone"},
@@ -2090,5 +2092,128 @@ async fn test_rag_create_reports_existing_indexes() {
     assert_eq!(
         app.rag_state.message.as_deref(),
         Some("RAG collection 'kb' ready: vector index already existed, 0 fulltext index(es) created (768 dims, ollama)")
+    );
+}
+
+/// The ACL list: a deleted ACL that did not exist is reported (the TUI read
+/// `success`, always true, so "not found" never showed), and the list is
+/// reloaded after a delete
+#[tokio::test]
+async fn test_acl_delete_reports_a_missing_acl() {
+    let server = two_collections();
+    server.respond(
+        "acl_list",
+        json!({"rules": [{"_id": 1, "collection": "users", "rules": [{
+            "principal": {"type": "apikey", "value": "abc"},
+            "permissions": {"read": true, "write": false, "admin": false}}]}],
+            "count": 1, "note": "Built-in rules (_system.* protection) are not shown here"}),
+    );
+    server.respond(
+        "acl_delete",
+        json!({"success": true, "collection": "users", "deleted": false,
+            "note": "No custom ACL found for this collection."}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.connection_type = ConnectionType::Localhost;
+    shift(&mut app, 'A').await;
+    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.acl_state.acls.len(), 1);
+
+    server.clear_calls();
+    app.acl_state.start_delete();
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(app.acl_state.error.as_deref(), Some("ACL not found"));
+    // The stale row is reloaded
+    assert_eq!(server.calls_to("acl_list").len(), 1);
+}
+
+/// Shift+P on a collection without a custom ACL opens an empty editor
+#[tokio::test]
+async fn test_shift_p_without_a_stored_acl_opens_an_empty_editor() {
+    let server = two_collections();
+    server.respond(
+        "acl_get",
+        json!({"collection": "users", "rules": null,
+            "note": "No custom ACL for this collection. Default rules apply."}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.connection_type = ConnectionType::Localhost;
+    shift(&mut app, 'P').await;
+    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.acl_state.edit_collection, "users");
+    assert!(app.acl_state.edit_rules.is_empty());
+}
+
+/// A listener created over an existing one is reported as replaced, with the
+/// server's note (a restart applies it); the list is reloaded
+#[tokio::test]
+async fn test_listener_create_reports_replace_and_restart() {
+    let server = two_collections();
+    let listeners = json!({"listeners": [{"_id": "web", "bind": "127.0.0.1:9090",
+        "tls": false, "enabled": true}], "count": 1, "collection": "_system.listeners",
+        "note": "Changes require server restart to take effect"});
+    server.respond("listener_list", listeners);
+    server.respond(
+        "listener_create",
+        json!({"success": true, "id": "web", "bind": "127.0.0.1:9091", "tls": false,
+            "action": "updated", "note": "Restart server for changes to take effect"}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.connection_type = ConnectionType::Localhost;
+    shift(&mut app, 'L').await;
+    assert_eq!(app.modal, Some(Modal::Listener));
+    assert_eq!(app.listener_state.listeners.len(), 1);
+    assert_eq!(app.listener_state.listeners[0].bind, "127.0.0.1:9090");
+
+    app.listener_state.mode = crate::modals::listener::ListenerModalMode::Add;
+    app.listener_state.add_id = "web".to_string();
+    app.listener_state.add_bind = "127.0.0.1:9091".to_string();
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(
+        server.calls_to("listener_create"),
+        vec![json!({"id": "web", "bind": "127.0.0.1:9091", "tls": false})]
+    );
+    assert_eq!(
+        app.listener_state.success.as_deref(),
+        Some("Listener 'web' replaced. Restart server for changes to take effect")
+    );
+    assert_eq!(server.calls_to("listener_list").len(), 2);
+}
+
+/// A failed reload after a listener change is reported, not ignored
+#[tokio::test]
+async fn test_listener_disable_reports_a_failed_reload() {
+    let server = two_collections();
+    server.respond(
+        "listener_list",
+        json!({"listeners": [{"_id": "web", "bind": "127.0.0.1:9090",
+            "tls": false, "enabled": true}], "count": 1, "collection": "_system.listeners",
+            "note": "Changes require server restart to take effect"}),
+    );
+    server.respond(
+        "listener_disable",
+        json!({"success": true, "id": "web", "disabled": true,
+            "note": "Listener disabled. Restart server for changes to take effect."}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.connection_type = ConnectionType::Localhost;
+    shift(&mut app, 'L').await;
+    server.fail("listener_list", "gone");
+    app.listener_state.mode = crate::modals::listener::ListenerModalMode::Confirm;
+    app.listener_state.confirm_action = Some(crate::modals::listener::ListenerAction::Disable);
+    press(&mut app, KeyCode::Char('y')).await;
+    assert_eq!(
+        server.calls_to("listener_disable"),
+        vec![json!({"id": "web"})]
+    );
+    assert!(
+        app.listener_state
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("'web': Listener disabled.")
+                && e.contains("reloading the listeners failed")
+                && e.contains("gone")),
+        "{:?}",
+        app.listener_state.error
     );
 }

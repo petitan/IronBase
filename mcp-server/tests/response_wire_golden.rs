@@ -73,6 +73,12 @@
 //! `find`; a `_score` keeps its position). Another test parses its responses
 //! with the shared types.
 //!
+//! The ACL and listener group (on a sixth database) sorts the ACL documents of
+//! `acl_list` by `collection` and the listeners of `listener_list` by `_id`.
+//! (The stored ACL documents came out in the storage's hash-map key order
+//! before 0.3.472; those cases were recorded with sorted keys, which the typed
+//! response's fixed order replaced.)
+//!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
 
@@ -210,6 +216,9 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
                 }
             }
         }
+        // The list in storage order
+        "acl_list" => sort_by_key(&mut out["rules"], "collection"),
+        "listener_list" => sort_by_key(&mut out["listeners"], "_id"),
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
             normalize_search(tool, args, out);
             if tool == "fulltext_search" && args.get("fields").is_some() {
@@ -409,6 +418,7 @@ fn render() -> String {
     render_embedding_group(&mut out);
     render_job_group(&mut out);
     render_rag_group(&mut out);
+    render_acl_listener_group(&mut out);
     out
 }
 
@@ -1375,6 +1385,101 @@ fn render_rag_group(out: &mut String) {
     );
 }
 
+/// The ACL tools (`acl_list`, `acl_get`, `acl_set`, `acl_delete`,
+/// `acl_cleanup`) and the listener tools (`listener_list`, `listener_get`,
+/// `listener_create`, `listener_delete`, `listener_enable`,
+/// `listener_disable`), on a sixth database
+fn render_acl_listener_group(out: &mut String) {
+    let (adapter, _dir) = create_test_adapter();
+    for name in ["users", "temp"] {
+        dispatch_ok(&adapter, "collection_create", json!({"collection": name}));
+    }
+    macro_rules! case {
+        ($tool:literal, $($label:literal => $json:tt),+ $(,)?) => {
+            $( record(out, &adapter, None, $tool, $label, json!($json)); )+
+        };
+    }
+
+    case!("acl_list", "none" => {});
+    case!("acl_get", "none" => {"collection": "users"});
+    case!("acl_set",
+        "every principal" => {"collection": "users", "rules": [
+            {"principal": "apikey:abc", "permissions": "read"},
+            {"principal": "interface:localhost", "permissions": "admin"},
+            {"principal": "ip:10.0.0.5", "permissions": "write"},
+            {"principal": "iprange:10.0.0.0/8", "permissions": "none"},
+            {"principal": "anyone:x", "permissions": "read,write"},
+        ]},
+        "wildcard" => {"collection": "*", "rules": [{"principal": "interface:external", "permissions": "deny"}]},
+        "orphan to be" => {"collection": "temp", "rules": [{"principal": "anyone:x", "permissions": "all"}]},
+        "missing collection" => {"collection": "nope", "rules": []},
+        "bad principal" => {"collection": "users", "rules": [{"principal": "who", "permissions": "read"}]},
+        "unknown principal type" => {"collection": "users", "rules": [{"principal": "user:bob", "permissions": "read"}]},
+        "bad ip" => {"collection": "users", "rules": [{"principal": "ip:1.2.3", "permissions": "read"}]},
+        "missing permissions" => {"collection": "users", "rules": [{"principal": "apikey:abc"}]},
+        "missing rules" => {"collection": "users"},
+        "empty rules" => {"collection": "users", "rules": []},
+    );
+    case!("acl_get",
+        "set" => {"collection": "users"},
+        "wildcard" => {"collection": "*"},
+        "missing collection param" => {},
+    );
+    case!("acl_list", "three" => {});
+    // Dropping a collection drops its ACL; an orphan is a rule left behind
+    dispatch_ok(&adapter, "collection_drop", json!({"collection": "temp"}));
+    case!("acl_list", "after collection drop" => {});
+    adapter
+        .insert_one(
+            mcp_ironbase::acl::SYSTEM_ACL_COLLECTION,
+            json!({"collection": "gone", "rules": [
+                {"principal": {"type": "anyone"}, "permissions": {"read": true, "write": false, "admin": false}}
+            ]}),
+        )
+        .unwrap();
+    case!("acl_cleanup", "one orphan" => {});
+    case!("acl_cleanup", "none" => {});
+    case!("acl_delete",
+        "set" => {"collection": "users"},
+        "not set" => {"collection": "users"},
+        "builtin" => {"collection": "_system.*"},
+        "missing collection param" => {},
+    );
+
+    case!("listener_list", "none" => {});
+    case!("listener_create",
+        "http" => {"id": "web", "bind": "127.0.0.1:9090", "description": "Web"},
+        "https" => {"id": "tls", "bind": "0.0.0.0:9443", "tls": true,
+            "cert_path": "/etc/c.pem", "key_path": "/etc/k.pem"},
+        "update" => {"id": "web", "bind": "127.0.0.1:9091"},
+        "tls without cert" => {"id": "bad", "bind": "0.0.0.0:9444", "tls": true},
+        "bad bind" => {"id": "bad2", "bind": "nowhere"},
+        "missing bind" => {"id": "bad3"},
+    );
+    case!("listener_get",
+        "http" => {"id": "web"},
+        "https" => {"id": "tls"},
+        "missing" => {"id": "nope"},
+        "missing id param" => {},
+    );
+    case!("listener_disable",
+        "existing" => {"id": "web"},
+        "missing" => {"id": "nope"},
+    );
+    case!("listener_get", "disabled" => {"id": "web"});
+    case!("listener_enable",
+        "existing" => {"id": "web"},
+        "missing" => {"id": "nope"},
+    );
+    case!("listener_list", "two" => {});
+    case!("listener_delete",
+        "existing" => {"id": "tls"},
+        "missing" => {"id": "nope"},
+        "default" => {"id": "default"},
+        "missing id param" => {},
+    );
+}
+
 #[test]
 fn response_wire_format_matches_golden() {
     let actual = render();
@@ -1505,4 +1610,33 @@ fn rag_group_golden_parses_as_the_shared_response_types() {
         })
     });
     assert_eq!(checked, 29);
+}
+
+/// Every recorded response of the ACL and listener tool group parses,
+/// strictly, into the tool's shared response type and serializes back to the
+/// same bytes
+#[test]
+fn acl_listener_group_golden_parses_as_the_shared_response_types() {
+    use ironbase_mcp_types::tools::{
+        AclCleanup, AclDelete, AclGet, AclList, AclSet, ListenerCreate, ListenerDelete,
+        ListenerDisable, ListenerEnable, ListenerGet, ListenerList,
+    };
+
+    let checked = check_golden(|tool, json| {
+        Some(match tool {
+            "acl_list" => same_bytes::<AclList>(json),
+            "acl_get" => same_bytes::<AclGet>(json),
+            "acl_set" => same_bytes::<AclSet>(json),
+            "acl_delete" => same_bytes::<AclDelete>(json),
+            "acl_cleanup" => same_bytes::<AclCleanup>(json),
+            "listener_list" => same_bytes::<ListenerList>(json),
+            "listener_get" => same_bytes::<ListenerGet>(json),
+            "listener_create" => same_bytes::<ListenerCreate>(json),
+            "listener_delete" => same_bytes::<ListenerDelete>(json),
+            "listener_enable" => same_bytes::<ListenerEnable>(json),
+            "listener_disable" => same_bytes::<ListenerDisable>(json),
+            _ => return None,
+        })
+    });
+    assert_eq!(checked, 27);
 }

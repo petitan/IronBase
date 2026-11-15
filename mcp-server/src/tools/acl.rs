@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::params::{AclCollectionParams, AclSetParams, ParseParams};
+use ironbase_mcp_types::responses::{
+    AclCleanupResponse, AclDeleteResponse, AclDocument, AclGetResponse, AclListResponse,
+    AclSetResponse,
+};
 
 /// Dispatch ACL tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -26,39 +30,57 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 }
 
 fn handle_acl_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    match adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default()) {
-        Ok(result) => Ok(json!({
-            "rules": result.documents,
-            "count": result.documents.len(),
-            "note": "Built-in rules (_system.* protection) are not shown here"
-        })),
-        Err(_) => {
-            // Collection doesn't exist yet - no custom rules
-            Ok(json!({
-                "rules": [],
-                "count": 0,
-                "note": "No custom ACL rules defined. Default rules apply."
-            }))
+    let response = match adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default()) {
+        Ok(result) => {
+            // A document of another shape is skipped, as the live ACL loader
+            // skips it (it is not enforced either); one bad entry must not
+            // hide the others. acl_get on its collection names the problem.
+            let rules: Vec<AclDocument> = result
+                .documents
+                .into_iter()
+                .filter_map(|doc| match acl_document(doc) {
+                    Ok(doc) => Some(doc),
+                    Err(e) => {
+                        tracing::warn!("acl_list: skipping a stored ACL document: {}", e.message);
+                        None
+                    }
+                })
+                .collect();
+            AclListResponse {
+                count: rules.len(),
+                rules,
+                note: "Built-in rules (_system.* protection) are not shown here".to_string(),
+            }
         }
-    }
+        // Collection doesn't exist yet - no custom rules
+        Err(_) => AclListResponse {
+            rules: vec![],
+            count: 0,
+            note: "No custom ACL rules defined. Default rules apply.".to_string(),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
+}
+
+/// A stored ACL document as the ACL tools report it
+fn acl_document(doc: Value) -> Result<AclDocument> {
+    serde_json::from_value(doc)
+        .map_err(|e| McpError::internal(format!("Invalid stored ACL document: {}", e)))
 }
 
 fn handle_acl_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: AclCollectionParams = AclCollectionParams::parse(params)?;
 
-    match adapter.find_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.collection})) {
-        Ok(Some(doc)) => Ok(doc),
-        Ok(None) => Ok(json!({
-            "collection": p.collection,
-            "rules": null,
-            "note": "No custom ACL for this collection. Default rules apply."
-        })),
-        Err(_) => Ok(json!({
-            "collection": p.collection,
-            "rules": null,
-            "note": "No custom ACL for this collection. Default rules apply."
-        })),
-    }
+    let response =
+        match adapter.find_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.collection})) {
+            Ok(Some(doc)) => AclGetResponse::Set(acl_document(doc)?),
+            Ok(None) | Err(_) => AclGetResponse::NotSet {
+                collection: p.collection,
+                rules: (),
+                note: "No custom ACL for this collection. Default rules apply.".to_string(),
+            },
+        };
+    Ok(serde_json::to_value(response)?)
 }
 
 fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -112,12 +134,12 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
         true, // upsert = true
     )?;
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "rules_count": parsed_rules.len(),
-        "note": "ACL updated and live config reloaded. Changes are active immediately."
-    }))
+    Ok(serde_json::to_value(AclSetResponse {
+        success: true,
+        collection: p.collection,
+        rules_count: parsed_rules.len(),
+        note: "ACL updated and live config reloaded. Changes are active immediately.".to_string(),
+    })?)
 }
 
 fn handle_acl_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -133,16 +155,17 @@ fn handle_acl_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     let filter = json!({"collection": &p.collection});
     let deleted = adapter.delete_one(SYSTEM_ACL_COLLECTION, filter)?;
 
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "deleted": deleted > 0,
-        "note": if deleted > 0 {
+    Ok(serde_json::to_value(AclDeleteResponse {
+        success: true,
+        collection: p.collection,
+        deleted: deleted > 0,
+        note: if deleted > 0 {
             "ACL deleted and live config reloaded. Default rules now apply."
         } else {
             "No custom ACL found for this collection."
         }
-    }))
+        .to_string(),
+    })?)
 }
 
 fn handle_acl_cleanup(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -178,10 +201,10 @@ fn handle_acl_cleanup(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
         }
     }
 
-    Ok(json!({
-        "success": true,
-        "orphans_found": orphans.len(),
-        "orphans_deleted": deleted_count,
-        "collections": orphans
-    }))
+    Ok(serde_json::to_value(AclCleanupResponse {
+        success: true,
+        orphans_found: orphans.len(),
+        orphans_deleted: deleted_count,
+        collections: orphans,
+    })?)
 }

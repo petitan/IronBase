@@ -1552,3 +1552,42 @@ fn test_vector_reads_do_not_create_a_missing_collection() {
     let list = dispatch_ok(&adapter, "collection_list", json!({}));
     assert_eq!(list["collections"], json!([]));
 }
+
+/// A stored ACL document of another shape (written by an embedded client,
+/// say) does not hide the others: acl_list skips it, as the live ACL loader
+/// does, and acl_get on its collection names the problem; unknown fields count
+/// as another shape (the tools would drop them)
+#[test]
+fn test_acl_list_skips_an_invalid_stored_document() {
+    let (adapter, _dir) = create_test_adapter();
+    dispatch_ok(
+        &adapter,
+        "collection_create",
+        json!({"collection": "users"}),
+    );
+    dispatch_ok(
+        &adapter,
+        "acl_set",
+        json!({"collection": "users", "rules": [{"principal": "apikey:abc", "permissions": "read"}]}),
+    );
+    for doc in [
+        json!({"collection": "bad1", "rules": [{"principal": "anyone", "permissions": "read"}]}),
+        json!({"collection": "bad2", "comment": "x", "rules": [{"principal": {"type": "anyone"},
+            "permissions": {"read": true, "write": false, "admin": false}}]}),
+    ] {
+        adapter
+            .insert_one(mcp_ironbase::acl::SYSTEM_ACL_COLLECTION, doc)
+            .unwrap();
+    }
+    let list = dispatch_ok(&adapter, "acl_list", json!({}));
+    assert_eq!(list["count"], 1, "{list}");
+    assert_eq!(list["rules"][0]["collection"], "users");
+    let err = dispatch_err(&adapter, "acl_get", json!({"collection": "bad1"}));
+    assert!(
+        err.message.contains("Invalid stored ACL document"),
+        "{}",
+        err.message
+    );
+    let err = dispatch_err(&adapter, "acl_get", json!({"collection": "bad2"}));
+    assert!(err.message.contains("comment"), "{}", err.message);
+}

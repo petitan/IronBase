@@ -49,7 +49,8 @@ where
 }
 
 /// Arguments of a tool that takes none (`collection_list`, `db_stats`,
-/// `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`): `{}`
+/// `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`, `acl_list`,
+/// `acl_cleanup`, `listener_list`): `{}`
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoParams {}
 

@@ -90,14 +90,26 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                     // Load the current ACL first: acl_set replaces the whole rule list,
                     // so an editor opened empty would overwrite the existing rules
                     let existing = match app.db {
-                        Some(ref db) => db.acl_get(&coll).await.map_err(|e| e.to_string()),
+                        Some(ref db) => db
+                            .call::<ironbase_mcp_types::tools::AclGet>(
+                                &ironbase_mcp_types::params::AclCollectionParams {
+                                    collection: coll.clone(),
+                                },
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
                         None => Err("Nincs megnyitva adatbázis".to_string()),
                     };
                     match existing {
                         Ok(acl) => {
-                            let info = acl
-                                .as_ref()
-                                .and_then(modals::acl::CollectionAclInfo::from_value);
+                            let info = match acl {
+                                ironbase_mcp_types::responses::AclGetResponse::Set(doc) => {
+                                    Some(modals::acl::CollectionAclInfo::from_document(&doc))
+                                }
+                                ironbase_mcp_types::responses::AclGetResponse::NotSet {
+                                    ..
+                                } => None,
+                            };
                             // Never load a mangled copy: saving it would
                             // corrupt the stored rules
                             if let Some(message) =
@@ -186,12 +198,8 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
             // Load ACL rules
             if let Some(ref db) = app.db {
                 app.acl_state.loading = true;
-                match db.acl_list().await {
-                    Ok(rules) => {
-                        let acls: Vec<_> = rules
-                            .iter()
-                            .filter_map(modals::acl::CollectionAclInfo::from_value)
-                            .collect();
+                match super::acl::load_acls(db).await {
+                    Ok(acls) => {
                         app.acl_state.set_acls(acls);
                         app.acl_state.loading = false;
                     }
@@ -212,13 +220,9 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
             // Load listeners
             if let Some(ref db) = app.db {
                 app.listener_state.loading = true;
-                match db.listener_list().await {
+                match super::listener::load_listeners(db).await {
                     Ok(listeners) => {
-                        let infos: Vec<_> = listeners
-                            .iter()
-                            .filter_map(modals::listener::ListenerInfo::from_value)
-                            .collect();
-                        app.listener_state.set_listeners(infos);
+                        app.listener_state.set_listeners(listeners);
                         app.listener_state.loading = false;
                     }
                     Err(e) => {
