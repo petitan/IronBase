@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
@@ -97,17 +97,19 @@ impl Transport for HttpTransport {
             ));
         }
 
-        if !response.status().is_success() {
-            return Err(McpError::connection(format!(
-                "HTTP error: {}",
-                response.status()
-            )));
-        }
-
+        // A timeout (504) or a failed request (500) comes with a JSON-RPC
+        // error body naming the cause: that is the answer, not the bare status
+        let status = response.status();
         let body = response.text().await?;
-        let rpc_response: JsonRpcResponse = serde_json::from_str(&body)?;
-
-        Ok(rpc_response)
+        match (
+            status.is_success(),
+            serde_json::from_str::<JsonRpcResponse>(&body),
+        ) {
+            (true, parsed) => Ok(parsed?),
+            (false, Ok(rpc_response)) if rpc_response.error.is_some() => Ok(rpc_response),
+            // A non-2xx answer without a JSON-RPC error (a proxy, a crash page)
+            (false, _) => Err(McpError::connection(format!("HTTP error: {}", status))),
+        }
     }
 
     async fn close(&self) -> McpResult<()> {
@@ -123,9 +125,41 @@ impl Transport for HttpTransport {
 /// Stdio transport for MCP communication (spawns server as child process)
 pub struct StdioTransport {
     child: Arc<Mutex<Option<Child>>>,
+    /// The server's pipes, under one lock: a request and the reading of its
+    /// answer are one exchange
+    io: Arc<Mutex<StdioPipes>>,
+}
+
+struct StdioPipes {
     /// `None` once closed (dropping it is the EOF that stops the server)
-    stdin: Arc<Mutex<Option<BufWriter<ChildStdin>>>>,
-    stdout: Arc<Mutex<BufReader<ChildStdout>>>,
+    stdin: Option<BufWriter<ChildStdin>>,
+    stdout: BufReader<ChildStdout>,
+}
+
+/// Read lines from `reader` until the JSON-RPC response to request `id`.
+/// Any other line is skipped: the late answer to a request that timed out
+/// (which would otherwise be read as the answer to the next one), a
+/// notification, or output that is not a response.
+async fn read_response<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    id: u64,
+) -> McpResult<JsonRpcResponse> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            return Err(McpError::connection("Server closed connection"));
+        }
+        match serde_json::from_str::<JsonRpcResponse>(&line) {
+            Ok(response) if response.id == Some(id) => return Ok(response),
+            Ok(response) => tracing::debug!(
+                expected = id,
+                got = ?response.id,
+                "skipping a response to another request"
+            ),
+            Err(_) => tracing::debug!(expected = id, "skipping a line that is not a response"),
+        }
+    }
 }
 
 impl StdioTransport {
@@ -157,15 +191,17 @@ impl StdioTransport {
 
         Ok(Self {
             child: Arc::new(Mutex::new(Some(child))),
-            stdin: Arc::new(Mutex::new(Some(BufWriter::new(stdin)))),
-            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+            io: Arc::new(Mutex::new(StdioPipes {
+                stdin: Some(BufWriter::new(stdin)),
+                stdout: BufReader::new(stdout),
+            })),
         })
     }
 
     /// Graceful shutdown: close the child's stdin (the server exits on EOF),
     /// wait for it to exit, and kill it only if it has not exited in time
     async fn close_with_timeout(&self, timeout: Duration) -> McpResult<()> {
-        if let Some(mut stdin) = self.stdin.lock().await.take() {
+        if let Some(mut stdin) = self.io.lock().await.stdin.take() {
             let _ = stdin.shutdown().await;
         }
 
@@ -179,7 +215,6 @@ impl StdioTransport {
     }
 }
 
-/// BUG FIX: Added timeout and size limit to prevent DoS and deadlock
 #[async_trait]
 impl Transport for StdioTransport {
     async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
@@ -187,41 +222,25 @@ impl Transport for StdioTransport {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
 
+        let mut io = self.io.lock().await;
+        let StdioPipes { stdin, stdout } = &mut *io;
+        let Some(stdin) = stdin.as_mut() else {
+            return Err(McpError::connection("Connection is closed"));
+        };
+
         // Send request with timeout
-        {
-            let mut stdin_guard = self.stdin.lock().await;
-            let Some(stdin) = stdin_guard.as_mut() else {
-                return Err(McpError::connection("Connection is closed"));
-            };
-            tokio::time::timeout(STDIO_TIMEOUT, async {
-                stdin.write_all(json.as_bytes()).await?;
-                stdin.flush().await?;
-                Ok::<_, std::io::Error>(())
-            })
+        tokio::time::timeout(STDIO_TIMEOUT, async {
+            stdin.write_all(json.as_bytes()).await?;
+            stdin.flush().await?;
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(|_| McpError::connection("Timeout sending request to server"))??;
+
+        // Read this request's response with timeout
+        tokio::time::timeout(STDIO_TIMEOUT, read_response(stdout, request.id))
             .await
-            .map_err(|_| McpError::connection("Timeout sending request to server"))??;
-        }
-
-        // Read response line with timeout
-        let mut line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
-            let read_result =
-                tokio::time::timeout(STDIO_TIMEOUT, stdout.read_line(&mut line)).await;
-
-            match read_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(McpError::Io(e)),
-                Err(_) => return Err(McpError::connection("Timeout waiting for server response")),
-            }
-        }
-
-        if line.is_empty() {
-            return Err(McpError::connection("Server closed connection"));
-        }
-
-        let response: JsonRpcResponse = serde_json::from_str(&line)?;
-        Ok(response)
+            .map_err(|_| McpError::connection("Timeout waiting for server response"))?
     }
 
     async fn close(&self) -> McpResult<()> {
@@ -239,6 +258,91 @@ impl Drop for StdioTransport {
                 let _ = child.start_kill();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+
+    /// The late answer to a timed-out request, a notification and a stray
+    /// line come before this request's answer: the answer is the one with its id
+    #[tokio::test]
+    async fn test_read_response_skips_other_requests_answers() {
+        let lines = concat!(
+            r#"{"jsonrpc":"2.0","id":6,"result":{"stale":true}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+            "\n",
+            "not json\n",
+            r#"{"jsonrpc":"2.0","id":7,"result":{"mine":true}}"#,
+            "\n",
+        );
+        let mut reader = tokio::io::BufReader::new(lines.as_bytes());
+
+        let response = read_response(&mut reader, 7).await.unwrap();
+
+        assert_eq!(response.result, Some(serde_json::json!({"mine": true})));
+    }
+
+    #[tokio::test]
+    async fn test_read_response_reports_a_closed_pipe() {
+        let lines = concat!(r#"{"jsonrpc":"2.0","id":6,"result":{}}"#, "\n");
+        let mut reader = tokio::io::BufReader::new(lines.as_bytes());
+
+        let error = read_response(&mut reader, 7).await.unwrap_err();
+
+        assert!(error.to_string().contains("closed"), "{}", error);
+    }
+
+    /// Serve one raw HTTP response on a local port; returns the base URL
+    async fn serve_once(status: &str, body: &str) -> String {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            status,
+            body.len(),
+            body
+        );
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{}", addr)
+    }
+
+    /// The server answers a tool timeout with 504 and a JSON-RPC error that
+    /// says what to do: that error reaches the caller, not "HTTP error: 504"
+    #[tokio::test]
+    async fn test_http_error_status_keeps_the_servers_json_rpc_error() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32008,"message":"Operation timed out after 25 seconds. Tool: 'find'."}}"#;
+        let url = serve_once("504 Gateway Timeout", body).await;
+        let transport = HttpTransport::with_options(url, None, false).unwrap();
+
+        let response = transport.send(&JsonRpcRequest::tools_list()).await.unwrap();
+
+        let error = response.error.unwrap();
+        assert_eq!(error.code, -32008);
+        assert!(error.message.contains("timed out after 25 seconds"));
+    }
+
+    /// A non-2xx answer without a JSON-RPC body is still a status error
+    #[tokio::test]
+    async fn test_http_error_status_without_json_rpc_body() {
+        let url = serve_once("502 Bad Gateway", "<html>proxy</html>").await;
+        let transport = HttpTransport::with_options(url, None, false).unwrap();
+
+        let error = transport
+            .send(&JsonRpcRequest::tools_list())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("502"), "{}", error);
     }
 }
 
