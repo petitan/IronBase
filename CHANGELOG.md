@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: one shared text input, the terminal's own cursor (ironbase-core 0.3.475)
+
+Phase 3a of the Tuti TUI overhaul: the first shared widget.
+
+- **`widgets::TextInput`:** a single-line input with a char-index cursor (safe next to multi-byte
+  characters), the editing keys (Backspace, Delete, arrows, Home / End) and the readline keys Ctrl+A / E / U
+  / K / W, paste that stays on one line, and rendering that scrolls a long value so the cursor stays
+  visible (character widths from `unicode-width`, wide characters two columns) and puts the terminal's own
+  cursor at the insertion point. Ctrl / Alt chords are not text (AltGr, reported as Ctrl+Alt, is).
+- **The database path, the new collection name and the search field use it** (the three copies of the
+  cursor logic are gone):
+  - a Ctrl chord typed its letter into the field (the handlers ignored the modifiers): Ctrl+U put a "u"
+    into the path; Ctrl+A / E / U / K / W now edit, other chords do nothing;
+  - the cursor was a "|" drawn into the text; it is now the terminal cursor;
+  - a path longer than the field was cut off at the right edge, the cursor out of sight; it now scrolls.
+- The other modals' inputs follow in the next steps of phase 3.
+
 ### Fixed — Tuti TUI connection: answers matched to their requests, server errors kept, re-initialize after a server restart (ironbase-core 0.3.474)
 
 Phase 2i of the Tuti TUI overhaul (client protocol layer).

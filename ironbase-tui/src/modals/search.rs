@@ -42,44 +42,23 @@ fn render_search_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
         SearchMode::Document => "Irj be keresett szoveget...",
     };
 
-    let input_text = if app.search.query_input.is_empty() {
-        placeholder
+    if app.search.query_input.is_empty() {
+        frame.render_widget(
+            Paragraph::new(placeholder).style(Style::default().fg(theme.muted)),
+            area,
+        );
+        // An active empty field: the cursor waits at its start
+        if app.search.input_active {
+            frame.set_cursor_position(Position::new(area.x, area.y));
+        }
     } else {
-        &app.search.query_input
-    };
-
-    let style = if app.search.query_input.is_empty() {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    };
-
-    // Add cursor if active - UTF-8 safe slicing
-    let display = if app.search.input_active && !app.search.query_input.is_empty() {
-        let before: String = app
-            .search
-            .query_input
-            .chars()
-            .take(app.search.cursor_pos)
-            .collect();
-        let after: String = app
-            .search
-            .query_input
-            .chars()
-            .skip(app.search.cursor_pos)
-            .collect();
-        format!("{}|{}", before, after)
-    } else if app.search.input_active {
-        "|".to_string()
-    } else {
-        input_text.to_string()
-    };
-
-    let input = Paragraph::new(display)
-        .style(style)
-        .alignment(Alignment::Left);
-
-    frame.render_widget(input, area);
+        app.search.query_input.render(
+            frame,
+            area,
+            Style::default().fg(theme.fg),
+            app.search.input_active,
+        );
+    }
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {

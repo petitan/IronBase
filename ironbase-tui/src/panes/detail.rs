@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     // Get search query for highlighting (if any)
     let highlight_query = if !app.search.doc_matches.is_empty() {
-        Some(app.search.query_input.trim().to_lowercase())
+        Some(app.search.query_input.value().trim().to_lowercase())
     } else {
         None
     };

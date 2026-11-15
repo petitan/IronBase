@@ -28,21 +28,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &NewCollectionState, theme: 
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
-    // Name input with cursor
-    let display = if state.name.is_empty() {
-        "|".to_string()
-    } else {
-        let before: String = state.name.chars().take(state.cursor).collect();
-        let after: String = state.name.chars().skip(state.cursor).collect();
-        format!("{}|{}", before, after)
-    };
-
-    let input_line = Line::from(vec![
-        Span::styled(" Nev: ", Style::default().fg(theme.muted)),
-        Span::styled(display, Style::default().fg(theme.fg)),
-    ]);
-    let input = Paragraph::new(input_line);
-    frame.render_widget(input, chunks[1]);
+    // Name input
+    let label = " Nev: ";
+    let [label_area, input_area] =
+        Layout::horizontal([Constraint::Length(label.len() as u16), Constraint::Min(1)])
+            .areas(chunks[1]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(label, Style::default().fg(theme.muted))),
+        label_area,
+    );
+    state
+        .name
+        .render(frame, input_area, Style::default().fg(theme.fg), true);
 
     // Status/error
     let status_text = if let Some(ref err) = state.error {

@@ -1,27 +1,21 @@
 //! Key handlers: new_collection
 
 use crate::app::App;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async new collection key handler
-pub(crate) async fn handle_new_collection_key_async(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_new_collection_key_async(
+    app: &mut App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) {
     match key {
         KeyCode::Esc => app.close_modal(),
         KeyCode::Enter => {
             app.create_collection_async().await;
         }
-        KeyCode::Backspace => {
-            app.new_collection_state.backspace();
+        _ => {
+            app.new_collection_state.handle_input(key, modifiers);
         }
-        KeyCode::Left => {
-            app.new_collection_state.cursor_left();
-        }
-        KeyCode::Right => {
-            app.new_collection_state.cursor_right();
-        }
-        KeyCode::Char(c) => {
-            app.new_collection_state.insert_char(c);
-        }
-        _ => {}
     }
 }

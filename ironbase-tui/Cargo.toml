@@ -51,3 +51,6 @@ async-trait = { workspace = true }
 
 # Clipboard
 arboard = "3.4"
+
+# Display width of characters (text inputs)
+unicode-width = "0.2"

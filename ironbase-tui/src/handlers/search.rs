@@ -4,17 +4,21 @@ use crate::app::App;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async search key handler
-pub(crate) async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+pub(crate) async fn handle_search_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     use crate::app::SearchMode;
 
     match app.search.mode {
-        SearchMode::Collections => handle_collection_search_key(app, key).await,
-        SearchMode::Document => handle_document_search_key(app, key),
+        SearchMode::Collections => handle_collection_search_key(app, key, modifiers).await,
+        SearchMode::Document => handle_document_search_key(app, key, modifiers),
     }
 }
 
 /// Handle collection search keys
-pub(crate) async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_collection_search_key(
+    app: &mut App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) {
     if app.search.input_active {
         match key {
             KeyCode::Esc => app.close_modal(),
@@ -28,14 +32,12 @@ pub(crate) async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
                     }
                 }
             }
-            KeyCode::Char(c) => app.search.insert_char(c),
-            KeyCode::Backspace => app.search.delete_char(),
-            KeyCode::Left => app.search.cursor_left(),
-            KeyCode::Right => app.search.cursor_right(),
             KeyCode::Tab | KeyCode::Down if !app.search.results.is_empty() => {
                 app.search.input_active = false;
             }
-            _ => {}
+            _ => {
+                app.search.query_input.handle_key(key, modifiers);
+            }
         }
     } else {
         match key {
@@ -56,7 +58,7 @@ pub(crate) async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
 }
 
 /// Handle document search keys
-pub(crate) fn handle_document_search_key(app: &mut App, key: KeyCode) {
+pub(crate) fn handle_document_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
         KeyCode::Esc => app.close_modal(),
         KeyCode::Enter if !app.search.query_input.is_empty() => {
@@ -69,10 +71,8 @@ pub(crate) fn handle_document_search_key(app: &mut App, key: KeyCode) {
         }
         // n/N are typed like any other character here; match navigation (n/N)
         // lives in the Detail pane, where the modal lands after a successful search
-        KeyCode::Char(c) => app.search.insert_char(c),
-        KeyCode::Backspace => app.search.delete_char(),
-        KeyCode::Left => app.search.cursor_left(),
-        KeyCode::Right => app.search.cursor_right(),
-        _ => {}
+        _ => {
+            app.search.query_input.handle_key(key, modifiers);
+        }
     }
 }

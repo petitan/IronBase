@@ -1,6 +1,7 @@
 //! Search state for collections and document search
 
 use super::types::SearchMode;
+use crate::widgets::TextInput;
 
 /// Search result - collection match
 #[derive(Debug, Clone)]
@@ -18,8 +19,7 @@ pub struct DocSearchMatch {
 /// Search state
 #[derive(Debug, Default)]
 pub struct SearchState {
-    pub query_input: String,
-    pub cursor_pos: usize,
+    pub query_input: TextInput,
     pub input_active: bool,
     pub mode: SearchMode,
     // Collection search results
@@ -61,44 +61,5 @@ impl SearchState {
     /// Get current match line number (for scrolling)
     pub fn current_match_line(&self) -> Option<usize> {
         self.doc_matches.get(self.current_match).map(|m| m.line)
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        // Convert character position to byte position for UTF-8 safety
-        let byte_pos = self
-            .query_input
-            .char_indices()
-            .nth(self.cursor_pos)
-            .map(|(i, _)| i)
-            .unwrap_or(self.query_input.len());
-        self.query_input.insert(byte_pos, c);
-        self.cursor_pos += 1;
-    }
-
-    pub fn delete_char(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-            // Convert character position to byte position for UTF-8 safety
-            let byte_pos = self
-                .query_input
-                .char_indices()
-                .nth(self.cursor_pos)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.query_input.remove(byte_pos);
-        }
-    }
-
-    pub fn cursor_left(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        // Use character count, not byte length
-        if self.cursor_pos < self.query_input.chars().count() {
-            self.cursor_pos += 1;
-        }
     }
 }

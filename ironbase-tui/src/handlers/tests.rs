@@ -928,7 +928,7 @@ async fn open_database_modal_with_path(app: &mut App, path: &str) {
         press(app, KeyCode::Backspace).await;
     }
     type_text(app, path).await;
-    assert_eq!(app.database_state.path, path);
+    assert_eq!(app.database_state.path.value(), path);
 }
 
 #[tokio::test]
@@ -2355,4 +2355,58 @@ async fn test_api_key_revoke_of_a_missing_key_says_so() {
     assert_eq!(app.api_key_state.error.as_deref(), Some("Key not found"));
     assert_eq!(app.api_key_state.mode, ApiKeyModalMode::List);
     assert!(server.calls_to("admin_apikey_list").is_empty());
+}
+
+// === Text inputs (shared TextInput widget) ===
+
+/// Ctrl chords edit the field (readline) instead of typing their letter:
+/// Ctrl+U used to type a "u" into the path
+#[tokio::test]
+async fn test_database_path_takes_readline_keys() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_database_modal_with_path(&mut app, "/data/old.mlite").await;
+
+    press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.database_state.path.value(), "");
+    type_text(&mut app, "/data/new.mlite").await;
+    press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL).await;
+    press(&mut app, KeyCode::Right).await;
+    press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.database_state.path.value(), "/");
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.database_state.path.value(), "");
+}
+
+/// The field shows the text as typed, with the terminal's cursor at the
+/// insertion point - no "|" drawn into the text
+#[tokio::test]
+async fn test_new_collection_name_uses_the_terminal_cursor() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
+    use ratatui::Terminal;
+
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.open_new_collection();
+    type_text(&mut app, "users2").await;
+    press(&mut app, KeyCode::Left).await;
+
+    let screen = render_to_string(&app, 100, 30);
+    let line = screen
+        .lines()
+        .find(|l| l.contains("Nev:"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(line.contains("Nev: users2"), "{}", line);
+    assert!(!line.contains('|'), "{}", line);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render_ui(frame, &app))
+        .unwrap();
+    let y = screen.lines().position(|l| l.contains("Nev:")).unwrap() as u16;
+    // Columns, not bytes: the frame's border characters are multi-byte
+    let x = line[..line.find("users2").unwrap()].chars().count() as u16 + 5;
+    assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(x, y));
 }
