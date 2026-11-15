@@ -137,6 +137,8 @@ struct StdioPipes {
 }
 
 /// Read lines from `reader` until the JSON-RPC response to request `id`.
+/// An error without an id (the server could not tell or answer the request,
+/// JSON-RPC's `"id": null`) is the answer too: one exchange runs at a time.
 /// Any other line is skipped: the late answer to a request that timed out
 /// (which would otherwise be read as the answer to the next one), a
 /// notification, or output that is not a response.
@@ -152,6 +154,9 @@ async fn read_response<R: AsyncBufRead + Unpin>(
         }
         match serde_json::from_str::<JsonRpcResponse>(&line) {
             Ok(response) if response.id == Some(id) => return Ok(response),
+            Ok(response) if response.id.is_none() && response.error.is_some() => {
+                return Ok(response)
+            }
             Ok(response) => tracing::debug!(
                 expected = id,
                 got = ?response.id,
@@ -283,6 +288,23 @@ mod read_tests {
         let response = read_response(&mut reader, 7).await.unwrap();
 
         assert_eq!(response.result, Some(serde_json::json!({"mine": true})));
+    }
+
+    /// The server's answer when it cannot serialize its response carries no
+    /// id: it is this request's error, not a line to wait past
+    #[tokio::test]
+    async fn test_read_response_takes_an_error_without_id() {
+        let lines = concat!(
+            r#"{"jsonrpc":"2.0","id":6,"result":{"stale":true}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error"}}"#,
+            "\n",
+        );
+        let mut reader = tokio::io::BufReader::new(lines.as_bytes());
+
+        let response = read_response(&mut reader, 7).await.unwrap();
+
+        assert_eq!(response.error.unwrap().code, -32603);
     }
 
     #[tokio::test]

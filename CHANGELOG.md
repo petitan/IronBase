@@ -14,8 +14,9 @@ Phase 2i of the Tuti TUI overhaul (client protocol layer).
 - **stdio: a late answer was read as the answer to the next request.** After a request timed out on the
   client (30 s), the server's late answer stayed in the pipe, and every later request read the answer to
   the one before. The transport now reads until the response carrying the request's id and skips any
-  other line (a late answer, a notification, non-JSON output); the request and the reading of its answer
-  are one exchange under one lock (the pipes were locked separately).
+  other line (a late answer, a notification, non-JSON output); an error without an id (`"id": null`, the
+  server's answer when it cannot serialize its response) is taken as this request's error. The request and
+  the reading of its answer are one exchange under one lock (the pipes were locked separately).
 - **HTTP: the server's error was replaced by the status.** A tool timeout (504) and a failed request (500)
   come with a JSON-RPC error that names the cause and the remedy ("Operation timed out after 25 seconds …
   add 'limit' …"); the TUI showed only "HTTP error: 504 Gateway Timeout". The JSON-RPC error is now the
