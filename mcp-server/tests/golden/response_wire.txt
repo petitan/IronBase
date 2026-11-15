@@ -600,7 +600,7 @@ err: IndexError Index not found: w_name
 
 ## index_drop / missing collection
 in:  {"collection":"nope","index_name":"nope_age"}
-err: IndexError Index not found: nope_age
+err: CollectionNotFound Collection 'nope' not found
 
 ## index_drop / missing index_name
 in:  {"collection":"w"}
@@ -904,7 +904,7 @@ err: IndexError No vector index found for field 'title' in collection 'kb'
 
 ## vector_search / missing collection
 in:  {"collection":"nope","vector":[1.0,2.0]}
-err: IndexError No vector index found for field 'embedding' in collection 'nope'
+err: CollectionNotFound Collection 'nope' not found
 
 ## vector_search / missing vector
 in:  {"collection":"kb"}
@@ -972,7 +972,7 @@ err: InvalidParams `search` arguments must be a JSON object with at least {colle
 
 ## search / missing collection
 in:  {"collection":"nope","query":"rust"}
-err: IndexError No vector index found for field 'embedding' in collection 'nope'
+err: CollectionNotFound Collection 'nope' not found
 
 ## search / invalid collection name
 in:  {"collection":"a$b","query":"rust"}
