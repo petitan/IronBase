@@ -500,6 +500,21 @@ fn test_merge_keeps_crlf_line_ends() {
     );
 }
 
+/// A dot-path text field (`body.text`) is read and written at its path
+/// (before: a literal top-level `"body.text": ""` key, the chunks' text lost)
+#[test]
+fn test_merge_reads_and_writes_a_nested_text_field() {
+    let mut results = vec![
+        make_chunk("c0", "docA", 0, "", 0, 5, 0.03),
+        make_chunk("c1", "docA", 1, "", 6, 11, 0.02),
+    ];
+    results[0].doc["body"] = json!({"text": "alpha"});
+    results[1].doc["body"] = json!({"text": "omega"});
+    assert_eq!(merge_adjacent_chunks(&mut results, "body.text"), 1);
+    assert_eq!(results[0].doc["body"]["text"], "alpha\nomega");
+    assert!(results[0].doc.get("body.text").is_none());
+}
+
 /// No separator where the chunks touch, or where the stored text already
 /// keeps the whitespace at the boundary
 #[test]

@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusion projection of them) merged without overlap trimming or gap separator. The merge's fields
   (`doc_id`, `chunk_index`, `start_char`, `end_char`, `table_header` and the text field) now survive the
   projection until the merge has read them and are removed after it unless the request kept them
-  (`CollectionCore::hybrid_group_documents`; MCP `search`, Rhai `db_hybrid_search`).
+  (`CollectionCore::hybrid_group_documents`; MCP `search`, Rhai `db_hybrid_search`, Python
+  `hybrid_search`). An invalid projection is refused there as by `find`, before it is extended.
+- **The chunk merge reads and writes a dot-path text field** (`body.text`) at its path. It looked the field up
+  as a literal top-level key: the merged chunk got a `"body.text": ""` key and the chunks' text was lost.
 
 ### Fixed — merged chunks no longer glue words together (ironbase-core 0.3.468, mcp-server 1.0.666)
 

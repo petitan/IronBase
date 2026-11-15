@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use crate::collection_core::CollectionCore;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::find_options::apply_projection;
+use crate::find_options::{apply_projection, validate_projection};
 use crate::fulltext::FulltextSearchOptions;
 use crate::storage::{RawStorage, Storage};
+use crate::value_utils::{delete_nested_value, get_nested_value};
 
 use super::fuse::{exclusion_projection, fused_doc_id};
 use super::{id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES};
@@ -141,7 +142,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<(Vec<DocGroup>, usize)> {
         // The merge reads its fields before the projection drops them
         let (merge_projection, merge_only) =
-            projection_for_merge(q.projection.as_ref(), q.merge_chunks, &q.text_field);
+            projection_for_merge(q.projection.as_ref(), q.merge_chunks, &q.text_field)?;
         let projection = &merge_projection;
 
         // Phase 1: top N unique doc_ids (first occurrence = best score)
@@ -270,12 +271,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if q.merge_chunks {
                 merge_adjacent_values(&mut chunks, &q.text_field);
                 // The fields kept only for the merge leave as the projection asked
+                // (dot paths as the projection set them, the key order kept)
                 for chunk in &mut chunks {
-                    if let Value::Object(obj) = chunk {
-                        for key in &merge_only {
-                            obj.remove(key);
-                        }
-                    }
+                    merge_only.remove_from(chunk);
                 }
             }
 
@@ -313,15 +311,17 @@ const MERGE_FIELDS: &[&str] = &[
 /// field) survive the projection until the merge has read them. An inclusion
 /// projection gets them added, an exclusion projection does not exclude them;
 /// either way they are removed after the merge unless the request kept them.
-/// Without a merge, or without a projection, the projection is unchanged.
+/// Without a merge, or without a projection, the projection is unchanged. An
+/// invalid projection is refused as `find` refuses it, before it is changed.
 fn projection_for_merge(
     projection: Option<&HashMap<String, i32>>,
     merge_chunks: bool,
     text_field: &str,
-) -> (Option<HashMap<String, i32>>, Vec<String>) {
+) -> Result<(Option<HashMap<String, i32>>, MergeOnlyFields)> {
     let Some(projection) = projection.filter(|_| merge_chunks) else {
-        return (projection.cloned(), Vec::new());
+        return Ok((projection.cloned(), MergeOnlyFields::default()));
     };
+    validate_projection(projection)?;
     let include_mode = projection.values().any(|&v| v == 1);
     let mut augmented = projection.clone();
     let mut merge_only = Vec::new();
@@ -339,5 +339,44 @@ fn projection_for_merge(
             merge_only.push(field.to_string());
         }
     }
-    (Some(augmented), merge_only)
+    Ok((
+        Some(augmented),
+        MergeOnlyFields {
+            paths: merge_only,
+            added_by_inclusion: include_mode,
+        },
+    ))
+}
+
+/// The fields a projection kept only for the merge ([`projection_for_merge`])
+#[derive(Debug, Default)]
+struct MergeOnlyFields {
+    /// Dot paths, as the projection names them
+    paths: Vec<String>,
+    /// Added to an inclusion projection: an object on the path exists only
+    /// because of them, and goes with them once empty (an exclusion
+    /// projection leaves an emptied object, as `find` does)
+    added_by_inclusion: bool,
+}
+
+impl MergeOnlyFields {
+    fn remove_from(&self, chunk: &mut Value) {
+        for path in &self.paths {
+            delete_nested_value(chunk, path);
+            if !self.added_by_inclusion {
+                continue;
+            }
+            let mut parent = path.as_str();
+            while let Some((prefix, _)) = parent.rsplit_once('.') {
+                let empty = get_nested_value(chunk, prefix)
+                    .and_then(Value::as_object)
+                    .is_some_and(|o| o.is_empty());
+                if !empty {
+                    break;
+                }
+                delete_nested_value(chunk, prefix);
+                parent = prefix;
+            }
+        }
+    }
 }
