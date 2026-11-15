@@ -87,6 +87,37 @@ fn test_multikey_index_counts_a_document_once_after_a_crash() {
     assert_eq!(count_and_find(&db, &query), (2, 2));
 }
 
+/// The first array arrives after the last checkpoint: the index file loaded
+/// after the crash lacks it, and the WAL replay marks the index multikey
+#[test]
+fn test_wal_replay_marks_the_index_multikey() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let live = dir.path().join("live");
+    std::fs::create_dir(&live).unwrap();
+    let query = json!({"o.x": {"$gt": -1.5}});
+
+    let db = DatabaseCore::<StorageEngine>::open(live.join("s.mlite")).unwrap();
+    db.collection("s")
+        .unwrap()
+        .create_index("o.x".to_string(), false, false)
+        .unwrap();
+    db.insert_one("s", fields(json!({"o": {"x": 1}}))).unwrap();
+    db.checkpoint().unwrap();
+    db.insert_one("s", fields(json!({"o": {"x": [0, -1]}})))
+        .unwrap();
+    let crashed = dir.path().join("crashed");
+    crash_copy(&live, &crashed);
+    drop(db);
+
+    let db = DatabaseCore::<StorageEngine>::open(crashed.join("s.mlite")).unwrap();
+    assert_eq!(count_and_find(&db, &query), (2, 2));
+    db.close().unwrap();
+    drop(db);
+    // ... and the replayed flag is stored with the index file
+    let db = DatabaseCore::<StorageEngine>::open(crashed.join("s.mlite")).unwrap();
+    assert_eq!(count_and_find(&db, &query), (2, 2));
+}
+
 /// An update bringing an array makes the index multikey, before and after
 /// a reopen (the batch update path did not mark it)
 #[test]

@@ -382,6 +382,18 @@ mod tests {
         dir.join("nested").join("tuti-tui.log")
     }
 
+    /// Log this test thread's events to `file` at `level`. tracing caches
+    /// each callsite's interest; a callsite first hit by another test thread
+    /// can store one computed from the dispatchers it saw then (a finished
+    /// test's, or none: "never"), and this test's events from it were
+    /// dropped (Windows CI). Recomputing the cache once this subscriber is
+    /// in place gives every registered callsite this test's interest.
+    fn log_to(file: LogFile, level: LevelFilter) -> tracing::subscriber::DefaultGuard {
+        let guard = tracing::subscriber::set_default(subscriber(file, level));
+        tracing::callsite::rebuild_interest_cache();
+        guard
+    }
+
     fn cleanup(path: &Path) {
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
@@ -609,7 +621,7 @@ mod tests {
     async fn test_server_error_text_is_sanitized_in_the_log() {
         let path = temp_log_path("sanitize");
         let file = open_log_file(&path).unwrap();
-        let _guard = tracing::subscriber::set_default(subscriber(file, LevelFilter::DEBUG));
+        let _guard = log_to(file, LevelFilter::DEBUG);
         register_secret("sk-echoed-7c1d");
 
         let server = FakeServer::new(vec![]);
@@ -715,7 +727,7 @@ mod tests {
     async fn test_tool_call_outcomes_are_logged() {
         let path = temp_log_path("calls");
         let file = open_log_file(&path).unwrap();
-        let _guard = tracing::subscriber::set_default(subscriber(file, LevelFilter::INFO));
+        let _guard = log_to(file, LevelFilter::INFO);
 
         let server = FakeServer::new(vec![("users", vec![serde_json::json!({"name": "Alice"})])]);
         let mut app = app_with_server(&server).await;
@@ -749,7 +761,7 @@ mod tests {
     async fn test_admin_key_is_not_logged_at_debug_level() {
         let path = temp_log_path("redact");
         let file = open_log_file(&path).unwrap();
-        let _guard = tracing::subscriber::set_default(subscriber(file, LevelFilter::DEBUG));
+        let _guard = log_to(file, LevelFilter::DEBUG);
 
         let server = FakeServer::new(vec![]);
         let app = app_with_server(&server).await;

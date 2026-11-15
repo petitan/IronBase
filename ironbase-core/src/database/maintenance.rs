@@ -536,6 +536,7 @@ impl DatabaseCore<StorageEngine> {
     }
 
     fn flush_all_indexes_at(&self, watermark: u64) -> Result<usize> {
+        // `watermark` was taken before the flags (see flush_btree_indexes_counted)
         self.persist_multikey_flags()?;
         let db_path = {
             let storage = self.storage.read();
@@ -874,13 +875,15 @@ impl DatabaseCore<StorageEngine> {
     /// their WAL entries. Without it the periodic checkpoint kept the whole WAL
     /// until the next full flush (close, compaction, `checkpoint()`).
     pub fn flush_btree_indexes_counted(&self) -> Result<usize> {
+        // The watermark first: every transaction it covers has set its
+        // multikey flags, which are stored before the files are written
+        let watermark = self.watermark_tx_id();
         self.persist_multikey_flags()?;
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
         };
 
-        let watermark = self.watermark_tx_id();
         let mut total_flushed = 0usize;
         // Every index holds the transactions <= watermark (see above)
         let mut covered = true;
@@ -1027,12 +1030,6 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.flush()
     }
 
-    /// The collections' index managers, cloned out of `index_managers` under a
-    /// brief read lock. The flush passes iterate this instead of holding the
-    /// map's read lock for the whole flush, which stalled every map reader
-    /// behind a waiting collection create/drop (audit 2026-10-07 T4). Callers
-    /// hold `index_flush_lock`, so a collection dropped meanwhile does not get
-    /// its index files written back.
     /// Store every B+ tree index's multikey flag in the collection metadata
     /// (persisted when one changed). A write that makes an index multikey sets
     /// the flag in memory only (it runs under the storage lock); the index
@@ -1084,6 +1081,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         changed
     }
 
+    /// The collections' index managers, cloned out of `index_managers` under a
+    /// brief read lock. The flush passes iterate this instead of holding the
+    /// map's read lock for the whole flush, which stalled every map reader
+    /// behind a waiting collection create/drop (audit 2026-10-07 T4). Callers
+    /// hold `index_flush_lock`, so a collection dropped meanwhile does not get
+    /// its index files written back.
     pub(crate) fn index_managers_snapshot(
         &self,
     ) -> Vec<(
@@ -1104,9 +1107,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// first (holding `persist_gate` exclusively), because the WAL is what
     /// brings dirty indexes forward after a crash (audit 2026-10-06 #28).
     pub(crate) fn flush_all_index_managers(&self) -> Result<()> {
+        // The watermark before the multikey flags (see flush_btree_indexes_counted)
+        let watermark = self.watermark_tx_id();
         self.persist_multikey_flags()?;
         let db_path = self.storage.read().get_file_path().to_string();
-        let watermark = self.watermark_tx_id();
         let mut first_error = None;
         let _flush = self.index_flush_lock.lock();
         for (_, index_manager) in self.index_managers_snapshot() {

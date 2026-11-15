@@ -1201,10 +1201,6 @@ impl IndexManager {
         }
     }
 
-    /// Flush a single B+ tree index to disk
-    ///
-    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
-    /// On error, the dirty flag is preserved for retry.
     /// The B+ tree indexes marked multikey (a document had an array on an
     /// indexed path)
     pub fn multikey_btree_index_names(&self) -> Vec<String> {
@@ -1215,6 +1211,10 @@ impl IndexManager {
             .collect()
     }
 
+    /// Flush a single B+ tree index to disk
+    ///
+    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
+    /// On error, the dirty flag is preserved for retry.
     pub fn flush_one_btree_index(
         &mut self,
         name: &str,
