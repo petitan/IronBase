@@ -98,23 +98,17 @@ fn render_search_input(frame: &mut Frame, area: Rect, state: &FulltextState, the
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let display = if state.query.is_empty() {
-        "Irj be keresett szoveget...".to_string()
+    if state.query.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Irj be keresett szoveget...").style(Style::default().fg(theme.muted)),
+            inner,
+        );
+        frame.set_cursor_position(Position::new(inner.x, inner.y));
     } else {
-        // Show cursor
-        let before: String = state.query.chars().take(state.cursor_pos).collect();
-        let after: String = state.query.chars().skip(state.cursor_pos).collect();
-        format!("{}|{}", before, after)
-    };
-
-    let style = if state.query.is_empty() {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    };
-
-    let input = Paragraph::new(display).style(style);
-    frame.render_widget(input, inner);
+        state
+            .query
+            .render(frame, inner, Style::default().fg(theme.fg), true);
+    }
 }
 
 fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {

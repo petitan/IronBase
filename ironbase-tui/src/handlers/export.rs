@@ -13,12 +13,8 @@ pub(crate) async fn handle_export_key_async(app: &mut App, key: KeyCode, modifie
         (KeyCode::Tab, _) => {
             app.export_state.toggle_format();
         }
-        (KeyCode::Backspace, _) => {
-            app.export_state.backspace();
+        _ => {
+            app.export_state.handle_input(key, modifiers);
         }
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.export_state.insert_char(c);
-        }
-        _ => {}
     }
 }

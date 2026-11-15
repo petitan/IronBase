@@ -1,6 +1,8 @@
 //! Export state
 
 use crate::modals::export::ExportFormat;
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Export state
 #[derive(Debug, Clone)]
@@ -10,8 +12,7 @@ pub struct ExportState {
     /// `doc_count` is the filtered count (an active filter is exported)
     pub filtered: bool,
     pub format: ExportFormat,
-    pub file_path: String,
-    pub editing_path: bool,
+    pub file_path: TextInput,
     pub error: Option<String>,
     pub message: Option<String>,
 }
@@ -23,8 +24,7 @@ impl Default for ExportState {
             doc_count: 0,
             filtered: false,
             format: ExportFormat::Json,
-            file_path: String::new(),
-            editing_path: true,
+            file_path: TextInput::default(),
             error: None,
             message: None,
         }
@@ -33,14 +33,13 @@ impl Default for ExportState {
 
 impl ExportState {
     pub fn new(collection: String, doc_count: usize) -> Self {
-        let file_path = format!("{}.json", collection);
+        let file_path = TextInput::new(format!("{}.json", collection));
         Self {
             collection,
             doc_count,
             filtered: false,
             format: ExportFormat::Json,
             file_path,
-            editing_path: true,
             error: None,
             message: None,
         }
@@ -58,18 +57,19 @@ impl ExportState {
     fn update_extension(&mut self) {
         // Replace the extension of the final path component only
         // (a dot in a directory name is not an extension)
-        let path = std::path::Path::new(&self.file_path).with_extension(self.format.extension());
-        self.file_path = path.to_string_lossy().into_owned();
+        let path =
+            std::path::Path::new(self.file_path.value()).with_extension(self.format.extension());
+        self.file_path
+            .set_value(path.to_string_lossy().into_owned());
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.file_path.push(c);
-        self.error = None;
-    }
-
-    pub fn backspace(&mut self) {
-        self.file_path.pop();
-        self.error = None;
+    /// An editing key for the path; a change clears the error
+    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = self.file_path.handle_key(code, modifiers);
+        if outcome == InputOutcome::Changed {
+            self.error = None;
+        }
+        outcome
     }
 }
 
@@ -79,9 +79,9 @@ mod tests {
 
     fn path_after_toggle(path: &str) -> String {
         let mut state = ExportState::new("users".to_string(), 0);
-        state.file_path = path.to_string();
+        state.file_path.set_value(path);
         state.toggle_format();
-        state.file_path
+        state.file_path.value().to_string()
     }
 
     #[test]

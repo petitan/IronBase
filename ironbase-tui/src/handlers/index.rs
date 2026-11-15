@@ -25,13 +25,8 @@ pub(crate) async fn handle_index_key_async(app: &mut App, key: KeyCode, modifier
             (KeyCode::Char(' '), _) if app.index_state.form_field == 3 => {
                 app.index_state.toggle_sparse();
             }
-            (KeyCode::Backspace, _) if app.index_state.form_field == 0 => {
-                app.index_state.backspace();
-            }
-            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
-                if app.index_state.form_field == 0 =>
-            {
-                app.index_state.insert_char(c);
+            _ if app.index_state.form_field == 0 => {
+                app.index_state.handle_input(key, modifiers);
             }
             _ => {}
         }

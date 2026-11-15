@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: the export path, the index fields and the fulltext query edit at the cursor (ironbase-core 0.3.476)
+
+Phase 3b of the Tuti TUI overhaul: three more inputs use the shared `TextInput`.
+
+- **Export path and index field name(s):** they took characters only at their end (`push` / `pop`); the
+  arrows, Home / End and Delete did nothing. They now edit at the cursor, with the readline keys and the
+  terminal's cursor. The index fields are re-parsed on each change, as before; the export format switch
+  still replaces the extension of the edited path. The export state's `editing_path` (always `true`) is gone.
+- **Fulltext query:** Home / End now move in the query (they did nothing); Ctrl+J / Ctrl+K stay the result
+  list's keys.
+
 ### Changed — Tuti TUI: one shared text input, the terminal's own cursor (ironbase-core 0.3.475)
 
 Phase 3a of the Tuti TUI overhaul: the first shared widget.
