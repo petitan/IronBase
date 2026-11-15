@@ -134,29 +134,53 @@ fn merge_adjacent_runs<T>(
                 // nearer side first) while the window stays within `max_chars`
                 let (mut lo, mut hi) = (best_pos, best_pos);
                 if let Some(cap) = max_chars {
+                    // A neighbour costs its text, and the separator its join
+                    // may add (`gap_separator`) when the two are apart
                     let len = |pos: usize| {
                         doc(&results[range[pos].1])
                             .get(text_field)
                             .and_then(|v| v.as_str())
                             .map_or(0, str::len)
                     };
+                    let offset = |pos: usize, key: &str| {
+                        doc(&results[range[pos].1])
+                            .get(key)
+                            .and_then(|v| v.as_u64())
+                    };
+                    // Cost of joining `next` to the window edge `edge`
+                    let join = |edge: usize, next: usize| {
+                        let (first, second) = if next < edge {
+                            (next, edge)
+                        } else {
+                            (edge, next)
+                        };
+                        let apart = matches!(
+                            (offset(first, "end_char"), offset(second, "start_char")),
+                            (Some(end), Some(start)) if start > end
+                        );
+                        len(next) + if apart { MAX_SEPARATOR_BYTES } else { 0 }
+                    };
                     let mut total = len(best_pos);
                     loop {
-                        let left = (lo > 0).then(|| lo - 1).filter(|&p| total + len(p) <= cap);
+                        let left = (lo > 0)
+                            .then(|| lo - 1)
+                            .map(|p| (p, join(lo, p)))
+                            .filter(|&(_, cost)| total + cost <= cap);
                         let right = (hi + 1 < range.len())
                             .then_some(hi + 1)
-                            .filter(|&p| total + len(p) <= cap);
+                            .map(|p| (p, join(hi, p)))
+                            .filter(|&(_, cost)| total + cost <= cap);
                         match (left, right) {
-                            (Some(l), Some(r)) if best_pos - l <= r - best_pos => {
-                                total += len(l);
+                            (Some((l, cost)), Some((r, _))) if best_pos - l <= r - best_pos => {
+                                total += cost;
                                 lo = l;
                             }
-                            (_, Some(r)) => {
-                                total += len(r);
+                            (_, Some((r, cost))) => {
+                                total += cost;
                                 hi = r;
                             }
-                            (Some(l), None) => {
-                                total += len(l);
+                            (Some((l, cost)), None) => {
+                                total += cost;
                                 lo = l;
                             }
                             (None, None) => break,
@@ -203,13 +227,13 @@ fn merge_adjacent_runs<T>(
                         raw_text
                     };
 
-                    if res_idx == best_idx_in_run {
-                        best_offset = Some(merged_text.len());
-                    }
                     if i == 0 {
+                        if res_idx == best_idx_in_run {
+                            best_offset = Some(merged_text.len());
+                        }
                         merged_text.push_str(chunk_text);
                     } else {
-                        // Calculate overlap from start_char/end_char if available
+                        // Calculate overlap (or gap) from start_char/end_char if available
                         let prev_end = doc(&results[run[i - 1].1])
                             .get("end_char")
                             .and_then(|v| v.as_u64());
@@ -234,6 +258,19 @@ fn merge_adjacent_runs<T>(
                                 chunk_text
                             };
 
+                        // The chunker drops the whitespace between two chunks:
+                        // put a separator into the gap instead of gluing words
+                        if let (Some(pe), Some(cs)) = (prev_end, curr_start) {
+                            merged_text.push_str(gap_separator(
+                                cs.saturating_sub(pe),
+                                &merged_text,
+                                text_to_append,
+                            ));
+                        }
+
+                        if res_idx == best_idx_in_run {
+                            best_offset = Some(merged_text.len());
+                        }
                         merged_text.push_str(text_to_append);
                     }
 
@@ -284,4 +321,34 @@ fn merge_adjacent_runs<T>(
     }
 
     removed
+}
+
+/// The most bytes [`gap_separator`] puts between two chunks (`"\r\n\r\n"`)
+const MAX_SEPARATOR_BYTES: usize = 4;
+
+/// What goes between two merged chunks `gap` characters apart in the source
+/// (`start_char` of the next minus `end_char` of the previous). The chunker
+/// drops that text, which is whitespace, and the chunk documents do not keep
+/// it: one line ending stands for a short gap (a single space, newline or
+/// CRLF), a blank line for a longer one. A line ending keeps markdown lines
+/// apart (headings, list items, code, table rows) and costs a sentence break
+/// only a line break instead of a space. The line ending is `\r\n` when the
+/// text uses it. Nothing when the chunks touch or overlap, or when the stored
+/// text keeps whitespace at the boundary.
+fn gap_separator(gap: u64, before: &str, after: &str) -> &'static str {
+    let boundary_space = before.ends_with(char::is_whitespace)
+        || after.starts_with(char::is_whitespace)
+        || before.is_empty()
+        || after.is_empty();
+    if boundary_space || gap == 0 {
+        return "";
+    }
+    // A CRLF line ending is two characters of the gap
+    let crlf = before.contains("\r\n") || after.contains("\r\n");
+    match (crlf, gap) {
+        (false, 1) => "\n",
+        (false, _) => "\n\n",
+        (true, 1..=2) => "\r\n",
+        (true, _) => "\r\n\r\n",
+    }
 }
