@@ -1,5 +1,7 @@
 //! Full-text search state
 
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::FulltextHit;
 
 /// Hits asked for per search (`fulltext_search` `limit`)
@@ -10,8 +12,7 @@ pub const FULLTEXT_LIMIT: usize = 50;
 pub struct FulltextState {
     pub collection: String,
     pub field: String,
-    pub query: String,
-    pub cursor_pos: usize,
+    pub query: TextInput,
     /// Hits of the last search on `field`
     pub results: Vec<FulltextHit>,
     pub selected_result: usize,
@@ -28,8 +29,7 @@ impl FulltextState {
         Self {
             collection,
             field,
-            query: String::new(),
-            cursor_pos: 0,
+            query: TextInput::default(),
             results: Vec::new(),
             selected_result: 0,
             error: None,
@@ -39,49 +39,13 @@ impl FulltextState {
         }
     }
 
-    /// Convert char index to byte index for String operations
-    fn char_to_byte_pos(&self, char_pos: usize) -> usize {
-        self.query
-            .char_indices()
-            .nth(char_pos)
-            .map(|(byte_pos, _)| byte_pos)
-            .unwrap_or(self.query.len())
-    }
-
-    pub fn insert_char(&mut self, c: char) {
-        let byte_pos = self.char_to_byte_pos(self.cursor_pos);
-        self.query.insert(byte_pos, c);
-        self.cursor_pos += 1;
-        self.error = None;
-    }
-
-    pub fn backspace(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-            let byte_pos = self.char_to_byte_pos(self.cursor_pos);
-            self.query.remove(byte_pos);
+    /// An editing key for the query; a change clears the error
+    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = self.query.handle_key(code, modifiers);
+        if outcome == InputOutcome::Changed {
             self.error = None;
         }
-    }
-
-    pub fn delete(&mut self) {
-        if self.cursor_pos < self.query.chars().count() {
-            let byte_pos = self.char_to_byte_pos(self.cursor_pos);
-            self.query.remove(byte_pos);
-            self.error = None;
-        }
-    }
-
-    pub fn move_cursor_left(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-        }
-    }
-
-    pub fn move_cursor_right(&mut self) {
-        if self.cursor_pos < self.query.chars().count() {
-            self.cursor_pos += 1;
-        }
+        outcome
     }
 
     /// Switch to the next indexed field; when the field changes, the hits of

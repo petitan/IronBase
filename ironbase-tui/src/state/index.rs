@@ -1,6 +1,8 @@
 //! Index management state
 
 use crate::state::vector::DistanceMetric;
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::{BTreeIndexStats, IndexListAll};
 
 /// Index statistics for a single index
@@ -143,7 +145,7 @@ pub struct IndexState {
     pub selected_index: usize,
     pub is_creating: bool,
     pub form_field: usize, // 0 = field name, 1 = compound, 2 = unique, 3 = sparse
-    pub field_input: String,
+    pub field_input: TextInput,
     /// Multiple fields for compound index (comma-separated in input, parsed here)
     pub compound_fields: Vec<String>,
     /// If true, create compound index; if false, single field
@@ -173,7 +175,7 @@ impl IndexState {
             selected_index: 0,
             is_creating: false,
             form_field: 0,
-            field_input: String::new(),
+            field_input: TextInput::default(),
             compound_fields: Vec::new(),
             is_compound: false,
             unique: false,
@@ -254,22 +256,22 @@ impl IndexState {
         self.sparse = !self.sparse;
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        self.field_input.push(c);
-        self.parse_fields();
-        self.error = None;
-    }
-
-    pub fn backspace(&mut self) {
-        self.field_input.pop();
-        self.parse_fields();
-        self.error = None;
+    /// An editing key for the field name(s); a change re-parses the fields
+    /// and clears the error
+    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = self.field_input.handle_key(code, modifiers);
+        if outcome == InputOutcome::Changed {
+            self.parse_fields();
+            self.error = None;
+        }
+        outcome
     }
 
     /// Parse comma-separated field input into compound_fields
     fn parse_fields(&mut self) {
         self.compound_fields = self
             .field_input
+            .value()
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())

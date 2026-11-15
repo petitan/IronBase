@@ -59,10 +59,6 @@ pub(crate) async fn handle_fulltext_key_async(
         KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
             app.fulltext_state.select_down()
         }
-        KeyCode::Left => app.fulltext_state.move_cursor_left(),
-        KeyCode::Right => app.fulltext_state.move_cursor_right(),
-        KeyCode::Backspace => app.fulltext_state.backspace(),
-        KeyCode::Delete => app.fulltext_state.delete(),
         KeyCode::Enter => {
             // Execute fulltext search
             if app.fulltext_state.query.is_empty() {
@@ -74,7 +70,7 @@ pub(crate) async fn handle_fulltext_key_async(
             if let Some(ref db) = app.db {
                 let collection = app.fulltext_state.collection.clone();
                 let field = app.fulltext_state.field.clone();
-                let query = app.fulltext_state.query.clone();
+                let query = app.fulltext_state.query.value().to_string();
 
                 let args = FulltextSearchParams {
                     collection,
@@ -107,9 +103,8 @@ pub(crate) async fn handle_fulltext_key_async(
 
             app.fulltext_state.loading = false;
         }
-        KeyCode::Char(c) => {
-            app.fulltext_state.insert_char(c);
+        _ => {
+            app.fulltext_state.handle_input(key, modifiers);
         }
-        _ => {}
     }
 }

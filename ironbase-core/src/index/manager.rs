@@ -1201,6 +1201,16 @@ impl IndexManager {
         }
     }
 
+    /// The B+ tree indexes marked multikey (a document had an array on an
+    /// indexed path)
+    pub fn multikey_btree_index_names(&self) -> Vec<String> {
+        self.btree_indexes
+            .iter()
+            .filter(|(_, index)| index.metadata.multikey)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Flush a single B+ tree index to disk
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
@@ -1616,20 +1626,7 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
-                if !index.metadata.multikey {
-                    let has_array = if index.metadata.is_compound() {
-                        index
-                            .metadata
-                            .fields
-                            .iter()
-                            .any(|field| path_crosses_array(doc, field))
-                    } else {
-                        path_crosses_array(doc, &index.metadata.field)
-                    };
-                    if has_array {
-                        index.metadata.multikey = true;
-                    }
-                }
+                index.note_multikey(doc);
                 if index.metadata.is_compound()
                     && Self::count_compound_array_fields(doc, &index.metadata.fields) > 1
                 {

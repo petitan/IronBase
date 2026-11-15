@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a multikey index counted a document once per key after a reopen (ironbase-core 0.3.477, mcp-server 1.0.672)
+
+Found by the crash-recovery property test (`pbt_crash_recovery`) in CI.
+
+- **Symptom:** an index on `o.x` created on an empty collection, then `{"o": {"x": [0, -1]}}`: after a
+  reopen `count_documents({"o.x": {"$gt": -1.5}})` was 2 while `find` returned the one document (MCP `count`,
+  Python / C# `count_documents` alike). After an update that brought the array, even without a reopen.
+- **Root cause:** the stored index definition (`meta.indexes[].multikey`) was written when the index was
+  created. A later write that made the index multikey set the flag in memory only; the catalog rebuild after
+  a crash, the WAL replay and the batch update path (every `update`) did not set it at all. Loaded with the
+  flag off, the index-based count counted entries, not documents.
+- **Fix:** one detector, `BPlusTree::note_multikey`, on every path that adds a document's keys (insert,
+  update, rebuild at open, catalog rebuild, WAL replay); every index flush first stores the in-memory flags
+  in the collection metadata (`persist_multikey_flags`, after the pass's watermark is taken: every
+  transaction the files cover has set its flags), so a stored index file never holds a multikey document
+  without a stored flag. As in MongoDB, an index stays multikey once it is. No file format change.
+  An existing database whose stored flag is already wrong keeps counting wrong until the index is rebuilt
+  from the documents (an open without a usable index file, or dropping and re-creating the index) or a
+  write puts an array on the indexed path.
+- Regression tests: `tests/multikey_persistence_tests.rs` (reopen, crash, WAL replay, update; each fails
+  without its part of the fix), `btree_replay_marks_the_index_multikey`, and the CI case in
+  `pbt_crash_recovery.proptest-regressions`.
+
+### Fixed — Tuti TUI: the export path, the index fields and the fulltext query edit at the cursor (ironbase-core 0.3.476)
+
+Phase 3b of the Tuti TUI overhaul: three more inputs use the shared `TextInput`.
+
+- **Export path and index field name(s):** they took characters only at their end (`push` / `pop`); the
+  arrows, Home / End and Delete did nothing. They now edit at the cursor, with the readline keys and the
+  terminal's cursor. The index fields are re-parsed on each change, as before; the export format switch
+  still replaces the extension of the edited path. The export state's `editing_path` (always `true`) is gone.
+- The log tests install their per-thread subscriber and then rebuild tracing's callsite interest cache: a
+  callsite first hit by another test thread could keep an interest computed without the test's subscriber,
+  and its debug lines were dropped (`test_admin_key_is_not_logged_at_debug_level` failed on Windows CI).
+- **Fulltext query:** Home / End now move in the query (they did nothing); Ctrl+J / Ctrl+K stay the result
+  list's keys.
+
 ### Changed — Tuti TUI: one shared text input, the terminal's own cursor (ironbase-core 0.3.475)
 
 Phase 3a of the Tuti TUI overhaul: the first shared widget.

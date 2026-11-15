@@ -998,7 +998,7 @@ async fn test_j_and_k_go_into_fulltext_query() {
     assert_eq!(app.modal, Some(Modal::Fulltext));
     type_text(&mut app, "jk").await;
 
-    assert_eq!(app.fulltext_state.query, "jk");
+    assert_eq!(app.fulltext_state.query.value(), "jk");
     assert_eq!(app.fulltext_state.selected_result, 0);
 }
 
@@ -1009,11 +1009,11 @@ async fn test_uppercase_j_and_c_go_into_export_path() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('o')).await;
     assert_eq!(app.modal, Some(Modal::Export));
-    assert_eq!(app.export_state.file_path, "users.json");
+    assert_eq!(app.export_state.file_path.value(), "users.json");
 
     type_text(&mut app, "JC").await;
 
-    assert_eq!(app.export_state.file_path, "users.jsonJC");
+    assert_eq!(app.export_state.file_path.value(), "users.jsonJC");
     assert_eq!(app.modal, Some(Modal::Export));
 }
 
@@ -2409,4 +2409,73 @@ async fn test_new_collection_name_uses_the_terminal_cursor() {
     // Columns, not bytes: the frame's border characters are multi-byte
     let x = line[..line.find("users2").unwrap()].chars().count() as u16 + 5;
     assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(x, y));
+}
+
+/// The export path is edited where the cursor is: it used to take characters
+/// only at its end, the arrows did nothing
+#[tokio::test]
+async fn test_export_path_is_edited_at_the_cursor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    press(&mut app, KeyCode::Char('a')).await;
+    press(&mut app, KeyCode::Char('o')).await;
+    assert_eq!(app.modal, Some(Modal::Export));
+
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "out/").await;
+    press(&mut app, KeyCode::End).await;
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Left).await;
+    }
+    type_text(&mut app, "-2026").await;
+
+    assert_eq!(app.export_state.file_path.value(), "out/users-2026.json");
+    // The format switch still replaces the extension of the edited path
+    press(&mut app, KeyCode::Tab).await;
+    assert_eq!(app.export_state.file_path.value(), "out/users-2026.csv");
+}
+
+/// The index field name is edited at the cursor and re-parsed on each change
+#[tokio::test]
+async fn test_index_fields_are_edited_at_the_cursor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.index_state = crate::state::index::IndexState::new("users".to_string(), vec![]);
+    app.index_state.start_create();
+    app.index_state.toggle_compound();
+    app.modal = Some(Modal::Index);
+
+    type_text(&mut app, "city").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "country,").await;
+
+    assert_eq!(app.index_state.field_input.value(), "country,city");
+    assert_eq!(app.index_state.get_fields(), vec!["country", "city"]);
+    press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.index_state.get_fields(), vec!["country"]);
+    // Off the field (Tab), space toggles the checkboxes and types nothing
+    press(&mut app, KeyCode::Tab).await;
+    press(&mut app, KeyCode::Char(' ')).await;
+    assert!(!app.index_state.is_compound);
+    assert_eq!(app.index_state.field_input.value(), "country,");
+}
+
+/// Ctrl+J / Ctrl+K stay the result keys of the fulltext modal (not the
+/// input's Ctrl+K); Home moves in the query, which it used to ignore
+#[tokio::test]
+async fn test_fulltext_query_keeps_its_result_keys() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    server.respond(
+        "index_list",
+        fulltext_index_list(&[("users_bio_fts", "bio")]),
+    );
+    shift(&mut app, 'F').await;
+    type_text(&mut app, "rust").await;
+
+    press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.fulltext_state.query.value(), "rust");
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "async ").await;
+    assert_eq!(app.fulltext_state.query.value(), "async rust");
 }

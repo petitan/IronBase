@@ -256,24 +256,23 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
         Style::default().fg(theme.muted)
     };
 
-    let cursor = if state.is_creating && state.form_field == 0 {
-        "|"
-    } else {
-        ""
-    };
-
     let field_label = if state.is_compound {
         " Mezok (vesszovel): "
     } else {
         " Mezo neve: "
     };
-
-    let field_line = Line::from(vec![
-        Span::raw(field_label),
-        Span::styled(&state.field_input, field_style),
-        Span::styled(cursor, Style::default().fg(theme.accent)),
-    ]);
-    frame.render_widget(Paragraph::new(field_line), form_chunks[0]);
+    let [label_area, input_area] = Layout::horizontal([
+        Constraint::Length(field_label.len() as u16),
+        Constraint::Min(1),
+    ])
+    .areas(form_chunks[0]);
+    frame.render_widget(Paragraph::new(field_label), label_area);
+    state.field_input.render(
+        frame,
+        input_area,
+        field_style,
+        state.is_creating && state.form_field == 0,
+    );
 
     // Compound checkbox (form_field == 1)
     let compound_style = if state.is_creating && state.form_field == 1 {

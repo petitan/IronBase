@@ -560,24 +560,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             if let Some(index) =
                                                 index_manager.get_btree_index_mut(&index_meta.name)
                                             {
-                                                if !index.metadata.multikey {
-                                                    let has_array = if index.metadata.is_compound()
-                                                    {
-                                                        index.metadata.fields.iter().any(|field| {
-                                                            crate::value_utils::path_crosses_array(
-                                                                &doc, field,
-                                                            )
-                                                        })
-                                                    } else {
-                                                        crate::value_utils::path_crosses_array(
-                                                            &doc,
-                                                            &index.metadata.field,
-                                                        )
-                                                    };
-                                                    if has_array {
-                                                        index.metadata.multikey = true;
-                                                    }
-                                                }
+                                                index.note_multikey(&doc);
                                                 let keys = index.extract_keys(&doc);
                                                 let mut seen = HashSet::new();
                                                 for key in keys {
@@ -2223,6 +2206,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         }
                     };
 
+                    // An update bringing an array makes the index multikey
+                    index.note_multikey(new_doc_value);
                     let old_keys: HashSet<IndexKey> =
                         index.extract_keys(old_doc_value).into_iter().collect();
                     let new_keys: HashSet<IndexKey> =

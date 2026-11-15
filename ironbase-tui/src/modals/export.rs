@@ -53,13 +53,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     frame.render_widget(Paragraph::new(format_line), chunks[1]);
 
     // File path input
-    let cursor = if state.editing_path { "|" } else { "" };
-    let path_line = Line::from(vec![
-        Span::raw(" Fajl: "),
-        Span::styled(&state.file_path, Style::default().fg(theme.fg)),
-        Span::styled(cursor, Style::default().fg(theme.accent)),
-    ]);
-    frame.render_widget(Paragraph::new(path_line), chunks[2]);
+    let label = " Fajl: ";
+    let [label_area, input_area] =
+        Layout::horizontal([Constraint::Length(label.len() as u16), Constraint::Min(1)])
+            .areas(chunks[2]);
+    frame.render_widget(Paragraph::new(label), label_area);
+    state
+        .file_path
+        .render(frame, input_area, Style::default().fg(theme.fg), true);
 
     // Status info
     let filtered = if state.filtered { " - szűrt" } else { "" };

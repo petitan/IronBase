@@ -531,6 +531,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         continue;
                     };
 
+                    index.note_multikey(doc);
                     let keys = index.extract_keys(doc);
                     let mut seen = std::collections::HashSet::new();
                     for key in keys {
@@ -1477,6 +1478,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // in memory until the periodic checkpoint (60s default) and a
             // crash before then forces another rebuild — a known time-sink on
             // read-mostly DBs.
+            // The rebuild marked the multikey indexes: stored with the files
+            {
+                let mut storage = self.storage.write();
+                let names = index_manager.multikey_btree_index_names();
+                if Self::store_multikey_flags(&mut *storage, name, &names) {
+                    storage.persist_metadata()?;
+                }
+            }
             let watermark = self.watermark_tx_id();
             let flush_btree = index_manager.flush_btree_indexes(&db_path, watermark)?;
             let flush_ft = index_manager.flush_fulltext_indexes(watermark)?;

@@ -2214,12 +2214,12 @@ impl App {
     /// goes to a temp file next to the target and is renamed on success, so a
     /// failed export never truncates an existing file.
     pub async fn execute_export_async(&mut self) {
-        if self.export_state.file_path.trim().is_empty() {
+        if self.export_state.file_path.value().trim().is_empty() {
             self.export_state.error = Some("Fájl útvonal megadása kötelező".to_string());
             return;
         }
 
-        let file_path = self.export_state.file_path.clone();
+        let file_path = self.export_state.file_path.value().to_string();
         let Some(tmp_path) = export_temp_path(std::path::Path::new(&file_path)) else {
             self.export_state.error =
                 Some(format!("Fájl hiba: érvénytelen útvonal: {}", file_path));
@@ -2754,7 +2754,9 @@ mod tests {
             .unwrap()
             .to_path_buf();
         std::fs::create_dir_all(dir.join("out.v1")).unwrap();
-        app.export_state.file_path = target.to_string_lossy().into_owned();
+        app.export_state
+            .file_path
+            .set_value(target.to_string_lossy().into_owned());
         app.execute_export_async().await;
         assert_eq!(app.export_state.error, None);
         assert!(app
@@ -2799,7 +2801,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("docs.json");
         std::fs::write(&target, "precious").unwrap();
-        app.export_state.file_path = target.to_string_lossy().into_owned();
+        app.export_state
+            .file_path
+            .set_value(target.to_string_lossy().into_owned());
 
         *server.failing_find.lock().unwrap() = Some("docs".to_string());
         app.execute_export_async().await;
