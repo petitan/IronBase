@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a multikey index counted a document once per key after a reopen (ironbase-core 0.3.477, mcp-server 1.0.672)
+
+Found by the crash-recovery property test (`pbt_crash_recovery`) in CI.
+
+- **Symptom:** an index on `o.x` created on an empty collection, then `{"o": {"x": [0, -1]}}`: after a
+  reopen `count_documents({"o.x": {"$gt": -1.5}})` was 2 while `find` returned the one document (MCP `count`,
+  Python / C# `count_documents` alike). After an update that brought the array, even without a reopen.
+- **Root cause:** the stored index definition (`meta.indexes[].multikey`) was written when the index was
+  created. A later write that made the index multikey set the flag in memory only; the catalog rebuild after
+  a crash, the WAL replay and the batch update path (every `update`) did not set it at all. Loaded with the
+  flag off, the index-based count counted entries, not documents.
+- **Fix:** one detector, `BPlusTree::note_multikey`, on every path that adds a document's keys (insert,
+  update, rebuild at open, catalog rebuild, WAL replay); every index flush first stores the in-memory flags
+  in the collection metadata (`persist_multikey_flags`), so a stored index file never holds a multikey
+  document without a stored flag. As in MongoDB, an index stays multikey once it is. No file format change.
+  An existing database whose stored flag is already wrong keeps counting wrong until the index is rebuilt
+  from the documents (an open without a usable index file, or dropping and re-creating the index) or a
+  write puts an array on the indexed path.
+- Regression tests: `tests/multikey_persistence_tests.rs` (reopen, crash, update; all three fail without the
+  fix), `btree_replay_marks_the_index_multikey`, and the CI case in
+  `pbt_crash_recovery.proptest-regressions`.
+
 ### Fixed — Tuti TUI: the export path, the index fields and the fulltext query edit at the cursor (ironbase-core 0.3.476)
 
 Phase 3b of the Tuti TUI overhaul: three more inputs use the shared `TextInput`.

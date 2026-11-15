@@ -823,6 +823,25 @@ impl BPlusTree {
             .unwrap_or(IndexKey::Null)
     }
 
+    /// Mark the index multikey when `doc` has an array on an indexed path.
+    /// Every path that adds a document's keys calls this: once multikey, an
+    /// index stays multikey (as in MongoDB). Returns whether this call set it.
+    pub fn note_multikey(&mut self, doc: &serde_json::Value) -> bool {
+        if self.metadata.multikey {
+            return false;
+        }
+        let has_array = if self.metadata.is_compound() {
+            self.metadata
+                .fields
+                .iter()
+                .any(|field| crate::value_utils::path_crosses_array(doc, field))
+        } else {
+            crate::value_utils::path_crosses_array(doc, &self.metadata.field)
+        };
+        self.metadata.multikey = has_array;
+        has_array
+    }
+
     /// Extract all keys for a document (supports multi-key indexes on arrays)
     ///
     /// For case-insensitive indexes, string values are lowercased.

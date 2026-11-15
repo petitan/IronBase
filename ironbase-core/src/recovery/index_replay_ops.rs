@@ -189,6 +189,7 @@ pub fn apply_op_to_btree(tree: &mut BPlusTree, op: &Operation) -> Result<()> {
 
     match op {
         Operation::Insert { doc, .. } => {
+            tree.note_multikey(doc);
             let keys = extract_indexable_btree_keys(tree, doc);
             for k in keys {
                 tree.delete(&k, doc_id)?;
@@ -198,6 +199,7 @@ pub fn apply_op_to_btree(tree: &mut BPlusTree, op: &Operation) -> Result<()> {
         Operation::Update {
             old_doc, new_doc, ..
         } => {
+            tree.note_multikey(new_doc);
             let old_keys = extract_indexable_btree_keys(tree, old_doc);
             let new_keys = extract_indexable_btree_keys(tree, new_doc);
             for k in &old_keys {
@@ -294,6 +296,29 @@ mod tests {
         let mut cfg = VectorIndexConfig::default();
         cfg.dim = dim;
         HnswIndex::new(cfg)
+    }
+
+    /// A replayed document with an array makes the index multikey, as the
+    /// runtime insert does
+    #[test]
+    fn btree_replay_marks_the_index_multikey() {
+        let mut tree = BPlusTree::new("s_o.x".to_string(), "o.x".to_string(), false, false);
+        apply_op_to_btree(&mut tree, &insert_op(doc_id(1), json!({"o": {"x": 1}}))).unwrap();
+        assert!(!tree.metadata.multikey);
+        apply_op_to_btree(
+            &mut tree,
+            &update_op(doc_id(1), json!({"o": {"x": [0, -1]}})),
+        )
+        .unwrap();
+        assert!(tree.metadata.multikey);
+
+        let mut tree = BPlusTree::new("s_o.x".to_string(), "o.x".to_string(), false, false);
+        apply_op_to_btree(
+            &mut tree,
+            &insert_op(doc_id(2), json!({"o": {"x": [0, -1]}})),
+        )
+        .unwrap();
+        assert!(tree.metadata.multikey);
     }
 
     #[test]

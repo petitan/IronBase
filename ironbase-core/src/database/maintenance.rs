@@ -536,6 +536,7 @@ impl DatabaseCore<StorageEngine> {
     }
 
     fn flush_all_indexes_at(&self, watermark: u64) -> Result<usize> {
+        self.persist_multikey_flags()?;
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
@@ -873,6 +874,7 @@ impl DatabaseCore<StorageEngine> {
     /// their WAL entries. Without it the periodic checkpoint kept the whole WAL
     /// until the next full flush (close, compaction, `checkpoint()`).
     pub fn flush_btree_indexes_counted(&self) -> Result<usize> {
+        self.persist_multikey_flags()?;
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
@@ -1031,6 +1033,57 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// behind a waiting collection create/drop (audit 2026-10-07 T4). Callers
     /// hold `index_flush_lock`, so a collection dropped meanwhile does not get
     /// its index files written back.
+    /// Store every B+ tree index's multikey flag in the collection metadata
+    /// (persisted when one changed). A write that makes an index multikey sets
+    /// the flag in memory only (it runs under the storage lock); the index
+    /// file then gains the document's keys at the next flush. Every index
+    /// flush runs this first, so a stored index file holding a multikey
+    /// document always comes with a stored multikey flag: loaded with `false`,
+    /// the index counted such a document once per key.
+    pub(crate) fn persist_multikey_flags(&self) -> Result<()> {
+        let flagged: Vec<(String, Vec<String>)> = self
+            .index_managers_snapshot()
+            .into_iter()
+            .map(|(name, manager)| {
+                let names = manager.read().multikey_btree_index_names();
+                (name, names)
+            })
+            .filter(|(_, names)| !names.is_empty())
+            .collect();
+        if flagged.is_empty() {
+            return Ok(());
+        }
+        let mut storage = self.storage.write();
+        let mut changed = false;
+        for (collection, names) in &flagged {
+            changed |= Self::store_multikey_flags(&mut *storage, collection, names);
+        }
+        if changed {
+            storage.persist_metadata()?;
+        }
+        Ok(())
+    }
+
+    /// Set the stored multikey flag of the named indexes of `collection`;
+    /// returns whether one changed (the caller persists the metadata)
+    pub(crate) fn store_multikey_flags(
+        storage: &mut S,
+        collection: &str,
+        names: &[String],
+    ) -> bool {
+        let Some(meta) = storage.get_collection_meta_mut(collection) else {
+            return false;
+        };
+        let mut changed = false;
+        for index in meta.indexes.iter_mut() {
+            if !index.multikey && names.contains(&index.name) {
+                index.multikey = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub(crate) fn index_managers_snapshot(
         &self,
     ) -> Vec<(
@@ -1051,6 +1104,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// first (holding `persist_gate` exclusively), because the WAL is what
     /// brings dirty indexes forward after a crash (audit 2026-10-06 #28).
     pub(crate) fn flush_all_index_managers(&self) -> Result<()> {
+        self.persist_multikey_flags()?;
         let db_path = self.storage.read().get_file_path().to_string();
         let watermark = self.watermark_tx_id();
         let mut first_error = None;
