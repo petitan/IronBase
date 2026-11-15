@@ -27,6 +27,10 @@ fn log_outcome<T>(what: &str, tool: &str, started: Instant, result: &McpResult<T
     }
 }
 
+/// The JSON-RPC error of a request sent before `initialize`: the server does
+/// not know this client (it restarted and lost its sessions)
+const NOT_INITIALIZED: i64 = -32002;
+
 /// MCP Client for IronBase operations
 pub struct McpClient {
     transport: Arc<dyn Transport>,
@@ -71,6 +75,13 @@ impl McpClient {
 
     /// Initialize the MCP connection
     async fn initialize(&mut self) -> McpResult<()> {
+        self.handshake().await?;
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// The MCP `initialize` exchange
+    async fn handshake(&self) -> McpResult<()> {
         let started = Instant::now();
         let request = JsonRpcRequest::initialize();
         let result = match self.transport.send(&request).await {
@@ -81,10 +92,7 @@ impl McpClient {
             Err(e) => Err(e),
         };
         log_outcome("MCP initialize", "initialize", started, &result);
-        result?;
-
-        self.initialized = true;
-        Ok(())
+        result
     }
 
     /// Call an MCP tool and get the result. Every call is logged: name,
@@ -107,8 +115,24 @@ impl McpClient {
             return Err(McpError::NotInitialized);
         }
 
-        let request = JsonRpcRequest::tool_call(name, arguments);
-        let response = self.transport.send(&request).await?;
+        let request = JsonRpcRequest::tool_call(name, arguments.clone());
+        let mut response = self.transport.send(&request).await?;
+
+        // The server restarted and forgot this client: initialize again and
+        // repeat the request once
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code == NOT_INITIALIZED)
+        {
+            tracing::info!(
+                tool = name,
+                "server does not know this session: initializing again"
+            );
+            self.handshake().await?;
+            let request = JsonRpcRequest::tool_call(name, arguments);
+            response = self.transport.send(&request).await?;
+        }
 
         // Check for RPC error
         if let Some(error) = response.error {
@@ -223,5 +247,101 @@ impl Drop for McpClient {
     fn drop(&mut self) {
         // Best effort close - we can't do async in drop
         // The transport's Drop impl will handle cleanup
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::protocol::JsonRpcResponse;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// A server that restarted: it refuses tool calls with `refusal` until
+    /// the client initializes again
+    struct RestartedServer {
+        refusal: i64,
+        initialized: Mutex<bool>,
+        methods: Mutex<Vec<String>>,
+    }
+
+    impl RestartedServer {
+        fn refusing_with(refusal: i64) -> Arc<Self> {
+            Arc::new(Self {
+                refusal,
+                initialized: Mutex::new(false),
+                methods: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for RestartedServer {
+        async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
+            self.methods.lock().unwrap().push(request.method.clone());
+            let mut initialized = self.initialized.lock().unwrap();
+            let body = match request.method.as_str() {
+                "initialize" => {
+                    *initialized = true;
+                    serde_json::json!({"result": {}})
+                }
+                _ if !*initialized => serde_json::json!({"error": {
+                    "code": self.refusal,
+                    "message": "refused"
+                }}),
+                _ => serde_json::json!({"result": {"content": [
+                    {"type": "text", "text": "{\"collections\": [\"users\"]}"}
+                ]}}),
+            };
+            let mut response = serde_json::json!({"jsonrpc": "2.0", "id": request.id});
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(body.as_object().unwrap().clone());
+            Ok(serde_json::from_value(response).unwrap())
+        }
+
+        async fn close(&self) -> McpResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_restarted_server_is_initialized_again() {
+        let server = RestartedServer::refusing_with(NOT_INITIALIZED);
+        let client = McpClient::with_transport(server.clone());
+
+        let collections = client
+            .call::<ironbase_mcp_types::tools::CollectionList>(
+                &ironbase_mcp_types::params::NoParams {},
+            )
+            .await
+            .unwrap()
+            .collections;
+
+        assert_eq!(collections, vec!["users".to_string()]);
+        assert_eq!(
+            *server.methods.lock().unwrap(),
+            vec!["tools/call", "initialize", "tools/call"]
+        );
+    }
+
+    /// Another JSON-RPC error is reported as it is, without a new handshake
+    #[tokio::test]
+    async fn test_other_rpc_errors_are_not_retried() {
+        let server = RestartedServer::refusing_with(-32602);
+        let client = McpClient::with_transport(server.clone());
+
+        let error = client
+            .call_tool("x", serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, McpError::Rpc { code: -32602, .. }),
+            "{}",
+            error
+        );
+        assert_eq!(*server.methods.lock().unwrap(), vec!["tools/call"]);
     }
 }

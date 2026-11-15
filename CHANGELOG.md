@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI connection: answers matched to their requests, server errors kept, re-initialize after a server restart (ironbase-core 0.3.474)
+
+Phase 2i of the Tuti TUI overhaul (client protocol layer).
+
+- **stdio: a late answer was read as the answer to the next request.** After a request timed out on the
+  client (30 s), the server's late answer stayed in the pipe, and every later request read the answer to
+  the one before. The transport now reads until the response carrying the request's id and skips any
+  other line (a late answer, a notification, non-JSON output); an error without an id (`"id": null`, the
+  server's answer when it cannot serialize its response) is taken as this request's error. The request and
+  the reading of its answer are one exchange under one lock (the pipes were locked separately).
+- **HTTP: the server's error was replaced by the status.** A tool timeout (504) and a failed request (500)
+  come with a JSON-RPC error that names the cause and the remedy ("Operation timed out after 25 seconds …
+  add 'limit' …"); the TUI showed only "HTTP error: 504 Gateway Timeout". The JSON-RPC error is now the
+  answer; a non-2xx answer without one is still reported by its status.
+- **After a server restart every call failed until the TUI was restarted.** The server keeps the
+  initialized clients in memory and answers an unknown client with JSON-RPC `-32002` ("Server not
+  initialized"). The client now initializes again and repeats the request once; any other JSON-RPC error is
+  reported as before (`-32002` as a JSON-RPC error means only this: a tool's own errors come inside the
+  tool result).
+
 ### Fixed — Tuti TUI script and API key screens; typed MCP responses for the script, API key and `db_open` tools (ironbase-core 0.3.473, mcp-server 1.0.671)
 
 Phase 2h of the Tuti TUI overhaul. The server's response values are unchanged.
