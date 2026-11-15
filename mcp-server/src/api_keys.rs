@@ -262,11 +262,23 @@ pub fn list_api_keys(
             .documents
             .into_iter()
             .map(|doc| {
-                let text = |field: &str| {
-                    doc.get(field)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string()
+                // A stored key of another shape (written past `create_api_key`)
+                // is still listed: the auth cache accepts any enabled document
+                // with a string `key`, so hiding it would hide a live credential.
+                // Its unusable fields read as empty / 0 / false, with a warning.
+                let malformed = |field: &str| {
+                    tracing::warn!(
+                        "API key document {}: field '{}' is missing or of another type",
+                        doc.get("_id").cloned().unwrap_or(serde_json::Value::Null),
+                        field
+                    );
+                };
+                let text = |field: &str| match doc.get(field).and_then(|v| v.as_str()) {
+                    Some(value) => value.to_string(),
+                    None => {
+                        malformed(field);
+                        String::new()
+                    }
                 };
                 // Masked: the first 6 and last 4 characters of a long key
                 let key_preview = doc
@@ -281,14 +293,20 @@ pub fn list_api_keys(
                     })
                     .unwrap_or_else(|| "***".to_string());
                 ironbase_mcp_types::responses::ApiKeyEntry {
-                    id: doc.get("_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                    id: doc.get("_id").and_then(|v| v.as_u64()).unwrap_or_else(|| {
+                        malformed("_id");
+                        0
+                    }),
                     name: text("name"),
                     key_preview,
                     created_at: text("created_at"),
                     enabled: doc
                         .get("enabled")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
+                        .unwrap_or_else(|| {
+                            malformed("enabled");
+                            false
+                        }),
                 }
             })
             .collect()),

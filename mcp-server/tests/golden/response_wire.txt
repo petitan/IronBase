@@ -1786,6 +1786,10 @@ out: {"success":false,"id":99,"error":"API key not found"}
 in:  {"admin_key":"golden-admin"}
 out: {"success":true,"keys":[{"_id":1,"name":"ci","key_preview":"<key_preview>","created_at":"<created_at>","enabled":false}],"count":1}
 
+## admin_apikey_list / handmade document
+in:  {"admin_key":"golden-admin"}
+out: {"success":true,"keys":[{"_id":0,"name":"handmade","key_preview":"<key_preview>","created_at":"<created_at>","enabled":true},{"_id":1,"name":"ci","key_preview":"<key_preview>","created_at":"<created_at>","enabled":false}],"count":2}
+
 ## db_open / missing file
 in:  {"path":"/nonexistent/dir/x.mlite"}
 err: InvalidParams Database file does not exist: /nonexistent/dir/x.mlite

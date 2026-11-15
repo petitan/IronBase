@@ -17,9 +17,14 @@ Phase 2h of the Tuti TUI overhaul. The server's response values are unchanged.
   crate; the server re-exports them under their old paths and returns them as they are instead of rebuilding
   them field by field. An API key list entry is `ApiKeyEntry`; a revoke / delete answers the untagged
   `ApiKeyChangeResponse` (`Done` or `NotFound`, told apart by `success`). The response golden test grew from
-  405 to 452 cases (recorded on the previous code; run times and keys are normalized, numbers to zero of
+  405 to 453 cases (recorded on the previous code; run times and keys are normalized, numbers to zero of
   their own kind) and every recorded response of the group round-trips through the shared types byte for
   byte.
+- **`admin_apikey_list` and a stored key of another shape:** the collection's schema admits a negative
+  integer `_id` (only a client writing `_system.api_keys` directly can store one). Such a key is still
+  listed, as the auth cache accepts it, with id `0` and a logged warning (it was passed through raw); a
+  field missing or of another type (possible only in a file written before the schema) reads as empty /
+  `false`, with the same warning. It is not hidden: that would hide a live credential from the admin.
 - **Tuti TUI script and API key screens:**
   - a script run shows the script's own run time on the server (it showed the round trip measured by the
     TUI);

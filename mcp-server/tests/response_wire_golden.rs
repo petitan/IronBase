@@ -1600,6 +1600,22 @@ fn render_script_admin_group(out: &mut String) {
         "missing" => {"id": 99, "admin_key": "golden-admin"},
     );
     case!("admin_apikey_list", "one revoked" => {"admin_key": "golden-admin"});
+    // A key written past `admin_apikey_create` with a negative `_id` (the
+    // collection's schema allows any integer): still listed, as the auth cache
+    // accepts it, with id 0
+    adapter
+        .insert_one(
+            "_system.api_keys",
+            json!({
+                "_id": -5,
+                "key": "sk-handmade0123456789abcdefghijklmnopq",
+                "name": "handmade",
+                "created_at": "2026-11-15T10:00:00Z",
+                "enabled": true
+            }),
+        )
+        .unwrap();
+    case!("admin_apikey_list", "handmade document" => {"admin_key": "golden-admin"});
 
     // The temporary directory is "<dir>" in the input, the output and the errors
     let dir_path = dir.path().to_str().unwrap().to_string();
@@ -1819,5 +1835,5 @@ fn script_admin_group_golden_parses_as_the_shared_response_types() {
             _ => return None,
         })
     });
-    assert_eq!(checked, 32);
+    assert_eq!(checked, 33);
 }
