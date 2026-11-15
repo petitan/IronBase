@@ -15,3 +15,4 @@ pub mod state;
 pub(crate) mod testing;
 pub mod theme;
 pub mod ui;
+pub mod widgets;

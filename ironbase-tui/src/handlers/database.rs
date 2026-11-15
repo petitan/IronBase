@@ -3,7 +3,7 @@
 use crate::app::{App, Modal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::DbOpenParams;
 use ironbase_mcp_types::tools::DbOpen;
 
@@ -16,7 +16,11 @@ pub(crate) fn handle_database_open(app: &mut App) {
 }
 
 /// Handle database modal keys
-pub(crate) async fn handle_database_key_async(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_database_key_async(
+    app: &mut App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) {
     use crate::app::DatabaseMode;
 
     match key {
@@ -28,7 +32,7 @@ pub(crate) async fn handle_database_key_async(app: &mut App, key: KeyCode) {
             app.database_state.toggle_mode();
         }
         KeyCode::Enter => {
-            let path = app.database_state.path.trim().to_string();
+            let path = app.database_state.path.value().trim().to_string();
             if path.is_empty() {
                 app.database_state.error = Some("Az utvonal nem lehet ures!".to_string());
                 return;
@@ -139,27 +143,8 @@ pub(crate) async fn handle_database_key_async(app: &mut App, key: KeyCode) {
                 }
             }
         }
-        KeyCode::Char(c) => {
-            app.database_state.insert_char(c);
+        _ => {
+            app.database_state.handle_input(key, modifiers);
         }
-        KeyCode::Backspace => {
-            app.database_state.backspace();
-        }
-        KeyCode::Delete => {
-            app.database_state.delete();
-        }
-        KeyCode::Left => {
-            app.database_state.move_left();
-        }
-        KeyCode::Right => {
-            app.database_state.move_right();
-        }
-        KeyCode::Home => {
-            app.database_state.home();
-        }
-        KeyCode::End => {
-            app.database_state.end();
-        }
-        _ => {}
     }
 }

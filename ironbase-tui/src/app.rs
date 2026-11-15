@@ -334,7 +334,6 @@ impl App {
         self.modal = Some(Modal::Search);
         self.search.input_active = true;
         self.search.query_input.clear();
-        self.search.cursor_pos = 0;
         self.search.results.clear();
         self.search.selected_result = 0;
         self.search.doc_matches.clear();
@@ -983,7 +982,7 @@ impl App {
 
     /// Create new collection (async)
     pub async fn create_collection_async(&mut self) {
-        let name = self.new_collection_state.name.trim().to_string();
+        let name = self.new_collection_state.name.value().trim().to_string();
         if name.is_empty() {
             self.new_collection_state.error = Some("Név megadása kötelező".to_string());
             return;
@@ -1467,7 +1466,7 @@ impl App {
 
     /// Search collections (async - requires DB call)
     async fn execute_collection_search_async(&mut self) {
-        let query = self.search.query_input.trim();
+        let query = self.search.query_input.value().trim();
         if query.is_empty() {
             self.search.results.clear();
             return;
@@ -1511,7 +1510,7 @@ impl App {
 
     /// Search within current document (sync - local operation)
     pub fn execute_document_search(&mut self) {
-        let query = self.search.query_input.trim().to_lowercase();
+        let query = self.search.query_input.value().trim().to_lowercase();
         if query.is_empty() {
             self.search.doc_matches.clear();
             return;
