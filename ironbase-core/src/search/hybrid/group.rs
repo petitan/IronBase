@@ -139,7 +139,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         q: &HybridQuery,
         ctx: Option<&ExecutionContext>,
     ) -> Result<(Vec<DocGroup>, usize)> {
-        let projection = &q.projection;
+        // The merge reads its fields before the projection drops them
+        let (merge_projection, merge_only) =
+            projection_for_merge(q.projection.as_ref(), q.merge_chunks, &q.text_field);
+        let projection = &merge_projection;
 
         // Phase 1: top N unique doc_ids (first occurrence = best score)
         let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
@@ -266,6 +269,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // so each passage carries its text once
             if q.merge_chunks {
                 merge_adjacent_values(&mut chunks, &q.text_field);
+                // The fields kept only for the merge leave as the projection asked
+                for chunk in &mut chunks {
+                    if let Value::Object(obj) = chunk {
+                        for key in &merge_only {
+                            obj.remove(key);
+                        }
+                    }
+                }
             }
 
             // Lift BEFORE cap so doc-level fields are determined from the full set.
@@ -286,4 +297,47 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         Ok((groups, total_chunks))
     }
+}
+
+/// The chunk fields [`merge_adjacent_values`] reads, besides the text field
+const MERGE_FIELDS: &[&str] = &[
+    "doc_id",
+    "chunk_index",
+    "start_char",
+    "end_char",
+    "table_header",
+];
+
+/// The projection the grouped chunks get before the merge, and the fields to
+/// remove after it: when chunks are merged, the merge's fields (and the text
+/// field) survive the projection until the merge has read them. An inclusion
+/// projection gets them added, an exclusion projection does not exclude them;
+/// either way they are removed after the merge unless the request kept them.
+/// Without a merge, or without a projection, the projection is unchanged.
+fn projection_for_merge(
+    projection: Option<&HashMap<String, i32>>,
+    merge_chunks: bool,
+    text_field: &str,
+) -> (Option<HashMap<String, i32>>, Vec<String>) {
+    let Some(projection) = projection.filter(|_| merge_chunks) else {
+        return (projection.cloned(), Vec::new());
+    };
+    let include_mode = projection.values().any(|&v| v == 1);
+    let mut augmented = projection.clone();
+    let mut merge_only = Vec::new();
+    for field in MERGE_FIELDS
+        .iter()
+        .copied()
+        .chain(std::iter::once(text_field))
+    {
+        if include_mode {
+            if augmented.get(field) != Some(&1) {
+                augmented.insert(field.to_string(), 1);
+                merge_only.push(field.to_string());
+            }
+        } else if augmented.remove(field).is_some() {
+            merge_only.push(field.to_string());
+        }
+    }
+    (Some(augmented), merge_only)
 }

@@ -258,8 +258,10 @@ feloldás kiküszöböli.
   sortörés lesz. Érintkező / átfedő chunkoknál, vagy ha a tárolt szöveg a határon
   whitespace-szel végződik/kezdődik, nincs. A csoportosított merge 3000 bájtos ablaka az
   elválasztókat is beszámítja. Korábban a szavak összeragadtak („várról.Második").
-  Ismert korlát: csoportosított keresésben az inclusion projekció a merge előtt fut, így
-  ha kihagyja a `start_char`/`end_char` mezőket, nincs elválasztó (és átfedés-vágás sem).
+  Csoportosított keresésben (v0.3.469) a merge mezői (`doc_id`, `chunk_index`,
+  `start_char`, `end_char`, `table_header`, a szövegmező) a projekción át megmaradnak a
+  merge-ig, utána a kért projekció szerint kikerülnek — korábban egy inclusion projekció
+  mellett a merge el sem indult (duplikált átfedés-szöveg).
 
 ---
 
