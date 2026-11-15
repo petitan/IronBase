@@ -55,8 +55,9 @@ pub fn merge_adjacent_values(chunks: &mut Vec<Value>, text_field: &str) -> usize
 /// `search` context budget, so one document's run cannot take it over
 pub const MAX_MERGED_PASSAGE_CHARS: usize = 3_000;
 
-/// Internal key (stripped from every response, never lifted) holding the byte
-/// offset of a merged passage's best chunk
+/// Internal key holding the byte offset of a merged passage's best chunk, set by
+/// [`merge_adjacent_values`]; `hybrid_group_documents` moves it out of each
+/// chunk into [`DocGroup::best_offsets`](super::DocGroup::best_offsets)
 pub const MERGE_BEST_OFFSET_KEY: &str = "_merge_best_offset";
 
 /// Shared merge: `doc` reads an item's chunk document, `score` ranks an item

@@ -110,12 +110,10 @@ pub(crate) fn assemble(
         let bodies: Vec<(&str, usize)> = g
             .chunks
             .iter()
-            .filter_map(|c| {
+            .enumerate()
+            .filter_map(|(i, c)| {
                 let text = c.get(text_field).and_then(|v| v.as_str())?;
-                let best = c
-                    .get(ironbase_core::search::hybrid::MERGE_BEST_OFFSET_KEY)
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let best = g.best_offsets.get(i).copied().unwrap_or(0);
                 Some((text, best))
             })
             .filter(|(s, _)| !s.is_empty())
@@ -334,6 +332,7 @@ mod tests {
             doc_id: doc_id.to_string(),
             best_score: score,
             lifted: Map::new(),
+            best_offsets: vec![0; chunks.len()],
             chunks,
         }
     }
@@ -413,6 +412,7 @@ mod tests {
             best_score: 1.0,
             lifted: Map::new(),
             chunks: vec![json!({"doc_id": "x", "other": "y"})],
+            best_offsets: vec![0],
         };
         let out = assemble_json(&[g], 1, None, F, "structured", false).unwrap();
         assert_eq!(out.get("count").unwrap().as_u64().unwrap(), 0);
@@ -435,6 +435,7 @@ mod tests {
                 "embedding_source_hash": "0123456789abcdef",
                 "chunk_index": 2, "_text_score": 3.0, "title": "T"
             })],
+            best_offsets: vec![0],
         };
         let out = assemble_json(&[g], 5, None, F, "structured", false).unwrap();
         assert_eq!(out.get("verdict").unwrap(), &json!("unknown"));
@@ -550,8 +551,8 @@ mod tests {
     fn a_shortened_passage_keeps_its_best_chunk() {
         let text = format!("{}NEEDLE{}", "a".repeat(20_000), "b".repeat(5_000));
         let mut g = group("big", 1.0, &[1]);
-        g.chunks[0] = json!({"doc_id": "big", F: text,
-            ironbase_core::search::hybrid::MERGE_BEST_OFFSET_KEY: 20_000});
+        g.chunks[0] = json!({"doc_id": "big", F: text});
+        g.best_offsets[0] = 20_000;
         let mut groups = vec![g];
         for i in 0..9 {
             groups.push(group(&format!("d{i}"), 0.5, &[2000]));
