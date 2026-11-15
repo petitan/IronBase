@@ -252,10 +252,14 @@ feloldás kiküszöböli.
   Ezután fut az overlap-vágás. A merged eredmény egyszer mutatja a fejlécet.
 - **Rés-elválasztó** (v0.3.468): a chunker a két chunk közti whitespace-t elhagyja
   (`curr_start > prev_end`), és a chunk-dokumentum nem tárolja: a merge a résbe
-  elválasztót tesz — 1 karakteres rés: szóköz, két markdown táblasor (`|` a határ két
-  oldalán) között újsor; hosszabb rés: bekezdéstörés (`"\n\n"`). Érintkező / átfedő
-  chunkoknál, vagy ha a tárolt szöveg a határon whitespace-szel végződik/kezdődik, nincs.
-  Korábban a szavak összeragadtak („várról.Második").
+  elválasztót tesz — 1 karakteres rés: újsor, hosszabb rés: bekezdéstörés (`"\n\n"`);
+  CRLF-es szövegben `"\r\n"` (≤ 2 karakteres rés) ill. `"\r\n\r\n"`. Az újsor a markdown
+  sorait (címsor, lista, kód, táblasor) külön tartja; mondatok között szóköz helyett
+  sortörés lesz. Érintkező / átfedő chunkoknál, vagy ha a tárolt szöveg a határon
+  whitespace-szel végződik/kezdődik, nincs. A csoportosított merge 3000 bájtos ablaka az
+  elválasztókat is beszámítja. Korábban a szavak összeragadtak („várról.Második").
+  Ismert korlát: csoportosított keresésben az inclusion projekció a merge előtt fut, így
+  ha kihagyja a `start_char`/`end_char` mezőket, nincs elválasztó (és átfedés-vágás sem).
 
 ---
 

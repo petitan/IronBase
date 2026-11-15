@@ -323,27 +323,32 @@ fn merge_adjacent_runs<T>(
     removed
 }
 
-/// The most bytes [`gap_separator`] puts between two chunks
-const MAX_SEPARATOR_BYTES: usize = 2;
+/// The most bytes [`gap_separator`] puts between two chunks (`"\r\n\r\n"`)
+const MAX_SEPARATOR_BYTES: usize = 4;
 
 /// What goes between two merged chunks `gap` characters apart in the source
 /// (`start_char` of the next minus `end_char` of the previous). The chunker
 /// drops that text, which is whitespace, and the chunk documents do not keep
-/// it: a one-character gap becomes a space (between sentences), or a line
-/// break between two markdown table rows (the chunker splits a table at its
-/// line ends), and a longer gap a paragraph break. Nothing when the chunks
-/// touch or overlap, or when the stored text keeps whitespace at the boundary.
+/// it: one line ending stands for a short gap (a single space, newline or
+/// CRLF), a blank line for a longer one. A line ending keeps markdown lines
+/// apart (headings, list items, code, table rows) and costs a sentence break
+/// only a line break instead of a space. The line ending is `\r\n` when the
+/// text uses it. Nothing when the chunks touch or overlap, or when the stored
+/// text keeps whitespace at the boundary.
 fn gap_separator(gap: u64, before: &str, after: &str) -> &'static str {
     let boundary_space = before.ends_with(char::is_whitespace)
         || after.starts_with(char::is_whitespace)
         || before.is_empty()
         || after.is_empty();
-    let table_rows = before.ends_with('|') && after.starts_with('|');
-    match gap {
-        _ if boundary_space => "",
-        0 => "",
-        1 if table_rows => "\n",
-        1 => " ",
-        _ => "\n\n",
+    if boundary_space || gap == 0 {
+        return "";
+    }
+    // A CRLF line ending is two characters of the gap
+    let crlf = before.contains("\r\n") || after.contains("\r\n");
+    match (crlf, gap) {
+        (false, 1) => "\n",
+        (false, _) => "\n\n",
+        (true, 1..=2) => "\r\n",
+        (true, _) => "\r\n\r\n",
     }
 }

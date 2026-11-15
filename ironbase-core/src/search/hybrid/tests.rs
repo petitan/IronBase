@@ -420,8 +420,8 @@ fn test_merge_three_consecutive() {
 
 /// The chunker drops the whitespace between two chunks (`end_char` of one
 /// below `start_char` of the next): the merge puts a separator into the gap
-/// instead of gluing the words ("vár.Második"): a space for a one-character
-/// gap, a paragraph break for a longer one
+/// instead of gluing the words ("vár.Második"): a line break for a
+/// one-character gap, a paragraph break for a longer one
 #[test]
 fn test_merge_separates_chunks_across_a_gap() {
     let mut results = vec![
@@ -432,7 +432,7 @@ fn test_merge_separates_chunks_across_a_gap() {
     assert_eq!(merge_adjacent_chunks(&mut results, "content"), 2);
     assert_eq!(
         results[0].doc["content"],
-        "Első bekezdés a várról.\n\nMásodik bekezdés. Harmadik mondat."
+        "Első bekezdés a várról.\n\nMásodik bekezdés.\nHarmadik mondat."
     );
 }
 
@@ -465,6 +465,38 @@ fn test_merge_keeps_table_rows_on_their_own_lines() {
     assert_eq!(
         results[0].doc["content"],
         "| név | kor |\n|---|---|\n| Álmos | 30 |\n| Bea | 25 |"
+    );
+}
+
+/// Markdown lines split at a single line end stay on their own lines (a
+/// space would put a heading's text into the heading, run list items and code
+/// lines together)
+#[test]
+fn test_merge_keeps_markdown_lines_apart() {
+    let mut results = vec![
+        make_chunk("c0", "docA", 0, "# Cím", 0, 5, 0.03),
+        make_chunk("c1", "docA", 1, "- első elem", 6, 17, 0.02),
+        make_chunk("c2", "docA", 2, "- második elem", 18, 32, 0.01),
+    ];
+    assert_eq!(merge_adjacent_chunks(&mut results, "content"), 2);
+    assert_eq!(
+        results[0].doc["content"],
+        "# Cím\n- első elem\n- második elem"
+    );
+}
+
+/// A CRLF text: a two-character gap is one CRLF line end, not a blank line
+#[test]
+fn test_merge_keeps_crlf_line_ends() {
+    let mut results = vec![
+        make_chunk("c0", "docA", 0, "| a | b |\r\n|---|---|", 0, 20, 0.03),
+        make_chunk("c1", "docA", 1, "| 1 | 2 |", 22, 31, 0.02),
+        make_chunk("c2", "docA", 2, "Utána.", 35, 41, 0.01),
+    ];
+    assert_eq!(merge_adjacent_chunks(&mut results, "content"), 2);
+    assert_eq!(
+        results[0].doc["content"],
+        "| a | b |\r\n|---|---|\r\n| 1 | 2 |\r\n\r\nUtána."
     );
 }
 
