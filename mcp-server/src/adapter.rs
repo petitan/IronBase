@@ -2047,7 +2047,7 @@ impl IronBaseAdapter {
     /// Typed [`list_vector_indexes`](Self::list_vector_indexes)
     pub fn vector_index_infos(&self, collection: &str) -> Result<Vec<VectorIndexInfo>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let indexes = coll.list_vector_indexes()?;
 
         Ok(indexes
@@ -2073,7 +2073,7 @@ impl IronBaseAdapter {
     /// Drop a vector index
     pub fn drop_vector_index(&self, collection: &str, index_name: &str) -> Result<()> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         coll.drop_vector_index(index_name)?;
         Ok(())
     }
@@ -2122,7 +2122,7 @@ impl IronBaseAdapter {
     ) -> Result<Vec<(Value, f32)>> {
         let field = self.searched_vector_field(collection, field);
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
         let results = coll.vector_search_with_ctx(&field, query_vector, limit, Some(&ctx))?;
         Ok(results)
@@ -2145,7 +2145,7 @@ impl IronBaseAdapter {
         }
         let field = searched.as_str();
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
         let options = ironbase_core::VectorSearchOptions {
             filter: filter.cloned(),
@@ -2177,7 +2177,7 @@ impl IronBaseAdapter {
     ) -> Result<Vec<(Value, f32)>> {
         let field = self.searched_vector_field(collection, field);
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
         let results = coll.vector_search_with_filter_with_ctx(
             &field,

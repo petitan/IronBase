@@ -1510,3 +1510,45 @@ fn test_vector_search_huge_limit() {
     );
     assert_eq!(res["results"].as_array().unwrap().len(), 3);
 }
+
+/// A read of a missing collection's vector indexes does not create it: the
+/// vector tools answer "Collection not found" like `find` / `index_list`
+/// (before: `index_list`/`index_stats` with `type: vector`, `vector_search`,
+/// `index_drop` of a vector index and `rag_collection_stats` created it)
+#[test]
+fn test_vector_reads_do_not_create_a_missing_collection() {
+    let calls = [
+        ("index_list", json!({"collection": "n1", "type": "vector"})),
+        ("index_stats", json!({"collection": "n2", "type": "vector"})),
+        (
+            "vector_search",
+            json!({"collection": "n3", "field": "e", "vector": [1.0, 0.0]}),
+        ),
+        (
+            "index_drop",
+            json!({"collection": "n4", "index_name": "n4_vec_e", "type": "vector"}),
+        ),
+    ];
+    for (tool, args) in calls {
+        let (adapter, _dir) = create_test_adapter();
+        let err = dispatch_err(&adapter, tool, args);
+        assert!(err.message.contains("not found"), "{tool}: {}", err.message);
+        let list = dispatch_ok(&adapter, "collection_list", json!({}));
+        assert_eq!(
+            list["collections"],
+            json!([]),
+            "{tool} created the collection"
+        );
+    }
+
+    // rag_collection_stats keeps answering with zero counts, without creating it
+    let (adapter, _dir) = create_test_adapter();
+    let stats = dispatch_ok(
+        &adapter,
+        "rag_collection_stats",
+        json!({"collection": "n5"}),
+    );
+    assert_eq!(stats["stats"]["chunk_count"], 0);
+    let list = dispatch_ok(&adapter, "collection_list", json!({}));
+    assert_eq!(list["collections"], json!([]));
+}

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — reading a missing collection's vector indexes no longer creates it (ironbase-core 0.3.470, mcp-server 1.0.668)
+
+- **Five MCP tools created a missing collection as a side effect:** `index_list` / `index_stats` with
+  `type: vector`, `vector_search`, `index_drop` (which tries the vector index) and `rag_collection_stats`.
+  The adapter's vector functions (`vector_index_infos`, `vector_search*`, `drop_vector_index`) opened the
+  collection with the creating accessor; they now use the non-creating one, as every other read does. These
+  tools answer "Collection 'x' not found" like `find` and `index_list` (`vector_search` / `search` said "No
+  vector index found …", `index_drop` "Index not found"); `rag_collection_stats` keeps answering with zero
+  counts. Three response golden cases change accordingly. Writes (`index_create`, `schema_set`,
+  `auto_embed_enable`) still create the collection, as MongoDB's `createIndex` does.
+
 ### Fixed — grouped search merges chunks under a projection (ironbase-core 0.3.469, mcp-server 1.0.667)
 
 - **`group_by_document` search projected the chunks before merging them.** An inclusion projection
@@ -57,8 +68,8 @@ Phase 2f of the Tuti TUI overhaul. The server's response JSON is unchanged.
 - Known server behaviour, pinned by the golden test and not changed here (the chunk merge separator is
   fixed in 0.3.468): `embed_document`
   reports `provider: null` when the default provider embedded the chunks, and its `inserted_ids` are
-  strings; `rag_collection_stats` of a missing collection creates it (the index listing opens the
-  collection with the creating accessor) and answers with zero counts instead of an error;
+  strings; `rag_collection_stats` of a missing collection created it (fixed in 0.3.470) and answers
+  with zero counts instead of an error;
   `rag_collection_create` always reports `collection_created: true`.
 
 ### Fixed — Tuti TUI embedding and job screens; embedding cache miss count; typed MCP responses for the embedding tools (ironbase-core 0.3.466, mcp-server 1.0.664)
