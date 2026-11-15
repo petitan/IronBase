@@ -24,6 +24,11 @@
 //!
 //! RAG tool group: `rag_collection_create`, `rag_document_import`,
 //! `rag_collection_stats`, `rag_chunks_load`, `embed_document`.
+//!
+//! ACL and listener tool group: `acl_list`, `acl_get`, `acl_set`,
+//! `acl_delete`, `acl_cleanup`, `listener_list`, `listener_get`,
+//! `listener_create`, `listener_delete`, `listener_enable`,
+//! `listener_disable`.
 
 use serde::de::Error as _;
 use serde::ser::SerializeMap;
@@ -1695,4 +1700,199 @@ pub struct RagChunksLoadResponse {
     pub chunks_merged: usize,
     /// `true` when a `query` scored the chunks
     pub scored: bool,
+}
+
+// ============================================================================
+// ACL
+// ============================================================================
+
+/// The interface class of a caller (by its address)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AclInterface {
+    /// Loopback (127.0.0.1, ::1)
+    Localhost,
+    /// Private network (10/8, 172.16/12, 192.168/16)
+    Internal,
+    /// Anything else
+    External,
+}
+
+/// Who an ACL rule applies to, as the server stores it (`{"type": …,
+/// "value": …}`); addresses stay strings, as on the wire
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum AclPrincipal {
+    #[serde(rename = "interface")]
+    Interface(AclInterface),
+    #[serde(rename = "apikey")]
+    ApiKey(String),
+    /// An exact IP address
+    #[serde(rename = "ip")]
+    Ip(String),
+    /// A CIDR range (`10.0.0.0/8`)
+    #[serde(rename = "iprange")]
+    IpRange(String),
+    #[serde(rename = "anyone")]
+    Anyone,
+}
+
+/// What an ACL rule grants (write implies read, admin implies write)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AclPermissions {
+    pub read: bool,
+    pub write: bool,
+    pub admin: bool,
+}
+
+/// One stored ACL rule
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AclRule {
+    pub principal: AclPrincipal,
+    pub permissions: AclPermissions,
+}
+
+/// A collection's stored ACL (`_system.acl`); `collection` is `*` for the
+/// rule set every collection falls back to
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AclDocument {
+    #[serde(rename = "_id")]
+    pub id: Value,
+    pub collection: String,
+    pub rules: Vec<AclRule>,
+}
+
+/// `acl_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AclListResponse {
+    /// The custom ACLs, in storage order (the built-in `_system.*` rules are
+    /// not listed)
+    pub rules: Vec<AclDocument>,
+    pub count: usize,
+    pub note: String,
+}
+
+/// `acl_get` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AclGetResponse {
+    Set(AclDocument),
+    /// No custom ACL: the default rules apply
+    NotSet {
+        collection: String,
+        /// Always `null`
+        rules: (),
+        note: String,
+    },
+}
+
+/// `acl_set` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AclSetResponse {
+    pub success: bool,
+    pub collection: String,
+    pub rules_count: usize,
+    pub note: String,
+}
+
+/// `acl_delete` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AclDeleteResponse {
+    pub success: bool,
+    pub collection: String,
+    /// `false` when the collection had no custom ACL
+    pub deleted: bool,
+    pub note: String,
+}
+
+/// `acl_cleanup` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AclCleanupResponse {
+    pub success: bool,
+    /// ACLs of collections that no longer exist
+    pub orphans_found: usize,
+    pub orphans_deleted: usize,
+    /// The orphans' collection names
+    pub collections: Vec<String>,
+}
+
+// ============================================================================
+// Listeners
+// ============================================================================
+
+/// A configured network listener (`_system.listeners`)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenerInfo {
+    #[serde(rename = "_id")]
+    pub id: String,
+    /// Bind address with port (`0.0.0.0:8080`)
+    pub bind: String,
+    pub tls: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `listener_list` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListenerListResponse {
+    pub listeners: Vec<ListenerInfo>,
+    pub count: usize,
+    /// The collection the listeners are stored in
+    pub collection: String,
+    pub note: String,
+}
+
+/// What `listener_create` did
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenerAction {
+    Created,
+    /// A listener of that id existed and was replaced
+    Updated,
+}
+
+/// `listener_create` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListenerCreateResponse {
+    pub success: bool,
+    pub id: String,
+    pub bind: String,
+    pub tls: bool,
+    pub action: ListenerAction,
+    pub note: String,
+}
+
+/// `listener_delete` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListenerDeleteResponse {
+    /// `false` when no listener has that id
+    pub success: bool,
+    pub id: String,
+    pub deleted: bool,
+    pub note: String,
+}
+
+/// `listener_enable` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListenerEnableResponse {
+    /// `false` when no listener has that id
+    pub success: bool,
+    pub id: String,
+    pub enabled: bool,
+    pub note: String,
+}
+
+/// `listener_disable` response
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListenerDisableResponse {
+    /// `false` when no listener has that id
+    pub success: bool,
+    pub id: String,
+    pub disabled: bool,
+    pub note: String,
 }

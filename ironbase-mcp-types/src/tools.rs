@@ -7,9 +7,10 @@
 //!
 //! Tools whose handler parses a typed argument struct have a marker, and so do
 //! the argument-less tools a client needs (`collection_list`, `db_stats`,
-//! `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`, with
-//! [`NoParams`]), and `index_create` (with [`IndexCreateArgs`], one argument
-//! struct per `type`); the other argument-less tools do not have one yet.
+//! `embed_models_list`, `embed_cache_stats`, `embed_cache_clear`,
+//! `acl_list`, `acl_cleanup`, `listener_list`, with [`NoParams`]), and
+//! `index_create` (with [`IndexCreateArgs`], one argument struct per `type`);
+//! the other argument-less tools do not have one yet.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -114,16 +115,19 @@ tools! {
     ScriptStats => "script_stats", ScriptNameParams;
 
     // ACL
-    AclGet => "acl_get", AclCollectionParams;
-    AclSet => "acl_set", AclSetParams;
-    AclDelete => "acl_delete", AclCollectionParams;
+    AclList => "acl_list", NoParams => AclListResponse;
+    AclGet => "acl_get", AclCollectionParams => AclGetResponse;
+    AclSet => "acl_set", AclSetParams => AclSetResponse;
+    AclDelete => "acl_delete", AclCollectionParams => AclDeleteResponse;
+    AclCleanup => "acl_cleanup", NoParams => AclCleanupResponse;
 
     // Listeners
-    ListenerGet => "listener_get", ListenerIdParams;
-    ListenerCreate => "listener_create", ListenerAddParams;
-    ListenerDelete => "listener_delete", ListenerIdParams;
-    ListenerEnable => "listener_enable", ListenerIdParams;
-    ListenerDisable => "listener_disable", ListenerIdParams;
+    ListenerList => "listener_list", NoParams => ListenerListResponse;
+    ListenerGet => "listener_get", ListenerIdParams => ListenerInfo;
+    ListenerCreate => "listener_create", ListenerAddParams => ListenerCreateResponse;
+    ListenerDelete => "listener_delete", ListenerIdParams => ListenerDeleteResponse;
+    ListenerEnable => "listener_enable", ListenerIdParams => ListenerEnableResponse;
+    ListenerDisable => "listener_disable", ListenerIdParams => ListenerDisableResponse;
 
     // Database & admin
     DbStats => "db_stats", NoParams => DbStatsResponse;

@@ -1,8 +1,29 @@
 //! Key handlers: listener
 
 use crate::app::App;
-use crate::modals;
+use crate::db::DbWrapper;
 use crossterm::event::KeyCode;
+use ironbase_mcp_types::params::{ListenerAddParams, ListenerIdParams, NoParams};
+use ironbase_mcp_types::responses::{ListenerAction as Created, ListenerInfo};
+use ironbase_mcp_types::tools::{
+    ListenerCreate, ListenerDelete, ListenerDisable, ListenerEnable, ListenerList,
+};
+
+/// The server's listeners (`listener_list`)
+pub(crate) async fn load_listeners(db: &DbWrapper) -> anyhow::Result<Vec<ListenerInfo>> {
+    Ok(db.call::<ListenerList>(&NoParams {}).await?.listeners)
+}
+
+/// Reload the listener list after a change; a failed reload is reported
+async fn refresh_listeners(app: &mut App) {
+    let Some(ref db) = app.db else { return };
+    match load_listeners(db).await {
+        Ok(listeners) => app.listener_state.set_listeners(listeners),
+        Err(e) => app
+            .listener_state
+            .set_error(format!("Failed to reload listeners: {}", e)),
+    }
+}
 
 /// Listener modal key handler
 pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
@@ -60,26 +81,30 @@ pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                 }
 
                 if let Some(ref db) = app.db {
-                    match db.listener_add(&id, &bind, tls, None, None).await {
-                        Ok(true) => {
-                            app.listener_state
-                                .set_success(format!("Listener '{}' added!", id));
+                    let args = ListenerAddParams {
+                        id: id.clone(),
+                        bind,
+                        tls,
+                        cert_path: None,
+                        key_path: None,
+                        description: None,
+                    };
+                    match db.call::<ListenerCreate>(&args).await {
+                        Ok(response) => {
+                            // Replacing an existing listener is not "added"; the
+                            // server applies either on its next start
+                            let action = match response.action {
+                                Created::Created => "added",
+                                Created::Updated => "replaced",
+                            };
+                            app.listener_state.set_success(format!(
+                                "Listener '{}' {}. {}",
+                                id, action, response.note
+                            ));
                             app.listener_state.mode = ListenerModalMode::List;
                             app.listener_state.add_id.clear();
                             app.listener_state.add_bind.clear();
-
-                            // Refresh listener list
-                            if let Ok(listeners) = db.listener_list().await {
-                                let infos: Vec<_> = listeners
-                                    .iter()
-                                    .filter_map(modals::listener::ListenerInfo::from_value)
-                                    .collect();
-                                app.listener_state.set_listeners(infos);
-                            }
-                        }
-                        Ok(false) => {
-                            app.listener_state
-                                .set_error("Failed to add listener".to_string());
+                            refresh_listeners(app).await;
                         }
                         Err(e) => {
                             app.listener_state.set_error(format!("Failed: {}", e));
@@ -112,36 +137,35 @@ pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                     let id = listener.id.clone();
 
                     if let Some(ref db) = app.db {
+                        let args = ListenerIdParams { id: id.clone() };
+                        // (found, the server's note)
                         let result = match app.listener_state.confirm_action {
-                            Some(ListenerAction::Delete) => db.listener_delete(&id).await,
-                            Some(ListenerAction::Enable) => db.listener_enable(&id).await,
-                            Some(ListenerAction::Disable) => db.listener_disable(&id).await,
-                            None => Ok(false),
+                            Some(ListenerAction::Delete) => db
+                                .call::<ListenerDelete>(&args)
+                                .await
+                                .map(|r| (r.deleted, r.note)),
+                            Some(ListenerAction::Enable) => db
+                                .call::<ListenerEnable>(&args)
+                                .await
+                                .map(|r| (r.enabled, r.note)),
+                            Some(ListenerAction::Disable) => db
+                                .call::<ListenerDisable>(&args)
+                                .await
+                                .map(|r| (r.disabled, r.note)),
+                            None => Ok((false, String::new())),
                         };
 
                         match result {
-                            Ok(true) => {
-                                let action = match app.listener_state.confirm_action {
-                                    Some(ListenerAction::Delete) => "deleted",
-                                    Some(ListenerAction::Enable) => "enabled",
-                                    Some(ListenerAction::Disable) => "disabled",
-                                    None => "modified",
-                                };
+                            Ok((true, note)) => {
+                                // The note says what changed and that it waits
+                                // for a restart
                                 app.listener_state
-                                    .set_success(format!("Listener '{}' {}!", id, action));
+                                    .set_success(format!("'{}': {}", id, note));
                                 app.listener_state.mode = ListenerModalMode::List;
                                 app.listener_state.confirm_action = None;
-
-                                // Refresh listener list
-                                if let Ok(listeners) = db.listener_list().await {
-                                    let infos: Vec<_> = listeners
-                                        .iter()
-                                        .filter_map(modals::listener::ListenerInfo::from_value)
-                                        .collect();
-                                    app.listener_state.set_listeners(infos);
-                                }
+                                refresh_listeners(app).await;
                             }
-                            Ok(false) => {
+                            Ok((false, _)) => {
                                 app.listener_state
                                     .set_error("Listener not found".to_string());
                                 app.listener_state.cancel();

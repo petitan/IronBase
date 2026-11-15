@@ -163,7 +163,8 @@ mod tests {
         }
 
         // No marker yet: tools without arguments (except collection_list,
-        // db_stats and the embedding model / cache tools, which take `NoParams`).
+        // db_stats, the embedding model / cache tools, acl_list, acl_cleanup
+        // and listener_list, which take `NoParams`).
         let mut without_marker: Vec<&str> = registered
             .iter()
             .copied()
@@ -173,11 +174,8 @@ mod tests {
         assert_eq!(
             without_marker,
             [
-                "acl_cleanup",
-                "acl_list",
                 "db_checkpoint",
                 "db_compact",
-                "listener_list",
                 "transaction_begin",
                 "transaction_status",
             ]

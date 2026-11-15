@@ -5,32 +5,8 @@ use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-/// Listener information
-#[derive(Debug, Clone)]
-pub struct ListenerInfo {
-    pub id: String,
-    pub bind: String,
-    pub tls: bool,
-    pub enabled: bool,
-}
-
-impl ListenerInfo {
-    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        Some(Self {
-            id: value
-                .get("_id")
-                .or_else(|| value.get("id"))
-                .and_then(|v| v.as_str())?
-                .to_string(),
-            bind: value.get("bind").and_then(|v| v.as_str())?.to_string(),
-            tls: value.get("tls").and_then(|v| v.as_bool()).unwrap_or(false),
-            enabled: value
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-        })
-    }
-}
+/// A configured listener, as the listener tools report it
+pub use ironbase_mcp_types::responses::ListenerInfo;
 
 /// Modal mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,8 +1,34 @@
 //! Key handlers: acl
 
 use crate::app::App;
+use crate::db::DbWrapper;
 use crate::modals;
 use crossterm::event::KeyCode;
+use ironbase_mcp_types::params::{AclCollectionParams, AclSetParams, NoParams};
+use ironbase_mcp_types::tools::{AclDelete, AclList, AclSet};
+
+/// The server's custom ACLs (`acl_list`)
+pub(crate) async fn load_acls(
+    db: &DbWrapper,
+) -> anyhow::Result<Vec<modals::acl::CollectionAclInfo>> {
+    let response = db.call::<AclList>(&NoParams {}).await?;
+    Ok(response
+        .rules
+        .iter()
+        .map(modals::acl::CollectionAclInfo::from_document)
+        .collect())
+}
+
+/// Reload the ACL list after a change; a failed reload is reported
+async fn refresh_acls(app: &mut App) {
+    let Some(ref db) = app.db else { return };
+    match load_acls(db).await {
+        Ok(acls) => app.acl_state.set_acls(acls),
+        Err(e) => app
+            .acl_state
+            .set_error(format!("Failed to reload ACL list: {}", e)),
+    }
+}
 
 /// ACL modal key handler
 pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
@@ -50,20 +76,16 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                 if let Some(acl) = app.acl_state.get_selected() {
                     let collection = acl.collection.clone();
                     if let Some(ref db) = app.db {
-                        match db.acl_delete(&collection).await {
+                        let args = AclCollectionParams {
+                            collection: collection.clone(),
+                        };
+                        // `success` is always true: `deleted` says whether it existed
+                        match db.call::<AclDelete>(&args).await.map(|r| r.deleted) {
                             Ok(true) => {
                                 app.acl_state
                                     .set_success(format!("ACL for '{}' deleted!", collection));
                                 app.acl_state.mode = AclModalMode::List;
-
-                                // Refresh ACL list
-                                if let Ok(acls) = db.acl_list().await {
-                                    let infos: Vec<_> = acls
-                                        .iter()
-                                        .filter_map(modals::acl::CollectionAclInfo::from_value)
-                                        .collect();
-                                    app.acl_state.set_acls(infos);
-                                }
+                                refresh_acls(app).await;
                             }
                             Ok(false) => {
                                 app.acl_state.set_error("ACL not found".to_string());
@@ -152,26 +174,20 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                 let rules = app.acl_state.get_rules_json();
 
                 if let Some(ref db) = app.db {
-                    match db.acl_set(&collection, &rules).await {
-                        Ok(true) => {
-                            app.acl_state
-                                .set_success(format!("ACL for '{}' saved!", collection));
+                    let args = AclSetParams {
+                        collection: collection.clone(),
+                        rules,
+                    };
+                    match db.call::<AclSet>(&args).await {
+                        Ok(response) => {
+                            app.acl_state.set_success(format!(
+                                "ACL for '{}' saved ({} rules)",
+                                collection, response.rules_count
+                            ));
                             app.acl_state.mode = AclModalMode::List;
                             app.acl_state.edit_rules.clear();
                             app.acl_state.edit_collection.clear();
-
-                            // Refresh ACL list
-                            if let Ok(acls) = db.acl_list().await {
-                                let infos: Vec<_> = acls
-                                    .iter()
-                                    .filter_map(modals::acl::CollectionAclInfo::from_value)
-                                    .collect();
-                                app.acl_state.set_acls(infos);
-                            }
-                        }
-                        Ok(false) => {
-                            app.acl_state.set_error("Failed to save ACL".to_string());
-                            app.acl_state.cancel_save();
+                            refresh_acls(app).await;
                         }
                         Err(e) => {
                             app.acl_state.set_error(format!("Failed: {}", e));

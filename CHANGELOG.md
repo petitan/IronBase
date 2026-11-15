@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI ACL and listener screens; typed MCP responses for the ACL and listener tools (ironbase-core 0.3.472, mcp-server 1.0.670)
+
+Phase 2g of the Tuti TUI overhaul. The server's response values are unchanged.
+
+- **`ironbase-mcp-types` gains response types for the ACL and listener tools:** `acl_list`, `acl_get`,
+  `acl_set`, `acl_delete`, `acl_cleanup`, `listener_list`, `listener_get`, `listener_create`,
+  `listener_delete`, `listener_enable`, `listener_disable` (markers added for the three argument-less
+  ones). A stored ACL is `AclDocument` with `AclRule` / `AclPrincipal` (adjacently tagged, addresses as
+  strings, as on the wire) / `AclPermissions`; a listener `ListenerInfo`. The server builds these
+  responses from the shared structs; a stored ACL document now comes out in a fixed key order (it was
+  the storage's hash-map order). The response golden test grew from 361 to 405 cases (recorded on the
+  previous code; the stored ACL documents with sorted keys) and every recorded response of the group
+  round-trips through the shared types.
+- **Tuti TUI ACL and listener screens:**
+  - deleting an ACL that does not exist says "ACL not found" (the TUI read `success`, always `true`);
+  - a listener created over an existing id is reported as replaced, and every listener change shows the
+    server's note that it takes effect on the next server start;
+  - a failed reload of the ACL or listener list after a change is reported instead of being ignored;
+  - the ACL editor's representability check works on the typed rules: a stored rule of another shape
+    is refused with the answer instead of being shown as a mangled rule.
+- Known server behaviour, pinned by the golden test and not changed here: an `anyone` principal needs a
+  dummy value (`anyone:x`) in `acl_set`; `acl_set` with an empty rule list fails the `_system.acl` schema
+  ("minimum required is 1") instead of clearing the rules (use `acl_delete`).
+
 ### Fixed — the internal merge offset no longer reaches grouped results (ironbase-core 0.3.471, mcp-server 1.0.669)
 
 - **`_merge_best_offset` left the engine.** The grouped merge kept a merged chunk's best-chunk offset in an
