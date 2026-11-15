@@ -1492,11 +1492,11 @@ err: ValidationError Field 'rules' has 0 items, minimum required is 1
 
 ## acl_get / set
 in:  {"collection":"users"}
-out: {"_id":1,"collection":"users","rules":[{"permissions":{"admin":false,"read":true,"write":false},"principal":{"type":"apikey","value":"abc"}},{"permissions":{"admin":true,"read":true,"write":true},"principal":{"type":"interface","value":"localhost"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"ip","value":"10.0.0.5"}},{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"iprange","value":"10.0.0.0/8"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"anyone"}}]}
+out: {"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}
 
 ## acl_get / wildcard
 in:  {"collection":"*"}
-out: {"_id":2,"collection":"*","rules":[{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"interface","value":"external"}}]}
+out: {"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]}
 
 ## acl_get / missing collection param
 in:  {}
@@ -1504,11 +1504,11 @@ err: InvalidParams missing field `collection`
 
 ## acl_list / three
 in:  {}
-out: {"rules":[{"_id":2,"collection":"*","rules":[{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"interface","value":"external"}}]},{"_id":3,"collection":"temp","rules":[{"permissions":{"admin":true,"read":true,"write":true},"principal":{"type":"anyone"}}]},{"_id":1,"collection":"users","rules":[{"permissions":{"admin":false,"read":true,"write":false},"principal":{"type":"apikey","value":"abc"}},{"permissions":{"admin":true,"read":true,"write":true},"principal":{"type":"interface","value":"localhost"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"ip","value":"10.0.0.5"}},{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"iprange","value":"10.0.0.0/8"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"anyone"}}]}],"count":3,"note":"Built-in rules (_system.* protection) are not shown here"}
+out: {"rules":[{"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]},{"_id":3,"collection":"temp","rules":[{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":true}}]},{"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}],"count":3,"note":"Built-in rules (_system.* protection) are not shown here"}
 
 ## acl_list / after collection drop
 in:  {}
-out: {"rules":[{"_id":2,"collection":"*","rules":[{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"interface","value":"external"}}]},{"_id":1,"collection":"users","rules":[{"permissions":{"admin":false,"read":true,"write":false},"principal":{"type":"apikey","value":"abc"}},{"permissions":{"admin":true,"read":true,"write":true},"principal":{"type":"interface","value":"localhost"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"ip","value":"10.0.0.5"}},{"permissions":{"admin":false,"read":false,"write":false},"principal":{"type":"iprange","value":"10.0.0.0/8"}},{"permissions":{"admin":false,"read":true,"write":true},"principal":{"type":"anyone"}}]}],"count":2,"note":"Built-in rules (_system.* protection) are not shown here"}
+out: {"rules":[{"_id":2,"collection":"*","rules":[{"principal":{"type":"interface","value":"external"},"permissions":{"read":false,"write":false,"admin":false}}]},{"_id":1,"collection":"users","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}},{"principal":{"type":"interface","value":"localhost"},"permissions":{"read":true,"write":true,"admin":true}},{"principal":{"type":"ip","value":"10.0.0.5"},"permissions":{"read":true,"write":true,"admin":false}},{"principal":{"type":"iprange","value":"10.0.0.0/8"},"permissions":{"read":false,"write":false,"admin":false}},{"principal":{"type":"anyone"},"permissions":{"read":true,"write":true,"admin":false}}]}],"count":2,"note":"Built-in rules (_system.* protection) are not shown here"}
 
 ## acl_cleanup / one orphan
 in:  {}

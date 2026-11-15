@@ -2119,9 +2119,29 @@ async fn test_acl_delete_reports_a_missing_acl() {
     assert_eq!(app.modal, Some(Modal::Acl));
     assert_eq!(app.acl_state.acls.len(), 1);
 
+    server.clear_calls();
     app.acl_state.start_delete();
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.acl_state.error.as_deref(), Some("ACL not found"));
+    // The stale row is reloaded
+    assert_eq!(server.calls_to("acl_list").len(), 1);
+}
+
+/// Shift+P on a collection without a custom ACL opens an empty editor
+#[tokio::test]
+async fn test_shift_p_without_a_stored_acl_opens_an_empty_editor() {
+    let server = two_collections();
+    server.respond(
+        "acl_get",
+        json!({"collection": "users", "rules": null,
+            "note": "No custom ACL for this collection. Default rules apply."}),
+    );
+    let mut app = app_with_server(&server).await;
+    app.connection_type = ConnectionType::Localhost;
+    shift(&mut app, 'P').await;
+    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.acl_state.edit_collection, "users");
+    assert!(app.acl_state.edit_rules.is_empty());
 }
 
 /// A listener created over an existing one is reported as replaced, with the
@@ -2190,7 +2210,9 @@ async fn test_listener_disable_reports_a_failed_reload() {
         app.listener_state
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("Failed to reload listeners") && e.contains("gone")),
+            .is_some_and(|e| e.starts_with("'web': Listener disabled.")
+                && e.contains("reloading the listeners failed")
+                && e.contains("gone")),
         "{:?}",
         app.listener_state.error
     );

@@ -32,11 +32,20 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 fn handle_acl_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let response = match adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default()) {
         Ok(result) => {
-            let rules = result
+            // A document of another shape is skipped, as the live ACL loader
+            // skips it (it is not enforced either); one bad entry must not
+            // hide the others. acl_get on its collection names the problem.
+            let rules: Vec<AclDocument> = result
                 .documents
                 .into_iter()
-                .map(acl_document)
-                .collect::<Result<Vec<_>>>()?;
+                .filter_map(|doc| match acl_document(doc) {
+                    Ok(doc) => Some(doc),
+                    Err(e) => {
+                        tracing::warn!("acl_list: skipping a stored ACL document: {}", e.message);
+                        None
+                    }
+                })
+                .collect();
             AclListResponse {
                 count: rules.len(),
                 rules,

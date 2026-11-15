@@ -1721,7 +1721,7 @@ pub enum AclInterface {
 /// Who an ACL rule applies to, as the server stores it (`{"type": …,
 /// "value": …}`); addresses stay strings, as on the wire
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
+#[serde(tag = "type", content = "value", deny_unknown_fields)]
 pub enum AclPrincipal {
     #[serde(rename = "interface")]
     Interface(AclInterface),
@@ -1739,14 +1739,17 @@ pub enum AclPrincipal {
 
 /// What an ACL rule grants (write implies read, admin implies write)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AclPermissions {
     pub read: bool,
     pub write: bool,
     pub admin: bool,
 }
 
-/// One stored ACL rule
+/// One stored ACL rule. Unknown fields are refused at every level: the ACL
+/// tools would drop them, and a client saving the rules back would lose them
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AclRule {
     pub principal: AclPrincipal,
     pub permissions: AclPermissions,
@@ -1755,6 +1758,7 @@ pub struct AclRule {
 /// A collection's stored ACL (`_system.acl`); `collection` is `*` for the
 /// rule set every collection falls back to
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AclDocument {
     #[serde(rename = "_id")]
     pub id: Value,
@@ -1766,7 +1770,8 @@ pub struct AclDocument {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AclListResponse {
     /// The custom ACLs, in storage order (the built-in `_system.*` rules are
-    /// not listed)
+    /// not listed, nor a stored document of another shape, which the server's
+    /// ACL enforcement skips too)
     pub rules: Vec<AclDocument>,
     pub count: usize,
     pub note: String,

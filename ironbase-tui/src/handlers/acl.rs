@@ -19,14 +19,20 @@ pub(crate) async fn load_acls(
         .collect())
 }
 
-/// Reload the ACL list after a change; a failed reload is reported
+/// Reload the ACL list after a change; a failed reload is reported next to
+/// the change's own outcome (which it does not hide)
 async fn refresh_acls(app: &mut App) {
     let Some(ref db) = app.db else { return };
     match load_acls(db).await {
         Ok(acls) => app.acl_state.set_acls(acls),
-        Err(e) => app
-            .acl_state
-            .set_error(format!("Failed to reload ACL list: {}", e)),
+        Err(e) => {
+            let outcome = app.acl_state.success.take().or(app.acl_state.error.take());
+            let reload = format!("reloading the ACL list failed: {}", e);
+            app.acl_state.set_error(match outcome {
+                Some(outcome) => format!("{} ({})", outcome, reload),
+                None => reload,
+            });
+        }
     }
 }
 
@@ -88,8 +94,10 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                                 refresh_acls(app).await;
                             }
                             Ok(false) => {
+                                // Someone else deleted it: the row is stale
                                 app.acl_state.set_error("ACL not found".to_string());
                                 app.acl_state.cancel_delete();
+                                refresh_acls(app).await;
                             }
                             Err(e) => {
                                 app.acl_state.set_error(format!("Failed: {}", e));

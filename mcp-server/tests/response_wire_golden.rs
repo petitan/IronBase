@@ -73,10 +73,11 @@
 //! `find`; a `_score` keeps its position). Another test parses its responses
 //! with the shared types.
 //!
-//! The ACL and listener group (on a sixth database) sorts the keys of the
-//! stored ACL documents `acl_list` / `acl_get` return (stored in hash-map key
-//! order) and their list by `collection`, and the listeners of
-//! `listener_list` by `_id`.
+//! The ACL and listener group (on a sixth database) sorts the ACL documents of
+//! `acl_list` by `collection` and the listeners of `listener_list` by `_id`.
+//! (The stored ACL documents came out in the storage's hash-map key order
+//! before 0.3.472; those cases were recorded with sorted keys, which the typed
+//! response's fixed order replaced.)
 //!
 //! Regenerate (only for an intended wire-format change):
 //! `UPDATE_GOLDEN=1 cargo test --test response_wire_golden`
@@ -215,12 +216,8 @@ fn normalize(tool: &str, args: &Value, out: &mut Value) {
                 }
             }
         }
-        // Stored ACL documents: hash-map key order; the list in storage order
-        "acl_list" => {
-            sort_keys(&mut out["rules"]);
-            sort_by_key(&mut out["rules"], "collection");
-        }
-        "acl_get" if out.get("_id").is_some() => sort_keys(out),
+        // The list in storage order
+        "acl_list" => sort_by_key(&mut out["rules"], "collection"),
         "listener_list" => sort_by_key(&mut out["listeners"], "_id"),
         "fulltext_search" | "fuzzy_search" | "vector_search" | "search" => {
             normalize_search(tool, args, out);
@@ -1617,8 +1614,7 @@ fn rag_group_golden_parses_as_the_shared_response_types() {
 
 /// Every recorded response of the ACL and listener tool group parses,
 /// strictly, into the tool's shared response type and serializes back to the
-/// same bytes; a stored ACL document (recorded with sorted keys: its stored
-/// key order is the hash-map order) to the same JSON value
+/// same bytes
 #[test]
 fn acl_listener_group_golden_parses_as_the_shared_response_types() {
     use ironbase_mcp_types::tools::{
@@ -1626,18 +1622,9 @@ fn acl_listener_group_golden_parses_as_the_shared_response_types() {
         ListenerDisable, ListenerEnable, ListenerGet, ListenerList,
     };
 
-    fn same_value<T: ironbase_mcp_types::Tool>(json: &str) -> Result<(), String> {
-        let parsed: T::Resp = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        let back = serde_json::to_value(&parsed).unwrap();
-        let golden: Value = serde_json::from_str(json).unwrap();
-        assert_eq!(back, golden, "{} does not round-trip", T::NAME);
-        Ok(())
-    }
-
     let checked = check_golden(|tool, json| {
         Some(match tool {
-            "acl_list" => same_value::<AclList>(json),
-            "acl_get" if json.contains("\"_id\"") => same_value::<AclGet>(json),
+            "acl_list" => same_bytes::<AclList>(json),
             "acl_get" => same_bytes::<AclGet>(json),
             "acl_set" => same_bytes::<AclSet>(json),
             "acl_delete" => same_bytes::<AclDelete>(json),

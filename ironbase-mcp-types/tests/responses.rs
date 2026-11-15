@@ -798,3 +798,22 @@ fn listener_info_optional_fields() {
         ListenerAction::Created
     );
 }
+
+/// A stored ACL with fields the types do not know is refused, not trimmed
+#[test]
+fn acl_types_refuse_unknown_fields() {
+    let rule = r#"{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false}"#;
+    for text in [
+        format!(r#"{{"_id":1,"collection":"c","rules":[{rule}}}],"comment":"x"}}"#),
+        format!(r#"{{"_id":1,"collection":"c","rules":[{rule},"expires":"2030"}}]}}"#),
+        r#"{"_id":1,"collection":"c","rules":[{"principal":{"type":"apikey","value":"abc","note":1},"permissions":{"read":true,"write":false,"admin":false}}]}"#.to_string(),
+        r#"{"_id":1,"collection":"c","rules":[{"principal":{"type":"apikey","value":"abc"},"permissions":{"read":true,"write":false,"admin":false,"deny":true}}]}"#.to_string(),
+    ] {
+        assert!(serde_json::from_str::<AclDocument>(&text).is_err(), "parsed: {text}");
+    }
+    // `anyone` with a null value, as the server also accepts
+    assert_eq!(
+        serde_json::from_str::<AclPrincipal>(r#"{"type":"anyone","value":null}"#).unwrap(),
+        AclPrincipal::Anyone
+    );
+}

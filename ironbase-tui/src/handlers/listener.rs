@@ -15,13 +15,20 @@ pub(crate) async fn load_listeners(db: &DbWrapper) -> anyhow::Result<Vec<Listene
 }
 
 /// Reload the listener list after a change; a failed reload is reported
+/// next to the change's own outcome (which it does not hide)
 async fn refresh_listeners(app: &mut App) {
     let Some(ref db) = app.db else { return };
     match load_listeners(db).await {
         Ok(listeners) => app.listener_state.set_listeners(listeners),
-        Err(e) => app
-            .listener_state
-            .set_error(format!("Failed to reload listeners: {}", e)),
+        Err(e) => {
+            let state = &mut app.listener_state;
+            let outcome = state.success.take().or(state.error.take());
+            let reload = format!("reloading the listeners failed: {}", e);
+            state.set_error(match outcome {
+                Some(outcome) => format!("{} ({})", outcome, reload),
+                None => reload,
+            });
+        }
     }
 }
 
@@ -169,6 +176,7 @@ pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                                 app.listener_state
                                     .set_error("Listener not found".to_string());
                                 app.listener_state.cancel();
+                                refresh_listeners(app).await;
                             }
                             Err(e) => {
                                 app.listener_state.set_error(format!("Failed: {}", e));

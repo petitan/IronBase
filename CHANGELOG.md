@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — Tuti TUI ACL and listener screens; typed MCP responses for the ACL and listener tools (ironbase-core 0.3.472, mcp-server 1.0.670)
 
-Phase 2g of the Tuti TUI overhaul. The server's response values are unchanged.
+Phase 2g of the Tuti TUI overhaul. The server's response values are unchanged, except for a stored ACL
+document of another shape (see below).
 
 - **`ironbase-mcp-types` gains response types for the ACL and listener tools:** `acl_list`, `acl_get`,
   `acl_set`, `acl_delete`, `acl_cleanup`, `listener_list`, `listener_get`, `listener_create`,
@@ -18,13 +19,19 @@ Phase 2g of the Tuti TUI overhaul. The server's response values are unchanged.
   strings, as on the wire) / `AclPermissions`; a listener `ListenerInfo`. The server builds these
   responses from the shared structs; a stored ACL document now comes out in a fixed key order (it was
   the storage's hash-map order). The response golden test grew from 361 to 405 cases (recorded on the
-  previous code; the stored ACL documents with sorted keys) and every recorded response of the group
-  round-trips through the shared types.
+  previous code with the stored ACL documents' keys sorted, then pinned in the new fixed order: values
+  equal) and every recorded response of the group round-trips through the shared types byte for byte.
+- **A stored ACL document of another shape** (only an embedded client writing `_system.acl` directly can
+  store one; `acl_set` cannot) is skipped by `acl_list`, as the server's live ACL loader skips it and does
+  not enforce it, with a logged warning, instead of being passed through raw; `acl_get` on its collection
+  reports "Invalid stored ACL document". Unknown fields count as another shape: the typed tools would drop
+  them, and a client saving the rules back would lose them.
 - **Tuti TUI ACL and listener screens:**
   - deleting an ACL that does not exist says "ACL not found" (the TUI read `success`, always `true`);
   - a listener created over an existing id is reported as replaced, and every listener change shows the
     server's note that it takes effect on the next server start;
-  - a failed reload of the ACL or listener list after a change is reported instead of being ignored;
+  - a failed reload of the ACL or listener list after a change is reported, next to the change's own
+    outcome, instead of being ignored; "not found" reloads the stale list;
   - the ACL editor's representability check works on the typed rules: a stored rule of another shape
     is refused with the answer instead of being shown as a mangled rule.
 - Known server behaviour, pinned by the golden test and not changed here: an `anyone` principal needs a
