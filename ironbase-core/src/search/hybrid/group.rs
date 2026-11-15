@@ -12,7 +12,10 @@ use crate::storage::{RawStorage, Storage};
 use crate::value_utils::{delete_nested_value, get_nested_value};
 
 use super::fuse::{exclusion_projection, fused_doc_id};
-use super::{id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES};
+use super::{
+    id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES,
+    MERGE_BEST_OFFSET_KEY,
+};
 
 /// One grouped document: its id, best fused score, doc-level fields lifted from
 /// its chunks ([`lift_common_fields`]), and its (post-cap, merged) chunks.
@@ -23,6 +26,10 @@ pub struct DocGroup {
     pub lifted: serde_json::Map<String, Value>,
     /// Merged chunks (full Values, carrying score fields)
     pub chunks: Vec<Value>,
+    /// Per chunk (same order and length as `chunks`): the byte offset in its
+    /// text of the best chunk a merge folded into it (`0` when not merged), so
+    /// a shortened passage can keep it
+    pub best_offsets: Vec<usize>,
 }
 
 /// Keys never lifted to the group root by [`lift_common_fields`] in
@@ -277,11 +284,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
+            // The merge's best-chunk offsets leave the chunks for the typed field
+            let mut best_offsets: Vec<usize> = chunks
+                .iter_mut()
+                .map(|chunk| {
+                    chunk
+                        .as_object_mut()
+                        .and_then(|obj| obj.shift_remove(MERGE_BEST_OFFSET_KEY))
+                        .and_then(|v| v.as_u64())
+                        .map_or(0, |v| v as usize)
+                })
+                .collect();
+
             // Lift BEFORE cap so doc-level fields are determined from the full set.
             let lifted = lift_common_fields(&mut chunks);
 
             if let Some(cap) = q.max_chunks_per_doc {
                 chunks.truncate(cap);
+                best_offsets.truncate(cap);
             }
             total_chunks += chunks.len();
 
@@ -290,6 +310,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 best_score,
                 lifted,
                 chunks,
+                best_offsets,
             });
         }
 

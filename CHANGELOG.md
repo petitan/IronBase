@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the internal merge offset no longer reaches grouped results (ironbase-core 0.3.471, mcp-server 1.0.669)
+
+- **`_merge_best_offset` left the engine.** The grouped merge kept a merged chunk's best-chunk offset in an
+  internal `_merge_best_offset` key inside the chunk; only the MCP `search` contract stripped it (with every
+  `_` key), so the Python `hybrid_search(group_by_document=True)` result carried it, and nothing kept
+  `lift_common_fields` from lifting it to the group root. The offset is now the typed
+  `DocGroup::best_offsets` (one per chunk, `0` when not merged), taken out of the chunks right after the merge;
+  the MCP contract reads it from there. `DocGroup` gains the field (additive).
+
 ### Fixed — reading a missing collection's vector indexes no longer creates it (ironbase-core 0.3.470, mcp-server 1.0.668)
 
 - **Five MCP tools created a missing collection as a side effect:** `index_list` / `index_stats` with

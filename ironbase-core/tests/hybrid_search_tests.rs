@@ -305,3 +305,42 @@ fn grouped_merge_with_a_nested_text_field_and_an_invalid_projection() {
         .hybrid_group_documents(&fusion.fused, &q, None)
         .is_err());
 }
+
+/// A merged chunk's best-chunk offset is the group's typed `best_offsets`,
+/// not an internal `_merge_best_offset` key inside the chunk (it reached the
+/// Python `hybrid_search` result and could be lifted to the group root)
+#[test]
+fn grouped_merge_offset_is_not_left_in_the_chunk() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for (idx, content, start, end) in [
+        (0, "Car maintenance checklist.", 0, 26),
+        (1, "Brake maintenance notes.", 28, 52),
+    ] {
+        insert(
+            &db,
+            json!({"doc_id": "d", "chunk_index": idx, "content": content,
+                   "start_char": start, "end_char": end}),
+        );
+    }
+    let coll = db.collection("kb").unwrap();
+    coll.create_fulltext_index("content".to_string(), "none", None, None)
+        .unwrap();
+    let mut q = query("brake maintenance", None);
+    q.group_by_document = true;
+    q.merge_chunks = true;
+    let fusion = coll.hybrid_fuse(&q, None).unwrap();
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    let g = &groups[0];
+    assert_eq!(g.chunks.len(), 1);
+    assert!(
+        g.chunks[0].get("_merge_best_offset").is_none(),
+        "{:?}",
+        g.chunks
+    );
+    assert!(g.lifted.get("_merge_best_offset").is_none());
+    assert_eq!(g.best_offsets.len(), g.chunks.len());
+    let text = g.chunks[0]["content"].as_str().unwrap();
+    assert!(text[g.best_offsets[0]..].starts_with("Brake"), "{text}");
+}
