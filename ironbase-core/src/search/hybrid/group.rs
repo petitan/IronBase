@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use crate::collection_core::CollectionCore;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::find_options::apply_projection;
+use crate::find_options::{apply_projection, validate_projection};
 use crate::fulltext::FulltextSearchOptions;
 use crate::storage::{RawStorage, Storage};
+use crate::value_utils::{delete_nested_value, get_nested_value};
 
 use super::fuse::{exclusion_projection, fused_doc_id};
 use super::{id_to_string, merge_adjacent_values, FusedResult, HybridQuery, MAX_CANDIDATES};
@@ -139,7 +140,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         q: &HybridQuery,
         ctx: Option<&ExecutionContext>,
     ) -> Result<(Vec<DocGroup>, usize)> {
-        let projection = &q.projection;
+        // The merge reads its fields before the projection drops them
+        let (merge_projection, merge_only) =
+            projection_for_merge(q.projection.as_ref(), q.merge_chunks, &q.text_field)?;
+        let projection = &merge_projection;
 
         // Phase 1: top N unique doc_ids (first occurrence = best score)
         let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
@@ -266,6 +270,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // so each passage carries its text once
             if q.merge_chunks {
                 merge_adjacent_values(&mut chunks, &q.text_field);
+                // The fields kept only for the merge leave as the projection asked
+                // (dot paths as the projection set them, the key order kept)
+                for chunk in &mut chunks {
+                    merge_only.remove_from(chunk);
+                }
             }
 
             // Lift BEFORE cap so doc-level fields are determined from the full set.
@@ -285,5 +294,89 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok((groups, total_chunks))
+    }
+}
+
+/// The chunk fields [`merge_adjacent_values`] reads, besides the text field
+const MERGE_FIELDS: &[&str] = &[
+    "doc_id",
+    "chunk_index",
+    "start_char",
+    "end_char",
+    "table_header",
+];
+
+/// The projection the grouped chunks get before the merge, and the fields to
+/// remove after it: when chunks are merged, the merge's fields (and the text
+/// field) survive the projection until the merge has read them. An inclusion
+/// projection gets them added, an exclusion projection does not exclude them;
+/// either way they are removed after the merge unless the request kept them.
+/// Without a merge, or without a projection, the projection is unchanged. An
+/// invalid projection is refused as `find` refuses it, before it is changed.
+fn projection_for_merge(
+    projection: Option<&HashMap<String, i32>>,
+    merge_chunks: bool,
+    text_field: &str,
+) -> Result<(Option<HashMap<String, i32>>, MergeOnlyFields)> {
+    let Some(projection) = projection.filter(|_| merge_chunks) else {
+        return Ok((projection.cloned(), MergeOnlyFields::default()));
+    };
+    validate_projection(projection)?;
+    let include_mode = projection.values().any(|&v| v == 1);
+    let mut augmented = projection.clone();
+    let mut merge_only = Vec::new();
+    for field in MERGE_FIELDS
+        .iter()
+        .copied()
+        .chain(std::iter::once(text_field))
+    {
+        if include_mode {
+            if augmented.get(field) != Some(&1) {
+                augmented.insert(field.to_string(), 1);
+                merge_only.push(field.to_string());
+            }
+        } else if augmented.remove(field).is_some() {
+            merge_only.push(field.to_string());
+        }
+    }
+    Ok((
+        Some(augmented),
+        MergeOnlyFields {
+            paths: merge_only,
+            added_by_inclusion: include_mode,
+        },
+    ))
+}
+
+/// The fields a projection kept only for the merge ([`projection_for_merge`])
+#[derive(Debug, Default)]
+struct MergeOnlyFields {
+    /// Dot paths, as the projection names them
+    paths: Vec<String>,
+    /// Added to an inclusion projection: an object on the path exists only
+    /// because of them, and goes with them once empty (an exclusion
+    /// projection leaves an emptied object, as `find` does)
+    added_by_inclusion: bool,
+}
+
+impl MergeOnlyFields {
+    fn remove_from(&self, chunk: &mut Value) {
+        for path in &self.paths {
+            delete_nested_value(chunk, path);
+            if !self.added_by_inclusion {
+                continue;
+            }
+            let mut parent = path.as_str();
+            while let Some((prefix, _)) = parent.rsplit_once('.') {
+                let empty = get_nested_value(chunk, prefix)
+                    .and_then(Value::as_object)
+                    .is_some_and(|o| o.is_empty());
+                if !empty {
+                    break;
+                }
+                delete_nested_value(chunk, prefix);
+                parent = prefix;
+            }
+        }
     }
 }

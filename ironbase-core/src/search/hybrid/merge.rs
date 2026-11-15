@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 use super::FusedResult;
+use crate::value_utils::{get_nested_value, set_nested_value};
 
 /// Merge adjacent chunks from the same source document into single results.
 ///
@@ -137,8 +138,7 @@ fn merge_adjacent_runs<T>(
                     // A neighbour costs its text, and the separator its join
                     // may add (`gap_separator`) when the two are apart
                     let len = |pos: usize| {
-                        doc(&results[range[pos].1])
-                            .get(text_field)
+                        get_nested_value(doc(&results[range[pos].1]), text_field)
                             .and_then(|v| v.as_str())
                             .map_or(0, str::len)
                     };
@@ -209,7 +209,10 @@ fn merge_adjacent_runs<T>(
 
                 for (i, &(_, res_idx)) in run.iter().enumerate() {
                     let chunk = doc(&results[res_idx]);
-                    let raw_text = chunk.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
+                    // The text field may be a dot path (`body.text`)
+                    let raw_text = get_nested_value(chunk, text_field)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     // Table header propagation (#63) prepends the table's header to each
                     // continuation chunk; when merging, that header would repeat. Strip it
                     // from chunks after the first, using the EXACT header recorded at chunk
@@ -284,8 +287,12 @@ fn merge_adjacent_runs<T>(
                 }
 
                 // Update the best-scored result's doc with merged content
+                set_nested_value(
+                    doc_mut(&mut results[best_idx_in_run]),
+                    text_field,
+                    Value::String(merged_text),
+                );
                 if let Value::Object(obj) = doc_mut(&mut results[best_idx_in_run]) {
-                    obj.insert(text_field.to_string(), Value::String(merged_text));
                     obj.insert("chunk_index".to_string(), json!(run[0].0));
                     if let Some(sc) = min_start_char {
                         obj.insert("start_char".to_string(), json!(sc));

@@ -194,3 +194,114 @@ fn projection_has_find_semantics() {
         "mixed projection accepted"
     );
 }
+
+/// Grouped search merges before it projects: an inclusion projection without
+/// the merge's fields (`start_char`, `end_char`, `chunk_index`, `doc_id`)
+/// still gets the separator between chunks a gap apart and the overlap
+/// trimmed, and the fields it did not ask for are not in the result
+#[test]
+fn grouped_merge_sees_the_offsets_a_projection_leaves_out() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for (idx, content, start, end) in [
+        (0, "Car maintenance checklist.", 0, 26),
+        (1, "Brake maintenance notes.", 28, 52),
+        (2, "notes. Tyre maintenance table.", 46, 76),
+    ] {
+        insert(
+            &db,
+            json!({"doc_id": "d", "chunk_index": idx, "content": content,
+                   "start_char": start, "end_char": end, "embedding": [1.0, 0.0, 0.0, 0.0]}),
+        );
+    }
+    let coll = db.collection("kb").unwrap();
+    coll.create_fulltext_index("content".to_string(), "none", None, None)
+        .unwrap();
+    let mut q = query("maintenance", None);
+    q.group_by_document = true;
+    q.merge_chunks = true;
+    q.projection = Some(HashMap::from([("content".to_string(), 1)]));
+    let fusion = coll.hybrid_fuse(&q, None).unwrap();
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    let chunks = &groups[0].chunks;
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    assert_eq!(
+        chunks[0]["content"],
+        "Car maintenance checklist.\n\nBrake maintenance notes. Tyre maintenance table."
+    );
+    for key in ["start_char", "end_char", "chunk_index", "doc_id"] {
+        assert!(
+            chunks[0].get(key).is_none(),
+            "{key} not projected out: {chunks:?}"
+        );
+    }
+
+    // An exclusion projection of the offsets: merged, and the offsets left out
+    q.projection = Some(HashMap::from([
+        ("start_char".to_string(), 0),
+        ("end_char".to_string(), 0),
+        ("embedding".to_string(), 0),
+    ]));
+    let fusion = coll.hybrid_fuse(&q, None).unwrap();
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    let chunks = &groups[0].chunks;
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    assert_eq!(
+        chunks[0]["content"],
+        "Car maintenance checklist.\n\nBrake maintenance notes. Tyre maintenance table."
+    );
+    assert_eq!(chunks[0]["chunks_in_merge"], 3);
+    for key in ["start_char", "end_char", "embedding"] {
+        assert!(chunks[0].get(key).is_none(), "{key} not projected out");
+    }
+}
+
+/// A dot-path text field under an inclusion projection: merged at its path,
+/// and left out when the projection did not ask for it; an invalid projection
+/// is refused as by `find`
+#[test]
+fn grouped_merge_with_a_nested_text_field_and_an_invalid_projection() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    for (idx, text, start, end) in [
+        (0, "Car maintenance checklist.", 0, 26),
+        (1, "Brake maintenance notes.", 27, 51),
+    ] {
+        insert(
+            &db,
+            json!({"doc_id": "d", "chunk_index": idx, "title": "T", "body": {"text": text},
+                   "start_char": start, "end_char": end}),
+        );
+    }
+    let coll = db.collection("kb").unwrap();
+    coll.create_fulltext_index("body.text".to_string(), "none", None, None)
+        .unwrap();
+    let mut q = query("maintenance", None);
+    q.text_field = "body.text".to_string();
+    q.group_by_document = true;
+    q.merge_chunks = true;
+    q.projection = Some(HashMap::from([("title".to_string(), 1)]));
+    let fusion = coll.hybrid_fuse(&q, None).unwrap();
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    let chunks = &groups[0].chunks;
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    assert!(chunks[0].get("body").is_none(), "{chunks:?}");
+
+    q.projection = Some(HashMap::from([("body.text".to_string(), 1)]));
+    let (groups, _) = coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .unwrap();
+    assert_eq!(
+        groups[0].chunks[0]["body"]["text"],
+        "Car maintenance checklist.\nBrake maintenance notes."
+    );
+
+    q.projection = Some(HashMap::from([("title".to_string(), 2)]));
+    assert!(coll
+        .hybrid_group_documents(&fusion.fused, &q, None)
+        .is_err());
+}
