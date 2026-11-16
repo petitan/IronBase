@@ -2583,3 +2583,40 @@ async fn test_script_fields_are_edited_at_the_cursor() {
     type_text(&mut app, "{\"n\": 1}").await;
     assert_eq!(app.script_state.params_input.value(), "{\"n\": 1}");
 }
+
+/// The filter's field and value inputs edit at the cursor; Left / Right still
+/// pick the operator and the sort field
+#[tokio::test]
+async fn test_filter_inputs_are_edited_at_the_cursor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.filter_state.reset_inputs();
+    app.modal = Some(Modal::Filter);
+
+    type_text(&mut app, "ge").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "a").await;
+    assert_eq!(app.filter_state.field_input.value(), "age");
+    press(&mut app, KeyCode::Delete).await;
+    assert_eq!(app.filter_state.field_input.value(), "ae");
+    press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
+    type_text(&mut app, "ge").await;
+    assert_eq!(app.filter_state.field_input.value(), "age");
+
+    // Operator: Right picks the next one, it does not touch the inputs
+    app.filter_state.focus = crate::app::FilterFocus::Operator;
+    press(&mut app, KeyCode::Right).await;
+    assert_eq!(app.filter_state.operator_idx, 1);
+    assert_eq!(app.filter_state.field_input.value(), "age");
+
+    app.filter_state.focus = crate::app::FilterFocus::Value;
+    type_text(&mut app, "30").await;
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Left).await;
+    type_text(&mut app, "1").await;
+    assert_eq!(app.filter_state.value_input.value(), "130");
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.filter_state.filters.len(), 1);
+    assert_eq!(app.filter_state.filters[0].field, "age");
+    assert_eq!(app.filter_state.filters[0].value, "130");
+}

@@ -1,5 +1,7 @@
 //! Filter state for visual query building
 
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 use serde_json::Value;
 
 /// Filter operator for visual search
@@ -189,12 +191,10 @@ impl SortDirection {
 /// Visual filter state
 #[derive(Debug, Clone, Default)]
 pub struct FilterState {
-    pub field_input: String,
-    pub field_cursor: usize,
+    pub field_input: TextInput,
     pub operator: FilterOperator,
     pub operator_idx: usize,
-    pub value_input: String,
-    pub value_cursor: usize,
+    pub value_input: TextInput,
     pub focus: FilterFocus,
     pub filters: Vec<FilterCondition>,
     pub selected_filter: usize,
@@ -221,9 +221,7 @@ impl FilterState {
     /// Reset input fields only, preserving existing filters and sort
     pub fn reset_inputs(&mut self) {
         self.field_input.clear();
-        self.field_cursor = 0;
         self.value_input.clear();
-        self.value_cursor = 0;
         self.operator = FilterOperator::default();
         self.operator_idx = 0;
         self.focus = FilterFocus::Field;
@@ -342,18 +340,19 @@ impl FilterState {
 
     pub fn add_filter(&mut self) {
         if !self.field_input.is_empty() {
-            // Use mem::take to avoid clone+clear pattern
             let condition = FilterCondition {
-                field: std::mem::take(&mut self.field_input),
+                field: self.field_input.value().to_string(),
                 operator: self.operator,
-                value: std::mem::take(&mut self.value_input),
+                value: self.value_input.value().to_string(),
             };
             self.filters.push(condition);
-            self.field_cursor = 0;
-            self.value_cursor = 0;
+            self.field_input.clear();
+            self.value_input.clear();
             self.operator = FilterOperator::default();
             self.operator_idx = 0;
             self.focus = FilterFocus::Field;
+            // The suggestions follow the (now empty) field input
+            self.update_suggestions();
         }
     }
 
@@ -373,10 +372,8 @@ impl FilterState {
     pub fn edit_selected_filter(&mut self) {
         if let Some(filter) = self.filters.get(self.selected_filter).cloned() {
             // Load filter values into input fields
-            self.field_input = filter.field;
-            self.field_cursor = self.field_input.chars().count();
-            self.value_input = filter.value;
-            self.value_cursor = self.value_input.chars().count();
+            self.field_input.set_value(filter.field);
+            self.value_input.set_value(filter.value);
             self.operator = filter.operator;
             self.operator_idx = FilterOperator::all()
                 .iter()
@@ -425,103 +422,19 @@ impl FilterState {
         }
     }
 
-    pub fn insert_char(&mut self, c: char) {
+    /// Edit the focused text input (field name or value); the suggestions
+    /// follow the field name
+    pub fn handle_field_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
         match self.focus {
             FilterFocus::Field => {
-                // Convert character position to byte position for UTF-8 safety
-                let byte_pos = self
-                    .field_input
-                    .char_indices()
-                    .nth(self.field_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.field_input.len());
-                self.field_input.insert(byte_pos, c);
-                self.field_cursor += 1;
-                self.update_suggestions();
-            }
-            FilterFocus::Value => {
-                let byte_pos = self
-                    .value_input
-                    .char_indices()
-                    .nth(self.value_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.value_input.len());
-                self.value_input.insert(byte_pos, c);
-                self.value_cursor += 1;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn backspace(&mut self) {
-        match self.focus {
-            FilterFocus::Field if self.field_cursor > 0 => {
-                self.field_cursor -= 1;
-                // Convert character position to byte position for UTF-8 safety
-                let byte_pos = self
-                    .field_input
-                    .char_indices()
-                    .nth(self.field_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.field_input.remove(byte_pos);
-                self.update_suggestions();
-            }
-            FilterFocus::Value if self.value_cursor > 0 => {
-                self.value_cursor -= 1;
-                let byte_pos = self
-                    .value_input
-                    .char_indices()
-                    .nth(self.value_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.value_input.remove(byte_pos);
-            }
-            _ => {}
-        }
-    }
-
-    pub fn cursor_left(&mut self) {
-        match self.focus {
-            FilterFocus::Field if self.field_cursor > 0 => {
-                self.field_cursor -= 1;
-            }
-            FilterFocus::Value if self.value_cursor > 0 => {
-                self.value_cursor -= 1;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        match self.focus {
-            FilterFocus::Field
-                // Use character count, not byte length
-                if self.field_cursor < self.field_input.chars().count() => {
-                    self.field_cursor += 1;
+                let outcome = self.field_input.handle_key(code, modifiers);
+                if outcome == InputOutcome::Changed {
+                    self.update_suggestions();
                 }
-            FilterFocus::Value
-                if self.value_cursor < self.value_input.chars().count() => {
-                    self.value_cursor += 1;
-                }
-            _ => {}
-        }
-    }
-
-    pub fn cursor_home(&mut self) {
-        match self.focus {
-            FilterFocus::Field => self.field_cursor = 0,
-            FilterFocus::Value => self.value_cursor = 0,
-            _ => {}
-        }
-    }
-
-    pub fn cursor_end(&mut self) {
-        match self.focus {
-            // Use character count, not byte length
-            FilterFocus::Field => self.field_cursor = self.field_input.chars().count(),
-            FilterFocus::Value => self.value_cursor = self.value_input.chars().count(),
-            _ => {}
+                outcome
+            }
+            FilterFocus::Value => self.value_input.handle_key(code, modifiers),
+            _ => InputOutcome::Ignored,
         }
     }
 
@@ -535,7 +448,7 @@ impl FilterState {
 
     /// Update filtered suggestions based on current input
     pub fn update_suggestions(&mut self) {
-        let input = self.field_input.to_lowercase();
+        let input = self.field_input.value().to_lowercase();
         if input.is_empty() {
             // Show all fields when input is empty
             self.filtered_suggestions = self.all_fields.clone();
@@ -577,9 +490,7 @@ impl FilterState {
     /// Apply selected suggestion to field input
     pub fn apply_suggestion(&mut self) {
         if let Some(suggestion) = self.filtered_suggestions.get(self.suggestion_idx) {
-            self.field_input = suggestion.clone();
-            // Use character count, not byte length for UTF-8 safety
-            self.field_cursor = self.field_input.chars().count();
+            self.field_input.set_value(suggestion.clone());
             self.show_suggestions = false;
         }
     }
@@ -589,6 +500,16 @@ impl FilterState {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn key(state: &mut FilterState, code: KeyCode) -> InputOutcome {
+        state.handle_field_input(code, KeyModifiers::NONE)
+    }
+
+    fn type_into(state: &mut FilterState, text: &str) {
+        for c in text.chars() {
+            key(state, KeyCode::Char(c));
+        }
+    }
 
     fn condition(field: &str, operator: FilterOperator, value: &str) -> FilterCondition {
         FilterCondition {
@@ -705,15 +626,13 @@ mod tests {
     fn test_add_filter_takes_inputs_and_resets_the_form() {
         let mut state = FilterState::new();
         // Empty field: nothing is added
-        state.value_input = "x".to_string();
+        state.value_input.set_value("x");
         state.add_filter();
         assert!(state.filters.is_empty());
-        assert_eq!(state.value_input, "x");
+        assert_eq!(state.value_input.value(), "x");
 
-        state.field_input = "age".to_string();
-        state.field_cursor = 3;
-        state.value_input = "30".to_string();
-        state.value_cursor = 2;
+        state.field_input.set_value("age");
+        state.value_input.set_value("30");
         state.next_operator();
         state.next_operator();
         state.next_operator();
@@ -725,12 +644,31 @@ mod tests {
 
         assert_eq!(state.filters.len(), 1);
         assert_eq!(state.build_query(), json!({"age": {"$gt": 30}}));
-        assert_eq!(state.field_input, "");
-        assert_eq!(state.value_input, "");
-        assert_eq!((state.field_cursor, state.value_cursor), (0, 0));
+        assert_eq!(state.field_input.value(), "");
+        assert_eq!(state.value_input.value(), "");
+        assert_eq!(
+            (state.field_input.cursor(), state.value_input.cursor()),
+            (0, 0)
+        );
         assert_eq!(state.operator, FilterOperator::Equals);
         assert_eq!(state.operator_idx, 0);
         assert_eq!(state.focus, FilterFocus::Field);
+    }
+
+    /// The next condition starts from the full suggestion list, not the
+    /// previous field's matches
+    #[test]
+    fn test_add_filter_refreshes_the_suggestions() {
+        let mut state = FilterState::new();
+        state.set_fields(vec!["name".into(), "Age".into(), "address.city".into()]);
+        type_into(&mut state, "aG");
+        assert_eq!(state.filtered_suggestions, vec!["Age"]);
+        state.focus = FilterFocus::Value;
+        type_into(&mut state, "30");
+        state.add_filter();
+        assert_eq!(state.filtered_suggestions.len(), 3);
+        state.apply_suggestion();
+        assert_eq!(state.field_input.value(), "name");
     }
 
     #[test]
@@ -795,10 +733,13 @@ mod tests {
 
         assert_eq!(state.filters.len(), 1);
         assert_eq!(state.selected_filter, 0);
-        assert_eq!(state.field_input, "város");
-        assert_eq!(state.value_input, "Győ");
+        assert_eq!(state.field_input.value(), "város");
+        assert_eq!(state.value_input.value(), "Győ");
         // Cursors are character positions
-        assert_eq!((state.field_cursor, state.value_cursor), (5, 3));
+        assert_eq!(
+            (state.field_input.cursor(), state.value_input.cursor()),
+            (5, 3)
+        );
         assert_eq!(state.operator, FilterOperator::StartsWith);
         assert_eq!(FilterOperator::all()[state.operator_idx], state.operator);
         assert_eq!(state.focus, FilterFocus::Field);
@@ -836,39 +777,50 @@ mod tests {
     #[test]
     fn test_input_editing_with_multibyte() {
         let mut state = FilterState::new();
-        for c in "név".chars() {
-            state.insert_char(c);
-        }
-        assert_eq!((state.field_input.as_str(), state.field_cursor), ("név", 3));
-        state.cursor_left();
-        state.backspace();
-        assert_eq!((state.field_input.as_str(), state.field_cursor), ("nv", 1));
-        state.cursor_home();
-        state.backspace();
-        assert_eq!(state.field_input, "nv");
-        state.insert_char('ű');
-        assert_eq!(state.field_input, "űnv");
-        state.cursor_end();
-        state.cursor_right();
-        assert_eq!(state.field_cursor, 3);
+        type_into(&mut state, "név");
+        assert_eq!(
+            (state.field_input.value(), state.field_input.cursor()),
+            ("név", 3)
+        );
+        key(&mut state, KeyCode::Left);
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!(
+            (state.field_input.value(), state.field_input.cursor()),
+            ("nv", 1)
+        );
+        key(&mut state, KeyCode::Home);
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!(state.field_input.value(), "nv");
+        key(&mut state, KeyCode::Char('ű'));
+        assert_eq!(state.field_input.value(), "űnv");
+        // Delete removes the character under the cursor
+        key(&mut state, KeyCode::Delete);
+        assert_eq!(state.field_input.value(), "űv");
+        key(&mut state, KeyCode::End);
+        key(&mut state, KeyCode::Right);
+        assert_eq!(state.field_input.cursor(), 2);
 
         // Operator focus: typing goes nowhere
         state.focus = FilterFocus::Operator;
-        state.insert_char('x');
-        state.backspace();
-        assert_eq!(state.field_input, "űnv");
+        assert_eq!(key(&mut state, KeyCode::Char('x')), InputOutcome::Ignored);
+        assert_eq!(key(&mut state, KeyCode::Backspace), InputOutcome::Ignored);
+        assert_eq!(state.field_input.value(), "űv");
 
         state.focus = FilterFocus::Value;
-        for c in "Győr".chars() {
-            state.insert_char(c);
-        }
-        state.cursor_left();
-        state.cursor_left();
-        state.backspace();
-        assert_eq!((state.value_input.as_str(), state.value_cursor), ("Gőr", 1));
-        state.cursor_left();
-        state.cursor_left();
-        assert_eq!(state.value_cursor, 0);
+        type_into(&mut state, "Győr");
+        key(&mut state, KeyCode::Left);
+        key(&mut state, KeyCode::Left);
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!(
+            (state.value_input.value(), state.value_input.cursor()),
+            ("Gőr", 1)
+        );
+        // Ctrl+U clears to the start
+        state.handle_field_input(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(
+            (state.value_input.value(), state.value_input.cursor()),
+            ("őr", 0)
+        );
     }
 
     #[test]
@@ -879,21 +831,25 @@ mod tests {
         assert_eq!(state.filtered_suggestions.len(), 3);
 
         // Case-insensitive substring match
-        state.insert_char('a');
-        state.insert_char('G');
+        type_into(&mut state, "aG");
         assert_eq!(state.filtered_suggestions, vec!["Age"]);
         state.apply_suggestion();
-        assert_eq!((state.field_input.as_str(), state.field_cursor), ("Age", 3));
+        assert_eq!(
+            (state.field_input.value(), state.field_input.cursor()),
+            ("Age", 3)
+        );
         assert!(!state.show_suggestions);
 
         // No match: the list is hidden
-        state.insert_char('z');
+        key(&mut state, KeyCode::Char('z'));
         assert!(state.filtered_suggestions.is_empty());
         assert!(!state.show_suggestions);
 
+        // Any edit refreshes them, not only typing at the end
+        state.handle_field_input(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(state.filtered_suggestions.len(), 3);
+
         // Selection wraps
-        state.field_input.clear();
-        state.field_cursor = 0;
         state.update_suggestions();
         state.suggestion_up();
         assert_eq!(state.suggestion_idx, 2);
@@ -943,16 +899,16 @@ mod tests {
             .filters
             .push(condition("a", FilterOperator::Equals, "1"));
         state.next_sort_field();
-        state.field_input = "x".to_string();
-        state.value_input = "y".to_string();
+        state.field_input.set_value("x");
+        state.value_input.set_value("y");
         state.next_operator();
         state.focus = FilterFocus::Value;
         state.error = Some("hiba".to_string());
 
         state.reset_inputs();
 
-        assert_eq!(state.field_input, "");
-        assert_eq!(state.value_input, "");
+        assert_eq!(state.field_input.value(), "");
+        assert_eq!(state.value_input.value(), "");
         assert_eq!(state.operator, FilterOperator::Equals);
         assert_eq!(state.focus, FilterFocus::Field);
         assert_eq!(state.error, None);
