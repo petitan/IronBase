@@ -382,14 +382,47 @@ mod tests {
         dir.join("nested").join("tuti-tui.log")
     }
 
-    /// Log this test thread's events to `file` at `level`. tracing caches
-    /// each callsite's interest; a callsite first hit by another test thread
-    /// can store one computed from the dispatchers it saw then (a finished
-    /// test's, or none: "never"), and this test's events from it were
-    /// dropped (Windows CI). Recomputing the cache once this subscriber is
-    /// in place gives every registered callsite this test's interest.
+    /// Process-wide subscriber of the test binary: it records nothing and
+    /// answers every callsite with `Interest::sometimes()`.
+    ///
+    /// tracing caches each callsite's interest process-wide, but a test logs
+    /// through a subscriber of its own thread only. A callsite first hit by
+    /// another test thread cached the interest of the dispatchers live then
+    /// (none: "never"), and this test's events from it were dropped (Windows
+    /// and macOS CI: the completion lines were missing, the debug lines that
+    /// came before them were there). With this one installed no callsite is
+    /// "never": every event asks the current thread's subscriber.
+    struct AskEveryEvent;
+
+    impl tracing::Subscriber for AskEveryEvent {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Log this test thread's events to `file` at `level` (see `AskEveryEvent`)
     fn log_to(file: LogFile, level: LevelFilter) -> tracing::subscriber::DefaultGuard {
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            tracing::subscriber::set_global_default(AskEveryEvent)
+                .expect("no other global subscriber in the test binary");
+        });
         let guard = tracing::subscriber::set_default(subscriber(file, level));
+        // Callsites cached before the global one was installed
         tracing::callsite::rebuild_interest_cache();
         guard
     }
