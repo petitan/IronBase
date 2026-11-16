@@ -516,7 +516,7 @@ impl App {
         };
 
         let version = version_info.version;
-        let name = self.script_state.name.clone();
+        let name = self.script_state.name.value().to_string();
         self.confirm = ConfirmState::rollback_script(name, version);
         self.modal = Some(Modal::Confirm);
     }
@@ -798,7 +798,7 @@ impl App {
 
     /// Save current script to MCP server
     pub async fn save_script_async(&mut self) {
-        if self.script_state.name.trim().is_empty() {
+        if self.script_state.name.value().trim().is_empty() {
             self.script_state.error = Some("Script név megadása kötelező".to_string());
             return;
         }
@@ -809,9 +809,9 @@ impl App {
         };
 
         let args = ScriptSaveParams {
-            name: self.script_state.name.clone(),
+            name: self.script_state.name.value().to_string(),
             code: self.script_state.lines.join("\n"),
-            description: Some(self.script_state.description.clone())
+            description: Some(self.script_state.description.value().to_string())
                 .filter(|description| !description.is_empty()),
             tags: Some(self.script_state.tags.clone()).filter(|tags| !tags.is_empty()),
             dependencies: None,
@@ -872,19 +872,20 @@ impl App {
         };
 
         // Parse params
-        let params: Option<serde_json::Value> = if self.script_state.params_input.trim().is_empty()
-            || self.script_state.params_input.trim() == "{}"
-        {
-            None
-        } else {
-            match serde_json::from_str(&self.script_state.params_input) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    self.script_state.error = Some(format!("Hibás JSON paraméterek: {}", e));
-                    return;
+        let params: Option<serde_json::Value> =
+            if self.script_state.params_input.value().trim().is_empty()
+                || self.script_state.params_input.value().trim() == "{}"
+            {
+                None
+            } else {
+                match serde_json::from_str(self.script_state.params_input.value()) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        self.script_state.error = Some(format!("Hibás JSON paraméterek: {}", e));
+                        return;
+                    }
                 }
-            }
-        };
+            };
 
         let start = std::time::Instant::now();
 
@@ -924,7 +925,7 @@ impl App {
 
     /// Load script version history
     pub async fn load_script_history_async(&mut self) {
-        let script_name = self.script_state.name.clone();
+        let script_name = self.script_state.name.value().to_string();
         if script_name.is_empty() || script_name == "[inline]" {
             self.script_state.error = Some("Nincs kiválasztva script".to_string());
             return;
@@ -2883,7 +2884,7 @@ mod tests {
     #[test]
     fn test_rollback_confirm_names_script_and_version() {
         let mut app = App::new(Config::default());
-        app.script_state.name = "cleanup".to_string();
+        app.script_state.name.set_value("cleanup");
         app.script_state.versions = vec![ScriptVersion {
             script_name: "greet".to_string(),
             version: 3,

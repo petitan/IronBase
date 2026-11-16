@@ -190,45 +190,21 @@ pub(crate) async fn handle_script_history_key(app: &mut App, key: KeyCode) {
 
 /// Handle name field keys
 pub(crate) fn handle_script_name_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match (key, modifiers) {
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.script_state.insert_char(c);
+    match key {
+        KeyCode::Enter => app.script_state.next_focus(),
+        _ => {
+            app.script_state.handle_field_input(key, modifiers);
         }
-        (KeyCode::Backspace, _) => {
-            app.script_state.backspace();
-        }
-        (KeyCode::Left, _) => {
-            app.script_state.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.script_state.cursor_right();
-        }
-        (KeyCode::Enter, _) => {
-            app.script_state.next_focus();
-        }
-        _ => {}
     }
 }
 
 /// Handle description field keys
 pub(crate) fn handle_script_desc_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match (key, modifiers) {
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.script_state.insert_char(c);
+    match key {
+        KeyCode::Enter => app.script_state.next_focus(),
+        _ => {
+            app.script_state.handle_field_input(key, modifiers);
         }
-        (KeyCode::Backspace, _) => {
-            app.script_state.backspace();
-        }
-        (KeyCode::Left, _) => {
-            app.script_state.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.script_state.cursor_right();
-        }
-        (KeyCode::Enter, _) => {
-            app.script_state.next_focus();
-        }
-        _ => {}
     }
 }
 
@@ -236,25 +212,17 @@ pub(crate) fn handle_script_desc_key(app: &mut App, key: KeyCode, modifiers: Key
 pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     if app.script_state.tag_input_active {
         // Typing new tag
-        match (key, modifiers) {
-            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-                app.script_state.tag_input.push(c);
+        match key {
+            // Backspace on an empty tag leaves the input
+            KeyCode::Backspace if app.script_state.tag_input.is_empty() => {
+                app.script_state.tag_input_active = false;
             }
-            (KeyCode::Backspace, _) => {
-                if app.script_state.tag_input.is_empty() {
-                    app.script_state.tag_input_active = false;
-                } else {
-                    app.script_state.tag_input.pop();
-                }
-            }
-            (KeyCode::Enter, _) => {
+            KeyCode::Enter => {
                 app.script_state.add_tag();
             }
-            (KeyCode::Esc, _) => {
-                app.script_state.tag_input_active = false;
-                app.script_state.tag_input.clear();
+            _ => {
+                app.script_state.handle_field_input(key, modifiers);
             }
-            _ => {}
         }
     } else {
         // Navigating tags
@@ -343,19 +311,5 @@ pub(crate) fn handle_script_editor_key(app: &mut App, key: KeyCode, modifiers: K
 
 /// Handle params field keys
 pub(crate) fn handle_script_params_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match (key, modifiers) {
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.script_state.insert_char(c);
-        }
-        (KeyCode::Backspace, _) => {
-            app.script_state.backspace();
-        }
-        (KeyCode::Left, _) => {
-            app.script_state.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.script_state.cursor_right();
-        }
-        _ => {}
-    }
+    app.script_state.handle_field_input(key, modifiers);
 }

@@ -1,5 +1,7 @@
 //! IronRhai Script Editor State
 
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 use serde_json::Value;
 
 /// Script mode - browse, edit, new, history, inline
@@ -58,19 +60,16 @@ pub struct ScriptState {
     pub scroll_offset: usize,
 
     // Metadata
-    pub name: String,
-    pub name_cursor: usize,
-    pub description: String,
-    pub desc_cursor: usize,
+    pub name: TextInput,
+    pub description: TextInput,
     pub tags: Vec<String>,
     pub selected_tag: usize,
-    pub tag_input: String,
+    pub tag_input: TextInput,
     pub tag_input_active: bool,
     pub version: u32,
 
     // Execution
-    pub params_input: String,
-    pub params_cursor: usize,
+    pub params_input: TextInput,
     pub result: Option<ScriptResult>,
 
     // UI state
@@ -98,17 +97,14 @@ impl Default for ScriptState {
             cursor_line: 1,
             cursor_col: 0,
             scroll_offset: 0,
-            name: String::new(),
-            name_cursor: 0,
-            description: String::new(),
-            desc_cursor: 0,
+            name: TextInput::default(),
+            description: TextInput::default(),
             tags: Vec::new(),
             selected_tag: 0,
-            tag_input: String::new(),
+            tag_input: TextInput::default(),
             tag_input_active: false,
             version: 0,
-            params_input: "{}".to_string(),
-            params_cursor: 2,
+            params_input: TextInput::new("{}"),
             result: None,
             focus: ScriptFocus::List,
             mode: ScriptMode::Browse,
@@ -149,15 +145,12 @@ impl ScriptState {
         self.cursor_col = 0;
         self.scroll_offset = 0;
         self.name.clear();
-        self.name_cursor = 0;
         self.description.clear();
-        self.desc_cursor = 0;
         self.tags.clear();
         self.tag_input.clear();
         self.tag_input_active = false;
         self.version = 0;
-        self.params_input = "{}".to_string();
-        self.params_cursor = 2;
+        self.params_input.set_value("{}");
         self.result = None;
         self.error = None;
         self.message = None;
@@ -182,10 +175,8 @@ impl ScriptState {
         self.cursor_line = 0;
         self.cursor_col = 0;
         self.scroll_offset = 0;
-        self.name = name;
-        self.name_cursor = self.name.chars().count();
-        self.description = desc.unwrap_or_default();
-        self.desc_cursor = self.description.chars().count();
+        self.name.set_value(name);
+        self.description.set_value(desc.unwrap_or_default());
         self.tags = tags;
         self.selected_tag = 0;
         self.tag_input.clear();
@@ -212,7 +203,7 @@ impl ScriptState {
         self.cursor_line = 1;
         self.cursor_col = 0;
         self.scroll_offset = 0;
-        self.name = "[inline]".to_string();
+        self.name.set_value("[inline]");
         self.description.clear();
         self.tags.clear();
         self.version = 0;
@@ -223,123 +214,71 @@ impl ScriptState {
 
     // === Editor operations ===
 
-    pub fn insert_char(&mut self, c: char) {
-        match self.focus {
-            ScriptFocus::Name => {
-                let byte_pos = self
-                    .name
-                    .char_indices()
-                    .nth(self.name_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.name.len());
-                self.name.insert(byte_pos, c);
-                self.name_cursor += 1;
-                self.dirty = true;
-            }
-            ScriptFocus::Description => {
-                let byte_pos = self
-                    .description
-                    .char_indices()
-                    .nth(self.desc_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.description.len());
-                self.description.insert(byte_pos, c);
-                self.desc_cursor += 1;
-                self.dirty = true;
-            }
+    /// A key for the focused one-line field (name, description, the tag
+    /// being typed, params); a change clears the error, and a change of the
+    /// name or description makes the script dirty
+    pub fn handle_field_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = match self.focus {
+            ScriptFocus::Name => self.name.handle_key(code, modifiers),
+            ScriptFocus::Description => self.description.handle_key(code, modifiers),
             ScriptFocus::Tags if self.tag_input_active => {
-                self.tag_input.push(c);
+                self.tag_input.handle_key(code, modifiers)
             }
-            ScriptFocus::Editor => {
-                if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                    let char_count = line.chars().count();
-                    if self.cursor_col <= char_count {
-                        let byte_pos = line
-                            .char_indices()
-                            .nth(self.cursor_col)
-                            .map(|(i, _)| i)
-                            .unwrap_or(line.len());
-                        line.insert(byte_pos, c);
-                        self.cursor_col += 1;
-                        self.dirty = true;
-                    }
+            ScriptFocus::Params => self.params_input.handle_key(code, modifiers),
+            _ => InputOutcome::Ignored,
+        };
+        if outcome == InputOutcome::Changed {
+            if matches!(self.focus, ScriptFocus::Name | ScriptFocus::Description) {
+                self.dirty = true;
+            }
+            self.error = None;
+        }
+        outcome
+    }
+
+    /// Type `c` into the code editor
+    pub fn insert_char(&mut self, c: char) {
+        if self.focus == ScriptFocus::Editor {
+            if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                let char_count = line.chars().count();
+                if self.cursor_col <= char_count {
+                    let byte_pos = line
+                        .char_indices()
+                        .nth(self.cursor_col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    line.insert(byte_pos, c);
+                    self.cursor_col += 1;
+                    self.dirty = true;
                 }
             }
-            ScriptFocus::Params => {
-                let byte_pos = self
-                    .params_input
-                    .char_indices()
-                    .nth(self.params_cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.params_input.len());
-                self.params_input.insert(byte_pos, c);
-                self.params_cursor += 1;
-            }
-            _ => {}
         }
         self.error = None;
     }
 
+    /// Backspace in the code editor (joins lines at a line start)
     pub fn backspace(&mut self) {
-        match self.focus {
-            ScriptFocus::Name if self.name_cursor > 0 => {
-                let byte_pos = self
-                    .name
-                    .char_indices()
-                    .nth(self.name_cursor - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.name.remove(byte_pos);
-                self.name_cursor -= 1;
-                self.dirty = true;
-            }
-            ScriptFocus::Description if self.desc_cursor > 0 => {
-                let byte_pos = self
-                    .description
-                    .char_indices()
-                    .nth(self.desc_cursor - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.description.remove(byte_pos);
-                self.desc_cursor -= 1;
-                self.dirty = true;
-            }
-            ScriptFocus::Tags if self.tag_input_active => {
-                self.tag_input.pop();
-            }
-            ScriptFocus::Editor => {
-                if self.cursor_col > 0 {
-                    if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                        let byte_pos = line
-                            .char_indices()
-                            .nth(self.cursor_col - 1)
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        line.remove(byte_pos);
-                        self.cursor_col -= 1;
-                        self.dirty = true;
-                    }
-                } else if self.cursor_line > 0 {
-                    let current_line = self.lines.remove(self.cursor_line);
-                    self.cursor_line -= 1;
-                    if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
-                        self.cursor_col = prev_line.chars().count();
-                        prev_line.push_str(&current_line);
-                    }
+        if self.focus == ScriptFocus::Editor {
+            if self.cursor_col > 0 {
+                if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                    let byte_pos = line
+                        .char_indices()
+                        .nth(self.cursor_col - 1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    line.remove(byte_pos);
+                    self.cursor_col -= 1;
                     self.dirty = true;
                 }
+            } else if self.cursor_line > 0 {
+                let current_line = self.lines.remove(self.cursor_line);
+                self.cursor_line -= 1;
+                if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
+                    self.cursor_col = prev_line.chars().count();
+                    prev_line.push_str(&current_line);
+                }
+                self.dirty = true;
             }
-            ScriptFocus::Params if self.params_cursor > 0 => {
-                let byte_pos = self
-                    .params_input
-                    .char_indices()
-                    .nth(self.params_cursor - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.params_input.remove(byte_pos);
-                self.params_cursor -= 1;
-            }
-            _ => {}
         }
         self.error = None;
     }
@@ -372,51 +311,33 @@ impl ScriptState {
     // === Cursor navigation ===
 
     pub fn cursor_left(&mut self) {
-        match self.focus {
-            ScriptFocus::Name if self.name_cursor > 0 => self.name_cursor -= 1,
-            ScriptFocus::Description if self.desc_cursor > 0 => self.desc_cursor -= 1,
-            ScriptFocus::Editor => {
-                if self.cursor_col > 0 {
-                    self.cursor_col -= 1;
-                } else if self.cursor_line > 0 {
-                    self.cursor_line -= 1;
-                    self.cursor_col = self
-                        .lines
-                        .get(self.cursor_line)
-                        .map(|l| l.chars().count())
-                        .unwrap_or(0);
-                }
-            }
-            ScriptFocus::Params if self.params_cursor > 0 => self.params_cursor -= 1,
-            _ => {}
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        match self.focus {
-            ScriptFocus::Name if self.name_cursor < self.name.chars().count() => {
-                self.name_cursor += 1
-            }
-            ScriptFocus::Description if self.desc_cursor < self.description.chars().count() => {
-                self.desc_cursor += 1
-            }
-            ScriptFocus::Editor => {
-                let char_count = self
+        if self.focus == ScriptFocus::Editor {
+            if self.cursor_col > 0 {
+                self.cursor_col -= 1;
+            } else if self.cursor_line > 0 {
+                self.cursor_line -= 1;
+                self.cursor_col = self
                     .lines
                     .get(self.cursor_line)
                     .map(|l| l.chars().count())
                     .unwrap_or(0);
-                if self.cursor_col < char_count {
-                    self.cursor_col += 1;
-                } else if self.cursor_line + 1 < self.lines.len() {
-                    self.cursor_line += 1;
-                    self.cursor_col = 0;
-                }
             }
-            ScriptFocus::Params if self.params_cursor < self.params_input.chars().count() => {
-                self.params_cursor += 1
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.focus == ScriptFocus::Editor {
+            let char_count = self
+                .lines
+                .get(self.cursor_line)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
+            if self.cursor_col < char_count {
+                self.cursor_col += 1;
+            } else if self.cursor_line + 1 < self.lines.len() {
+                self.cursor_line += 1;
+                self.cursor_col = 0;
             }
-            _ => {}
         }
     }
 
@@ -485,28 +406,18 @@ impl ScriptState {
     }
 
     pub fn cursor_home(&mut self) {
-        match self.focus {
-            ScriptFocus::Name => self.name_cursor = 0,
-            ScriptFocus::Description => self.desc_cursor = 0,
-            ScriptFocus::Editor => self.cursor_col = 0,
-            ScriptFocus::Params => self.params_cursor = 0,
-            _ => {}
+        if self.focus == ScriptFocus::Editor {
+            self.cursor_col = 0;
         }
     }
 
     pub fn cursor_end(&mut self) {
-        match self.focus {
-            ScriptFocus::Name => self.name_cursor = self.name.chars().count(),
-            ScriptFocus::Description => self.desc_cursor = self.description.chars().count(),
-            ScriptFocus::Editor => {
-                self.cursor_col = self
-                    .lines
-                    .get(self.cursor_line)
-                    .map(|l| l.chars().count())
-                    .unwrap_or(0);
-            }
-            ScriptFocus::Params => self.params_cursor = self.params_input.chars().count(),
-            _ => {}
+        if self.focus == ScriptFocus::Editor {
+            self.cursor_col = self
+                .lines
+                .get(self.cursor_line)
+                .map(|l| l.chars().count())
+                .unwrap_or(0);
         }
     }
 
@@ -544,7 +455,7 @@ impl ScriptState {
 
     pub fn add_tag(&mut self) {
         if !self.tag_input.is_empty() {
-            let tag = self.tag_input.trim().to_string();
+            let tag = self.tag_input.value().trim().to_string();
             if !self.tags.contains(&tag) {
                 self.tags.push(tag);
                 self.dirty = true;
@@ -673,35 +584,40 @@ mod tests {
         assert_eq!(state.cursor_col, 0);
     }
 
+    fn key(state: &mut ScriptState, code: KeyCode) -> InputOutcome {
+        state.handle_field_input(code, KeyModifiers::NONE)
+    }
+
+    fn type_into(state: &mut ScriptState, text: &str) {
+        for c in text.chars() {
+            key(state, KeyCode::Char(c));
+        }
+    }
+
     #[test]
     fn test_name_and_description_editing_with_multibyte() {
         let mut state = ScriptState::new();
         state.start_new();
         assert_eq!(state.focus, ScriptFocus::Name);
-        for c in "név".chars() {
-            state.insert_char(c);
-        }
-        assert_eq!((state.name.as_str(), state.name_cursor), ("név", 3));
-        state.cursor_left();
-        state.backspace();
-        assert_eq!((state.name.as_str(), state.name_cursor), ("nv", 1));
-        state.cursor_home();
-        state.backspace();
-        assert_eq!(state.name, "nv");
-        state.cursor_end();
-        state.cursor_right();
-        assert_eq!(state.name_cursor, 2);
+        type_into(&mut state, "név");
+        assert_eq!((state.name.value(), state.name.cursor()), ("név", 3));
+        key(&mut state, KeyCode::Left);
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!((state.name.value(), state.name.cursor()), ("nv", 1));
+        key(&mut state, KeyCode::Home);
+        assert_eq!(key(&mut state, KeyCode::Backspace), InputOutcome::Moved);
+        assert_eq!(state.name.value(), "nv");
         assert!(state.dirty);
 
         state.next_focus();
         assert_eq!(state.focus, ScriptFocus::Description);
-        state.insert_char('é');
-        state.insert_char('k');
-        state.cursor_left();
-        state.cursor_left();
-        state.cursor_left();
-        state.insert_char('ű');
-        assert_eq!((state.description.as_str(), state.desc_cursor), ("űék", 1));
+        type_into(&mut state, "ék");
+        key(&mut state, KeyCode::Home);
+        type_into(&mut state, "ű");
+        assert_eq!(
+            (state.description.value(), state.description.cursor()),
+            ("űék", 1)
+        );
     }
 
     /// Params start as "{}" with the cursor after it; editing them does not
@@ -712,15 +628,15 @@ mod tests {
         state.start_new();
         state.focus = ScriptFocus::Params;
         assert_eq!(
-            (state.params_input.as_str(), state.params_cursor),
+            (state.params_input.value(), state.params_input.cursor()),
             ("{}", 2)
         );
-        state.cursor_left();
-        state.insert_char('é');
-        assert_eq!(state.params_input, "{é}");
-        state.backspace();
+        key(&mut state, KeyCode::Left);
+        type_into(&mut state, "é");
+        assert_eq!(state.params_input.value(), "{é}");
+        key(&mut state, KeyCode::Backspace);
         assert_eq!(
-            (state.params_input.as_str(), state.params_cursor),
+            (state.params_input.value(), state.params_input.cursor()),
             ("{}", 1)
         );
         assert!(!state.dirty);
@@ -733,24 +649,22 @@ mod tests {
         state.focus = ScriptFocus::Tags;
 
         // Typing only reaches the tag input while it is active
-        state.insert_char('x');
-        assert_eq!(state.tag_input, "");
+        assert_eq!(key(&mut state, KeyCode::Char('x')), InputOutcome::Ignored);
+        assert_eq!(state.tag_input.value(), "");
         state.tag_input_active = true;
-        for c in " etl ".chars() {
-            state.insert_char(c);
-        }
-        state.backspace();
-        assert_eq!(state.tag_input, " etl");
+        type_into(&mut state, " etl ");
+        key(&mut state, KeyCode::Backspace);
+        assert_eq!(state.tag_input.value(), " etl");
         state.add_tag();
         assert_eq!(state.tags, vec!["etl"]);
         assert!(!state.tag_input_active);
         assert!(state.dirty);
 
         // A duplicate is dropped, the input is cleared all the same
-        state.tag_input = "etl".to_string();
+        state.tag_input.set_value("etl");
         state.add_tag();
         assert_eq!(state.tags, vec!["etl"]);
-        assert_eq!(state.tag_input, "");
+        assert_eq!(state.tag_input.value(), "");
 
         // Name -> Description -> Tags -> Editor -> Params -> Name
         state.focus = ScriptFocus::Name;
@@ -790,7 +704,7 @@ mod tests {
         assert_eq!(state.mode, ScriptMode::Edit);
         assert_eq!(state.focus, ScriptFocus::Editor);
         assert_eq!(state.lines, vec!["let a = 1;", "let b = 2;"]);
-        assert_eq!((state.name_cursor, state.desc_cursor), (7, 6));
+        assert_eq!((state.name.cursor(), state.description.cursor()), (7, 6));
         assert_eq!(state.version, 3);
         assert!(!state.dirty);
 
@@ -800,7 +714,7 @@ mod tests {
 
         state.enter_inline();
         assert_eq!(state.mode, ScriptMode::Inline);
-        assert_eq!(state.name, "[inline]");
+        assert_eq!(state.name.value(), "[inline]");
         assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
 
         state.insert_char('x');

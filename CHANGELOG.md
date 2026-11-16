@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: the script name, description, tag and params fields edit at the cursor (ironbase-core 0.3.479)
+
+Phase 3d of the Tuti TUI overhaul.
+
+- **Script name, description, the tag being typed and the params:** Home / End and Delete did nothing, the tag
+  took characters only at its end, and a Ctrl chord typed its letter. They now use the shared `TextInput`
+  (readline keys, the terminal's cursor; the tag's cursor sits inside its chip). Editing the name or the
+  description still marks the script changed; the params do not. The script state's three cursor fields and
+  the focus branches of the code editor's editing methods for these fields are gone.
+- `TextInput::render_labeled` draws a label and the input beside it: the database, new collection, export,
+  index and ACL modals each laid this out by hand and now use it.
+
 ### Fixed — Tuti TUI: the API key, ACL, listener and vector inputs edit at the cursor (ironbase-core 0.3.478)
 
 Phase 3c of the Tuti TUI overhaul: four more modals use the shared `TextInput`.
@@ -18,8 +30,8 @@ Phase 3c of the Tuti TUI overhaul: four more modals use the shared `TextInput`.
   vector now scrolls in its field.
 - The ACL editor keeps its rules as data: the typed value lives in the modal's input and is mirrored into
   the rule being added (a new rule, or a principal type switch, resets the input to the type's default).
-- In the vector search tab Up / Down and `j` / `k` stay the result keys; the dimension field still takes
-  digits only.
+- In the vector search tab Up / Down, `j` / `k` and Ctrl+J / Ctrl+K stay the result keys (as in the fulltext
+  modal), so the input's Ctrl+K does not apply there; the dimension field still takes digits only.
 
 ### Fixed — a multikey index counted a document once per key after a reopen (ironbase-core 0.3.477, mcp-server 1.0.672)
 

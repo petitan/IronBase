@@ -29,17 +29,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &NewCollectionState, theme: 
     frame.render_widget(help, chunks[0]);
 
     // Name input
-    let label = " Nev: ";
-    let [label_area, input_area] =
-        Layout::horizontal([Constraint::Length(label.len() as u16), Constraint::Min(1)])
-            .areas(chunks[1]);
-    frame.render_widget(
-        Paragraph::new(Span::styled(label, Style::default().fg(theme.muted))),
-        label_area,
+    state.name.render_labeled(
+        frame,
+        chunks[1],
+        Span::styled(" Nev: ", Style::default().fg(theme.muted)),
+        Style::default().fg(theme.fg),
+        true,
     );
-    state
-        .name
-        .render(frame, input_area, Style::default().fg(theme.fg), true);
 
     // Status/error
     let status_text = if let Some(ref err) = state.error {

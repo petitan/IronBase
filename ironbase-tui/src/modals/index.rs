@@ -261,15 +261,10 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
     } else {
         " Mezo neve: "
     };
-    let [label_area, input_area] = Layout::horizontal([
-        Constraint::Length(field_label.len() as u16),
-        Constraint::Min(1),
-    ])
-    .areas(form_chunks[0]);
-    frame.render_widget(Paragraph::new(field_label), label_area);
-    state.field_input.render(
+    state.field_input.render_labeled(
         frame,
-        input_area,
+        form_chunks[0],
+        field_label,
         field_style,
         state.is_creating && state.form_field == 0,
     );
