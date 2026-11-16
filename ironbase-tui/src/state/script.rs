@@ -134,6 +134,13 @@ impl ScriptState {
         self.message = None;
         self.dirty = false;
         self.confirm_action = None;
+        self.stop_tag_typing();
+    }
+
+    /// Leave the tag being typed (a mode change must not carry it over)
+    fn stop_tag_typing(&mut self) {
+        self.tag_input.clear();
+        self.tag_input_active = false;
     }
 
     /// Start new script
@@ -147,8 +154,8 @@ impl ScriptState {
         self.name.clear();
         self.description.clear();
         self.tags.clear();
-        self.tag_input.clear();
-        self.tag_input_active = false;
+        self.selected_tag = 0;
+        self.stop_tag_typing();
         self.version = 0;
         self.params_input.set_value("{}");
         self.result = None;
@@ -179,8 +186,7 @@ impl ScriptState {
         self.description.set_value(desc.unwrap_or_default());
         self.tags = tags;
         self.selected_tag = 0;
-        self.tag_input.clear();
-        self.tag_input_active = false;
+        self.stop_tag_typing();
         self.version = version;
         self.result = None;
         self.error = None;
@@ -206,6 +212,8 @@ impl ScriptState {
         self.name.set_value("[inline]");
         self.description.clear();
         self.tags.clear();
+        self.selected_tag = 0;
+        self.stop_tag_typing();
         self.version = 0;
         self.result = None;
         self.error = None;
@@ -390,7 +398,7 @@ impl ScriptState {
             ScriptFocus::Params => ScriptFocus::Name,
             other => other,
         };
-        self.tag_input_active = false;
+        self.stop_tag_typing();
     }
 
     pub fn prev_focus(&mut self) {
@@ -402,7 +410,7 @@ impl ScriptState {
             ScriptFocus::Params => ScriptFocus::Editor,
             other => other,
         };
-        self.tag_input_active = false;
+        self.stop_tag_typing();
     }
 
     pub fn cursor_home(&mut self) {
@@ -640,6 +648,20 @@ mod tests {
             ("{}", 1)
         );
         assert!(!state.dirty);
+    }
+
+    #[test]
+    fn test_mode_change_leaves_the_tag_being_typed() {
+        for leave in [ScriptState::reset_to_browse, ScriptState::enter_inline] {
+            let mut state = ScriptState::new();
+            state.start_new();
+            state.focus = ScriptFocus::Tags;
+            state.tag_input_active = true;
+            type_into(&mut state, "ab");
+            leave(&mut state);
+            assert!(!state.tag_input_active);
+            assert_eq!(state.tag_input.value(), "");
+        }
     }
 
     #[test]

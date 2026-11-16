@@ -16,6 +16,10 @@ Phase 3d of the Tuti TUI overhaul.
   (readline keys, the terminal's cursor; the tag's cursor sits inside its chip). Editing the name or the
   description still marks the script changed; the params do not. The script state's three cursor fields and
   the focus branches of the code editor's editing methods for these fields are gone.
+- **A half-typed tag** stayed in the tag input across leaving the editor, switching to an inline script or
+  moving the focus, and reappeared on the next `[+]`; with the terminal cursor now in its chip, it would have
+  put the cursor in the tags row while the code editor had the focus. Leaving the tag field, the editor or
+  the mode now drops it.
 - `TextInput::render_labeled` draws a label and the input beside it: the database, new collection, export,
   index and ACL modals each laid this out by hand and now use it.
 
