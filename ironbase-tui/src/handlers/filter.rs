@@ -73,30 +73,25 @@ pub(crate) async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifie
             }
         }
 
-        // Left arrow - cursor left in text fields, prev operator in Operator focus, prev sort field
-        (KeyCode::Left, _) => match app.filter_state.focus {
-            FilterFocus::Operator => app.filter_state.prev_operator(),
-            FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_left(),
-            FilterFocus::SortField => app.filter_state.prev_sort_field(),
-            _ => {}
-        },
-
-        // Right arrow - cursor right in text fields, next operator in Operator focus, next sort field
-        (KeyCode::Right, _) => match app.filter_state.focus {
-            FilterFocus::Operator => app.filter_state.next_operator(),
-            FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_right(),
-            FilterFocus::SortField => app.filter_state.next_sort_field(),
-            _ => {}
-        },
+        // Left / Right - pick the operator or the sort field (in the text
+        // inputs they move the cursor, below)
+        (KeyCode::Left, _) if app.filter_state.focus == FilterFocus::Operator => {
+            app.filter_state.prev_operator();
+        }
+        (KeyCode::Left, _) if app.filter_state.focus == FilterFocus::SortField => {
+            app.filter_state.prev_sort_field();
+        }
+        (KeyCode::Right, _) if app.filter_state.focus == FilterFocus::Operator => {
+            app.filter_state.next_operator();
+        }
+        (KeyCode::Right, _) if app.filter_state.focus == FilterFocus::SortField => {
+            app.filter_state.next_sort_field();
+        }
 
         // Space - toggle sort direction in SortField focus
         (KeyCode::Char(' '), _) if app.filter_state.focus == FilterFocus::SortField => {
             app.filter_state.toggle_sort_direction();
         }
-
-        // Home/End - cursor to start/end of text
-        (KeyCode::Home, _) => app.filter_state.cursor_home(),
-        (KeyCode::End, _) => app.filter_state.cursor_end(),
 
         // Ctrl+Up/Down - move filter up/down in list
         (KeyCode::Up, KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
@@ -156,21 +151,9 @@ pub(crate) async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifie
             app.filter_state.remove_selected_filter();
         }
 
-        // Backspace - delete character
-        (KeyCode::Backspace, _) => {
-            app.filter_state.backspace();
+        // The field name and value inputs take the rest
+        _ => {
+            app.filter_state.handle_field_input(key, modifiers);
         }
-
-        // Character input - only for Field and Value focus
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            match app.filter_state.focus {
-                FilterFocus::Field | FilterFocus::Value => {
-                    app.filter_state.insert_char(c);
-                }
-                _ => {}
-            }
-        }
-
-        _ => {}
     }
 }

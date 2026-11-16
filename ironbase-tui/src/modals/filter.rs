@@ -99,29 +99,21 @@ fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let display = if is_focused {
-        // UTF-8 safe slicing using character positions
-        let before: String = state.field_input.chars().take(state.field_cursor).collect();
-        let after: String = state.field_input.chars().skip(state.field_cursor).collect();
-        format!("{}|{}", before, after)
-    } else if state.field_input.is_empty() {
-        if state.all_fields.is_empty() {
-            "pl: name, age, email...".to_string()
+    if is_focused || !state.field_input.is_empty() {
+        state
+            .field_input
+            .render(frame, inner, Style::default().fg(theme.fg), is_focused);
+    } else {
+        let placeholder = if state.all_fields.is_empty() {
+            "pl: name, age, email..."
         } else {
-            "gepelj vagy nyilakkal valassz...".to_string()
-        }
-    } else {
-        state.field_input.clone()
-    };
-
-    let style = if state.field_input.is_empty() && !is_focused {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    };
-
-    let p = Paragraph::new(display).style(style);
-    frame.render_widget(p, inner);
+            "gepelj vagy nyilakkal valassz..."
+        };
+        frame.render_widget(
+            Paragraph::new(placeholder).style(Style::default().fg(theme.muted)),
+            inner,
+        );
+    }
 }
 
 fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
@@ -231,25 +223,16 @@ fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let display = if is_focused {
-        // UTF-8 safe slicing using character positions
-        let before: String = state.value_input.chars().take(state.value_cursor).collect();
-        let after: String = state.value_input.chars().skip(state.value_cursor).collect();
-        format!("{}|{}", before, after)
-    } else if state.value_input.is_empty() {
-        "keresett ertek...".to_string()
+    if is_focused || !state.value_input.is_empty() {
+        state
+            .value_input
+            .render(frame, inner, Style::default().fg(theme.fg), is_focused);
     } else {
-        state.value_input.clone()
-    };
-
-    let style = if state.value_input.is_empty() && !is_focused {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    };
-
-    let p = Paragraph::new(display).style(style);
-    frame.render_widget(p, inner);
+        frame.render_widget(
+            Paragraph::new("keresett ertek...").style(Style::default().fg(theme.muted)),
+            inner,
+        );
+    }
 }
 
 fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
