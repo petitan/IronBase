@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: the RAG modal's single-line inputs edit at the cursor (ironbase-core 0.3.481)
+
+Phase 3f of the Tuti TUI overhaul: every single-line input the TUI types into now uses the shared `TextInput`.
+
+- **RAG search query, import title, the create form's collection name, embedding field and text field, the
+  embed test text:** they took characters only at their end (`push` / `pop`); the arrows, Home / End and
+  Delete did nothing, and a Ctrl chord was dropped. They now edit at the cursor, with the readline keys and the
+  terminal's cursor instead of a drawn `|`; a long value scrolls in its box. An edit clears the error, as
+  typing did. Up / Down and Ctrl+J / K still move in the search results, Space still toggles the provider and
+  the language; the import content (multi-line) is unchanged until the `TextArea`.
+- On the search tab Ctrl+K moves up in the results while there are any, as in the fulltext and vector
+  modals; with no results it deletes to the end of the query.
+- `TextInput::render_with_placeholder` draws the placeholder while an input is empty, focused too (the
+  terminal's cursor at its start); the filter and RAG modals use it, so their hints stay visible.
+- The RAG import tab's and create form's help said `[Ctrl+Tab] Fields`; the fields move with Tab (terminals
+  do not send Ctrl+Tab), and the help now says so.
+
 ### Fixed — Tuti TUI: the filter's field and value inputs edit at the cursor (ironbase-core 0.3.480)
 
 Phase 3e of the Tuti TUI overhaul.

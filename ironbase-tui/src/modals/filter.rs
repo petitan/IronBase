@@ -99,21 +99,18 @@ fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if is_focused || !state.field_input.is_empty() {
-        state
-            .field_input
-            .render(frame, inner, Style::default().fg(theme.fg), is_focused);
+    let placeholder = if state.all_fields.is_empty() {
+        "pl: name, age, email..."
     } else {
-        let placeholder = if state.all_fields.is_empty() {
-            "pl: name, age, email..."
-        } else {
-            "gepelj vagy nyilakkal valassz..."
-        };
-        frame.render_widget(
-            Paragraph::new(placeholder).style(Style::default().fg(theme.muted)),
-            inner,
-        );
-    }
+        "gepelj vagy nyilakkal valassz..."
+    };
+    state.field_input.render_with_placeholder(
+        frame,
+        inner,
+        Style::default().fg(theme.fg),
+        Span::styled(placeholder, Style::default().fg(theme.muted)),
+        is_focused,
+    );
 }
 
 fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
@@ -223,16 +220,13 @@ fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if is_focused || !state.value_input.is_empty() {
-        state
-            .value_input
-            .render(frame, inner, Style::default().fg(theme.fg), is_focused);
-    } else {
-        frame.render_widget(
-            Paragraph::new("keresett ertek...").style(Style::default().fg(theme.muted)),
-            inner,
-        );
-    }
+    state.value_input.render_with_placeholder(
+        frame,
+        inner,
+        Style::default().fg(theme.fg),
+        Span::styled("keresett ertek...", Style::default().fg(theme.muted)),
+        is_focused,
+    );
 }
 
 fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
