@@ -162,16 +162,16 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ConnectionType::Unknown => ("?", theme.muted),
     };
 
-    // Build spans
+    // The connection first: on a narrow terminal the end of the line is cut,
+    // and `[EXT]` is a warning that must stay visible
     let spans = vec![
-        Span::styled(db_info, Style::default().fg(theme.accent).bold()),
-        Span::raw(" | "),
-        Span::styled(pane_name, Style::default().fg(theme.fg)),
-        Span::raw(" | "),
         Span::styled(
-            format!("[{}]", conn_text),
+            format!(" [{}]", conn_text),
             Style::default().fg(conn_color).bold(),
         ),
+        Span::styled(db_info, Style::default().fg(theme.accent).bold()),
+        Span::raw("| "),
+        Span::styled(pane_name, Style::default().fg(theme.fg)),
     ];
 
     let line = Line::from(spans).patch_style(header_style);
@@ -232,18 +232,9 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
         }
     };
 
+    // The error / status first: on a narrow terminal the end of the bar is
+    // cut, and the message matters more than the key hints
     let mut spans = Vec::new();
-    spans.push(Span::raw(" "));
-
-    for (key, action) in commands {
-        spans.push(Span::styled(
-            format!("[{}]", key),
-            Style::default().fg(theme.accent),
-        ));
-        spans.push(Span::raw(format!(" {} ", action)));
-    }
-
-    // Add error/status message if present
     if let Some(ref err) = app.error_message {
         // Truncate long errors for status bar display (UTF-8 safe)
         let max_err_len = 50;
@@ -258,17 +249,26 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             Style::default().fg(theme.error),
         ));
         // Add hint to open error detail modal
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[e]", Style::default().fg(theme.accent)));
+        spans.push(Span::styled(" [e]", Style::default().fg(theme.accent)));
         spans.push(Span::styled(
             t().bar_error_details(),
             Style::default().fg(theme.muted),
         ));
+        spans.push(Span::raw(" |"));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
-            format!(" | {}", msg),
+            format!(" {} |", msg),
             Style::default().fg(theme.muted),
         ));
+    }
+    spans.push(Span::raw(" "));
+
+    for (key, action) in commands {
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(theme.accent),
+        ));
+        spans.push(Span::raw(format!(" {} ", action)));
     }
 
     let line = Line::from(spans).patch_style(bar_style);
@@ -281,6 +281,27 @@ mod tests {
     use crate::config::Config;
     use crate::db::CollectionInfo;
     use ratatui::{backend::TestBackend, Terminal};
+
+    /// The connection warning is the first thing in the header: a long
+    /// database name or a longer translation cuts the end of the line on an
+    /// 80-column terminal, not `[EXT]`
+    #[test]
+    fn test_header_keeps_the_connection_type_visible() {
+        let mut app = App::new(Config::default());
+        app.connection_type = ConnectionType::External;
+        app.db_path = Some(std::path::PathBuf::from(
+            "/data/a_rather_long_database_name.mlite",
+        ));
+        app.collections = (0..5)
+            .map(|i| CollectionInfo::unloaded(format!("coll{}", i)))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render_ui(f, &app)).unwrap();
+        let header: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(header.contains("[EXT]"), "{header}");
+    }
 
     /// Rendering must survive any terminal size: `visible_height - 1` in the
     /// collections pane underflowed when the pane had no inner rows

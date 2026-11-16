@@ -44,8 +44,13 @@ pub struct Config {
     #[serde(default)]
     pub mcp_insecure: bool,
 
-    /// UI language (`"hu"` / `"en"`); unset: the system's (`LANG`)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// UI language (`"hu"` / `"en"`); unset: the system's (`LANG`). An
+    /// unknown value counts as unset (and is logged), not as a broken file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::i18n::Language::deserialize_lenient"
+    )]
     pub language: Option<crate::i18n::Language>,
 }
 
@@ -265,6 +270,17 @@ mod tests {
             Config::load_from(&path).unwrap().language,
             Some(Language::En)
         );
+
+        // Any letter case; an unknown value is unset, the rest of the file loads
+        std::fs::write(&path, "mcp_url = \"http://x:1\"\nlanguage = \"HU\"\n").unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().language,
+            Some(Language::Hu)
+        );
+        std::fs::write(&path, "mcp_url = \"http://x:1\"\nlanguage = \"de\"\n").unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.language, None);
+        assert_eq!(config.mcp_url, "http://x:1");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

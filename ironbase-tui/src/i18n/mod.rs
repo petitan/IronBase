@@ -35,6 +35,32 @@ impl Language {
         }
     }
 
+    /// The language of a config value (any letter case); `None` for an
+    /// unknown one
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hu" => Some(Language::Hu),
+            "en" => Some(Language::En),
+            _ => None,
+        }
+    }
+
+    /// Serde: an unknown language is unset (with a warning in the log), so
+    /// one bad value does not make the whole config unreadable
+    pub fn deserialize_lenient<'de, D>(deserializer: D) -> Result<Option<Self>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        Ok(value.and_then(|value| {
+            let language = Self::parse(&value);
+            if language.is_none() {
+                tracing::warn!(value = %value, "Unknown UI language in the config, using the system's");
+            }
+            language
+        }))
+    }
+
     /// The system's language: the first set of `LC_ALL`, `LC_MESSAGES`,
     /// `LANG` (the POSIX order); English when none is set
     pub fn system() -> Self {
@@ -115,6 +141,13 @@ pub trait Messages: Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_config_value() {
+        assert_eq!(Language::parse("HU"), Some(Language::Hu));
+        assert_eq!(Language::parse(" en "), Some(Language::En));
+        assert_eq!(Language::parse("de"), None);
+    }
 
     #[test]
     fn test_language_of_a_locale() {

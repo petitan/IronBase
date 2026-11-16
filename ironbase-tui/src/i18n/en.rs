@@ -15,7 +15,7 @@ impl Messages for En {
         "Documents"
     }
     fn pane_detail(&self) -> &'static str {
-        "Detail"
+        "Details"
     }
 
     fn cmd_panel(&self) -> &'static str {
@@ -61,7 +61,7 @@ impl Messages for En {
         "Quit"
     }
     fn bar_error(&self, error: &str) -> String {
-        format!(" | Error: {error}")
+        format!(" Error: {error}")
     }
     fn bar_error_details(&self) -> &'static str {
         " Details"
@@ -81,7 +81,7 @@ impl Messages for En {
     }
     fn documents_title(&self, page: usize, pages: usize, filtered: bool) -> String {
         let filter = if filtered {
-            " [FILTERED – Esc clears]"
+            " [FILTERED – Esc: clear filter]"
         } else {
             ""
         };

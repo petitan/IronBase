@@ -25,16 +25,16 @@ impl Messages for Hu {
         "Mozgás"
     }
     fn cmd_select(&self) -> &'static str {
-        "Kiválaszt"
+        "Kiválasztás"
     }
     fn cmd_page(&self) -> &'static str {
-        "Lapoz"
+        "Lapozás"
     }
     fn cmd_scroll(&self) -> &'static str {
-        "Görget"
+        "Görgetés"
     }
     fn cmd_refresh(&self) -> &'static str {
-        "Frissít"
+        "Frissítés"
     }
     fn cmd_filter(&self) -> &'static str {
         "Szűrő"
@@ -46,13 +46,13 @@ impl Messages for Hu {
         "Műveletek"
     }
     fn cmd_edit(&self) -> &'static str {
-        "Szerkeszt"
+        "Szerkesztés"
     }
     fn cmd_delete(&self) -> &'static str {
-        "Töröl"
+        "Törlés"
     }
     fn cmd_copy(&self) -> &'static str {
-        "Másol"
+        "Másolás"
     }
     fn cmd_help(&self) -> &'static str {
         "Súgó"
@@ -61,7 +61,7 @@ impl Messages for Hu {
         "Kilépés"
     }
     fn bar_error(&self, error: &str) -> String {
-        format!(" | Hiba: {error}")
+        format!(" Hiba: {error}")
     }
     fn bar_error_details(&self) -> &'static str {
         " Részletek"
@@ -81,11 +81,11 @@ impl Messages for Hu {
     }
     fn documents_title(&self, page: usize, pages: usize, filtered: bool) -> String {
         let filter = if filtered {
-            " [SZŰRT – Esc töröl]"
+            " [SZŰRT – Esc: szűrő törlése]"
         } else {
             ""
         };
-        format!(" Dokumentumok ({page}/{pages}. oldal){filter} ")
+        format!(" Dokumentumok (oldal: {page}/{pages}){filter} ")
     }
     fn no_documents(&self) -> &'static str {
         "Nincs dokumentum"
