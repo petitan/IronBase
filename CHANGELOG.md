@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Tuti TUI: language layer, Hungarian with accents and English (ironbase-core 0.3.484)
+
+Phase 3i of the Tuti TUI overhaul: the first part of the bilingual UI.
+
+- **`i18n` module:** every text is a method of the `Messages` trait, implemented once per language (`Hu`,
+  `En`): a language missing a text does not compile, and a text with values (page numbers, counts) takes them
+  as typed arguments. `t()` gives the current language's texts.
+- **Choosing the language:** `language = "hu"` or `"en"` in `config.toml`; unset (the default, and every
+  existing config) follows the system (`LC_ALL`, `LC_MESSAGES`, `LANG`: Hungarian for `hu*`, English
+  otherwise). An unset language is not written into the file.
+- **Translated in this step:** the header (database, pane name), the command bar and its error line, the
+  collections, indexes, documents and detail panes. Until now they mixed English ("Collections", "Quit")
+  with unaccented Hungarian ("Reszletek", "Valassz kollekciot", "Sugo"); the Hungarian texts are now
+  accented. The modals follow in the next steps.
+
 ### Fixed — Tuti TUI: pasting goes into the focused input in one piece (ironbase-core 0.3.483)
 
 Phase 3h of the Tuti TUI overhaul: the terminal's bracketed paste is on.

@@ -1,6 +1,7 @@
 //! Main UI renderer
 
 use crate::app::{App, ConnectionType, Modal, Pane};
+use crate::i18n::t;
 use crate::modals;
 use crate::panes;
 use crate::theme::Theme;
@@ -139,19 +140,18 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let header_style = Style::default().bg(theme.header_bg).fg(theme.fg);
 
     // DB info with version
-    let db_info = format!(
-        " IronBase v{} | {} ({} coll, {} docs) ",
+    let db_info = t().header_db(
         env!("CARGO_PKG_VERSION"),
         app.db_name(),
         app.collections.len(),
-        app.total_doc_count()
+        app.total_doc_count(),
     );
 
     // Pane indicator
     let pane_name = match app.active_pane {
-        Pane::Collections => "Collections",
-        Pane::Documents => "Documents",
-        Pane::Detail => "Detail",
+        Pane::Collections => t().pane_collections(),
+        Pane::Documents => t().pane_documents(),
+        Pane::Detail => t().pane_detail(),
     };
 
     // Connection type indicator
@@ -188,32 +188,32 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     // Context-dependent commands based on active pane
     let commands: Vec<(&str, String)> = match app.active_pane {
         Pane::Collections => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("Enter", "Select".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
+            ("Tab", t().cmd_panel().into()),
+            ("j/k", t().cmd_navigate().into()),
+            ("Enter", t().cmd_select().into()),
+            ("r", t().cmd_refresh().into()),
+            ("f", t().cmd_filter().into()),
+            ("/", t().cmd_search().into()),
+            ("a", t().cmd_actions().into()),
+            ("?", t().cmd_help().into()),
+            ("q", t().cmd_quit().into()),
         ],
         Pane::Documents => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("PgUp/Dn", "Page".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
+            ("Tab", t().cmd_panel().into()),
+            ("j/k", t().cmd_navigate().into()),
+            ("PgUp/Dn", t().cmd_page().into()),
+            ("r", t().cmd_refresh().into()),
+            ("f", t().cmd_filter().into()),
+            ("/", t().cmd_search().into()),
+            ("a", t().cmd_actions().into()),
+            ("?", t().cmd_help().into()),
+            ("q", t().cmd_quit().into()),
         ],
         Pane::Detail => {
             let mut cmds = vec![
-                ("Tab", "Panel".into()),
-                ("j/k", "Scroll".into()),
-                ("/", "Search".into()),
+                ("Tab", t().cmd_panel().into()),
+                ("j/k", t().cmd_scroll().into()),
+                ("/", t().cmd_search().into()),
             ];
             // Only show n/N if there are search matches
             if !app.search.doc_matches.is_empty() {
@@ -222,11 +222,11 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 cmds.push(("n/N", format!("{}/{}", current, total)));
             }
             cmds.extend([
-                ("e", "Edit".into()),
-                ("d", "Delete".into()),
-                ("y", "Copy".into()),
-                ("?", "Sugo".into()),
-                ("q", "Quit".into()),
+                ("e", t().cmd_edit().into()),
+                ("d", t().cmd_delete().into()),
+                ("y", t().cmd_copy().into()),
+                ("?", t().cmd_help().into()),
+                ("q", t().cmd_quit().into()),
             ]);
             cmds
         }
@@ -254,13 +254,16 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             err.clone()
         };
         spans.push(Span::styled(
-            format!(" | Hiba: {}", truncated),
+            t().bar_error(&truncated),
             Style::default().fg(theme.error),
         ));
         // Add hint to open error detail modal
         spans.push(Span::raw(" "));
         spans.push(Span::styled("[e]", Style::default().fg(theme.accent)));
-        spans.push(Span::styled(" Reszletek", Style::default().fg(theme.muted)));
+        spans.push(Span::styled(
+            t().bar_error_details(),
+            Style::default().fg(theme.muted),
+        ));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             format!(" | {}", msg),

@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::base64_detect::sanitize_base64_values;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -20,15 +21,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     };
 
     // Show match info in title if searching
-    let title = if !app.search.doc_matches.is_empty() {
-        format!(
-            " Reszletek [{}/{}] ",
-            app.search.current_match + 1,
-            app.search.doc_matches.len()
-        )
-    } else {
-        " Reszletek ".to_string()
-    };
+    let matches = (!app.search.doc_matches.is_empty())
+        .then(|| (app.search.current_match + 1, app.search.doc_matches.len()));
+    let title = t().detail_title(matches);
 
     let block = Block::default()
         .title(title)
@@ -41,7 +36,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     // Get selected document - BUG FIX: use if-let instead of is_none + unwrap
     let Some(doc) = app.get_selected_document() else {
-        let empty_msg = Paragraph::new("Valassz dokumentumot")
+        let empty_msg = Paragraph::new(t().select_document())
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);

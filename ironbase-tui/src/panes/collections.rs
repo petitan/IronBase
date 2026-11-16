@@ -1,6 +1,7 @@
 //! Collections pane - left panel showing collection list and indexes
 
 use crate::app::App;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -31,7 +32,7 @@ fn render_collections_list(frame: &mut Frame, area: Rect, app: &App, theme: &The
     };
 
     let block = Block::default()
-        .title(" Kollekcio ")
+        .title(t().collections_title())
         .title_style(title_style)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
@@ -43,7 +44,7 @@ fn render_collections_list(frame: &mut Frame, area: Rect, app: &App, theme: &The
     let collections = app.get_collections();
 
     if collections.is_empty() {
-        let empty_msg = Paragraph::new("Nincs kollekció")
+        let empty_msg = Paragraph::new(t().no_collections())
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
@@ -96,7 +97,7 @@ fn render_indexes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focus
     };
 
     let block = Block::default()
-        .title(" Indexes ")
+        .title(t().indexes_title())
         .title_style(Style::default().fg(theme.secondary))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
@@ -108,7 +109,7 @@ fn render_indexes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focus
     let indexes = app.get_current_indexes();
 
     if indexes.is_empty() {
-        let empty_msg = Paragraph::new("Nincs index").style(Style::default().fg(theme.muted));
+        let empty_msg = Paragraph::new(t().no_indexes()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty_msg, inner);
         return;
     }

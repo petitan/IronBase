@@ -978,7 +978,7 @@ async fn test_database_switch_keeps_collection_list_error_visible() {
     assert_eq!(app.status_message, None);
     // The status bar shows the error (cut short by the key hints at this
     // width; `e` opens the full text)
-    let screen = render_to_string(&app, 120, 36);
+    let screen = render_to_string(&app, 160, 36);
     assert!(screen.contains("Hiba: Koll"), "{}", screen);
     assert!(!screen.contains("Adatbazis megnyitva"), "{}", screen);
 }
