@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
+use crate::widgets::TextInput;
 use ironbase_mcp_types::responses::{
     AclDocument, AclInterface, AclPermissions, AclPrincipal, AclRule,
 };
@@ -293,6 +294,8 @@ pub struct AclState {
     pub edit_selected_rule: usize,
     /// Current rule being added/edited
     pub current_rule: EditRule,
+    /// The principal value being typed (mirrored into `current_rule`)
+    pub principal_input: TextInput,
     /// Current field focus in add form
     pub edit_field: EditField,
     /// Is adding a new rule (vs editing existing)
@@ -321,6 +324,7 @@ impl AclState {
             edit_rules: Vec::new(),
             edit_selected_rule: 0,
             current_rule: EditRule::default(),
+            principal_input: TextInput::new(EditRule::default().principal_value),
             edit_field: EditField::PrincipalType,
             is_adding_rule: false,
         }
@@ -404,7 +408,7 @@ impl AclState {
         self.edit_collection = collection;
         self.edit_rules.clear();
         self.edit_selected_rule = 0;
-        self.current_rule = EditRule::default();
+        self.reset_current_rule();
         self.edit_field = EditField::PrincipalType;
         self.is_adding_rule = false;
         self.error = None;
@@ -456,7 +460,7 @@ impl AclState {
         self.edit_collection = collection;
         self.load_edit_rules(&rules);
         self.edit_selected_rule = 0;
-        self.current_rule = EditRule::default();
+        self.reset_current_rule();
         self.edit_field = EditField::PrincipalType;
         self.is_adding_rule = false;
         self.error = None;
@@ -465,8 +469,25 @@ impl AclState {
     }
 
     /// Start adding a new rule
-    pub fn start_add_rule(&mut self) {
+    /// A fresh rule in the add form, its value in the input
+    fn reset_current_rule(&mut self) {
         self.current_rule = EditRule::default();
+        self.principal_input
+            .set_value(self.current_rule.principal_value.clone());
+    }
+
+    /// An editing key for the principal value
+    pub fn handle_principal_input(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) {
+        self.principal_input.handle_key(code, modifiers);
+        self.current_rule.principal_value = self.principal_input.value().to_string();
+    }
+
+    pub fn start_add_rule(&mut self) {
+        self.reset_current_rule();
         self.edit_field = EditField::PrincipalType;
         self.is_adding_rule = true;
     }
@@ -487,7 +508,7 @@ impl AclState {
             return;
         }
         self.edit_rules.push(self.current_rule.clone());
-        self.current_rule = EditRule::default();
+        self.reset_current_rule();
         self.is_adding_rule = false;
         self.error = None;
     }
@@ -533,6 +554,8 @@ impl AclState {
             // Update default value for new type
             self.current_rule.principal_value =
                 self.current_rule.principal_type.default_value().to_string();
+            self.principal_input
+                .set_value(self.current_rule.principal_value.clone());
         }
     }
 
@@ -999,20 +1022,20 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         " "
     };
-    let cursor = if is_active && state.edit_field == EditField::PrincipalValue {
-        "_"
-    } else {
-        ""
-    };
-    let value_line = Line::from(vec![
+    let label = Line::from(vec![
         Span::raw(value_indicator),
         Span::styled(" Value: ", value_style),
-        Span::styled(
-            format!("{}{}", state.current_rule.principal_value, cursor),
-            value_style,
-        ),
     ]);
-    frame.render_widget(Paragraph::new(value_line), form_chunks[2]);
+    let [label_area, input_area] =
+        Layout::horizontal([Constraint::Length(label.width() as u16), Constraint::Min(1)])
+            .areas(form_chunks[2]);
+    frame.render_widget(Paragraph::new(label), label_area);
+    state.principal_input.render(
+        frame,
+        input_area,
+        value_style,
+        is_active && state.edit_field == EditField::PrincipalValue,
+    );
 
     // Permissions checkboxes
     let perm_chunks = Layout::horizontal([

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: the API key, ACL, listener and vector inputs edit at the cursor (ironbase-core 0.3.478)
+
+Phase 3c of the Tuti TUI overhaul: four more modals use the shared `TextInput`.
+
+- **API key name, ACL principal value, listener id and bind address, vector index field and query vector:**
+  they took characters only at their end (`push` / `pop`); the arrows, Home / End and Delete did nothing, and
+  a Ctrl chord typed its letter. They now edit at the cursor, with the readline keys and the terminal's cursor.
+- **The query vector** was shown cut after 50 characters (with "..."), the cursor out of sight; a long
+  vector now scrolls in its field.
+- The ACL editor keeps its rules as data: the typed value lives in the modal's input and is mirrored into
+  the rule being added (a new rule, or a principal type switch, resets the input to the type's default).
+- In the vector search tab Up / Down and `j` / `k` stay the result keys; the dimension field still takes
+  digits only.
+
 ### Fixed — a multikey index counted a document once per key after a reopen (ironbase-core 0.3.477, mcp-server 1.0.672)
 
 Found by the crash-recovery property test (`pbt_crash_recovery`) in CI.

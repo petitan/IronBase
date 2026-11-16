@@ -84,10 +84,10 @@ pub(crate) async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifier
         Some(Modal::ServerInfo) => handle_server_info_key(app, key),
         Some(Modal::Update) => handle_update_key(app, key),
         Some(Modal::Database) => handle_database_key_async(app, key, modifiers).await,
-        Some(Modal::ApiKey) => handle_api_key_key_async(app, key).await,
+        Some(Modal::ApiKey) => handle_api_key_key_async(app, key, modifiers).await,
         Some(Modal::Fulltext) => handle_fulltext_key_async(app, key, modifiers).await,
-        Some(Modal::Acl) => handle_acl_key_async(app, key).await,
-        Some(Modal::Listener) => handle_listener_key_async(app, key).await,
+        Some(Modal::Acl) => handle_acl_key_async(app, key, modifiers).await,
+        Some(Modal::Listener) => handle_listener_key_async(app, key, modifiers).await,
         Some(Modal::VectorSearch) => handle_vector_key_async(app, key, modifiers).await,
         Some(Modal::Rag) => handle_rag_key_async(app, key, modifiers).await,
         None => {}

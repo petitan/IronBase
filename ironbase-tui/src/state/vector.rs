@@ -1,5 +1,6 @@
 //! Vector search state
 
+use crate::widgets::TextInput;
 use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric, VectorSearchHit};
 use serde_json::Value;
 
@@ -103,7 +104,7 @@ pub struct VectorSearchState {
     /// Field to search on
     pub search_field: String,
     /// Vector input (JSON array string)
-    pub vector_input: String,
+    pub vector_input: TextInput,
     /// Maximum results
     pub k: usize,
     /// Optional filter query (JSON string)
@@ -116,7 +117,7 @@ pub struct VectorSearchState {
 
     // === Create Index tab ===
     /// Field name for new index
-    pub new_field: String,
+    pub new_field: TextInput,
     /// Dimension (0 = auto-detect)
     pub dimension: usize,
     /// Distance metric
@@ -142,12 +143,12 @@ impl VectorSearchState {
             collection,
             active_tab: VectorTab::Search,
             search_field: String::new(),
-            vector_input: String::new(),
+            vector_input: TextInput::default(),
             k: 10,
             filter_input: String::new(),
             results: Vec::new(),
             selected_result: 0,
-            new_field: String::new(),
+            new_field: TextInput::default(),
             dimension: 0,
             metric: DistanceMetric::Cosine,
             create_form_field: 0,
@@ -167,7 +168,7 @@ impl VectorSearchState {
 
     /// Parse vector input as JSON array of f64
     pub fn parse_vector(&self) -> Result<Vec<f64>, String> {
-        let trimmed = self.vector_input.trim();
+        let trimmed = self.vector_input.value().trim();
         if trimmed.is_empty() {
             return Err("Vector input is empty".to_string());
         }

@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
+use crate::widgets::TextInput;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -36,7 +37,7 @@ pub struct ApiKeyState {
     /// Selected index in list
     pub selected: usize,
     /// Input buffer (for create mode - name)
-    pub input: String,
+    pub input: TextInput,
     /// Newly created key (full key, only shown once)
     pub new_key: Option<String>,
     /// Error message
@@ -72,7 +73,7 @@ impl ApiKeyState {
             mode: ApiKeyModalMode::List,
             keys: Vec::new(),
             selected: 0,
-            input: String::new(),
+            input: TextInput::default(),
             new_key: None,
             error: None,
             success: None,
@@ -344,9 +345,9 @@ fn render_create_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme:
     let input_inner = input_block.inner(chunks[1]);
     frame.render_widget(input_block, chunks[1]);
 
-    let input_text =
-        Paragraph::new(format!("{}_", state.input)).style(Style::default().fg(theme.fg));
-    frame.render_widget(input_text, input_inner);
+    state
+        .input
+        .render(frame, input_inner, Style::default().fg(theme.fg), true);
 
     // Buttons
     let buttons = Paragraph::new(Line::from(vec![

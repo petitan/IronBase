@@ -2198,8 +2198,8 @@ async fn test_listener_create_reports_replace_and_restart() {
     assert_eq!(app.listener_state.listeners[0].bind, "127.0.0.1:9090");
 
     app.listener_state.mode = crate::modals::listener::ListenerModalMode::Add;
-    app.listener_state.add_id = "web".to_string();
-    app.listener_state.add_bind = "127.0.0.1:9091".to_string();
+    app.listener_state.add_id.set_value("web");
+    app.listener_state.add_bind.set_value("127.0.0.1:9091");
     press(&mut app, KeyCode::Enter).await;
     assert_eq!(
         server.calls_to("listener_create"),
@@ -2478,4 +2478,81 @@ async fn test_fulltext_query_keeps_its_result_keys() {
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "async ").await;
     assert_eq!(app.fulltext_state.query.value(), "async rust");
+}
+
+/// The API key name is edited at the cursor (it took characters only at its end)
+#[tokio::test]
+async fn test_api_key_name_is_edited_at_the_cursor() {
+    use crate::modals::api_key::ApiKeyModalMode;
+
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.modal = Some(Modal::ApiKey);
+    app.api_key_state.mode = ApiKeyModalMode::Create;
+
+    type_text(&mut app, "runner").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "ci-").await;
+
+    assert_eq!(app.api_key_state.input.value(), "ci-runner");
+}
+
+/// The ACL principal value takes the readline keys; the rule follows it
+#[tokio::test]
+async fn test_acl_principal_value_takes_readline_keys() {
+    use crate::modals::acl::{AclModalMode, EditField};
+
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.modal = Some(Modal::Acl);
+    app.acl_state.mode = AclModalMode::Edit;
+    app.acl_state.start_add_rule();
+    app.acl_state.edit_field = EditField::PrincipalValue;
+    assert_eq!(app.acl_state.principal_input.value(), "internal");
+
+    // Ctrl+U used to type a "u" after "internal"
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
+    type_text(&mut app, "localhost").await;
+
+    assert_eq!(app.acl_state.current_rule.principal_value, "localhost");
+    // A new rule starts from the default value again
+    app.acl_state.confirm_add_rule();
+    app.acl_state.start_add_rule();
+    assert_eq!(app.acl_state.principal_input.value(), "internal");
+}
+
+/// The listener id is edited at the cursor
+#[tokio::test]
+async fn test_listener_id_is_edited_at_the_cursor() {
+    use crate::modals::listener::{AddField, ListenerModalMode};
+
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.modal = Some(Modal::Listener);
+    app.listener_state.mode = ListenerModalMode::Add;
+    app.listener_state.add_field = AddField::Id;
+
+    type_text(&mut app, "web").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "public-").await;
+
+    assert_eq!(app.listener_state.add_id.value(), "public-web");
+}
+
+/// The query vector is edited at the cursor: a long vector no longer has to
+/// be retyped from its end
+#[tokio::test]
+async fn test_vector_input_is_edited_at_the_cursor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.vector_state = crate::state::vector::VectorSearchState::new("users".to_string());
+    app.modal = Some(Modal::VectorSearch);
+
+    type_text(&mut app, "[1,3]").await;
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Left).await;
+    type_text(&mut app, "2,").await;
+
+    assert_eq!(app.vector_state.vector_input.value(), "[1,2,3]");
+    assert_eq!(app.vector_state.parse_vector(), Ok(vec![1.0, 2.0, 3.0]));
 }

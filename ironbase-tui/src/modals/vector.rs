@@ -105,20 +105,20 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         .title(" Vector (JSON array) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
-    let vector_preview = if state.vector_input.chars().count() > 50 {
-        format!(
-            "{}...",
-            state.vector_input.chars().take(50).collect::<String>()
-        )
-    } else if state.vector_input.is_empty() {
-        "[1.0, 2.0, 3.0, ...]".to_string()
+    let vector_inner = vector_block.inner(chunks[2]);
+    frame.render_widget(vector_block, chunks[2]);
+    if state.vector_input.is_empty() {
+        frame.render_widget(
+            Paragraph::new("[1.0, 2.0, 3.0, ...]").style(Style::default().fg(theme.muted)),
+            vector_inner,
+        );
+        frame.set_cursor_position(Position::new(vector_inner.x, vector_inner.y));
     } else {
-        state.vector_input.clone()
-    };
-    let vector_text = Paragraph::new(vector_preview)
-        .block(vector_block)
-        .style(Style::default().fg(theme.fg));
-    frame.render_widget(vector_text, chunks[2]);
+        // A long vector scrolls: the cursor stays in view
+        state
+            .vector_input
+            .render(frame, vector_inner, Style::default().fg(theme.fg), true);
+    }
 
     // Filter input
     let filter_block = Block::default()
@@ -231,15 +231,14 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         .title(" Field name ")
         .borders(Borders::ALL)
         .border_style(field_style);
-    let cursor = if state.create_form_field == 0 {
-        "|"
-    } else {
-        ""
-    };
-    let field_text = Paragraph::new(format!("{}{}", state.new_field, cursor))
-        .block(field_block)
-        .style(Style::default().fg(theme.fg));
-    frame.render_widget(field_text, chunks[1]);
+    let field_inner = field_block.inner(chunks[1]);
+    frame.render_widget(field_block, chunks[1]);
+    state.new_field.render(
+        frame,
+        field_inner,
+        Style::default().fg(theme.fg),
+        state.create_form_field == 0,
+    );
 
     // Dimension input
     let dim_style = if state.create_form_field == 1 {
