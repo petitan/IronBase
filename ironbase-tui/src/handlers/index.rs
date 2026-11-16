@@ -1,6 +1,7 @@
 //! Key handlers: index
 
 use crate::app::App;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async index key handler
@@ -26,7 +27,7 @@ pub(crate) async fn handle_index_key_async(app: &mut App, key: KeyCode, modifier
                 app.index_state.toggle_sparse();
             }
             _ if app.index_state.form_field == 0 => {
-                app.index_state.handle_input(key, modifiers);
+                app.index_state.handle_input(Input::Key(key, modifiers));
             }
             _ => {}
         }

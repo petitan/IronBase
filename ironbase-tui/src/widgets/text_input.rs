@@ -20,6 +20,14 @@ pub enum InputOutcome {
     Ignored,
 }
 
+/// What reaches an input: a key press, or a pasted text (the terminal's
+/// bracketed paste, delivered in one piece)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Input<'a> {
+    Key(KeyCode, KeyModifiers),
+    Paste(&'a str),
+}
+
 /// A single-line text input. The cursor is a char index (0..=char count),
 /// never a byte index, so editing next to multi-byte characters is safe.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -80,16 +88,22 @@ impl TextInput {
     }
 
     /// Insert pasted text at the cursor. Line breaks become spaces and other
-    /// control characters are dropped: the value stays one line.
-    pub fn insert_str(&mut self, text: &str) {
-        for c in text.chars() {
+    /// control characters are dropped: the value stays one line. False when
+    /// nothing was inserted.
+    pub fn insert_str(&mut self, text: &str) -> bool {
+        let before = self.cursor;
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
             match c {
-                '\r' => {}
-                '\n' | '\t' => self.insert(' '),
+                // `\r\n` is one break (its `\n` makes the space); a bare `\r`
+                // is one too (many terminals paste line breaks as `\r`)
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\r' | '\n' | '\t' => self.insert(' '),
                 c if c.is_control() => {}
                 c => self.insert(c),
             }
         }
+        self.cursor != before
     }
 
     /// Delete the char before the cursor; false at the start
@@ -195,6 +209,15 @@ impl TextInput {
     /// Append `text`; the cursor does not move
     pub(crate) fn push_str(&mut self, text: &str) {
         self.value.push_str(text);
+    }
+
+    /// Apply a key (see `handle_key`) or a pasted text (see `insert_str`)
+    pub fn apply(&mut self, input: Input) -> InputOutcome {
+        match input {
+            Input::Key(code, modifiers) => self.handle_key(code, modifiers),
+            Input::Paste(text) if self.insert_str(text) => InputOutcome::Changed,
+            Input::Paste(_) => InputOutcome::Ignored,
+        }
     }
 
     /// Apply an editing key: printable characters, Backspace / Delete, the
@@ -401,9 +424,19 @@ mod tests {
     #[test]
     fn test_paste_stays_one_line() {
         let mut input = TextInput::new("a");
-        input.insert_str("b\r\nc\td\u{7}é");
+        assert_eq!(
+            input.apply(Input::Paste("b\r\nc\td\u{7}é")),
+            InputOutcome::Changed
+        );
         assert_eq!(input.value(), "ab c dé");
         assert_eq!(input.cursor(), 7);
+        // A bare `\r` line break is a space too
+        let mut lines = TextInput::default();
+        lines.apply(Input::Paste("foo\rbar"));
+        assert_eq!(lines.value(), "foo bar");
+        // Nothing printable: nothing changes
+        assert_eq!(input.apply(Input::Paste("\u{7}")), InputOutcome::Ignored);
+        assert_eq!(input.apply(Input::Paste("")), InputOutcome::Ignored);
     }
 
     fn rendered(input: &TextInput, width: u16) -> (String, Position) {

@@ -1,8 +1,7 @@
 //! Index management state
 
 use crate::state::vector::DistanceMetric;
-use crate::widgets::{InputOutcome, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{BTreeIndexStats, IndexListAll};
 
 /// Index statistics for a single index
@@ -258,8 +257,12 @@ impl IndexState {
 
     /// An editing key for the field name(s); a change re-parses the fields
     /// and clears the error
-    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.field_input.handle_key(code, modifiers);
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        // The field input is the create form's first field
+        if !self.is_creating || self.form_field != 0 {
+            return InputOutcome::Ignored;
+        }
+        let outcome = self.field_input.apply(input);
         if outcome == InputOutcome::Changed {
             self.parse_fields();
             self.error = None;

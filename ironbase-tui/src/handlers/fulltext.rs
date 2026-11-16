@@ -2,6 +2,7 @@
 
 use crate::app::{App, FulltextState, Modal};
 use crate::state::fulltext::FULLTEXT_LIMIT;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::FulltextSearchParams;
 use ironbase_mcp_types::tools::FulltextSearch;
@@ -104,7 +105,7 @@ pub(crate) async fn handle_fulltext_key_async(
             app.fulltext_state.loading = false;
         }
         _ => {
-            app.fulltext_state.handle_input(key, modifiers);
+            app.fulltext_state.handle_input(Input::Key(key, modifiers));
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
-use crate::widgets::TextInput;
+use crate::widgets::{Input, InputOutcome, TextInput};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -61,6 +61,14 @@ impl Default for ApiKeyState {
 }
 
 impl ApiKeyState {
+    /// Edit the key name, while one is being created
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        match self.mode {
+            ApiKeyModalMode::Create => self.input.apply(input),
+            _ => InputOutcome::Ignored,
+        }
+    }
+
     pub fn new() -> Self {
         // Try to get admin key from environment
         let admin_key = std::env::var("IRONBASE_ADMIN_KEY").ok();

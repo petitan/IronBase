@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::db::DbWrapper;
 use crate::modals;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{AclCollectionParams, AclSetParams, NoParams};
 use ironbase_mcp_types::tools::{AclDelete, AclList, AclSet};
@@ -141,7 +142,8 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode, modifiers:
                         _ => {}
                     },
                     _ if app.acl_state.edit_field == EditField::PrincipalValue => {
-                        app.acl_state.handle_principal_input(key, modifiers);
+                        app.acl_state
+                            .handle_principal_input(Input::Key(key, modifiers));
                     }
                     _ => {}
                 }

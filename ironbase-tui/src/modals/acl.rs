@@ -2,7 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
-use crate::widgets::TextInput;
+use crate::widgets::{Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{
     AclDocument, AclInterface, AclPermissions, AclPrincipal, AclRule,
 };
@@ -476,14 +476,17 @@ impl AclState {
             .set_value(self.current_rule.principal_value.clone());
     }
 
-    /// An editing key for the principal value
-    pub fn handle_principal_input(
-        &mut self,
-        code: crossterm::event::KeyCode,
-        modifiers: crossterm::event::KeyModifiers,
-    ) {
-        self.principal_input.handle_key(code, modifiers);
+    /// Edit the principal value of the rule being added
+    pub fn handle_principal_input(&mut self, input: Input) -> InputOutcome {
+        if self.mode != AclModalMode::Edit
+            || !self.is_adding_rule
+            || self.edit_field != EditField::PrincipalValue
+        {
+            return InputOutcome::Ignored;
+        }
+        let outcome = self.principal_input.apply(input);
         self.current_rule.principal_value = self.principal_input.value().to_string();
+        outcome
     }
 
     pub fn start_add_rule(&mut self) {

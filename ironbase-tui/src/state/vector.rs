@@ -1,6 +1,6 @@
 //! Vector search state
 
-use crate::widgets::TextInput;
+use crate::widgets::{push_digits, Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric, VectorSearchHit};
 use serde_json::Value;
 
@@ -138,6 +138,28 @@ pub struct VectorSearchState {
 }
 
 impl VectorSearchState {
+    /// Edit the query vector (search tab) or the field name (create form);
+    /// an edit clears the error
+    pub fn handle_text_input(&mut self, input: Input) -> InputOutcome {
+        let outcome = match self.active_tab {
+            VectorTab::Search => self.vector_input.apply(input),
+            VectorTab::CreateIndex if self.create_form_field == 0 => self.new_field.apply(input),
+            // The dimension takes the digits of a paste (its keys: the handler)
+            VectorTab::CreateIndex if self.create_form_field == 1 => match input {
+                Input::Paste(text) => {
+                    self.dimension = push_digits(self.dimension, text);
+                    InputOutcome::Changed
+                }
+                Input::Key(..) => InputOutcome::Ignored,
+            },
+            _ => InputOutcome::Ignored,
+        };
+        if outcome == InputOutcome::Changed {
+            self.error = None;
+        }
+        outcome
+    }
+
     pub fn new(collection: String) -> Self {
         Self {
             collection,

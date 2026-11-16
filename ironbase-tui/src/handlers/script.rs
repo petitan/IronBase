@@ -1,6 +1,7 @@
 //! Key handlers: script
 
 use crate::app::App;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async script key handler
@@ -187,7 +188,8 @@ pub(crate) fn handle_script_name_key(app: &mut App, key: KeyCode, modifiers: Key
     match key {
         KeyCode::Enter => app.script_state.next_focus(),
         _ => {
-            app.script_state.handle_field_input(key, modifiers);
+            app.script_state
+                .handle_field_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -197,7 +199,8 @@ pub(crate) fn handle_script_desc_key(app: &mut App, key: KeyCode, modifiers: Key
     match key {
         KeyCode::Enter => app.script_state.next_focus(),
         _ => {
-            app.script_state.handle_field_input(key, modifiers);
+            app.script_state
+                .handle_field_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -215,7 +218,8 @@ pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: Key
                 app.script_state.add_tag();
             }
             _ => {
-                app.script_state.handle_field_input(key, modifiers);
+                app.script_state
+                    .handle_field_input(Input::Key(key, modifiers));
             }
         }
     } else {
@@ -253,10 +257,12 @@ pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: Key
 
 /// Handle editor (code) keys
 pub(crate) fn handle_script_editor_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    app.script_state.handle_editor_input(key, modifiers);
+    app.script_state
+        .handle_editor_input(Input::Key(key, modifiers));
 }
 
 /// Handle params field keys
 pub(crate) fn handle_script_params_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    app.script_state.handle_field_input(key, modifiers);
+    app.script_state
+        .handle_field_input(Input::Key(key, modifiers));
 }

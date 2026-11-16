@@ -1,6 +1,7 @@
 //! Key handlers: query
 
 use crate::app::App;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async query key handler
@@ -39,7 +40,7 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
             if app.query_state.has_results() {
                 app.apply_query_as_filter().await;
             } else {
-                app.query_state.handle_input(key, modifiers);
+                app.query_state.handle_input(Input::Key(key, modifiers));
             }
         }
         // Ctrl+T = Templates
@@ -55,7 +56,7 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
         }
         // The editor takes the rest
         _ => {
-            app.query_state.handle_input(key, modifiers);
+            app.query_state.handle_input(Input::Key(key, modifiers));
         }
     }
 }

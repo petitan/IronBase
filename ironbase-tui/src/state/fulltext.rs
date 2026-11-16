@@ -1,7 +1,6 @@
 //! Full-text search state
 
-use crate::widgets::{InputOutcome, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::FulltextHit;
 
 /// Hits asked for per search (`fulltext_search` `limit`)
@@ -40,8 +39,8 @@ impl FulltextState {
     }
 
     /// An editing key for the query; a change clears the error
-    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.query.handle_key(code, modifiers);
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        let outcome = self.query.apply(input);
         if outcome == InputOutcome::Changed {
             self.error = None;
         }

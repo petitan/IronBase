@@ -3,7 +3,7 @@
 //! so the in-line editing (char-index cursor, readline keys) is the
 //! single-line input's; this type adds what crosses lines.
 
-use super::text_input::{InputOutcome, TextInput};
+use super::text_input::{Input, InputOutcome, TextInput};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
@@ -127,8 +127,10 @@ impl TextArea {
     }
 
     /// Insert pasted text at the cursor: line breaks (`\n`, `\r\n`, `\r`)
-    /// start new lines, a tab indents, other control characters are dropped
-    pub fn insert_str(&mut self, text: &str) {
+    /// start new lines, a tab indents, other control characters are dropped.
+    /// False when nothing was inserted.
+    pub fn insert_str(&mut self, text: &str) -> bool {
+        let mut inserted = false;
         let mut chars = text.chars().peekable();
         while let Some(c) = chars.next() {
             match c {
@@ -140,9 +142,20 @@ impl TextArea {
                 }
                 '\n' => self.newline(),
                 '\t' => self.indent(),
-                c if c.is_control() => {}
+                c if c.is_control() => continue,
                 c => self.insert(c),
             }
+            inserted = true;
+        }
+        inserted
+    }
+
+    /// Apply a key (see `handle_key`) or a pasted text (see `insert_str`)
+    pub fn apply(&mut self, input: Input) -> InputOutcome {
+        match input {
+            Input::Key(code, modifiers) => self.handle_key(code, modifiers),
+            Input::Paste(text) if self.insert_str(text) => InputOutcome::Changed,
+            Input::Paste(_) => InputOutcome::Ignored,
         }
     }
 
@@ -470,6 +483,14 @@ mod tests {
         assert_eq!(key(&mut area, KeyCode::Tab), InputOutcome::Changed);
         assert_eq!(area.line(1), "  ");
         assert_eq!(key(&mut area, KeyCode::Esc), InputOutcome::Ignored);
+    }
+
+    #[test]
+    fn test_apply_paste() {
+        let mut area = TextArea::default();
+        assert_eq!(area.apply(Input::Paste("a\nb")), InputOutcome::Changed);
+        assert_eq!(area.text(), "a\nb");
+        assert_eq!(area.apply(Input::Paste("\u{7}")), InputOutcome::Ignored);
     }
 
     #[test]

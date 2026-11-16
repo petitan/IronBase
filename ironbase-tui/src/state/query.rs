@@ -1,7 +1,6 @@
 //! Query builder state
 
-use crate::widgets::{InputOutcome, TextArea};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextArea};
 use ironbase_mcp_types::responses::QueryPlanSummary;
 use serde_json::Value;
 
@@ -143,8 +142,12 @@ impl QueryState {
     }
 
     /// Edit the query; an edit drops the previous run's results and the error
-    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.editor.handle_key(code, modifiers);
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        // The template list is over the editor
+        if self.show_templates {
+            return InputOutcome::Ignored;
+        }
+        let outcome = self.editor.apply(input);
         if outcome == InputOutcome::Changed {
             self.clear_results();
             self.error = None;
@@ -165,6 +168,7 @@ impl QueryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::json;
 
     #[test]
@@ -179,7 +183,7 @@ mod tests {
     fn test_typed_query_parses() {
         let mut state = QueryState::new("users".to_string());
         for c in "\"név\": \"Éva\"".chars() {
-            state.handle_input(KeyCode::Char(c), KeyModifiers::NONE);
+            state.handle_input(Input::Key(KeyCode::Char(c), KeyModifiers::NONE));
         }
         assert_eq!(state.parse_query(), Ok(json!({"név": "Éva"})));
     }
@@ -201,10 +205,10 @@ mod tests {
         assert_eq!(state.result_index, 1);
 
         // A cursor move keeps them
-        state.handle_input(KeyCode::Left, KeyModifiers::NONE);
+        state.handle_input(Input::Key(KeyCode::Left, KeyModifiers::NONE));
         assert!(state.has_results());
         assert_eq!(
-            state.handle_input(KeyCode::Char('x'), KeyModifiers::NONE),
+            state.handle_input(Input::Key(KeyCode::Char('x'), KeyModifiers::NONE)),
             InputOutcome::Changed
         );
 

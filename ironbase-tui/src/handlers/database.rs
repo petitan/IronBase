@@ -3,6 +3,7 @@
 use crate::app::{App, Modal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::DbOpenParams;
 use ironbase_mcp_types::tools::DbOpen;
@@ -144,7 +145,7 @@ pub(crate) async fn handle_database_key_async(
             }
         }
         _ => {
-            app.database_state.handle_input(key, modifiers);
+            app.database_state.handle_input(Input::Key(key, modifiers));
         }
     }
 }

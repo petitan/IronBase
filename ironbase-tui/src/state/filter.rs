@@ -1,7 +1,6 @@
 //! Filter state for visual query building
 
-use crate::widgets::{InputOutcome, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextInput};
 use serde_json::Value;
 
 /// Filter operator for visual search
@@ -424,16 +423,16 @@ impl FilterState {
 
     /// Edit the focused text input (field name or value); the suggestions
     /// follow the field name
-    pub fn handle_field_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+    pub fn handle_field_input(&mut self, input: Input) -> InputOutcome {
         match self.focus {
             FilterFocus::Field => {
-                let outcome = self.field_input.handle_key(code, modifiers);
+                let outcome = self.field_input.apply(input);
                 if outcome == InputOutcome::Changed {
                     self.update_suggestions();
                 }
                 outcome
             }
-            FilterFocus::Value => self.value_input.handle_key(code, modifiers),
+            FilterFocus::Value => self.value_input.apply(input),
             _ => InputOutcome::Ignored,
         }
     }
@@ -499,10 +498,11 @@ impl FilterState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use serde_json::json;
 
     fn key(state: &mut FilterState, code: KeyCode) -> InputOutcome {
-        state.handle_field_input(code, KeyModifiers::NONE)
+        state.handle_field_input(Input::Key(code, KeyModifiers::NONE))
     }
 
     fn type_into(state: &mut FilterState, text: &str) {
@@ -816,7 +816,7 @@ mod tests {
             ("Gőr", 1)
         );
         // Ctrl+U clears to the start
-        state.handle_field_input(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        state.handle_field_input(Input::Key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(
             (state.value_input.value(), state.value_input.cursor()),
             ("őr", 0)
@@ -846,7 +846,7 @@ mod tests {
         assert!(!state.show_suggestions);
 
         // Any edit refreshes them, not only typing at the end
-        state.handle_field_input(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        state.handle_field_input(Input::Key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(state.filtered_suggestions.len(), 3);
 
         // Selection wraps

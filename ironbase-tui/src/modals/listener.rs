@@ -2,7 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
-use crate::widgets::TextInput;
+use crate::widgets::{Input, InputOutcome, TextInput};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -72,6 +72,15 @@ impl Default for ListenerState {
 }
 
 impl ListenerState {
+    /// Edit the focused field of the add form
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        match (self.mode, self.add_field) {
+            (ListenerModalMode::Add, AddField::Id) => self.add_id.apply(input),
+            (ListenerModalMode::Add, AddField::Bind) => self.add_bind.apply(input),
+            _ => InputOutcome::Ignored,
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             mode: ListenerModalMode::List,

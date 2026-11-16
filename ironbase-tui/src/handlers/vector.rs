@@ -1,7 +1,7 @@
 //! Key handlers: vector
 
 use crate::app::{App, Modal, VectorSearchState};
-use crate::widgets::InputOutcome;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{IndexCreateArgs, VectorIndexCreateParams, VectorSearchParams};
 use ironbase_mcp_types::tools::{IndexCreate, VectorSearch};
@@ -132,9 +132,8 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
 
         // Text input for vector
         _ => {
-            if app.vector_state.vector_input.handle_key(key, modifiers) == InputOutcome::Changed {
-                app.vector_state.error = None;
-            }
+            app.vector_state
+                .handle_text_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -199,18 +198,16 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
 
         // Field name input
         _ if app.vector_state.create_form_field == 0 => {
-            if app.vector_state.new_field.handle_key(key, modifiers) == InputOutcome::Changed {
-                app.vector_state.error = None;
-            }
+            app.vector_state
+                .handle_text_input(Input::Key(key, modifiers));
         }
 
         // Dimension (digits only)
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
             if app.vector_state.create_form_field == 1 =>
         {
-            if let Some(digit) = c.to_digit(10) {
-                app.vector_state.dimension = app.vector_state.dimension * 10 + digit as usize;
-            }
+            app.vector_state.dimension =
+                crate::widgets::push_digits(app.vector_state.dimension, &c.to_string());
             app.vector_state.error = None;
         }
         (KeyCode::Backspace, _) if app.vector_state.create_form_field == 1 => {

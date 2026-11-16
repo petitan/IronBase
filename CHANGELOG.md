@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: pasting goes into the focused input in one piece (ironbase-core 0.3.483)
+
+Phase 3h of the Tuti TUI overhaul: the terminal's bracketed paste is on.
+
+- **A paste was typed key by key:** each line break of it was an Enter, so pasting into the RAG search, the
+  filter or a form ran the search or the action once per line, and every character also reached keys that
+  are commands outside a text input (e.g. `d` in a list). Now a paste arrives as one event and goes into the
+  focused input only: a multi-line editor (document, query, script, RAG content) keeps its lines; a
+  single-line input gets one line (line breaks, `\r\n`, `\n` or a bare `\r` as many terminals send them, and
+  tabs become spaces); a number field (vector dimension, RAG chunk size and overlap) takes its digits; the new
+  collection name keeps only the characters it accepts. With no focused input, or no modal, the paste is
+  dropped. (On Windows the console still delivers a paste as keys.)
+- A panic now also turns bracketed paste off, with raw mode and the screen.
+- **Number fields overflowed:** typing many digits into the vector dimension or the RAG chunk size / overlap
+  overflowed `usize` (a panic in a debug build, a wrapped-around number in a release build); they now stop
+  at the largest value.
+- Keys and pastes reach an input through one entry point, `widgets::Input` (a key or a pasted text) with
+  `TextInput::apply` / `TextArea::apply`: every state's editing method takes it, so a paste follows the same
+  focus rules and side effects (suggestions, the changed flag, error clearing) as typing. The API key,
+  listener, search, vector, ACL and index states got the method; their focus checks moved there from the key
+  handlers.
+
 ### Fixed — Tuti TUI: one multi-line editor for the document, query, script and RAG content (ironbase-core 0.3.482)
 
 Phase 3g of the Tuti TUI overhaul: `widgets::TextArea`, a multi-line editor whose lines are `TextInput`s,

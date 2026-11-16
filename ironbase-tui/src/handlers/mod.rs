@@ -31,6 +31,7 @@ mod vector;
 mod tests;
 
 use crate::app::{App, Modal};
+use crate::widgets::{Input, InputOutcome};
 use acl::handle_acl_key_async;
 use actions::handle_actions_key_async;
 use api_key::handle_api_key_key_async;
@@ -62,6 +63,41 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) {
     } else {
         handle_global_key_async(app, key.code, key.modifiers).await;
     }
+}
+
+/// Handle a pasted text (the terminal's bracketed paste): it goes into the
+/// focused input of the open modal, in one piece, through the same entry
+/// point as a key (so the same focus rules and side effects apply). Without
+/// a focused input, or without a modal, it is dropped: pasted characters are
+/// never taken as commands.
+pub fn handle_paste(app: &mut App, text: &str) {
+    let input = Input::Paste(text);
+    match app.modal {
+        Some(Modal::Search) => app.search.handle_input(input),
+        Some(Modal::Insert) => app.insert.handle_input(input),
+        Some(Modal::Index) => app.index_state.handle_input(input),
+        Some(Modal::Query) => app.query_state.handle_input(input),
+        Some(Modal::Export) => app.export_state.handle_input(input),
+        Some(Modal::Filter) => app.filter_state.handle_field_input(input),
+        Some(Modal::NewCollection) => app.new_collection_state.handle_input(input),
+        Some(Modal::Script) => app.script_state.handle_input(input),
+        Some(Modal::Database) => app.database_state.handle_input(input),
+        Some(Modal::ApiKey) => app.api_key_state.handle_input(input),
+        Some(Modal::Fulltext) => app.fulltext_state.handle_input(input),
+        Some(Modal::Acl) => app.acl_state.handle_principal_input(input),
+        Some(Modal::Listener) => app.listener_state.handle_input(input),
+        Some(Modal::VectorSearch) => app.vector_state.handle_text_input(input),
+        Some(Modal::Rag) => app.rag_state.handle_text_input(input),
+        Some(
+            Modal::Actions
+            | Modal::Help
+            | Modal::Confirm
+            | Modal::ErrorDetail
+            | Modal::ServerInfo
+            | Modal::Update,
+        )
+        | None => InputOutcome::Ignored,
+    };
 }
 
 /// Handle modal keys with async support

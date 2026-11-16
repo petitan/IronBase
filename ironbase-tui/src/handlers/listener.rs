@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::db::DbWrapper;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{ListenerAddParams, ListenerIdParams, NoParams};
 use ironbase_mcp_types::responses::{ListenerAction as Created, ListenerInfo};
@@ -123,15 +124,9 @@ pub(crate) async fn handle_listener_key_async(
                     }
                 }
             }
-            _ => match app.listener_state.add_field {
-                AddField::Id => {
-                    app.listener_state.add_id.handle_key(key, modifiers);
-                }
-                AddField::Bind => {
-                    app.listener_state.add_bind.handle_key(key, modifiers);
-                }
-                AddField::Tls => {}
-            },
+            _ => {
+                app.listener_state.handle_input(Input::Key(key, modifiers));
+            }
         },
         ListenerModalMode::Confirm => match key {
             KeyCode::Esc | KeyCode::Char('n') => {

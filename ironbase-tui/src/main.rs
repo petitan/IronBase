@@ -26,7 +26,7 @@ fn parse_bool_flexible(s: &str) -> Result<bool, String> {
         )),
     }
 }
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -207,6 +207,15 @@ async fn main() -> anyhow::Result<()> {
     // returns early: every error lands in `result`.
     let result = match ratatui::try_init() {
         Ok(mut terminal) => {
+            // A paste arrives as one event, not as keys (an Enter in it would
+            // otherwise run the focused action)
+            let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+            // ratatui's panic hook restores raw mode and the screen, not this
+            let restore_terminal = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
+                restore_terminal(info);
+            }));
             let result = run_session(&mut terminal, &mut app, &config, db_path, cli.server).await;
             let _ = terminal.show_cursor();
             result
@@ -216,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore terminal - also after a failed setup (raw mode can be on)
     // and after an error in the session
+    let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     let restored = ratatui::try_restore();
     if let Err(e) = &result {
         tracing::error!(error = %logging::sanitize_for_log(&e.to_string()), "TUI session failed");
@@ -352,6 +362,7 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Resul
                     // Modal keys first, global keys otherwise
                     handlers::handle_key(app, key).await;
                 }
+                Event::Paste(text) => handlers::handle_paste(app, &text),
                 Event::Resize(_, height)
                     // Update page_size when terminal is resized
                     if app.update_page_size(height) => {

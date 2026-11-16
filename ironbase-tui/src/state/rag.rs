@@ -1,7 +1,6 @@
 //! RAG & Embedding state
 
-use crate::widgets::{InputOutcome, TextArea, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{push_digits, Input, InputOutcome, TextArea, TextInput};
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, ModelInfo,
     RagCollectionStatsResponse, RagDocumentImportResponse, SearchBody, SearchDocument,
@@ -145,12 +144,24 @@ impl RagState {
 
     /// Edit the focused input, the import content included; an edit clears
     /// the error
-    pub fn handle_text_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+    pub fn handle_text_input(&mut self, input: Input) -> InputOutcome {
         let outcome = if self.active_tab == RagTab::Import && self.import_form_field == 0 {
-            self.import_content.handle_key(code, modifiers)
+            self.import_content.apply(input)
+        } else if let (RagTab::Import, 2 | 3, Input::Paste(text)) =
+            (self.active_tab, self.import_form_field, input)
+        {
+            // Chunk size and overlap take the digits of a paste (their keys:
+            // the handler)
+            let field = if self.import_form_field == 2 {
+                &mut self.import_chunk_size
+            } else {
+                &mut self.import_overlap
+            };
+            *field = push_digits(*field, text);
+            InputOutcome::Changed
         } else {
             match self.focused_input() {
-                Some(input) => input.handle_key(code, modifiers),
+                Some(field) => field.apply(input),
                 None => InputOutcome::Ignored,
             }
         };

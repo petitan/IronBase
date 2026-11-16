@@ -2685,3 +2685,78 @@ async fn test_document_editor_keys() {
     assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
     assert_eq!(app.modal, Some(Modal::Insert));
 }
+
+/// A paste goes into the document editor in one piece: its line breaks are
+/// lines, not Enter presses, and the cursor ends after it
+#[tokio::test]
+async fn test_paste_into_the_document_editor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_edit_of_first_user(&mut app).await;
+    app.insert.editor.set_text("{}");
+    app.insert.editor.move_to(0, 1);
+    crate::handlers::handle_paste(&mut app, "\r\n  \"a\": 1,\r\n  \"b\": 2\r\n");
+    assert_eq!(app.insert.editor.text(), "{\n  \"a\": 1,\n  \"b\": 2\n}");
+    assert_eq!(app.insert.editor.cursor(), (3, 0));
+    assert_eq!(app.modal, Some(Modal::Insert));
+    assert!(server.calls_to("update_one").is_empty());
+}
+
+/// A single-line input takes a paste as one line: the RAG query is not run
+/// by the pasted line break
+#[tokio::test]
+async fn test_paste_into_a_single_line_input_is_one_line() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 0, RagTab::Search).await;
+    crate::handlers::handle_paste(&mut app, "first line\nsecond");
+    assert_eq!(app.rag_state.search_query.value(), "first line second");
+    assert!(server.calls_to("search").is_empty());
+
+    // The new collection name keeps only the characters it accepts
+    app.close_modal();
+    app.open_new_collection();
+    crate::handlers::handle_paste(&mut app, "my coll/ection-1\n");
+    assert_eq!(app.new_collection_state.name.value(), "mycollection-1");
+}
+
+/// Pasted text is never taken as commands: without a focused input (or
+/// without a modal) it is dropped
+#[tokio::test]
+async fn test_paste_without_a_focused_input_is_dropped() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    // No modal: "q" would quit, "d" would delete
+    crate::handlers::handle_paste(&mut app, "qd");
+    assert!(!app.should_quit);
+    assert_eq!(app.modal, None);
+
+    // Filter modal, operator focus: nothing changes
+    app.filter_state.reset_inputs();
+    app.modal = Some(Modal::Filter);
+    app.filter_state.focus = crate::app::FilterFocus::Operator;
+    crate::handlers::handle_paste(&mut app, "age");
+    assert_eq!(app.filter_state.field_input.value(), "");
+    assert_eq!(app.filter_state.value_input.value(), "");
+    app.filter_state.focus = crate::app::FilterFocus::Field;
+    crate::handlers::handle_paste(&mut app, "age");
+    assert_eq!(app.filter_state.field_input.value(), "age");
+}
+
+/// A number field takes the digits of a paste
+#[tokio::test]
+async fn test_paste_into_a_number_field() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 0, RagTab::Search).await;
+    app.rag_state.active_tab = RagTab::Import;
+    app.rag_state.import_form_field = 2;
+    app.rag_state.import_chunk_size = 0;
+    crate::handlers::handle_paste(&mut app, "1 500\n");
+    assert_eq!(app.rag_state.import_chunk_size, 1500);
+    // Typed digits use the same rule, and no longer overflow
+    for _ in 0..30 {
+        press(&mut app, KeyCode::Char('9')).await;
+    }
+    assert_eq!(app.rag_state.import_chunk_size, usize::MAX);
+}

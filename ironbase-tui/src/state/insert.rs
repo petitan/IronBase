@@ -1,8 +1,7 @@
 //! Insert/Edit document state
 
 use super::types::EditorMode;
-use crate::widgets::{InputOutcome, TextArea};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextArea};
 use serde_json::Value;
 
 /// Document editor state - multi-line JSON editor for insert/edit
@@ -93,8 +92,8 @@ impl InsertState {
     }
 
     /// Edit the text; an edit clears the error
-    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.editor.handle_key(code, modifiers);
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        let outcome = self.editor.apply(input);
         if outcome == InputOutcome::Changed {
             self.error = None;
         }

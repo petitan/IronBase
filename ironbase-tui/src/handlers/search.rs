@@ -1,6 +1,7 @@
 //! Key handlers: search
 
 use crate::app::App;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async search key handler
@@ -36,7 +37,7 @@ pub(crate) async fn handle_collection_search_key(
                 app.search.input_active = false;
             }
             _ => {
-                app.search.query_input.handle_key(key, modifiers);
+                app.search.handle_input(Input::Key(key, modifiers));
             }
         }
     } else {
@@ -72,7 +73,7 @@ pub(crate) fn handle_document_search_key(app: &mut App, key: KeyCode, modifiers:
         // n/N are typed like any other character here; match navigation (n/N)
         // lives in the Detail pane, where the modal lands after a successful search
         _ => {
-            app.search.query_input.handle_key(key, modifiers);
+            app.search.handle_input(Input::Key(key, modifiers));
         }
     }
 }

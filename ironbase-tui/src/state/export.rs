@@ -1,8 +1,7 @@
 //! Export state
 
 use crate::modals::export::ExportFormat;
-use crate::widgets::{InputOutcome, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextInput};
 
 /// Export state
 #[derive(Debug, Clone)]
@@ -64,8 +63,8 @@ impl ExportState {
     }
 
     /// An editing key for the path; a change clears the error
-    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.file_path.handle_key(code, modifiers);
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        let outcome = self.file_path.apply(input);
         if outcome == InputOutcome::Changed {
             self.error = None;
         }

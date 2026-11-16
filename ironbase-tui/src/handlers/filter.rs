@@ -1,6 +1,7 @@
 //! Key handlers: filter
 
 use crate::app::App;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async filter key handler
@@ -153,7 +154,8 @@ pub(crate) async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifie
 
         // The field name and value inputs take the rest
         _ => {
-            app.filter_state.handle_field_input(key, modifiers);
+            app.filter_state
+                .handle_field_input(Input::Key(key, modifiers));
         }
     }
 }

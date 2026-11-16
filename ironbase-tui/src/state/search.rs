@@ -1,7 +1,7 @@
 //! Search state for collections and document search
 
 use super::types::SearchMode;
-use crate::widgets::TextInput;
+use crate::widgets::{Input, InputOutcome, TextInput};
 
 /// Search result - collection match
 #[derive(Debug, Clone)]
@@ -33,6 +33,15 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    /// Edit the query (in the collection search only while the input, not
+    /// the result list, has the focus)
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        if self.mode == SearchMode::Collections && !self.input_active {
+            return InputOutcome::Ignored;
+        }
+        self.query_input.apply(input)
+    }
+
     pub fn new() -> Self {
         Self {
             input_active: true,

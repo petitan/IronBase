@@ -1,6 +1,7 @@
 //! Key handlers: rag
 
 use crate::app::{App, Modal, RagState};
+use crate::widgets::{push_digits, Input};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{
     AutoEmbedEnableParams, AutoEmbedStatusParams, EmbedTextParams, JobListParams, NoParams,
@@ -172,7 +173,7 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
 
         // The query input takes the rest
         _ => {
-            app.rag_state.handle_text_input(key, modifiers);
+            app.rag_state.handle_text_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -243,19 +244,19 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
 
         // The content and the title
         _ if app.rag_state.import_form_field <= 1 => {
-            app.rag_state.handle_text_input(key, modifiers);
+            app.rag_state.handle_text_input(Input::Key(key, modifiers));
         }
 
         // Text input based on focused field
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
             match app.rag_state.import_form_field {
-                2 if c.is_ascii_digit() => {
-                    let digit = c.to_digit(10).unwrap() as usize;
-                    app.rag_state.import_chunk_size = app.rag_state.import_chunk_size * 10 + digit;
+                2 => {
+                    let size = app.rag_state.import_chunk_size;
+                    app.rag_state.import_chunk_size = push_digits(size, &c.to_string());
                 }
-                3 if c.is_ascii_digit() => {
-                    let digit = c.to_digit(10).unwrap() as usize;
-                    app.rag_state.import_overlap = app.rag_state.import_overlap * 10 + digit;
+                3 => {
+                    let overlap = app.rag_state.import_overlap;
+                    app.rag_state.import_overlap = push_digits(overlap, &c.to_string());
                 }
                 _ => {}
             }
@@ -343,7 +344,7 @@ pub(crate) async fn handle_rag_collections_key(
 
             // The name and field inputs take the rest
             _ => {
-                app.rag_state.handle_text_input(key, modifiers);
+                app.rag_state.handle_text_input(Input::Key(key, modifiers));
             }
         }
         return;
@@ -456,7 +457,7 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
             }
 
             _ => {
-                app.rag_state.handle_text_input(key, modifiers);
+                app.rag_state.handle_text_input(Input::Key(key, modifiers));
             }
         }
         return;

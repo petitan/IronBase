@@ -1,7 +1,6 @@
 //! IronRhai Script Editor State
 
-use crate::widgets::{InputOutcome, TextArea, TextInput};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::widgets::{Input, InputOutcome, TextArea, TextInput};
 use serde_json::Value;
 
 /// Script mode - browse, edit, new, history, inline
@@ -207,14 +206,12 @@ impl ScriptState {
     /// A key for the focused one-line field (name, description, the tag
     /// being typed, params); a change clears the error, and a change of the
     /// name or description makes the script dirty
-    pub fn handle_field_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+    pub fn handle_field_input(&mut self, input: Input) -> InputOutcome {
         let outcome = match self.focus {
-            ScriptFocus::Name => self.name.handle_key(code, modifiers),
-            ScriptFocus::Description => self.description.handle_key(code, modifiers),
-            ScriptFocus::Tags if self.tag_input_active => {
-                self.tag_input.handle_key(code, modifiers)
-            }
-            ScriptFocus::Params => self.params_input.handle_key(code, modifiers),
+            ScriptFocus::Name => self.name.apply(input),
+            ScriptFocus::Description => self.description.apply(input),
+            ScriptFocus::Tags if self.tag_input_active => self.tag_input.apply(input),
+            ScriptFocus::Params => self.params_input.apply(input),
             _ => InputOutcome::Ignored,
         };
         if outcome == InputOutcome::Changed {
@@ -226,9 +223,21 @@ impl ScriptState {
         outcome
     }
 
+    /// Edit the focused field or the code; nothing while a confirmation is
+    /// shown
+    pub fn handle_input(&mut self, input: Input) -> InputOutcome {
+        if self.confirm_action.is_some() {
+            return InputOutcome::Ignored;
+        }
+        match self.focus {
+            ScriptFocus::Editor => self.handle_editor_input(input),
+            _ => self.handle_field_input(input),
+        }
+    }
+
     /// A key for the code editor; an edit marks the script changed
-    pub fn handle_editor_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = self.editor.handle_key(code, modifiers);
+    pub fn handle_editor_input(&mut self, input: Input) -> InputOutcome {
+        let outcome = self.editor.apply(input);
         if outcome == InputOutcome::Changed {
             self.dirty = true;
             self.error = None;
@@ -278,6 +287,7 @@ impl ScriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     /// Editing the code marks the script changed; a cursor move does not
     #[test]
@@ -285,19 +295,19 @@ mod tests {
         let mut state = ScriptState::new();
         state.load_script("s".to_string(), "ab\ncd".to_string(), None, vec![], 1);
         assert_eq!(
-            state.handle_editor_input(KeyCode::Down, KeyModifiers::NONE),
+            state.handle_editor_input(Input::Key(KeyCode::Down, KeyModifiers::NONE)),
             InputOutcome::Moved
         );
         assert!(!state.dirty);
         state.error = Some("hiba".to_string());
-        state.handle_editor_input(KeyCode::Backspace, KeyModifiers::NONE);
+        state.handle_editor_input(Input::Key(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(state.editor.text(), "abcd");
         assert!(state.dirty);
         assert_eq!(state.error, None);
     }
 
     fn key(state: &mut ScriptState, code: KeyCode) -> InputOutcome {
-        state.handle_field_input(code, KeyModifiers::NONE)
+        state.handle_field_input(Input::Key(code, KeyModifiers::NONE))
     }
 
     fn type_into(state: &mut ScriptState, text: &str) {
@@ -444,7 +454,7 @@ mod tests {
         assert_eq!(state.name.value(), "[inline]");
         assert_eq!(state.editor.cursor(), (1, 0));
 
-        state.handle_editor_input(KeyCode::Char('x'), KeyModifiers::NONE);
+        state.handle_editor_input(Input::Key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(state.dirty);
         state.reset_to_browse();
         assert_eq!(state.mode, ScriptMode::Browse);

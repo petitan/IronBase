@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::db::DbWrapper;
 use crate::modals;
+use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminKeyParams};
 use ironbase_mcp_types::responses::ApiKeyChangeResponse;
@@ -179,7 +180,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                 }
             }
             _ => {
-                app.api_key_state.input.handle_key(key, modifiers);
+                app.api_key_state.handle_input(Input::Key(key, modifiers));
             }
         },
         ApiKeyModalMode::Confirm => match key {
