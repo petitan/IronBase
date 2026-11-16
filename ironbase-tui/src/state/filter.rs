@@ -351,6 +351,8 @@ impl FilterState {
             self.operator = FilterOperator::default();
             self.operator_idx = 0;
             self.focus = FilterFocus::Field;
+            // The suggestions follow the (now empty) field input
+            self.update_suggestions();
         }
     }
 
@@ -651,6 +653,22 @@ mod tests {
         assert_eq!(state.operator, FilterOperator::Equals);
         assert_eq!(state.operator_idx, 0);
         assert_eq!(state.focus, FilterFocus::Field);
+    }
+
+    /// The next condition starts from the full suggestion list, not the
+    /// previous field's matches
+    #[test]
+    fn test_add_filter_refreshes_the_suggestions() {
+        let mut state = FilterState::new();
+        state.set_fields(vec!["name".into(), "Age".into(), "address.city".into()]);
+        type_into(&mut state, "aG");
+        assert_eq!(state.filtered_suggestions, vec!["Age"]);
+        state.focus = FilterFocus::Value;
+        type_into(&mut state, "30");
+        state.add_filter();
+        assert_eq!(state.filtered_suggestions.len(), 3);
+        state.apply_suggestion();
+        assert_eq!(state.field_input.value(), "name");
     }
 
     #[test]

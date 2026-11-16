@@ -15,6 +15,8 @@ Phase 3e of the Tuti TUI overhaul.
   `TextInput` (Delete, readline keys Ctrl+A / E / U / K / W, the terminal's cursor instead of a drawn `|`, a
   long value scrolls in its box). Every edit of the field name, Ctrl+U / K / W too, refreshes the suggestions.
   Left / Right still pick the operator and the sort field when those have the focus; the placeholders stay.
+- **Adding a condition** left the suggestion list of the previous field: Tab or Enter on the next, empty field
+  name applied one of those matches. The list now restarts from all the fields.
 - The filter state's two cursor fields and its six per-field editing methods are gone.
 
 ### Fixed — Tuti TUI: the script name, description, tag and params fields edit at the cursor (ironbase-core 0.3.479)
