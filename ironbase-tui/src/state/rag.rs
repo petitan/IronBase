@@ -1,5 +1,7 @@
 //! RAG & Embedding state
 
+use crate::widgets::{InputOutcome, TextInput};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, ModelInfo,
     RagCollectionStatsResponse, RagDocumentImportResponse, SearchBody, SearchDocument,
@@ -49,7 +51,7 @@ pub struct RagState {
 
     // === Search tab ===
     // (`search` is intent-only: weights, RRF K and the like are server-owned)
-    pub search_query: String,
+    pub search_query: TextInput,
     pub search_limit: usize,
     /// Documents of the last `search`
     pub search_results: Vec<SearchDocument>,
@@ -65,7 +67,7 @@ pub struct RagState {
 
     // === Import tab ===
     pub import_content: String,
-    pub import_title: String,
+    pub import_title: TextInput,
     pub import_chunk_size: usize,
     pub import_overlap: usize,
     pub import_mode: String,
@@ -77,9 +79,9 @@ pub struct RagState {
     pub rag_collections: Vec<RagCollectionStatsResponse>,
     pub selected_collection: usize,
     pub creating: bool,
-    pub create_collection_name: String,
-    pub create_embedding_field: String,
-    pub create_text_field: String,
+    pub create_collection_name: TextInput,
+    pub create_embedding_field: TextInput,
+    pub create_text_field: TextInput,
     pub create_provider: String,
     pub create_language: String,
     /// Focus field in create form (0=name, 1=emb_field, 2=text_field, 3=provider, 4=language)
@@ -91,7 +93,7 @@ pub struct RagState {
     pub selected_model: usize,
     pub auto_embed_config: Option<AutoEmbedStatusResponse>,
     pub cache_stats: Option<EmbedCacheStatsResponse>,
-    pub embed_test_input: String,
+    pub embed_test_input: TextInput,
     pub embed_test_result: Option<EmbedTextResponse>,
     /// Sub-mode: 0=main view, 1=test input
     pub models_mode: usize,
@@ -116,12 +118,41 @@ impl RagState {
             import_chunk_size: 1000,
             import_overlap: 100,
             import_mode: "auto".to_string(),
-            create_embedding_field: "embedding".to_string(),
-            create_text_field: "content".to_string(),
+            create_embedding_field: TextInput::new("embedding"),
+            create_text_field: TextInput::new("content"),
             create_provider: "ollama".to_string(),
             create_language: "hungarian".to_string(),
             ..Default::default()
         }
+    }
+
+    /// The single-line input that has the focus, if any (the import
+    /// content is a multi-line text, edited on its own)
+    fn focused_input(&mut self) -> Option<&mut TextInput> {
+        match self.active_tab {
+            RagTab::Search if self.search_focus == 0 => Some(&mut self.search_query),
+            RagTab::Import if self.import_form_field == 1 => Some(&mut self.import_title),
+            RagTab::Collections if self.creating => match self.create_form_field {
+                0 => Some(&mut self.create_collection_name),
+                1 => Some(&mut self.create_embedding_field),
+                2 => Some(&mut self.create_text_field),
+                _ => None,
+            },
+            RagTab::Models if self.models_mode == 1 => Some(&mut self.embed_test_input),
+            _ => None,
+        }
+    }
+
+    /// Edit the focused single-line input; an edit clears the error
+    pub fn handle_text_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = match self.focused_input() {
+            Some(input) => input.handle_key(code, modifiers),
+            None => InputOutcome::Ignored,
+        };
+        if outcome == InputOutcome::Changed {
+            self.error = None;
+        }
+        outcome
     }
 
     // === Tab navigation ===

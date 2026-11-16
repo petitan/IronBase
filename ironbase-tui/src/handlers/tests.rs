@@ -2620,3 +2620,37 @@ async fn test_filter_inputs_are_edited_at_the_cursor() {
     assert_eq!(app.filter_state.filters[0].field, "age");
     assert_eq!(app.filter_state.filters[0].value, "130");
 }
+
+/// The RAG modal's single-line inputs edit at the cursor; an edit clears the
+/// error
+#[tokio::test]
+async fn test_rag_inputs_are_edited_at_the_cursor() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 0, RagTab::Search).await;
+
+    type_text(&mut app, "kiraly").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "a ").await;
+    press(&mut app, KeyCode::End).await;
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Delete).await;
+    assert_eq!(app.rag_state.search_query.value(), "a kiral");
+
+    // Create form: Ctrl+W clears the default field name, the error goes
+    app.rag_state.active_tab = RagTab::Collections;
+    press(&mut app, KeyCode::Char('c')).await;
+    assert!(app.rag_state.creating);
+    press(&mut app, KeyCode::Tab).await;
+    app.rag_state.error = Some("old".to_string());
+    press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
+    type_text(&mut app, "vec").await;
+    assert_eq!(app.rag_state.create_embedding_field.value(), "vec");
+    assert_eq!(app.rag_state.error, None);
+    // Space still toggles the provider, it is not typed
+    press(&mut app, KeyCode::Tab).await;
+    press(&mut app, KeyCode::Tab).await;
+    let provider = app.rag_state.create_provider.clone();
+    press(&mut app, KeyCode::Char(' ')).await;
+    assert_ne!(app.rag_state.create_provider, provider);
+}

@@ -266,6 +266,26 @@ impl TextInput {
         self.render(frame, input_area, style, focused);
     }
 
+    /// Draw the input, or `placeholder` while it is empty (focused, the
+    /// terminal cursor sits at its start)
+    pub fn render_with_placeholder<'a>(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        style: Style,
+        placeholder: impl Into<Line<'a>>,
+        focused: bool,
+    ) {
+        if !self.is_empty() {
+            self.render(frame, area, style, focused);
+            return;
+        }
+        frame.render_widget(Paragraph::new(placeholder.into()), area);
+        if focused && area.width > 0 && area.height > 0 {
+            frame.set_cursor_position(Position::new(area.x, area.y));
+        }
+    }
+
     /// Draw the value in `area` (its first line) with `style`, scrolled so
     /// that the cursor is visible; `focused` puts the terminal cursor there
     pub fn render(&self, frame: &mut Frame, area: Rect, style: Style, focused: bool) {
@@ -406,6 +426,42 @@ mod tests {
         let (line, cursor) = rendered(&input, 5);
         assert_eq!(line, "01234");
         assert_eq!(cursor, Position::new(0, 0));
+    }
+
+    /// An empty input shows its placeholder, focused too, with the cursor
+    /// at its start; a value replaces it
+    #[test]
+    fn test_render_with_placeholder() {
+        let draw = |input: &TextInput| {
+            let mut terminal = Terminal::new(TestBackend::new(8, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    input.render_with_placeholder(
+                        frame,
+                        frame.area(),
+                        Style::default(),
+                        "hint",
+                        true,
+                    )
+                })
+                .unwrap();
+            let line: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            (line, terminal.get_cursor_position().unwrap())
+        };
+        assert_eq!(
+            draw(&TextInput::default()),
+            ("hint    ".to_string(), Position::new(0, 0))
+        );
+        assert_eq!(
+            draw(&TextInput::new("ab")),
+            ("ab      ".to_string(), Position::new(2, 0))
+        );
     }
 
     /// Wide characters count two columns

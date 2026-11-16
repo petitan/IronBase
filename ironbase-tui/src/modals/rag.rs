@@ -92,20 +92,15 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Query ")
         .borders(Borders::ALL)
         .border_style(query_style);
-    let query_preview = if state.search_query.is_empty() {
-        "Enter search query...".to_string()
-    } else {
-        format!("{}|", state.search_query)
-    };
-    let query_text =
-        Paragraph::new(query_preview)
-            .block(query_block)
-            .style(if state.search_query.is_empty() {
-                Style::default().fg(theme.muted)
-            } else {
-                Style::default().fg(theme.fg)
-            });
-    frame.render_widget(query_text, chunks[1]);
+    let inner = query_block.inner(chunks[1]);
+    frame.render_widget(query_block, chunks[1]);
+    state.search_query.render_with_placeholder(
+        frame,
+        inner,
+        Style::default().fg(theme.fg),
+        Span::styled("Enter search query...", Style::default().fg(theme.muted)),
+        state.search_focus == 0,
+    );
 
     // Options row: limit (the rest of the retrieval is server-owned)
     let opts = Layout::horizontal([Constraint::Percentage(33), Constraint::Percentage(67)])
@@ -204,7 +199,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     // Help text
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("[Ctrl+Tab]", Style::default().fg(theme.accent)),
+        Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Fields  "),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Import  "),
@@ -226,18 +221,15 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Title (optional) ")
         .borders(Borders::ALL)
         .border_style(title_style);
-    let title_text = Paragraph::new(if state.import_title.is_empty() {
-        "Document title...".to_string()
-    } else {
-        state.import_title.clone()
-    })
-    .block(title_block)
-    .style(if state.import_title.is_empty() {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    });
-    frame.render_widget(title_text, chunks[1]);
+    let inner = title_block.inner(chunks[1]);
+    frame.render_widget(title_block, chunks[1]);
+    state.import_title.render_with_placeholder(
+        frame,
+        inner,
+        Style::default().fg(theme.fg),
+        Span::styled("Document title...", Style::default().fg(theme.muted)),
+        state.import_form_field == 1,
+    );
 
     // Content input
     let content_style = if state.import_form_field == 0 {
@@ -401,7 +393,7 @@ fn render_create_collection_form(frame: &mut Frame, area: Rect, state: &RagState
     .split(area);
 
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("[Ctrl+Tab]", Style::default().fg(theme.accent)),
+        Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Fields  "),
         Span::styled("[Space]", Style::default().fg(theme.accent)),
         Span::raw(" Toggle  "),
@@ -413,33 +405,41 @@ fn render_create_collection_form(frame: &mut Frame, area: Rect, state: &RagState
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
-    let fields = [
-        (0, "Collection Name", &state.create_collection_name),
-        (1, "Embedding Field", &state.create_embedding_field),
-        (2, "Text Field", &state.create_text_field),
-        (3, "Provider [Space]", &state.create_provider),
-        (4, "Language [Space]", &state.create_language),
+    let labels = [
+        "Collection Name",
+        "Embedding Field",
+        "Text Field",
+        "Provider [Space]",
+        "Language [Space]",
     ];
-
-    for (field_idx, label, value) in &fields {
-        let style = if state.create_form_field == *field_idx {
-            Style::default().fg(theme.accent)
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let cursor = if state.create_form_field == *field_idx {
-            "|"
-        } else {
-            ""
-        };
+    for (field_idx, label) in labels.into_iter().enumerate() {
+        let focused = state.create_form_field == field_idx;
         let block = Block::default()
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
-            .border_style(style);
-        let text = Paragraph::new(format!("{}{}", value, cursor))
-            .block(block)
-            .style(Style::default().fg(theme.fg));
-        frame.render_widget(text, chunks[*field_idx + 1]);
+            .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }));
+        let area = chunks[field_idx + 1];
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let fg = Style::default().fg(theme.fg);
+        match field_idx {
+            0 => state
+                .create_collection_name
+                .render(frame, inner, fg, focused),
+            1 => state
+                .create_embedding_field
+                .render(frame, inner, fg, focused),
+            2 => state.create_text_field.render(frame, inner, fg, focused),
+            // Provider and language are toggled, not typed
+            3 => frame.render_widget(
+                Paragraph::new(state.create_provider.as_str()).style(fg),
+                inner,
+            ),
+            _ => frame.render_widget(
+                Paragraph::new(state.create_language.as_str()).style(fg),
+                inner,
+            ),
+        }
     }
 }
 
@@ -555,18 +555,15 @@ fn render_embed_test(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .title(" Text to embed ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
-    let input_text = Paragraph::new(if state.embed_test_input.is_empty() {
-        "Type text here...".to_string()
-    } else {
-        format!("{}|", state.embed_test_input)
-    })
-    .block(input_block)
-    .style(if state.embed_test_input.is_empty() {
-        Style::default().fg(theme.muted)
-    } else {
-        Style::default().fg(theme.fg)
-    });
-    frame.render_widget(input_text, chunks[1]);
+    let inner = input_block.inner(chunks[1]);
+    frame.render_widget(input_block, chunks[1]);
+    state.embed_test_input.render_with_placeholder(
+        frame,
+        inner,
+        Style::default().fg(theme.fg),
+        Span::styled("Type text here...", Style::default().fg(theme.muted)),
+        true,
+    );
 
     let result_block = Block::default()
         .title(" Result ")

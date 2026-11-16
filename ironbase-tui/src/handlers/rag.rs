@@ -105,14 +105,14 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
     match (key, modifiers) {
         // Execute search
         (KeyCode::Enter, _) if app.rag_state.search_focus == 0 => {
-            if app.rag_state.search_query.trim().is_empty() {
+            if app.rag_state.search_query.value().trim().is_empty() {
                 app.rag_state.error = Some("Query is empty".to_string());
                 return;
             }
 
             let args = SearchParams {
                 collection: app.rag_state.collection.clone(),
-                query: app.rag_state.search_query.clone(),
+                query: app.rag_state.search_query.value().to_string(),
                 filter: None,
                 limit: app.rag_state.search_limit,
                 format: "structured".to_string(),
@@ -170,19 +170,10 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
             }
         }
 
-        // Text input for query (when query focused)
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
-            if app.rag_state.search_focus == 0 =>
-        {
-            app.rag_state.search_query.push(c);
-            app.rag_state.error = None;
+        // The query input takes the rest
+        _ => {
+            app.rag_state.handle_text_input(key, modifiers);
         }
-        (KeyCode::Backspace, _) if app.rag_state.search_focus == 0 => {
-            app.rag_state.search_query.pop();
-            app.rag_state.error = None;
-        }
-
-        _ => {}
     }
 }
 
@@ -201,7 +192,7 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
             let title = if app.rag_state.import_title.is_empty() {
                 None
             } else {
-                Some(app.rag_state.import_title.clone())
+                Some(app.rag_state.import_title.value().to_string())
             };
             let args = RagDocumentImportParams {
                 collection,
@@ -250,11 +241,15 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
             app.rag_state.next_import_field();
         }
 
+        // The title input
+        _ if app.rag_state.import_form_field == 1 => {
+            app.rag_state.handle_text_input(key, modifiers);
+        }
+
         // Text input based on focused field
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
             match app.rag_state.import_form_field {
                 0 => app.rag_state.import_content.push(c),
-                1 => app.rag_state.import_title.push(c),
                 2 if c.is_ascii_digit() => {
                     let digit = c.to_digit(10).unwrap() as usize;
                     app.rag_state.import_chunk_size = app.rag_state.import_chunk_size * 10 + digit;
@@ -271,9 +266,6 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
             match app.rag_state.import_form_field {
                 0 => {
                     app.rag_state.import_content.pop();
-                }
-                1 => {
-                    app.rag_state.import_title.pop();
                 }
                 2 => {
                     app.rag_state.import_chunk_size /= 10;
@@ -301,7 +293,12 @@ pub(crate) async fn handle_rag_collections_key(
         match (key, modifiers) {
             (KeyCode::Enter, _) => {
                 // Create collection
-                let name = app.rag_state.create_collection_name.trim().to_string();
+                let name = app
+                    .rag_state
+                    .create_collection_name
+                    .value()
+                    .trim()
+                    .to_string();
                 if name.is_empty() {
                     app.rag_state.error = Some("Collection name is required".to_string());
                     return;
@@ -309,8 +306,8 @@ pub(crate) async fn handle_rag_collections_key(
 
                 let args = RagCollectionCreateParams {
                     collection: name,
-                    embedding_field: app.rag_state.create_embedding_field.clone(),
-                    text_field: app.rag_state.create_text_field.clone(),
+                    embedding_field: app.rag_state.create_embedding_field.value().to_string(),
+                    text_field: app.rag_state.create_text_field.value().to_string(),
                     text_fields: None,
                     context_fields: None,
                     provider: Some(app.rag_state.create_provider.clone()),
@@ -348,33 +345,10 @@ pub(crate) async fn handle_rag_collections_key(
                 app.rag_state.next_create_field();
             }
 
-            // Text input
-            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-                match app.rag_state.create_form_field {
-                    0 => app.rag_state.create_collection_name.push(c),
-                    1 => app.rag_state.create_embedding_field.push(c),
-                    2 => app.rag_state.create_text_field.push(c),
-                    _ => {}
-                }
-                app.rag_state.error = None;
+            // The name and field inputs take the rest
+            _ => {
+                app.rag_state.handle_text_input(key, modifiers);
             }
-            (KeyCode::Backspace, _) => {
-                match app.rag_state.create_form_field {
-                    0 => {
-                        app.rag_state.create_collection_name.pop();
-                    }
-                    1 => {
-                        app.rag_state.create_embedding_field.pop();
-                    }
-                    2 => {
-                        app.rag_state.create_text_field.pop();
-                    }
-                    _ => {}
-                }
-                app.rag_state.error = None;
-            }
-
-            _ => {}
         }
         return;
     }
@@ -457,12 +431,12 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
     if app.rag_state.models_mode == 1 {
         match (key, modifiers) {
             (KeyCode::Enter, _) => {
-                if app.rag_state.embed_test_input.trim().is_empty() {
+                if app.rag_state.embed_test_input.value().trim().is_empty() {
                     app.rag_state.error = Some("Text is empty".to_string());
                     return;
                 }
 
-                let text = app.rag_state.embed_test_input.clone();
+                let text = app.rag_state.embed_test_input.value().to_string();
                 app.rag_state.is_loading = true;
                 app.rag_state.error = None;
 
@@ -485,16 +459,9 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                 }
             }
 
-            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-                app.rag_state.embed_test_input.push(c);
-                app.rag_state.error = None;
+            _ => {
+                app.rag_state.handle_text_input(key, modifiers);
             }
-            (KeyCode::Backspace, _) => {
-                app.rag_state.embed_test_input.pop();
-                app.rag_state.error = None;
-            }
-
-            _ => {}
         }
         return;
     }
