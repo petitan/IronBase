@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: one multi-line editor for the document, query, script and RAG content (ironbase-core 0.3.482)
+
+Phase 3g of the Tuti TUI overhaul: `widgets::TextArea`, a multi-line editor whose lines are `TextInput`s,
+replaces the three hand-written editors (document insert / edit, query, IronRhai script) and the RAG import
+content string.
+
+- **Document and query editors:** Delete, Home / End, PageUp / PageDown, Ctrl+Home / End and the readline keys
+  Ctrl+A / U / W did nothing (Ctrl+E is the query's explain and Ctrl+J / K its result keys, as before); they now
+  work, with the terminal's cursor instead of a drawn `│`. A long line scrolls sideways instead of being cut.
+- **Script editor:** the same keys, the Rhai highlighting is kept; the view no longer stays at the top when the
+  cursor moves below it. The line numbers lose their `|` separator, like the other editors.
+- **RAG import content:** typed at the cursor (it took characters only at its end) and shown as an editor
+  instead of a wrapped preview cut at 500 characters. Enter still starts the import, so line breaks come from
+  pasting, which the next phase turns on.
+- A loaded script keeps a trailing line break (it was dropped on load and then on save).
+- From line 1000 on the line numbers are as wide as needed (they pushed the text one column right of the
+  three-digit gutter); the Rhai highlighter sees the whole line, also when the view is scrolled sideways; the
+  terminal's cursor is not shown through the query templates, a script confirmation or the loading box.
+- The three editors' state lose their `lines` / `cursor_line` / `cursor_col` (and the script's `scroll_offset`)
+  and their eight copied editing methods each.
+
 ### Fixed — Tuti TUI: the RAG modal's single-line inputs edit at the cursor (ironbase-core 0.3.481)
 
 Phase 3f of the Tuti TUI overhaul: every single-line input the TUI types into now uses the shared `TextInput`.

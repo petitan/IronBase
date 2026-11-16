@@ -165,13 +165,7 @@ pub(crate) async fn handle_script_history_key(app: &mut App, key: KeyCode) {
                 .versions
                 .get(app.script_state.selected_version)
             {
-                app.script_state.lines = version.code.lines().map(String::from).collect();
-                if app.script_state.lines.is_empty() {
-                    app.script_state.lines.push(String::new());
-                }
-                app.script_state.cursor_line = 0;
-                app.script_state.cursor_col = 0;
-                app.script_state.scroll_offset = 0;
+                app.script_state.editor = crate::widgets::TextArea::new(&version.code);
                 app.script_state.mode = crate::app::ScriptMode::Edit;
                 app.script_state.focus = crate::app::ScriptFocus::Editor;
                 app.script_state.message =
@@ -259,54 +253,7 @@ pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: Key
 
 /// Handle editor (code) keys
 pub(crate) fn handle_script_editor_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match (key, modifiers) {
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.script_state.insert_char(c);
-        }
-        (KeyCode::Enter, _) => {
-            app.script_state.insert_newline();
-        }
-        (KeyCode::Tab, KeyModifiers::NONE) => {
-            // Insert 4 spaces as tab in editor
-            app.script_state.insert_tab();
-            app.script_state.insert_tab();
-        }
-        (KeyCode::Backspace, _) => {
-            app.script_state.backspace();
-        }
-        (KeyCode::Delete, _) => {
-            app.script_state.delete_char();
-        }
-        (KeyCode::Left, _) => {
-            app.script_state.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.script_state.cursor_right();
-        }
-        (KeyCode::Up, _) => {
-            app.script_state.cursor_up();
-        }
-        (KeyCode::Down, _) => {
-            app.script_state.cursor_down();
-        }
-        (KeyCode::Home, _) => {
-            app.script_state.cursor_home();
-        }
-        (KeyCode::End, _) => {
-            app.script_state.cursor_end();
-        }
-        (KeyCode::PageUp, _) => {
-            for _ in 0..10 {
-                app.script_state.cursor_up();
-            }
-        }
-        (KeyCode::PageDown, _) => {
-            for _ in 0..10 {
-                app.script_state.cursor_down();
-            }
-        }
-        _ => {}
-    }
+    app.script_state.handle_editor_input(key, modifiers);
 }
 
 /// Handle params field keys

@@ -39,12 +39,8 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
             if app.query_state.has_results() {
                 app.apply_query_as_filter().await;
             } else {
-                app.query_state.insert_newline();
+                app.query_state.handle_input(key, modifiers);
             }
-        }
-        // Tab = Insert 2 spaces
-        (KeyCode::Tab, _) => {
-            app.query_state.insert_tab();
         }
         // Ctrl+T = Templates
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
@@ -57,26 +53,9 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
             app.query_state.result_up();
         }
-        // Arrow keys = cursor movement
-        (KeyCode::Backspace, _) => {
-            app.query_state.backspace();
+        // The editor takes the rest
+        _ => {
+            app.query_state.handle_input(key, modifiers);
         }
-        (KeyCode::Left, _) => {
-            app.query_state.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.query_state.cursor_right();
-        }
-        (KeyCode::Up, _) => {
-            app.query_state.cursor_up();
-        }
-        (KeyCode::Down, _) => {
-            app.query_state.cursor_down();
-        }
-        // All other chars = insert
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.query_state.insert_char(c);
-        }
-        _ => {}
     }
 }

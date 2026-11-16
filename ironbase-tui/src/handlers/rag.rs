@@ -182,13 +182,13 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
     match (key, modifiers) {
         // Execute import
         (KeyCode::Enter, _) => {
-            if app.rag_state.import_content.trim().is_empty() {
+            if app.rag_state.import_content.text().trim().is_empty() {
                 app.rag_state.error = Some("Content is empty".to_string());
                 return;
             }
 
             let collection = app.rag_state.collection.clone();
-            let content = app.rag_state.import_content.clone();
+            let content = app.rag_state.import_content.text();
             let title = if app.rag_state.import_title.is_empty() {
                 None
             } else {
@@ -241,15 +241,14 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
             app.rag_state.next_import_field();
         }
 
-        // The title input
-        _ if app.rag_state.import_form_field == 1 => {
+        // The content and the title
+        _ if app.rag_state.import_form_field <= 1 => {
             app.rag_state.handle_text_input(key, modifiers);
         }
 
         // Text input based on focused field
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
             match app.rag_state.import_form_field {
-                0 => app.rag_state.import_content.push(c),
                 2 if c.is_ascii_digit() => {
                     let digit = c.to_digit(10).unwrap() as usize;
                     app.rag_state.import_chunk_size = app.rag_state.import_chunk_size * 10 + digit;
@@ -264,9 +263,6 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
         }
         (KeyCode::Backspace, _) => {
             match app.rag_state.import_form_field {
-                0 => {
-                    app.rag_state.import_content.pop();
-                }
                 2 => {
                     app.rag_state.import_chunk_size /= 10;
                 }

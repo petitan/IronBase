@@ -1,6 +1,6 @@
 //! RAG & Embedding state
 
-use crate::widgets::{InputOutcome, TextInput};
+use crate::widgets::{InputOutcome, TextArea, TextInput};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, ModelInfo,
@@ -66,7 +66,7 @@ pub struct RagState {
     pub search_focus: usize,
 
     // === Import tab ===
-    pub import_content: String,
+    pub import_content: TextArea,
     pub import_title: TextInput,
     pub import_chunk_size: usize,
     pub import_overlap: usize,
@@ -127,7 +127,7 @@ impl RagState {
     }
 
     /// The single-line input that has the focus, if any (the import
-    /// content is a multi-line text, edited on its own)
+    /// content is a multi-line text, see `handle_text_input`)
     fn focused_input(&mut self) -> Option<&mut TextInput> {
         match self.active_tab {
             RagTab::Search if self.search_focus == 0 => Some(&mut self.search_query),
@@ -143,11 +143,16 @@ impl RagState {
         }
     }
 
-    /// Edit the focused single-line input; an edit clears the error
+    /// Edit the focused input, the import content included; an edit clears
+    /// the error
     pub fn handle_text_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
-        let outcome = match self.focused_input() {
-            Some(input) => input.handle_key(code, modifiers),
-            None => InputOutcome::Ignored,
+        let outcome = if self.active_tab == RagTab::Import && self.import_form_field == 0 {
+            self.import_content.handle_key(code, modifiers)
+        } else {
+            match self.focused_input() {
+                Some(input) => input.handle_key(code, modifiers),
+                None => InputOutcome::Ignored,
+            }
         };
         if outcome == InputOutcome::Changed {
             self.error = None;

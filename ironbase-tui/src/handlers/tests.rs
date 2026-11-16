@@ -1328,7 +1328,9 @@ async fn test_edit_reports_updated_unchanged_and_not_found() {
 
     // A real change (built-in update_one)
     open_edit_of_first_user(&mut app).await;
-    app.insert.lines = vec![r#"{"_id": 0, "n": 100, "even": true}"#.to_string()];
+    app.insert
+        .editor
+        .set_text(r#"{"_id": 0, "n": 100, "even": true}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
     assert_eq!(app.status_message.as_deref(), Some("Dokumentum frissítve"));
     assert_eq!(
@@ -1369,7 +1371,7 @@ async fn test_edit_unsets_removed_fields() {
 
     // The first user is {"_id": 0, "n": 0, "even": true}: remove `even`
     open_edit_of_first_user(&mut app).await;
-    app.insert.lines = vec![r#"{"_id": 0, "n": 0}"#.to_string()];
+    app.insert.editor.set_text(r#"{"_id": 0, "n": 0}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
     assert_eq!(
         server.calls_to("update_one"),
@@ -1423,7 +1425,7 @@ async fn test_insert_into_fake_server_stores_the_document() {
     let mut app = app_with_server(&server).await;
 
     press(&mut app, KeyCode::Char('i')).await;
-    app.insert.lines = vec![r#"{"_id": "k-1", "n": 7}"#.to_string()];
+    app.insert.editor.set_text(r#"{"_id": "k-1", "n": 7}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
 
     assert_eq!(
@@ -2258,7 +2260,7 @@ async fn test_script_run_shows_the_servers_result_logs_and_time() {
         json!({"success": true, "result": 10, "logs": ["hi"], "execution_time_ms": 4242}),
     );
     let mut app = app_with_server(&server).await;
-    app.script_state.lines = vec!["print(\"hi\"); 10".to_string()];
+    app.script_state.editor.set_text("print(\"hi\"); 10");
 
     app.run_script_async().await;
 
@@ -2653,4 +2655,33 @@ async fn test_rag_inputs_are_edited_at_the_cursor() {
     let provider = app.rag_state.create_provider.clone();
     press(&mut app, KeyCode::Char(' ')).await;
     assert_ne!(app.rag_state.create_provider, provider);
+}
+
+/// The multi-line editors share one widget: Delete, End and the readline
+/// keys work in the document editor too, and an edit clears its error
+#[tokio::test]
+async fn test_document_editor_keys() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_edit_of_first_user(&mut app).await;
+    app.insert.editor.set_text("{\"a\": 1x}");
+    app.insert.error = Some("JSON hiba".to_string());
+    press(&mut app, KeyCode::End).await;
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Delete).await;
+    assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
+    assert_eq!(app.insert.error, None);
+    press(&mut app, KeyCode::Home).await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.insert.editor.text(), "\n{\"a\": 1}");
+    press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
+    assert_eq!(
+        app.insert.editor.text(),
+        "\n{\"a\": 1}",
+        "nothing before the cursor on its line"
+    );
+    press(&mut app, KeyCode::Backspace).await;
+    assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
+    assert_eq!(app.modal, Some(Modal::Insert));
 }

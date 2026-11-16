@@ -358,55 +358,22 @@ fn render_code_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme:
     } else {
         theme.muted
     };
-
-    let visible_height = area.height.saturating_sub(2) as usize; // account for border
-    let start_line = state.scroll_offset;
-
-    let mut lines: Vec<Line> = Vec::new();
-    for (idx, line) in state
-        .lines
-        .iter()
-        .enumerate()
-        .skip(start_line)
-        .take(visible_height)
-    {
-        let line_num = format!("{:3}| ", idx + 1);
-        let is_cursor_line = idx == state.cursor_line;
-
-        if is_cursor_line && is_focused {
-            // Show cursor with highlighting
-            let before: String = line.chars().take(state.cursor_col).collect();
-            let after: String = line.chars().skip(state.cursor_col).collect();
-
-            let mut spans = vec![Span::styled(line_num, Style::default().fg(theme.muted))];
-            spans.extend(highlight_rhai_spans(&before, theme));
-            spans.push(Span::styled(
-                "|",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.extend(highlight_rhai_spans(&after, theme));
-
-            lines.push(Line::from(spans));
-        } else {
-            // No cursor - full line highlighting
-            let mut spans = vec![Span::styled(line_num, Style::default().fg(theme.muted))];
-            spans.extend(highlight_rhai_spans(line, theme));
-            lines.push(Line::from(spans));
-        }
-    }
-
-    let editor = Paragraph::new(lines)
-        .block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .title(" Kod ")
-                .title_style(Style::default().fg(border_color)),
-        )
-        .style(Style::default().bg(theme.bg));
-    frame.render_widget(editor, area);
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(" Kod ")
+        .title_style(Style::default().fg(border_color));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    state.editor.render(
+        frame,
+        inner,
+        Style::default().bg(theme.bg),
+        Some(Style::default().fg(theme.muted)),
+        &|line: &str| highlight_rhai_spans(line, theme),
+        // A confirmation or the loading box is drawn over the editor
+        is_focused && state.confirm_action.is_none() && !state.loading,
+    );
 }
 
 /// Rhai syntax highlighting - returns spans for a single line
@@ -627,8 +594,8 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
             Span::styled(
                 format!(
                     "Sor: {} Oszlop: {}",
-                    state.cursor_line + 1,
-                    state.cursor_col + 1
+                    state.editor.cursor().0 + 1,
+                    state.editor.cursor().1 + 1
                 ),
                 Style::default().fg(theme.muted),
             ),

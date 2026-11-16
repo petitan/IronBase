@@ -1,6 +1,6 @@
 //! IronRhai Script Editor State
 
-use crate::widgets::{InputOutcome, TextInput};
+use crate::widgets::{InputOutcome, TextArea, TextInput};
 use crossterm::event::{KeyCode, KeyModifiers};
 use serde_json::Value;
 
@@ -54,10 +54,7 @@ pub struct ScriptResult {
 #[derive(Debug, Clone)]
 pub struct ScriptState {
     // Editor
-    pub lines: Vec<String>,
-    pub cursor_line: usize,
-    pub cursor_col: usize,
-    pub scroll_offset: usize,
+    pub editor: TextArea,
 
     // Metadata
     pub name: TextInput,
@@ -93,10 +90,7 @@ pub struct ScriptState {
 impl Default for ScriptState {
     fn default() -> Self {
         Self {
-            lines: vec!["// IronRhai script".to_string(), "".to_string()],
-            cursor_line: 1,
-            cursor_col: 0,
-            scroll_offset: 0,
+            editor: TextArea::with_cursor("// IronRhai script\n", 1, 0),
             name: TextInput::default(),
             description: TextInput::default(),
             tags: Vec::new(),
@@ -147,10 +141,7 @@ impl ScriptState {
     pub fn start_new(&mut self) {
         self.mode = ScriptMode::New;
         self.focus = ScriptFocus::Name;
-        self.lines = vec!["// IronRhai script".to_string(), "".to_string()];
-        self.cursor_line = 1;
-        self.cursor_col = 0;
-        self.scroll_offset = 0;
+        self.editor = TextArea::with_cursor("// IronRhai script\n", 1, 0);
         self.name.clear();
         self.description.clear();
         self.tags.clear();
@@ -175,13 +166,7 @@ impl ScriptState {
     ) {
         self.mode = ScriptMode::Edit;
         self.focus = ScriptFocus::Editor;
-        self.lines = code.lines().map(String::from).collect();
-        if self.lines.is_empty() {
-            self.lines.push(String::new());
-        }
-        self.cursor_line = 0;
-        self.cursor_col = 0;
-        self.scroll_offset = 0;
+        self.editor = TextArea::new(&code);
         self.name.set_value(name);
         self.description.set_value(desc.unwrap_or_default());
         self.tags = tags;
@@ -205,10 +190,7 @@ impl ScriptState {
     pub fn enter_inline(&mut self) {
         self.mode = ScriptMode::Inline;
         self.focus = ScriptFocus::Editor;
-        self.lines = vec!["// Ad-hoc script".to_string(), "".to_string()];
-        self.cursor_line = 1;
-        self.cursor_col = 0;
-        self.scroll_offset = 0;
+        self.editor = TextArea::with_cursor("// Ad-hoc script\n", 1, 0);
         self.name.set_value("[inline]");
         self.description.clear();
         self.tags.clear();
@@ -244,150 +226,15 @@ impl ScriptState {
         outcome
     }
 
-    /// Type `c` into the code editor
-    pub fn insert_char(&mut self, c: char) {
-        if self.focus == ScriptFocus::Editor {
-            if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                let char_count = line.chars().count();
-                if self.cursor_col <= char_count {
-                    let byte_pos = line
-                        .char_indices()
-                        .nth(self.cursor_col)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    line.insert(byte_pos, c);
-                    self.cursor_col += 1;
-                    self.dirty = true;
-                }
-            }
+    /// A key for the code editor; an edit marks the script changed
+    pub fn handle_editor_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = self.editor.handle_key(code, modifiers);
+        if outcome == InputOutcome::Changed {
+            self.dirty = true;
+            self.error = None;
         }
-        self.error = None;
+        outcome
     }
-
-    /// Backspace in the code editor (joins lines at a line start)
-    pub fn backspace(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            if self.cursor_col > 0 {
-                if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                    let byte_pos = line
-                        .char_indices()
-                        .nth(self.cursor_col - 1)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    line.remove(byte_pos);
-                    self.cursor_col -= 1;
-                    self.dirty = true;
-                }
-            } else if self.cursor_line > 0 {
-                let current_line = self.lines.remove(self.cursor_line);
-                self.cursor_line -= 1;
-                if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
-                    self.cursor_col = prev_line.chars().count();
-                    prev_line.push_str(&current_line);
-                }
-                self.dirty = true;
-            }
-        }
-        self.error = None;
-    }
-
-    pub fn insert_newline(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                let byte_pos = line
-                    .char_indices()
-                    .nth(self.cursor_col)
-                    .map(|(i, _)| i)
-                    .unwrap_or(line.len());
-                let rest = line.split_off(byte_pos);
-                self.cursor_line += 1;
-                self.lines.insert(self.cursor_line, rest);
-                self.cursor_col = 0;
-                self.dirty = true;
-            }
-        }
-        self.error = None;
-    }
-
-    pub fn insert_tab(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            self.insert_char(' ');
-            self.insert_char(' ');
-        }
-    }
-
-    // === Cursor navigation ===
-
-    pub fn cursor_left(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            if self.cursor_col > 0 {
-                self.cursor_col -= 1;
-            } else if self.cursor_line > 0 {
-                self.cursor_line -= 1;
-                self.cursor_col = self
-                    .lines
-                    .get(self.cursor_line)
-                    .map(|l| l.chars().count())
-                    .unwrap_or(0);
-            }
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            let char_count = self
-                .lines
-                .get(self.cursor_line)
-                .map(|l| l.chars().count())
-                .unwrap_or(0);
-            if self.cursor_col < char_count {
-                self.cursor_col += 1;
-            } else if self.cursor_line + 1 < self.lines.len() {
-                self.cursor_line += 1;
-                self.cursor_col = 0;
-            }
-        }
-    }
-
-    pub fn cursor_up(&mut self) {
-        match self.focus {
-            ScriptFocus::Editor if self.cursor_line > 0 => {
-                self.cursor_line -= 1;
-                let char_count = self
-                    .lines
-                    .get(self.cursor_line)
-                    .map(|l| l.chars().count())
-                    .unwrap_or(0);
-                self.cursor_col = self.cursor_col.min(char_count);
-            }
-            ScriptFocus::List if self.selected_script > 0 => self.selected_script -= 1,
-            ScriptFocus::History if self.selected_version > 0 => self.selected_version -= 1,
-            _ => {}
-        }
-    }
-
-    pub fn cursor_down(&mut self) {
-        match self.focus {
-            ScriptFocus::Editor if self.cursor_line + 1 < self.lines.len() => {
-                self.cursor_line += 1;
-                let char_count = self
-                    .lines
-                    .get(self.cursor_line)
-                    .map(|l| l.chars().count())
-                    .unwrap_or(0);
-                self.cursor_col = self.cursor_col.min(char_count);
-            }
-            ScriptFocus::List if self.selected_script + 1 < self.scripts.len() => {
-                self.selected_script += 1
-            }
-            ScriptFocus::History if self.selected_version + 1 < self.versions.len() => {
-                self.selected_version += 1
-            }
-            _ => {}
-        }
-    }
-
-    // === Focus navigation ===
 
     pub fn next_focus(&mut self) {
         self.focus = match self.focus {
@@ -413,52 +260,6 @@ impl ScriptState {
         self.stop_tag_typing();
     }
 
-    pub fn cursor_home(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            self.cursor_col = 0;
-        }
-    }
-
-    pub fn cursor_end(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            self.cursor_col = self
-                .lines
-                .get(self.cursor_line)
-                .map(|l| l.chars().count())
-                .unwrap_or(0);
-        }
-    }
-
-    pub fn delete_char(&mut self) {
-        if self.focus == ScriptFocus::Editor {
-            if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                let char_count = line.chars().count();
-                if self.cursor_col < char_count {
-                    let byte_pos = line
-                        .char_indices()
-                        .nth(self.cursor_col)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    let next_byte_pos = line
-                        .char_indices()
-                        .nth(self.cursor_col + 1)
-                        .map(|(i, _)| i)
-                        .unwrap_or(line.len());
-                    line.replace_range(byte_pos..next_byte_pos, "");
-                    self.dirty = true;
-                } else if self.cursor_line + 1 < self.lines.len() {
-                    // Merge next line
-                    let next_line = self.lines.remove(self.cursor_line + 1);
-                    if let Some(current_line) = self.lines.get_mut(self.cursor_line) {
-                        current_line.push_str(&next_line);
-                    }
-                    self.dirty = true;
-                }
-            }
-        }
-        self.error = None;
-    }
-
     // === Tag operations ===
 
     pub fn add_tag(&mut self) {
@@ -478,118 +279,21 @@ impl ScriptState {
 mod tests {
     use super::*;
 
-    fn editor(lines: &[&str], line: usize, col: usize) -> ScriptState {
-        ScriptState {
-            lines: lines.iter().map(|l| l.to_string()).collect(),
-            cursor_line: line,
-            cursor_col: col,
-            focus: ScriptFocus::Editor,
-            mode: ScriptMode::Edit,
-            ..ScriptState::default()
-        }
-    }
-
+    /// Editing the code marks the script changed; a cursor move does not
     #[test]
-    fn test_editor_insert_is_by_character_not_byte() {
-        let mut state = editor(&["árvíz"], 0, 2);
-        state.insert_char('ő');
-        assert_eq!(state.lines, vec!["árővíz"]);
-        assert_eq!(state.cursor_col, 3);
-        assert!(state.dirty);
-
-        // At the end of the line
-        state.cursor_end();
-        assert_eq!(state.cursor_col, 6);
-        state.insert_char('🙂');
-        assert_eq!(state.lines, vec!["árővíz🙂"]);
-        assert_eq!(state.cursor_col, 7);
-    }
-
-    #[test]
-    fn test_editor_backspace_and_delete_with_multibyte() {
-        let mut state = editor(&["tűzőgép"], 0, 2);
-        state.backspace();
-        assert_eq!(state.lines, vec!["tzőgép"]);
-        assert_eq!(state.cursor_col, 1);
-
-        state.delete_char();
-        assert_eq!(state.lines, vec!["tőgép"]);
-        assert_eq!(state.cursor_col, 1);
-        state.delete_char();
-        assert_eq!(state.lines, vec!["tgép"]);
-    }
-
-    #[test]
-    fn test_editor_backspace_at_line_start_joins_lines() {
-        let mut state = editor(&["első", "második"], 1, 0);
-        state.backspace();
-        assert_eq!(state.lines, vec!["elsőmásodik"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 4));
-        assert!(state.dirty);
-
-        // First line, first column: nothing to join, not dirty
-        let mut state = editor(&["a"], 0, 0);
-        state.backspace();
-        assert_eq!(state.lines, vec!["a"]);
+    fn test_editor_edit_marks_the_script_changed() {
+        let mut state = ScriptState::new();
+        state.load_script("s".to_string(), "ab\ncd".to_string(), None, vec![], 1);
+        assert_eq!(
+            state.handle_editor_input(KeyCode::Down, KeyModifiers::NONE),
+            InputOutcome::Moved
+        );
         assert!(!state.dirty);
-    }
-
-    #[test]
-    fn test_editor_delete_at_line_end_joins_next_line() {
-        let mut state = editor(&["ab", "cd"], 0, 2);
-        state.delete_char();
-        assert_eq!(state.lines, vec!["abcd"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 2));
-
-        // Last line end: nothing happens
-        let mut state = editor(&["ab"], 0, 2);
-        state.delete_char();
-        assert_eq!(state.lines, vec!["ab"]);
-        assert!(!state.dirty);
-    }
-
-    #[test]
-    fn test_editor_newline_splits_at_character_position() {
-        let mut state = editor(&["őzláb"], 0, 2);
-        state.insert_newline();
-        assert_eq!(state.lines, vec!["őz", "láb"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
-
-        state.insert_tab();
-        assert_eq!(state.lines, vec!["őz", "  láb"]);
-        assert_eq!(state.cursor_col, 2);
-    }
-
-    #[test]
-    fn test_editor_cursor_movement_wraps_and_clamps() {
-        let mut state = editor(&["hosszú sor", "űr", ""], 0, 10);
-        // Right at line end: start of the next line
-        state.cursor_right();
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
-        // Left at line start: end of the previous line (in characters)
-        state.cursor_left();
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 10));
-        // Down clamps the column to the shorter line
-        state.cursor_down();
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 2));
-        state.cursor_down();
-        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
-        // Last line: stays
-        state.cursor_down();
-        state.cursor_right();
-        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
-        // Up keeps the (clamped) column
-        state.cursor_up();
-        state.cursor_up();
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
-        state.cursor_up();
-        state.cursor_left();
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
-
-        state.cursor_end();
-        assert_eq!(state.cursor_col, 10);
-        state.cursor_home();
-        assert_eq!(state.cursor_col, 0);
+        state.error = Some("hiba".to_string());
+        state.handle_editor_input(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(state.editor.text(), "abcd");
+        assert!(state.dirty);
+        assert_eq!(state.error, None);
     }
 
     fn key(state: &mut ScriptState, code: KeyCode) -> InputOutcome {
@@ -725,21 +429,22 @@ mod tests {
         );
         assert_eq!(state.mode, ScriptMode::Edit);
         assert_eq!(state.focus, ScriptFocus::Editor);
-        assert_eq!(state.lines, vec!["let a = 1;", "let b = 2;"]);
+        assert_eq!(state.editor.text(), "let a = 1;\nlet b = 2;");
         assert_eq!((state.name.cursor(), state.description.cursor()), (7, 6));
         assert_eq!(state.version, 3);
         assert!(!state.dirty);
 
         // Empty code still has one line to type into
         state.load_script("empty".to_string(), String::new(), None, vec![], 1);
-        assert_eq!(state.lines, vec![""]);
+        assert_eq!(state.editor.line_count(), 1);
+        assert!(state.editor.is_empty());
 
         state.enter_inline();
         assert_eq!(state.mode, ScriptMode::Inline);
         assert_eq!(state.name.value(), "[inline]");
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
+        assert_eq!(state.editor.cursor(), (1, 0));
 
-        state.insert_char('x');
+        state.handle_editor_input(KeyCode::Char('x'), KeyModifiers::NONE);
         assert!(state.dirty);
         state.reset_to_browse();
         assert_eq!(state.mode, ScriptMode::Browse);
