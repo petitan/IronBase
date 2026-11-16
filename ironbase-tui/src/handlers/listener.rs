@@ -2,7 +2,7 @@
 
 use crate::app::App;
 use crate::db::DbWrapper;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{ListenerAddParams, ListenerIdParams, NoParams};
 use ironbase_mcp_types::responses::{ListenerAction as Created, ListenerInfo};
 use ironbase_mcp_types::tools::{
@@ -33,7 +33,11 @@ async fn refresh_listeners(app: &mut App) {
 }
 
 /// Listener modal key handler
-pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_listener_key_async(
+    app: &mut App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) {
     use crate::modals::listener::{AddField, ListenerAction, ListenerModalMode};
 
     match app.listener_state.mode {
@@ -72,8 +76,8 @@ pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                 app.listener_state.toggle_tls();
             }
             KeyCode::Enter => {
-                let id = app.listener_state.add_id.trim().to_string();
-                let bind = app.listener_state.add_bind.trim().to_string();
+                let id = app.listener_state.add_id.value().trim().to_string();
+                let bind = app.listener_state.add_bind.value().trim().to_string();
                 let tls = app.listener_state.add_tls;
 
                 if id.is_empty() {
@@ -119,21 +123,15 @@ pub(crate) async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                     }
                 }
             }
-            KeyCode::Char(c) => match app.listener_state.add_field {
-                AddField::Id => app.listener_state.add_id.push(c),
-                AddField::Bind => app.listener_state.add_bind.push(c),
-                AddField::Tls => {}
-            },
-            KeyCode::Backspace => match app.listener_state.add_field {
+            _ => match app.listener_state.add_field {
                 AddField::Id => {
-                    app.listener_state.add_id.pop();
+                    app.listener_state.add_id.handle_key(key, modifiers);
                 }
                 AddField::Bind => {
-                    app.listener_state.add_bind.pop();
+                    app.listener_state.add_bind.handle_key(key, modifiers);
                 }
                 AddField::Tls => {}
             },
-            _ => {}
         },
         ListenerModalMode::Confirm => match key {
             KeyCode::Esc | KeyCode::Char('n') => {

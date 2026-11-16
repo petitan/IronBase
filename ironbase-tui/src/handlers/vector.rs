@@ -1,6 +1,7 @@
 //! Key handlers: vector
 
 use crate::app::{App, Modal, VectorSearchState};
+use crate::widgets::InputOutcome;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{IndexCreateArgs, VectorIndexCreateParams, VectorSearchParams};
 use ironbase_mcp_types::tools::{IndexCreate, VectorSearch};
@@ -130,16 +131,11 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.vector_state.result_down(),
 
         // Text input for vector
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.vector_state.vector_input.push(c);
-            app.vector_state.error = None;
+        _ => {
+            if app.vector_state.vector_input.handle_key(key, modifiers) == InputOutcome::Changed {
+                app.vector_state.error = None;
+            }
         }
-        (KeyCode::Backspace, _) => {
-            app.vector_state.vector_input.pop();
-            app.vector_state.error = None;
-        }
-
-        _ => {}
     }
 }
 
@@ -149,7 +145,7 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
         // Create index
         (KeyCode::Enter, _) => {
             let collection = app.vector_state.collection.clone();
-            let field = app.vector_state.new_field.trim().to_string();
+            let field = app.vector_state.new_field.value().trim().to_string();
             let dimension = app.vector_state.dimension;
             let metric = app.vector_state.metric.as_str().to_string();
 
@@ -201,28 +197,24 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
             app.vector_state.toggle_metric();
         }
 
-        // Text input
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            match app.vector_state.create_form_field {
-                0 => app.vector_state.new_field.push(c),
-                1 if c.is_ascii_digit() => {
-                    let digit = c.to_digit(10).unwrap() as usize;
-                    app.vector_state.dimension = app.vector_state.dimension * 10 + digit;
-                }
-                _ => {}
+        // Field name input
+        _ if app.vector_state.create_form_field == 0 => {
+            if app.vector_state.new_field.handle_key(key, modifiers) == InputOutcome::Changed {
+                app.vector_state.error = None;
+            }
+        }
+
+        // Dimension (digits only)
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
+            if app.vector_state.create_form_field == 1 =>
+        {
+            if let Some(digit) = c.to_digit(10) {
+                app.vector_state.dimension = app.vector_state.dimension * 10 + digit as usize;
             }
             app.vector_state.error = None;
         }
-        (KeyCode::Backspace, _) => {
-            match app.vector_state.create_form_field {
-                0 => {
-                    app.vector_state.new_field.pop();
-                }
-                1 => {
-                    app.vector_state.dimension /= 10;
-                }
-                _ => {}
-            }
+        (KeyCode::Backspace, _) if app.vector_state.create_form_field == 1 => {
+            app.vector_state.dimension /= 10;
             app.vector_state.error = None;
         }
 

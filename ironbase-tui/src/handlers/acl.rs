@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::db::DbWrapper;
 use crate::modals;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{AclCollectionParams, AclSetParams, NoParams};
 use ironbase_mcp_types::tools::{AclDelete, AclList, AclSet};
 
@@ -37,7 +37,7 @@ async fn refresh_acls(app: &mut App) {
 }
 
 /// ACL modal key handler
-pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     use crate::modals::acl::{AclModalMode, EditField};
 
     match app.acl_state.mode {
@@ -140,11 +140,8 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                         }
                         _ => {}
                     },
-                    KeyCode::Char(c) if app.acl_state.edit_field == EditField::PrincipalValue => {
-                        app.acl_state.current_rule.principal_value.push(c);
-                    }
-                    KeyCode::Backspace if app.acl_state.edit_field == EditField::PrincipalValue => {
-                        app.acl_state.current_rule.principal_value.pop();
+                    _ if app.acl_state.edit_field == EditField::PrincipalValue => {
+                        app.acl_state.handle_principal_input(key, modifiers);
                     }
                     _ => {}
                 }

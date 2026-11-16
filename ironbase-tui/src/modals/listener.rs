@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::theme::Theme;
+use crate::widgets::TextInput;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -47,9 +48,9 @@ pub struct ListenerState {
     /// Confirm action
     pub confirm_action: Option<ListenerAction>,
     /// Add form: ID
-    pub add_id: String,
+    pub add_id: TextInput,
     /// Add form: Bind address
-    pub add_bind: String,
+    pub add_bind: TextInput,
     /// Add form: TLS enabled
     pub add_tls: bool,
     /// Add form: current field
@@ -77,8 +78,8 @@ impl ListenerState {
             listeners: Vec::new(),
             selected: 0,
             confirm_action: None,
-            add_id: String::new(),
-            add_bind: String::new(),
+            add_id: TextInput::default(),
+            add_bind: TextInput::default(),
             add_tls: false,
             add_field: AddField::Id,
             error: None,
@@ -111,7 +112,7 @@ impl ListenerState {
         if self.is_localhost {
             self.mode = ListenerModalMode::Add;
             self.add_id.clear();
-            self.add_bind = "0.0.0.0:8080".to_string();
+            self.add_bind.set_value("0.0.0.0:8080");
             self.add_tls = false;
             self.add_field = AddField::Id;
             self.error = None;
@@ -347,12 +348,12 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
         .border_style(id_style);
     let id_inner = id_block.inner(chunks[1]);
     frame.render_widget(id_block, chunks[1]);
-    let id_text = if state.add_field == AddField::Id {
-        format!("{}_", state.add_id)
-    } else {
-        state.add_id.clone()
-    };
-    frame.render_widget(Paragraph::new(id_text), id_inner);
+    state.add_id.render(
+        frame,
+        id_inner,
+        Style::default().fg(theme.fg),
+        state.add_field == AddField::Id,
+    );
 
     // Bind field
     let bind_style = if state.add_field == AddField::Bind {
@@ -366,12 +367,12 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
         .border_style(bind_style);
     let bind_inner = bind_block.inner(chunks[2]);
     frame.render_widget(bind_block, chunks[2]);
-    let bind_text = if state.add_field == AddField::Bind {
-        format!("{}_", state.add_bind)
-    } else {
-        state.add_bind.clone()
-    };
-    frame.render_widget(Paragraph::new(bind_text), bind_inner);
+    state.add_bind.render(
+        frame,
+        bind_inner,
+        Style::default().fg(theme.fg),
+        state.add_field == AddField::Bind,
+    );
 
     // TLS toggle
     let tls_style = if state.add_field == AddField::Tls {

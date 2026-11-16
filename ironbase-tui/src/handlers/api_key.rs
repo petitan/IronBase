@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::db::DbWrapper;
 use crate::modals;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminKeyParams};
 use ironbase_mcp_types::responses::ApiKeyChangeResponse;
 use ironbase_mcp_types::tools::{
@@ -43,7 +43,7 @@ async fn refresh_api_keys(app: &mut App, admin_key: &str) {
 }
 
 /// Handle API Key modal keys
-pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
+pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     use crate::modals::api_key::{ApiKeyModalMode, ConfirmAction};
 
     match app.api_key_state.mode {
@@ -84,7 +84,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                 app.api_key_state.cancel();
             }
             KeyCode::Enter => {
-                let name = app.api_key_state.input.trim().to_string();
+                let name = app.api_key_state.input.value().trim().to_string();
                 if name.is_empty() {
                     app.api_key_state
                         .set_error("Name cannot be empty".to_string());
@@ -178,13 +178,9 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                     }
                 }
             }
-            KeyCode::Char(c) => {
-                app.api_key_state.input.push(c);
+            _ => {
+                app.api_key_state.input.handle_key(key, modifiers);
             }
-            KeyCode::Backspace => {
-                app.api_key_state.input.pop();
-            }
-            _ => {}
         },
         ApiKeyModalMode::Confirm => match key {
             KeyCode::Esc | KeyCode::Char('n') => {
