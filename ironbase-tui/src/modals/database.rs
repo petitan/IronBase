@@ -67,17 +67,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     frame.render_widget(info, chunks[2]);
 
     // Path input
-    let label = " Utvonal: ";
-    let [label_area, input_area] =
-        Layout::horizontal([Constraint::Length(label.len() as u16), Constraint::Min(1)])
-            .areas(chunks[3]);
-    frame.render_widget(
-        Paragraph::new(Span::styled(label, Style::default().fg(theme.accent))),
-        label_area,
+    state.path.render_labeled(
+        frame,
+        chunks[3],
+        Span::styled(" Utvonal: ", Style::default().fg(theme.accent)),
+        Style::default().fg(theme.fg),
+        true,
     );
-    state
-        .path
-        .render(frame, input_area, Style::default().fg(theme.fg), true);
 
     // Status/error line
     let status_text = if let Some(ref err) = state.error {

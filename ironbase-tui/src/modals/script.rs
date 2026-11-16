@@ -288,14 +288,13 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     } else {
         Style::default().fg(theme.fg)
     };
-    let name_cursor = if state.focus == ScriptFocus::Name {
-        "|"
-    } else {
-        ""
-    };
-    let name_text = format!("Nev: {}{}", state.name, name_cursor);
-    let name = Paragraph::new(name_text).style(name_style);
-    frame.render_widget(name, chunks[0]);
+    state.name.render_labeled(
+        frame,
+        chunks[0],
+        Span::styled("Nev: ", name_style),
+        name_style,
+        state.focus == ScriptFocus::Name,
+    );
 
     // Description field
     let desc_style = if state.focus == ScriptFocus::Description {
@@ -303,14 +302,13 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     } else {
         Style::default().fg(theme.fg)
     };
-    let desc_cursor = if state.focus == ScriptFocus::Description {
-        "|"
-    } else {
-        ""
-    };
-    let desc_text = format!("Leiras: {}{}", state.description, desc_cursor);
-    let desc = Paragraph::new(desc_text).style(desc_style);
-    frame.render_widget(desc, chunks[1]);
+    state.description.render_labeled(
+        frame,
+        chunks[1],
+        Span::styled("Leiras: ", desc_style),
+        desc_style,
+        state.focus == ScriptFocus::Description,
+    );
 
     // Tags field
     let tags_style = if state.focus == ScriptFocus::Tags {
@@ -332,9 +330,13 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
             },
         ));
     }
+    // The tag being typed is a chip of its own; the terminal cursor sits in it
+    let mut typing_cursor = None;
     if state.tag_input_active {
+        let before = Line::from(tag_spans.clone()).width() + 1;
+        typing_cursor = Some(before + state.tag_input.cursor_width());
         tag_spans.push(Span::styled(
-            format!("[{}|]", state.tag_input),
+            format!("[{}]", state.tag_input.value()),
             Style::default().fg(theme.accent),
         ));
     } else if state.focus == ScriptFocus::Tags {
@@ -342,6 +344,11 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     }
     let tags = Paragraph::new(Line::from(tag_spans)).style(tags_style);
     frame.render_widget(tags, chunks[2]);
+    if let Some(column) = typing_cursor {
+        if (column as u16) < chunks[2].width && chunks[2].height > 0 {
+            frame.set_cursor_position(Position::new(chunks[2].x + column as u16, chunks[2].y));
+        }
+    }
 }
 
 fn render_code_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
@@ -528,10 +535,13 @@ fn render_params(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
     } else {
         Style::default().fg(theme.fg)
     };
-    let cursor = if is_focused { "|" } else { "" };
-    let params_text = format!("Parameterek (JSON): {}{}", state.params_input, cursor);
-    let params = Paragraph::new(params_text).style(style);
-    frame.render_widget(params, area);
+    state.params_input.render_labeled(
+        frame,
+        area,
+        Span::styled("Parameterek (JSON): ", style),
+        style,
+        is_focused,
+    );
 }
 
 fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
@@ -631,7 +641,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
 /// History mode - version list
 fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
-    let title = format!("IronRhai Elozmeny: {}", state.name);
+    let title = format!("IronRhai Elozmeny: {}", state.name.value());
     let inner = render_modal_frame(frame, area, &title, theme, 80, 70);
 
     let chunks = Layout::vertical([

@@ -2,7 +2,7 @@
 //! rendering with the terminal's own cursor
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -237,6 +237,33 @@ impl TextInput {
             start -= 1;
         }
         start
+    }
+
+    /// Display width of the text before the cursor (for a caller drawing the
+    /// value inline, e.g. inside a chip)
+    pub fn cursor_width(&self) -> usize {
+        self.value
+            .chars()
+            .take(self.cursor)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
+    }
+
+    /// Draw `label`, then the input in the rest of `area` (see `render`)
+    pub fn render_labeled<'a>(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: impl Into<Line<'a>>,
+        style: Style,
+        focused: bool,
+    ) {
+        let label = label.into();
+        let [label_area, input_area] =
+            Layout::horizontal([Constraint::Length(label.width() as u16), Constraint::Min(1)])
+                .areas(area);
+        frame.render_widget(Paragraph::new(label), label_area);
+        self.render(frame, input_area, style, focused);
     }
 
     /// Draw the value in `area` (its first line) with `style`, scrolled so

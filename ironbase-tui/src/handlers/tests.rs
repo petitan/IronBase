@@ -406,7 +406,7 @@ async fn test_script_rollback_executes_with_captured_names() {
     press(&mut app, KeyCode::Char('r')).await;
     assert_eq!(app.modal, Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
-    app.script_state.name = "other".to_string();
+    app.script_state.name.set_value("other");
     app.script_state.selected_version = 0;
 
     press(&mut app, KeyCode::Char('y')).await;
@@ -795,7 +795,7 @@ async fn test_script_discard_confirm_enter_does_not_confirm() {
     press(&mut app, KeyCode::Char('n')).await;
     assert_eq!(app.script_state.mode, ScriptMode::New);
     type_text(&mut app, "x").await;
-    assert_eq!(app.script_state.name, "x");
+    assert_eq!(app.script_state.name.value(), "x");
     assert!(app.script_state.dirty);
 
     press(&mut app, KeyCode::Esc).await;
@@ -807,7 +807,7 @@ async fn test_script_discard_confirm_enter_does_not_confirm() {
     assert_eq!(app.script_state.confirm_action, None);
     assert_eq!(app.script_state.mode, ScriptMode::New);
     assert!(app.script_state.dirty);
-    assert_eq!(app.script_state.name, "x");
+    assert_eq!(app.script_state.name.value(), "x");
 
     // `y` discards
     press(&mut app, KeyCode::Esc).await;
@@ -2555,4 +2555,31 @@ async fn test_vector_input_is_edited_at_the_cursor() {
 
     assert_eq!(app.vector_state.vector_input.value(), "[1,2,3]");
     assert_eq!(app.vector_state.parse_vector(), Ok(vec![1.0, 2.0, 3.0]));
+}
+
+/// The script name, tag and params fields edit at the cursor: Home and the
+/// readline keys used to be ignored or typed as letters
+#[tokio::test]
+async fn test_script_fields_are_edited_at_the_cursor() {
+    let server = two_collections();
+    server.respond("script_list", json!({"scripts": [], "count": 0}));
+    let mut app = app_with_server(&server).await;
+    press(&mut app, KeyCode::Char('a')).await;
+    press(&mut app, KeyCode::Char('s')).await;
+    press(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(app.script_state.mode, ScriptMode::New);
+
+    type_text(&mut app, "etl").await;
+    press(&mut app, KeyCode::Home).await;
+    type_text(&mut app, "daily-").await;
+    assert_eq!(app.script_state.name.value(), "daily-etl");
+    assert!(app.script_state.dirty);
+
+    // Params: Ctrl+W deletes the word before the cursor
+    app.script_state.focus = crate::app::ScriptFocus::Params;
+    press(&mut app, KeyCode::End).await;
+    press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
+    assert_eq!(app.script_state.params_input.value(), "");
+    type_text(&mut app, "{\"n\": 1}").await;
+    assert_eq!(app.script_state.params_input.value(), "{\"n\": 1}");
 }

@@ -1026,13 +1026,10 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
         Span::raw(value_indicator),
         Span::styled(" Value: ", value_style),
     ]);
-    let [label_area, input_area] =
-        Layout::horizontal([Constraint::Length(label.width() as u16), Constraint::Min(1)])
-            .areas(form_chunks[2]);
-    frame.render_widget(Paragraph::new(label), label_area);
-    state.principal_input.render(
+    state.principal_input.render_labeled(
         frame,
-        input_area,
+        form_chunks[2],
+        label,
         value_style,
         is_active && state.edit_field == EditField::PrincipalValue,
     );
