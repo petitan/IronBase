@@ -1,5 +1,7 @@
 //! Query builder state
 
+use crate::widgets::{InputOutcome, TextArea};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::responses::QueryPlanSummary;
 use serde_json::Value;
 
@@ -21,9 +23,7 @@ pub const QUERY_TEMPLATES: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct QueryState {
     pub collection: String,
-    pub lines: Vec<String>,
-    pub cursor_line: usize,
-    pub cursor_col: usize,
+    pub editor: TextArea,
     pub error: Option<String>,
     pub results: Option<Vec<Value>>,
     /// Show template selector
@@ -44,9 +44,7 @@ impl Default for QueryState {
     fn default() -> Self {
         Self {
             collection: String::new(),
-            lines: vec!["{}".to_string()],
-            cursor_line: 0,
-            cursor_col: 1,
+            editor: TextArea::with_cursor("{}", 0, 1),
             error: None,
             results: None,
             show_templates: false,
@@ -63,9 +61,7 @@ impl QueryState {
     pub fn new(collection: String) -> Self {
         Self {
             collection,
-            lines: vec!["{".to_string(), "  ".to_string(), "}".to_string()],
-            cursor_line: 1,
-            cursor_col: 2,
+            editor: TextArea::with_cursor("{\n  \n}", 1, 2),
             error: None,
             results: None,
             show_templates: false,
@@ -140,141 +136,24 @@ impl QueryState {
     /// Apply selected template
     pub fn apply_template(&mut self) {
         if let Some((_, template)) = QUERY_TEMPLATES.get(self.template_index) {
-            self.lines = vec![template.to_string()];
-            self.cursor_line = 0;
-            self.cursor_col = template.chars().count();
+            self.editor = TextArea::with_cursor(template, 0, usize::MAX);
             self.show_templates = false;
             self.error = None;
         }
     }
 
-    pub fn insert_char(&mut self, c: char) {
-        // Clear results when editing
-        self.clear_results();
-
-        if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            let char_count = line.chars().count();
-            if self.cursor_col <= char_count {
-                // Convert character position to byte position for UTF-8 safety
-                let byte_pos = line
-                    .char_indices()
-                    .nth(self.cursor_col)
-                    .map(|(i, _)| i)
-                    .unwrap_or(line.len());
-                line.insert(byte_pos, c);
-                self.cursor_col += 1;
-            }
+    /// Edit the query; an edit drops the previous run's results and the error
+    pub fn handle_input(&mut self, code: KeyCode, modifiers: KeyModifiers) -> InputOutcome {
+        let outcome = self.editor.handle_key(code, modifiers);
+        if outcome == InputOutcome::Changed {
+            self.clear_results();
+            self.error = None;
         }
-        self.error = None;
-    }
-
-    pub fn backspace(&mut self) {
-        // Clear results when editing
-        self.clear_results();
-
-        if self.cursor_col > 0 {
-            if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                // Convert character position to byte position for UTF-8 safety
-                let byte_pos = line
-                    .char_indices()
-                    .nth(self.cursor_col - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                line.remove(byte_pos);
-                self.cursor_col -= 1;
-            }
-        } else if self.cursor_line > 0 {
-            let current_line = self.lines.remove(self.cursor_line);
-            self.cursor_line -= 1;
-            if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
-                self.cursor_col = prev_line.chars().count();
-                prev_line.push_str(&current_line);
-            }
-        }
-        self.error = None;
-    }
-
-    pub fn insert_newline(&mut self) {
-        // Clear results when editing
-        self.clear_results();
-
-        if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            // Convert character position to byte position for UTF-8 safety
-            let byte_pos = line
-                .char_indices()
-                .nth(self.cursor_col)
-                .map(|(i, _)| i)
-                .unwrap_or(line.len());
-            let rest = line.split_off(byte_pos);
-            self.cursor_line += 1;
-            self.lines.insert(self.cursor_line, rest);
-            self.cursor_col = 0;
-        }
-        self.error = None;
-    }
-
-    pub fn insert_tab(&mut self) {
-        self.insert_char(' ');
-        self.insert_char(' ');
-    }
-
-    pub fn cursor_left(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        } else if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            // Use character count, not byte length
-            self.cursor_col = self
-                .lines
-                .get(self.cursor_line)
-                .map(|l| l.chars().count())
-                .unwrap_or(0);
-        }
-    }
-
-    pub fn cursor_right(&mut self) {
-        // Use character count, not byte length
-        let char_count = self
-            .lines
-            .get(self.cursor_line)
-            .map(|l| l.chars().count())
-            .unwrap_or(0);
-        if self.cursor_col < char_count {
-            self.cursor_col += 1;
-        } else if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
-            self.cursor_col = 0;
-        }
-    }
-
-    pub fn cursor_up(&mut self) {
-        if self.cursor_line > 0 {
-            self.cursor_line -= 1;
-            // Use character count, not byte length
-            let char_count = self
-                .lines
-                .get(self.cursor_line)
-                .map(|l| l.chars().count())
-                .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(char_count);
-        }
-    }
-
-    pub fn cursor_down(&mut self) {
-        if self.cursor_line + 1 < self.lines.len() {
-            self.cursor_line += 1;
-            // Use character count, not byte length
-            let char_count = self
-                .lines
-                .get(self.cursor_line)
-                .map(|l| l.chars().count())
-                .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(char_count);
-        }
+        outcome
     }
 
     pub fn get_query_text(&self) -> String {
-        self.lines.join("\n")
+        self.editor.text()
     }
 
     pub fn parse_query(&self) -> Result<Value, String> {
@@ -288,82 +167,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn query(lines: &[&str], line: usize, col: usize) -> QueryState {
-        QueryState {
-            lines: lines.iter().map(|l| l.to_string()).collect(),
-            cursor_line: line,
-            cursor_col: col,
-            ..QueryState::default()
-        }
-    }
-
     #[test]
     fn test_new_query_is_an_empty_object_with_cursor_inside() {
         let state = QueryState::new("users".to_string());
-        assert_eq!(state.lines, vec!["{", "  ", "}"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 2));
+        assert_eq!(state.editor.text(), "{\n  \n}");
+        assert_eq!(state.editor.cursor(), (1, 2));
         assert_eq!(state.parse_query(), Ok(json!({})));
     }
 
     #[test]
-    fn test_insert_is_by_character_not_byte() {
-        let mut state = query(&["{\"név\": \"\"}"], 0, 9);
-        state.insert_char('É');
-        state.insert_char('v');
-        state.insert_char('a');
-        assert_eq!(state.lines, vec!["{\"név\": \"Éva\"}"]);
-        assert_eq!(state.cursor_col, 12);
+    fn test_typed_query_parses() {
+        let mut state = QueryState::new("users".to_string());
+        for c in "\"név\": \"Éva\"".chars() {
+            state.handle_input(KeyCode::Char(c), KeyModifiers::NONE);
+        }
         assert_eq!(state.parse_query(), Ok(json!({"név": "Éva"})));
-    }
-
-    #[test]
-    fn test_backspace_with_multibyte_and_at_line_start() {
-        let mut state = query(&["őá", "űé"], 1, 1);
-        state.backspace();
-        assert_eq!(state.lines, vec!["őá", "é"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
-
-        // At line start: joins with the previous line, cursor at the seam
-        state.backspace();
-        assert_eq!(state.lines, vec!["őáé"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 2));
-
-        // First line, first column: nothing
-        state.cursor_col = 0;
-        state.backspace();
-        assert_eq!(state.lines, vec!["őáé"]);
-    }
-
-    #[test]
-    fn test_newline_and_tab() {
-        let mut state = query(&["{űő}"], 0, 2);
-        state.insert_newline();
-        assert_eq!(state.lines, vec!["{ű", "ő}"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
-        state.insert_tab();
-        assert_eq!(state.lines, vec!["{ű", "  ő}"]);
-        assert_eq!(state.cursor_col, 2);
-    }
-
-    #[test]
-    fn test_cursor_movement_wraps_and_clamps() {
-        let mut state = query(&["hosszú", "ű", ""], 0, 6);
-        state.cursor_right();
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 0));
-        state.cursor_left();
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 6));
-        state.cursor_down();
-        assert_eq!((state.cursor_line, state.cursor_col), (1, 1));
-        state.cursor_down();
-        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
-        state.cursor_down();
-        state.cursor_right();
-        assert_eq!((state.cursor_line, state.cursor_col), (2, 0));
-        state.cursor_up();
-        state.cursor_up();
-        state.cursor_up();
-        state.cursor_left();
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 0));
     }
 
     /// Editing drops the results of the previous run and the error
@@ -382,7 +200,13 @@ mod tests {
         state.result_down();
         assert_eq!(state.result_index, 1);
 
-        state.insert_char('x');
+        // A cursor move keeps them
+        state.handle_input(KeyCode::Left, KeyModifiers::NONE);
+        assert!(state.has_results());
+        assert_eq!(
+            state.handle_input(KeyCode::Char('x'), KeyModifiers::NONE),
+            InputOutcome::Changed
+        );
 
         assert_eq!(state.results, None);
         assert_eq!((state.result_index, state.total_count), (0, 0));
@@ -406,8 +230,8 @@ mod tests {
         state.template_index = 3;
         state.apply_template();
         assert!(!state.show_templates);
-        assert_eq!(state.lines, vec!["{\"field\": {\"$gt\": 0}}"]);
-        assert_eq!((state.cursor_line, state.cursor_col), (0, 21));
+        assert_eq!(state.editor.text(), "{\"field\": {\"$gt\": 0}}");
+        assert_eq!(state.editor.cursor(), (0, 21));
         assert_eq!(state.parse_query(), Ok(json!({"field": {"$gt": 0}})));
 
         // Every template is valid JSON
@@ -432,7 +256,10 @@ mod tests {
 
     #[test]
     fn test_invalid_query_is_an_error() {
-        let state = query(&["{\"a\": }"], 0, 0);
+        let state = QueryState {
+            editor: TextArea::new("{\"a\": }"),
+            ..QueryState::default()
+        };
         assert!(state.parse_query().is_err());
     }
 }

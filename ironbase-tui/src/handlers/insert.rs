@@ -10,30 +10,9 @@ pub(crate) async fn handle_insert_key_async(app: &mut App, key: KeyCode, modifie
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             app.execute_insert_async().await;
         }
-        (KeyCode::Enter, KeyModifiers::NONE) => {
-            app.insert.insert_newline();
+        // The editor takes the rest
+        _ => {
+            app.insert.handle_input(key, modifiers);
         }
-        (KeyCode::Tab, _) => {
-            app.insert.insert_tab();
-        }
-        (KeyCode::Backspace, _) => {
-            app.insert.backspace();
-        }
-        (KeyCode::Left, _) => {
-            app.insert.cursor_left();
-        }
-        (KeyCode::Right, _) => {
-            app.insert.cursor_right();
-        }
-        (KeyCode::Up, _) => {
-            app.insert.cursor_up();
-        }
-        (KeyCode::Down, _) => {
-            app.insert.cursor_down();
-        }
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            app.insert.insert_char(c);
-        }
-        _ => {}
     }
 }

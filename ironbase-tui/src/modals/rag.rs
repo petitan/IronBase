@@ -3,6 +3,7 @@
 use super::render_modal_frame;
 use crate::state::rag::{RagState, RagTab};
 use crate::theme::Theme;
+use crate::widgets::text_area::plain;
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, JobStatus,
     JobType, ModelInfo, RagCollectionStatsResponse, RagDocumentImportResponse,
@@ -237,27 +238,27 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     } else {
         Style::default().fg(theme.muted)
     };
+    let content = state.import_content.text();
     let content_block = Block::default()
-        .title(format!(
-            " Content ({} chars) ",
-            state.import_content.chars().count()
-        ))
+        .title(format!(" Content ({} chars) ", content.chars().count()))
         .borders(Borders::ALL)
         .border_style(content_style);
-    let content_preview = if state.import_content.is_empty() {
-        "Paste or type content here...".to_string()
-    } else {
-        truncate_str(&state.import_content, 500).to_string()
-    };
-    let content_text = Paragraph::new(content_preview)
-        .block(content_block)
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .style(if state.import_content.is_empty() {
-            Style::default().fg(theme.muted)
-        } else {
-            Style::default().fg(theme.fg)
-        });
-    frame.render_widget(content_text, chunks[2]);
+    let inner = content_block.inner(chunks[2]);
+    frame.render_widget(content_block, chunks[2]);
+    state.import_content.render(
+        frame,
+        inner,
+        Style::default(),
+        None,
+        &plain(Style::default().fg(theme.fg)),
+        state.import_form_field == 0,
+    );
+    if state.import_content.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Paste or type content here...").style(Style::default().fg(theme.muted)),
+            inner,
+        );
+    }
 
     // Options row: chunk_size | overlap | mode
     let opts = Layout::horizontal([

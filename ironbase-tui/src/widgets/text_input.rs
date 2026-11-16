@@ -180,6 +180,23 @@ impl TextInput {
         true
     }
 
+    /// Put the cursor at char index `pos`, clamped to the end
+    pub(crate) fn set_cursor(&mut self, pos: usize) {
+        self.cursor = pos.min(self.len());
+    }
+
+    /// Cut the text after the cursor off and return it (the cursor stays
+    /// at the new end)
+    pub(crate) fn split_off(&mut self) -> String {
+        let at = self.byte_at(self.cursor);
+        self.value.split_off(at)
+    }
+
+    /// Append `text`; the cursor does not move
+    pub(crate) fn push_str(&mut self, text: &str) {
+        self.value.push_str(text);
+    }
+
     /// Apply an editing key: printable characters, Backspace / Delete, the
     /// arrows, Home / End and the readline keys Ctrl+A / E / U / K / W.
     /// Anything else is `Ignored` and left to the caller.
@@ -219,7 +236,7 @@ impl TextInput {
 
     /// The first char index shown in a field `width` columns wide, so that
     /// the cursor (one column past the text at the end) stays visible
-    fn scroll_start(&self, width: usize) -> usize {
+    pub(crate) fn scroll_start(&self, width: usize) -> usize {
         if width == 0 {
             return self.cursor;
         }

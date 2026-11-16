@@ -810,7 +810,7 @@ impl App {
 
         let args = ScriptSaveParams {
             name: self.script_state.name.value().to_string(),
-            code: self.script_state.lines.join("\n"),
+            code: self.script_state.editor.text(),
             description: Some(self.script_state.description.value().to_string())
                 .filter(|description| !description.is_empty()),
             tags: Some(self.script_state.tags.clone()).filter(|tags| !tags.is_empty()),
@@ -892,7 +892,7 @@ impl App {
         // Always execute current editor content (not saved version)
         // This ensures "what you see is what runs"
         let args = ScriptExecParams {
-            code: self.script_state.lines.join("\n"),
+            code: self.script_state.editor.text(),
             params,
             max_operations: None,
         };

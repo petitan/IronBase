@@ -3,6 +3,7 @@
 use super::render_modal_frame;
 use crate::app::{QueryState, QUERY_TEMPLATES};
 use crate::theme::Theme;
+use crate::widgets::text_area::plain;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
@@ -115,56 +116,15 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 fn render_editor(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
-    let visible_height = area.height as usize;
-
-    // Build display lines with cursor
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (line_idx, line) in state.lines.iter().enumerate() {
-        let is_cursor_line = line_idx == state.cursor_line;
-
-        if is_cursor_line {
-            // Line with cursor - UTF-8 safe slicing
-            let char_count = line.chars().count();
-            let before: String = line.chars().take(state.cursor_col).collect();
-            let after: String = if state.cursor_col < char_count {
-                line.chars().skip(state.cursor_col).collect()
-            } else {
-                String::new()
-            };
-
-            let line_num = format!("{:2} ", line_idx + 1);
-            lines.push(Line::from(vec![
-                Span::styled(line_num, Style::default().fg(theme.muted)),
-                Span::styled(before, Style::default().fg(theme.fg)),
-                Span::styled("|", Style::default().fg(theme.accent)), // Cursor
-                Span::styled(after, Style::default().fg(theme.fg)),
-            ]));
-        } else {
-            let line_num = format!("{:2} ", line_idx + 1);
-            lines.push(Line::from(vec![
-                Span::styled(line_num, Style::default().fg(theme.muted)),
-                Span::styled(line.clone(), Style::default().fg(theme.fg)),
-            ]));
-        }
-    }
-
-    // Handle scroll
-    let start_line = if state.cursor_line >= visible_height {
-        state.cursor_line - visible_height + 1
-    } else {
-        0
-    };
-
-    let visible_lines: Vec<Line> = lines
-        .into_iter()
-        .skip(start_line)
-        .take(visible_height)
-        .collect();
-
-    let editor = Paragraph::new(visible_lines).style(Style::default().bg(theme.bg));
-
-    frame.render_widget(editor, area);
+    state.editor.render(
+        frame,
+        area,
+        Style::default().bg(theme.bg),
+        Some(Style::default().fg(theme.muted)),
+        &plain(Style::default().fg(theme.fg)),
+        // The template list is drawn over the editor
+        !state.show_templates,
+    );
 }
 
 fn render_results(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
@@ -237,7 +197,8 @@ fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else {
-        let (line, col) = (state.cursor_line + 1, state.cursor_col + 1);
+        let (line, col) = state.editor.cursor();
+        let (line, col) = (line + 1, col + 1);
         let view_indicator = if state.show_explain { " [Explain]" } else { "" };
         Line::from(vec![Span::styled(
             format!(
