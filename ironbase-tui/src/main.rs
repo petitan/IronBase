@@ -198,6 +198,13 @@ async fn main() -> anyhow::Result<()> {
     // Get db_path for later use
     let db_path = cli.database.or_else(|| config.last_db_path.clone());
 
+    // UI language: the config's, else the system's
+    tuti_tui::i18n::set_language(
+        config
+            .language
+            .unwrap_or_else(tuti_tui::i18n::Language::system),
+    );
+
     // Initialize app
     let mut app = App::new(config.clone());
 

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Tuti TUI: language layer, Hungarian with accents and English (ironbase-core 0.3.484)
+
+Phase 3i of the Tuti TUI overhaul: the first part of the bilingual UI.
+
+- **`i18n` module:** every text is a method of the `Messages` trait, implemented once per language (`Hu`,
+  `En`): a language missing a text does not compile, and a text with values (page numbers, counts) takes them
+  as typed arguments. `t()` gives the current language's texts.
+- **Choosing the language:** `language = "hu"` or `"en"` in `config.toml`; unset (the default, and every
+  existing config) follows the system (`LC_ALL`, `LC_MESSAGES`, `LANG`: Hungarian for `hu*`, English
+  otherwise). An unset language is not written into the file. **This changes the default:** the UI was
+  Hungarian for everyone; with an English or unset system locale (`C`, containers, Windows services) it is
+  now English unless `language = "hu"` is set. The value is read in any letter case; an unknown one counts as
+  unset (logged) instead of making the whole config unreadable.
+- **Translated in this step:** the header (database, pane name), the command bar and its error line, the
+  collections, indexes, documents and detail panes. Until now they mixed English ("Collections", "Quit")
+  with unaccented Hungarian ("Reszletek", "Valassz kollekciot", "Sugo"); the Hungarian texts are now
+  accented. The modals, and the status and error messages (e.g. "Kollekcio betoltes hiba", "(nincs)" for no
+  database), follow in the next steps; until then they stay Hungarian in the English UI too.
+- **Narrow terminals:** the header starts with the connection type (`[EXT]` is a warning: a longer database
+  name or translation cut it off at 80 columns), and the command bar shows the error / status before the key
+  hints (the error was cut off at 120 columns once the hints got longer).
+
 ### Fixed — Tuti TUI: pasting goes into the focused input in one piece (ironbase-core 0.3.483)
 
 Phase 3h of the Tuti TUI overhaul: the terminal's bracketed paste is on.

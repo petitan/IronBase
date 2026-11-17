@@ -43,6 +43,15 @@ pub struct Config {
     /// Accept self-signed/invalid TLS certificates (for HTTPS)
     #[serde(default)]
     pub mcp_insecure: bool,
+
+    /// UI language (`"hu"` / `"en"`); unset: the system's (`LANG`). An
+    /// unknown value counts as unset (and is logged), not as a broken file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::i18n::Language::deserialize_lenient"
+    )]
+    pub language: Option<crate::i18n::Language>,
 }
 
 fn default_mcp_url() -> String {
@@ -59,6 +68,7 @@ impl Default for Config {
             mcp_server_path: None,
             mcp_api_key: None,
             mcp_insecure: false,
+            language: None,
         }
     }
 }
@@ -233,6 +243,44 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.mcp_url, config.mcp_url);
         assert_eq!(loaded.last_db_path, config.last_db_path);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// `language` is optional: an older file without it loads (the system
+    /// language is used), an unset one is not written, a set one round-trips
+    #[test]
+    fn test_language_is_optional_and_round_trips() {
+        use crate::i18n::Language;
+        let path = temp_config_path("language");
+        std::fs::write(&path, "mcp_url = \"http://127.0.0.1:8080\"\n").unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.language, None);
+        config.save_to(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("language"));
+
+        let config = Config {
+            language: Some(Language::En),
+            ..Config::default()
+        };
+        config.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("language = \"en\""));
+        assert_eq!(
+            Config::load_from(&path).unwrap().language,
+            Some(Language::En)
+        );
+
+        // Any letter case; an unknown value is unset, the rest of the file loads
+        std::fs::write(&path, "mcp_url = \"http://x:1\"\nlanguage = \"HU\"\n").unwrap();
+        assert_eq!(
+            Config::load_from(&path).unwrap().language,
+            Some(Language::Hu)
+        );
+        std::fs::write(&path, "mcp_url = \"http://x:1\"\nlanguage = \"de\"\n").unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.language, None);
+        assert_eq!(config.mcp_url, "http://x:1");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

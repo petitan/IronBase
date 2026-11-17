@@ -1,6 +1,7 @@
 //! Main UI renderer
 
 use crate::app::{App, ConnectionType, Modal, Pane};
+use crate::i18n::t;
 use crate::modals;
 use crate::panes;
 use crate::theme::Theme;
@@ -139,19 +140,18 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let header_style = Style::default().bg(theme.header_bg).fg(theme.fg);
 
     // DB info with version
-    let db_info = format!(
-        " IronBase v{} | {} ({} coll, {} docs) ",
+    let db_info = t().header_db(
         env!("CARGO_PKG_VERSION"),
         app.db_name(),
         app.collections.len(),
-        app.total_doc_count()
+        app.total_doc_count(),
     );
 
     // Pane indicator
     let pane_name = match app.active_pane {
-        Pane::Collections => "Collections",
-        Pane::Documents => "Documents",
-        Pane::Detail => "Detail",
+        Pane::Collections => t().pane_collections(),
+        Pane::Documents => t().pane_documents(),
+        Pane::Detail => t().pane_detail(),
     };
 
     // Connection type indicator
@@ -162,16 +162,16 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         ConnectionType::Unknown => ("?", theme.muted),
     };
 
-    // Build spans
+    // The connection first: on a narrow terminal the end of the line is cut,
+    // and `[EXT]` is a warning that must stay visible
     let spans = vec![
-        Span::styled(db_info, Style::default().fg(theme.accent).bold()),
-        Span::raw(" | "),
-        Span::styled(pane_name, Style::default().fg(theme.fg)),
-        Span::raw(" | "),
         Span::styled(
-            format!("[{}]", conn_text),
+            format!(" [{}]", conn_text),
             Style::default().fg(conn_color).bold(),
         ),
+        Span::styled(db_info, Style::default().fg(theme.accent).bold()),
+        Span::raw("| "),
+        Span::styled(pane_name, Style::default().fg(theme.fg)),
     ];
 
     let line = Line::from(spans).patch_style(header_style);
@@ -188,32 +188,32 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     // Context-dependent commands based on active pane
     let commands: Vec<(&str, String)> = match app.active_pane {
         Pane::Collections => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("Enter", "Select".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
+            ("Tab", t().cmd_panel().into()),
+            ("j/k", t().cmd_navigate().into()),
+            ("Enter", t().cmd_select().into()),
+            ("r", t().cmd_refresh().into()),
+            ("f", t().cmd_filter().into()),
+            ("/", t().cmd_search().into()),
+            ("a", t().cmd_actions().into()),
+            ("?", t().cmd_help().into()),
+            ("q", t().cmd_quit().into()),
         ],
         Pane::Documents => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("PgUp/Dn", "Page".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
+            ("Tab", t().cmd_panel().into()),
+            ("j/k", t().cmd_navigate().into()),
+            ("PgUp/Dn", t().cmd_page().into()),
+            ("r", t().cmd_refresh().into()),
+            ("f", t().cmd_filter().into()),
+            ("/", t().cmd_search().into()),
+            ("a", t().cmd_actions().into()),
+            ("?", t().cmd_help().into()),
+            ("q", t().cmd_quit().into()),
         ],
         Pane::Detail => {
             let mut cmds = vec![
-                ("Tab", "Panel".into()),
-                ("j/k", "Scroll".into()),
-                ("/", "Search".into()),
+                ("Tab", t().cmd_panel().into()),
+                ("j/k", t().cmd_scroll().into()),
+                ("/", t().cmd_search().into()),
             ];
             // Only show n/N if there are search matches
             if !app.search.doc_matches.is_empty() {
@@ -222,28 +222,19 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 cmds.push(("n/N", format!("{}/{}", current, total)));
             }
             cmds.extend([
-                ("e", "Edit".into()),
-                ("d", "Delete".into()),
-                ("y", "Copy".into()),
-                ("?", "Sugo".into()),
-                ("q", "Quit".into()),
+                ("e", t().cmd_edit().into()),
+                ("d", t().cmd_delete().into()),
+                ("y", t().cmd_copy().into()),
+                ("?", t().cmd_help().into()),
+                ("q", t().cmd_quit().into()),
             ]);
             cmds
         }
     };
 
+    // The error / status first: on a narrow terminal the end of the bar is
+    // cut, and the message matters more than the key hints
     let mut spans = Vec::new();
-    spans.push(Span::raw(" "));
-
-    for (key, action) in commands {
-        spans.push(Span::styled(
-            format!("[{}]", key),
-            Style::default().fg(theme.accent),
-        ));
-        spans.push(Span::raw(format!(" {} ", action)));
-    }
-
-    // Add error/status message if present
     if let Some(ref err) = app.error_message {
         // Truncate long errors for status bar display (UTF-8 safe)
         let max_err_len = 50;
@@ -254,18 +245,30 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             err.clone()
         };
         spans.push(Span::styled(
-            format!(" | Hiba: {}", truncated),
+            t().bar_error(&truncated),
             Style::default().fg(theme.error),
         ));
         // Add hint to open error detail modal
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[e]", Style::default().fg(theme.accent)));
-        spans.push(Span::styled(" Reszletek", Style::default().fg(theme.muted)));
-    } else if let Some(ref msg) = app.status_message {
+        spans.push(Span::styled(" [e]", Style::default().fg(theme.accent)));
         spans.push(Span::styled(
-            format!(" | {}", msg),
+            t().bar_error_details(),
             Style::default().fg(theme.muted),
         ));
+        spans.push(Span::raw(" |"));
+    } else if let Some(ref msg) = app.status_message {
+        spans.push(Span::styled(
+            format!(" {} |", msg),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    spans.push(Span::raw(" "));
+
+    for (key, action) in commands {
+        spans.push(Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(theme.accent),
+        ));
+        spans.push(Span::raw(format!(" {} ", action)));
     }
 
     let line = Line::from(spans).patch_style(bar_style);
@@ -278,6 +281,27 @@ mod tests {
     use crate::config::Config;
     use crate::db::CollectionInfo;
     use ratatui::{backend::TestBackend, Terminal};
+
+    /// The connection warning is the first thing in the header: a long
+    /// database name or a longer translation cuts the end of the line on an
+    /// 80-column terminal, not `[EXT]`
+    #[test]
+    fn test_header_keeps_the_connection_type_visible() {
+        let mut app = App::new(Config::default());
+        app.connection_type = ConnectionType::External;
+        app.db_path = Some(std::path::PathBuf::from(
+            "/data/a_rather_long_database_name.mlite",
+        ));
+        app.collections = (0..5)
+            .map(|i| CollectionInfo::unloaded(format!("coll{}", i)))
+            .collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render_ui(f, &app)).unwrap();
+        let header: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(header.contains("[EXT]"), "{header}");
+    }
 
     /// Rendering must survive any terminal size: `visible_height - 1` in the
     /// collections pane underflowed when the pane had no inner rows

@@ -31,6 +31,9 @@ tuti-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
 
 # API key from environment variable
 IRONBASE_API_KEY=sk-xxx tuti-tui --url https://192.168.0.136:8080/mcp --insecure
+
+# Local database through a server process the TUI starts (stdio)
+tuti-tui --server ./mcp-ironbase-server mydata.mlite
 ```
 
 ## CLI Options
@@ -99,6 +102,60 @@ Options:
 | `Shift+K` | API Key management |
 | `Shift+D` | Drop the selected collection (Collections panel, asks for confirmation) |
 | `a` then `b` | Open / switch database (via the actions menu) |
+
+## Language
+
+The UI is Hungarian (with accents) or English.
+
+- `language = "hu"` or `"en"` in `config.toml` chooses it (any letter case).
+- Unset, it follows the system locale: the first set of `LC_ALL`, `LC_MESSAGES`, `LANG`. A value starting with `hu` gives Hungarian, anything else (including `C` and no locale at all, e.g. a container or a Windows service) English.
+- An unknown value counts as unset and is logged; the rest of the config still loads.
+
+The header, the command bar and the four panels are translated. The modals and the status / error messages are being translated in the next steps; until then some of them are Hungarian in the English UI too.
+
+## Editing Text
+
+Every text field uses the same editing keys.
+
+### Single-line fields
+
+Search, filter, names, paths, the query vector, the API key name, the listener fields, the RAG fields.
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Move the cursor |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Start / end of the field |
+| `Backspace` / `Delete` | Delete before / under the cursor |
+| `Ctrl+U` / `Ctrl+K` | Delete to the start / to the end |
+| `Ctrl+W` | Delete the word before the cursor |
+
+A long value scrolls in its field; the terminal's own cursor shows where you type. Exceptions: in the fulltext and RAG search `Ctrl+J` / `Ctrl+K` move in the results (in RAG only while there are results), in the vector search `j` / `k` and the arrows do.
+
+### Multi-line editors
+
+The document editor (insert / edit), the query editor, the IronRhai script code and the RAG import content. All the keys above work on the current line, plus:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | New line (query editor with results: apply them as the filter; RAG import: start the import) |
+| `Tab` | Two spaces (script editor: next field) |
+| `↑` / `↓`, `PgUp` / `PgDn` | Previous / next line, 10 lines |
+| `Ctrl+Home` / `Ctrl+End` | Start / end of the text |
+| `Ctrl+S` | Save (document), run (query), save and run (script) |
+
+Query editor: `Ctrl+E` explain, `Ctrl+T` templates, `Ctrl+J` / `Ctrl+K` move in the results. Backspace at a line start and Delete at a line end join the lines; a long line scrolls sideways.
+
+### Pasting
+
+The terminal's bracketed paste is on: a paste arrives in one piece and goes into the focused field only.
+
+- A multi-line editor keeps its lines.
+- A single-line field gets one line: line breaks (`\n`, `\r\n`, `\r`) and tabs become spaces.
+- A number field (vector dimension, RAG chunk size and overlap) takes the digits.
+- The new collection name keeps only the characters a name may have.
+- With no text field focused, or no window open, the paste is dropped: pasted characters are never taken as commands.
+
+On Windows the console delivers a paste as key presses, so the rules above do not apply there.
 
 ## HTTPS Setup with mkcert
 
@@ -192,6 +249,9 @@ mcp_insecure = false
 
 # Theme: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
+
+# UI language: "hu" or "en"; unset: the system's (LANG)
+language = "en"
 ```
 
 ## Logging
@@ -212,22 +272,22 @@ The TUI logs to a file only (never to the terminal): `~/.local/state/ironbase-tu
 ```
 ironbase-tui/
 ├── src/
-│   ├── main.rs          # Entry point, event loop, key handlers
-│   ├── app.rs           # App state, business logic
-│   ├── config.rs        # Configuration loading
+│   ├── main.rs          # CLI, terminal setup, event loop
+│   ├── lib.rs           # Library root (everything but the binary)
+│   ├── app.rs           # App state, MCP calls
+│   ├── config.rs        # config.toml loading / saving
+│   ├── logging.rs       # File logging, secret redaction
 │   ├── theme.rs         # Color themes
-│   ├── db.rs            # Database wrapper (MCP client)
-│   ├── mcp/             # MCP protocol client
-│   │   ├── client.rs    # High-level MCP client
-│   │   ├── transport.rs # HTTP/STDIO transport
-│   │   ├── protocol.rs  # JSON-RPC types
-│   │   └── error.rs     # Error types
-│   ├── modals/          # Modal dialogs
-│   │   ├── help.rs      # Help modal
-│   │   ├── search.rs    # Search modal
-│   │   └── ...
-│   ├── panes/           # Main UI panels
-│   └── widgets/         # Reusable UI components
+│   ├── db.rs            # Typed MCP calls (ironbase-mcp-types)
+│   ├── i18n/            # Texts: Messages trait, hu.rs, en.rs
+│   ├── handlers/        # Key and paste handlers, one per modal
+│   ├── state/           # Modal state (filter, query, script, RAG, ...)
+│   ├── modals/          # Modal rendering
+│   ├── panes/           # Collections, documents, detail panels
+│   ├── ui/              # Header, command bar, layout
+│   ├── widgets/         # TextInput (one line), TextArea (multi-line)
+│   ├── mcp/             # MCP client: JSON-RPC, HTTP / stdio transport
+│   └── testing.rs       # Fake MCP server for the tests
 └── Cargo.toml
 ```
 

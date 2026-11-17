@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::base64_detect::sanitize_base64_values;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -28,15 +29,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     // Title with pagination info and filter indicator
     let (current_page, total_pages) = app.get_pagination_info();
-    let filter_indicator = if app.active_filter.is_some() {
-        " [SZURT - Esc torol]"
-    } else {
-        ""
-    };
-    let title = format!(
-        " Dokumentumok ({}/{} oldal) {}",
-        current_page, total_pages, filter_indicator
-    );
+    let title = t().documents_title(current_page, total_pages, app.active_filter.is_some());
 
     let block = Block::default()
         .title(title)
@@ -52,9 +45,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     if documents.is_empty() {
         let msg = if app.has_collection() {
-            "Nincs dokumentum"
+            t().no_documents()
         } else {
-            "Valassz kollekciot"
+            t().select_collection()
         };
         let empty_msg = Paragraph::new(msg)
             .style(Style::default().fg(theme.muted))
