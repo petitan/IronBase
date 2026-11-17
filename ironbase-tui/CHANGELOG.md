@@ -1,5 +1,7 @@
 # Changelog
 
+> Archived: the history up to 0.2.8. Later TUI changes are in the repository root [CHANGELOG.md](../CHANGELOG.md) ("Tuti TUI" entries).
+
 ## [0.2.8] - 2024-12-13
 
 ### Added
