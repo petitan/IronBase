@@ -1,6 +1,7 @@
 //! Listener management modal
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::{Input, InputOutcome, TextInput};
 use ratatui::prelude::*;
@@ -191,7 +192,7 @@ impl ListenerState {
 
 /// Render the Listener management modal
 pub fn render(frame: &mut Frame, area: Rect, state: &ListenerState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Listeners", theme, 70, 60);
+    let inner = render_modal_frame(frame, area, t().listeners_title(), theme, 70, 60);
 
     match state.mode {
         ListenerModalMode::List => render_list_mode(frame, inner, state, theme),
@@ -212,25 +213,25 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme:
     // Help text
     let mut help_spans = vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Nav  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
     ];
 
     if state.is_localhost {
         help_spans.extend([
             Span::styled("[n]", Style::default().fg(theme.accent)),
-            Span::raw(" New  "),
+            Span::raw(format!(" {}  ", t().key_new())),
             Span::styled("[e]", Style::default().fg(theme.accent)),
-            Span::raw(" Enable  "),
+            Span::raw(format!(" {}  ", t().key_enable())),
             Span::styled("[x]", Style::default().fg(theme.accent)),
-            Span::raw(" Disable  "),
+            Span::raw(format!(" {}  ", t().key_disable())),
             Span::styled("[d]", Style::default().fg(theme.accent)),
-            Span::raw(" Delete  "),
+            Span::raw(format!(" {}  ", t().cmd_delete())),
         ]);
     }
 
     help_spans.extend([
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]);
 
     let help = Paragraph::new(Line::from(help_spans)).style(Style::default().fg(theme.muted));
@@ -240,8 +241,7 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme:
     render_listeners_list(frame, chunks[1], state, theme);
 
     // Warning
-    let warning = Paragraph::new("Changes require server restart to take effect")
-        .style(Style::default().fg(theme.warning));
+    let warning = Paragraph::new(t().restart_needed()).style(Style::default().fg(theme.warning));
     frame.render_widget(warning, chunks[2]);
 
     // Status/error line
@@ -250,7 +250,7 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme:
 
 fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, theme: &Theme) {
     let block = Block::default()
-        .title(" Listeners ")
+        .title(format!(" {} ", t().listeners_title()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
@@ -259,14 +259,13 @@ fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, t
     frame.render_widget(block, area);
 
     if state.loading {
-        let loading = Paragraph::new("Loading...").style(Style::default().fg(theme.muted));
+        let loading = Paragraph::new(t().loading()).style(Style::default().fg(theme.muted));
         frame.render_widget(loading, inner);
         return;
     }
 
     if state.listeners.is_empty() {
-        let empty =
-            Paragraph::new("No listeners configured").style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_listeners()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -277,11 +276,14 @@ fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, t
     let header = Paragraph::new(Line::from(vec![
         Span::styled(format!("{:<14}", "ID"), Style::default().fg(theme.muted)),
         Span::raw("  "),
-        Span::styled(format!("{:<22}", "Bind"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<22}", t().label_bind()),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
         Span::styled(format!("{:<5}", "TLS"), Style::default().fg(theme.muted)),
         Span::raw("  "),
-        Span::styled("Status", Style::default().fg(theme.muted)),
+        Span::styled(t().label_status(), Style::default().fg(theme.muted)),
     ]));
     frame.render_widget(header, header_chunks[0]);
 
@@ -293,16 +295,16 @@ fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, t
         .map(|(i, listener)| {
             let is_selected = i == state.selected;
             let status = if listener.enabled {
-                "Active"
+                t().status_active()
             } else {
-                "Disabled"
+                t().status_disabled()
             };
             let status_color = if listener.enabled {
                 theme.success
             } else {
                 theme.error
             };
-            let tls_str = if listener.tls { "Yes" } else { "No" };
+            let tls_str = if listener.tls { t().yes() } else { t().no() };
 
             let line = Line::from(vec![
                 Span::raw(format!("{:<14}", truncate(&listener.id, 14))),
@@ -341,8 +343,8 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
     .split(area);
 
     // Instructions
-    let instructions = Paragraph::new("Enter listener details (Tab to switch fields):")
-        .style(Style::default().fg(theme.fg));
+    let instructions =
+        Paragraph::new(t().enter_listener_details()).style(Style::default().fg(theme.fg));
     frame.render_widget(instructions, chunks[0]);
 
     // ID field
@@ -371,7 +373,7 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
         Style::default().fg(theme.muted)
     };
     let bind_block = Block::default()
-        .title(" Bind Address ")
+        .title(format!(" {} ", t().label_bind_address()))
         .borders(Borders::ALL)
         .border_style(bind_style);
     let bind_inner = bind_block.inner(chunks[2]);
@@ -396,14 +398,14 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
     let tls_inner = tls_block.inner(chunks[3]);
     frame.render_widget(tls_block, chunks[3]);
     let tls_text = if state.add_tls {
-        "[x] Enabled"
+        t().checkbox_enabled()
     } else {
-        "[ ] Disabled"
+        t().checkbox_disabled()
     };
     let tls_hint = if state.add_field == AddField::Tls {
-        " (Space to toggle)"
+        format!(" {}", t().space_to_toggle())
     } else {
-        ""
+        String::new()
     };
     frame.render_widget(
         Paragraph::new(format!("{}{}", tls_text, tls_hint)),
@@ -413,11 +415,11 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
     // Buttons
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Create  "),
+        Span::raw(format!(" {}  ", t().key_create())),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Next field  "),
+        Span::raw(format!(" {}  ", t().key_next_field())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel"),
+        Span::raw(format!(" {}", t().key_cancel())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(buttons, chunks[4]);
@@ -434,28 +436,24 @@ fn render_confirm_mode(frame: &mut Frame, area: Rect, state: &ListenerState, the
     ])
     .split(area);
 
-    let action = match state.confirm_action {
-        Some(ListenerAction::Delete) => "DELETE",
-        Some(ListenerAction::Enable) => "ENABLE",
-        Some(ListenerAction::Disable) => "DISABLE",
-        None => "???",
+    let listener_id = state.get_selected().map(|l| l.id.as_str()).unwrap_or("?");
+    let text = match state.confirm_action {
+        Some(ListenerAction::Delete) => t().confirm_delete_listener(listener_id),
+        Some(ListenerAction::Enable) => t().confirm_enable_listener(listener_id),
+        Some(ListenerAction::Disable) => t().confirm_disable_listener(listener_id),
+        None => String::new(),
     };
 
-    let listener_id = state.get_selected().map(|l| l.id.as_str()).unwrap_or("?");
-
-    let message = Paragraph::new(format!(
-        "Are you sure you want to {} the listener '{}'?",
-        action, listener_id
-    ))
-    .style(Style::default().fg(theme.warning))
-    .wrap(ratatui::widgets::Wrap { trim: true });
+    let message = Paragraph::new(text)
+        .style(Style::default().fg(theme.warning))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(message, chunks[0]);
 
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[y]", Style::default().fg(theme.error)),
-        Span::raw(" Yes  "),
+        Span::raw(format!(" {}  ", t().yes())),
         Span::styled("[n/Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" No"),
+        Span::raw(format!(" {}", t().no())),
     ]));
     frame.render_widget(buttons, chunks[1]);
 }
@@ -466,8 +464,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ListenerState, theme: &T
     } else if let Some(ref success) = state.success {
         Paragraph::new(success.as_str()).style(Style::default().fg(theme.success))
     } else if !state.is_localhost {
-        Paragraph::new("Read-only: Listener management requires localhost connection")
-            .style(Style::default().fg(theme.warning))
+        Paragraph::new(t().listener_read_only()).style(Style::default().fg(theme.warning))
     } else {
         Paragraph::new("").style(Style::default().fg(theme.muted))
     };

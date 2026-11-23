@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the API key, listener, vector search and index modals in both languages (tuti-tui 0.3.489, mcp-server 1.0.677 — version only, for the release tag)
+
+The API key, listener and vector search modals were English only, the index modal Hungarian without accents
+(„Index kezeles”, „Meglevo indexek”) with English words mixed in („Analyze”, „Keys”, „Stale”). All four take
+their titles, column headers, key hints, labels and messages from the language layer (`i18n::Messages`) now.
+
+- The confirmations name the action in the sentence („Biztosan visszavonod a(z) „ci” API-kulcsot?”) instead of
+  an English verb in capitals inserted into one template; deleting keeps the emphasis („TÖRLÖD” / „DELETE”).
+- English counts use the singular for one („1 vector”, „1 stale index”, „[1 field]”).
+- The sparse index hint says what it means: only the documents that have the field are indexed.
+- Tests: every new text differs between the two languages, with exact expected texts for the confirmations,
+  the vector index row and the counts; the vector index list test expects the Hungarian row.
+- Left for the next PRs: the script, RAG and ACL modals and the key handlers' messages; the actions menu and the
+  help are generated from the key map.
+
 ### Changed — Tuti TUI: the filter, query builder and server info in both languages (tuti-tui 0.3.488, mcp-server 1.0.676 — version only, for the release tag)
 
 The visual filter, the query builder (with its templates and the query plan panel) and the server info take

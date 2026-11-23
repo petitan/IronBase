@@ -1312,7 +1312,7 @@ async fn test_vector_index_list_shows_dim_and_metric() {
     let screen = render_to_string(&app, 140, 45);
     let line = line_with(&screen, "users_vec_emb");
     assert!(
-        line.contains("users_vec_emb | emb | dim:3 | dot_product | 3 vectors"),
+        line.contains("users_vec_emb | emb | dim:3 | dot_product | 3 vektor"),
         "{line}"
     );
 }

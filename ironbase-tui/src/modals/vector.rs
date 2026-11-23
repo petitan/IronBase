@@ -1,6 +1,7 @@
 //! Vector search modal - create indexes and perform similarity search
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::state::vector::{DistanceMetric, VectorSearchState, VectorTab};
 use crate::theme::Theme;
 use ratatui::prelude::*;
@@ -8,7 +9,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 
 /// Render the vector search modal
 pub fn render(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Vector Search", theme, 80, 85);
+    let inner = render_modal_frame(frame, area, t().vector_search_title(), theme, 80, 85);
 
     // Split into sections
     let chunks = Layout::vertical([
@@ -33,7 +34,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: &
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: &Theme) {
-    let titles = vec!["Search", "Create Index", "List Indexes"];
+    let titles = vec![
+        t().key_search(),
+        t().tab_create_index(),
+        t().tab_list_indexes(),
+    ];
     let selected = match state.active_tab {
         VectorTab::Search => 0,
         VectorTab::CreateIndex => 1,
@@ -66,13 +71,13 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Tabs  "),
+        Span::raw(format!(" {}  ", t().key_tabs())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Search  "),
+        Span::raw(format!(" {}  ", t().key_search())),
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -83,7 +88,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
             .split(chunks[1]);
 
     let field_block = Block::default()
-        .title(" Field ")
+        .title(format!(" {} ", t().label_field()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let field_text = Paragraph::new(&*state.search_field)
@@ -92,7 +97,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
     frame.render_widget(field_text, field_k_chunks[0]);
 
     let k_block = Block::default()
-        .title(" K (limit) ")
+        .title(format!(" {} ", t().label_k_limit()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let k_text = Paragraph::new(state.k.to_string())
@@ -102,7 +107,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
 
     // Vector input
     let vector_block = Block::default()
-        .title(" Vector (JSON array) ")
+        .title(format!(" {} ", t().label_vector_json()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
     let vector_inner = vector_block.inner(chunks[2]);
@@ -122,7 +127,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
 
     // Filter input
     let filter_block = Block::default()
-        .title(" Filter (optional JSON) ")
+        .title(format!(" {} ", t().label_filter_optional()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let filter_preview = if state.filter_input.is_empty() {
@@ -140,11 +145,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
 }
 
 fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: &Theme) {
-    let title = if state.is_loading {
-        " Results (loading...) ".to_string()
-    } else {
-        format!(" Results ({}) ", state.results.len())
-    };
+    let title = t().vector_results_title(state.results.len(), state.is_loading);
 
     let block = Block::default()
         .title(title)
@@ -156,9 +157,9 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
 
     if state.results.is_empty() {
         let msg = if state.is_loading {
-            "Searching..."
+            t().searching()
         } else {
-            "No results. Enter vector and press Enter to search."
+            t().no_vector_results()
         };
         let empty = Paragraph::new(msg).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
@@ -210,13 +211,13 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Next field  "),
+        Span::raw(format!(" {}  ", t().key_next_field())),
         Span::styled("[Space]", Style::default().fg(theme.accent)),
-        Span::raw(" Toggle metric  "),
+        Span::raw(format!(" {}  ", t().key_toggle_metric())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Create  "),
+        Span::raw(format!(" {}  ", t().key_create())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel"),
+        Span::raw(format!(" {}", t().key_cancel())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -228,7 +229,7 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         Style::default().fg(theme.muted)
     };
     let field_block = Block::default()
-        .title(" Field name ")
+        .title(format!(" {} ", t().label_field_name()))
         .borders(Borders::ALL)
         .border_style(field_style);
     let field_inner = field_block.inner(chunks[1]);
@@ -247,7 +248,7 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         Style::default().fg(theme.muted)
     };
     let dim_block = Block::default()
-        .title(" Dimension (0 = auto) ")
+        .title(format!(" {} ", t().label_dimension()))
         .borders(Borders::ALL)
         .border_style(dim_style);
     let dim_text = Paragraph::new(state.dimension.to_string())
@@ -262,14 +263,14 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         Style::default().fg(theme.muted)
     };
     let metric_block = Block::default()
-        .title(" Distance metric [Space to change] ")
+        .title(format!(" {} ", t().label_distance_metric()))
         .borders(Borders::ALL)
         .border_style(metric_style);
 
     let metric_display = match state.metric {
-        DistanceMetric::Cosine => "Cosine (recommended for embeddings)",
-        DistanceMetric::Euclidean => "Euclidean (L2 distance)",
-        DistanceMetric::DotProduct => "Dot Product (for normalized vectors)",
+        DistanceMetric::Cosine => t().metric_cosine(),
+        DistanceMetric::Euclidean => t().metric_euclidean(),
+        DistanceMetric::DotProduct => t().metric_dot_product(),
     };
     let metric_text = Paragraph::new(metric_display)
         .block(metric_block)
@@ -277,8 +278,7 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
     frame.render_widget(metric_text, chunks[3]);
 
     // Hint
-    let hint = Paragraph::new("Tip: Dimension is usually 384, 768, or 1536 for common embeddings.")
-        .style(Style::default().fg(theme.muted));
+    let hint = Paragraph::new(t().dimension_tip()).style(Style::default().fg(theme.muted));
     frame.render_widget(hint, chunks[4]);
 }
 
@@ -292,19 +292,19 @@ fn render_list_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, the
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::raw(" Delete  "),
+        Span::raw(format!(" {}  ", t().cmd_delete())),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Tabs  "),
+        Span::raw(format!(" {}  ", t().key_tabs())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Index list
-    let title = format!(" Vector Indexes ({}) ", state.indexes.len());
+    let title = t().vector_indexes_title(state.indexes.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -314,8 +314,7 @@ fn render_list_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, the
     frame.render_widget(block, chunks[1]);
 
     if state.indexes.is_empty() {
-        let empty = Paragraph::new("No vector indexes. Use 'Create Index' tab to create one.")
-            .style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_vector_indexes()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -333,8 +332,14 @@ fn render_list_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, the
 
             // Format: name | field | dimension | metric | count
             let text = format!(
-                "  {} | {} | dim:{} | {} | {} vectors",
-                idx.name, idx.field, idx.dimension, idx.metric, idx.vector_count
+                "  {}",
+                t().vector_index_row(
+                    &idx.name,
+                    &idx.field,
+                    idx.dimension,
+                    &idx.metric.to_string(),
+                    idx.vector_count
+                )
             );
             ListItem::new(text).style(style)
         })
@@ -347,7 +352,10 @@ fn render_list_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, the
 fn render_status(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: &Theme) {
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Error: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -357,7 +365,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme
         )])
     } else {
         Line::from(vec![Span::styled(
-            format!("Collection: {}", state.collection),
+            t().collection_label(&state.collection),
             Style::default().fg(theme.muted),
         )])
     };

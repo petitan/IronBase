@@ -1,6 +1,7 @@
 //! API Key management modal - list, create, revoke, delete API keys
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::{Input, InputOutcome, TextInput};
 use ratatui::prelude::*;
@@ -169,7 +170,7 @@ impl ApiKeyState {
 
 /// Render the API key management modal
 pub fn render(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "API Keys", theme, 70, 60);
+    let inner = render_modal_frame(frame, area, t().api_keys_title(), theme, 70, 60);
 
     match state.mode {
         ApiKeyModalMode::List => render_list_mode(frame, inner, state, theme),
@@ -191,27 +192,27 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
     let help_spans = if state.can_admin() {
         vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
-            Span::raw(" Nav  "),
+            Span::raw(format!(" {}  ", t().key_navigate())),
             Span::styled("[n]", Style::default().fg(theme.accent)),
-            Span::raw(" New  "),
+            Span::raw(format!(" {}  ", t().key_new())),
             Span::styled("[r]", Style::default().fg(theme.accent)),
-            Span::raw(" Revoke  "),
+            Span::raw(format!(" {}  ", t().key_revoke())),
             Span::styled("[d]", Style::default().fg(theme.accent)),
-            Span::raw(" Delete  "),
+            Span::raw(format!(" {}  ", t().cmd_delete())),
             Span::styled("[c]", Style::default().fg(theme.accent)),
-            Span::raw(" Copy  "),
+            Span::raw(format!(" {}  ", t().cmd_copy())),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::raw(" Close"),
+            Span::raw(format!(" {}", t().key_close())),
         ]
     } else if !state.is_localhost {
         // Not localhost - show localhost warning
         vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
-            Span::raw(" Nav  "),
+            Span::raw(format!(" {}  ", t().key_navigate())),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::raw(" Close  "),
+            Span::raw(format!(" {}  ", t().key_close())),
             Span::styled(
-                "(Admin ops require localhost connection)",
+                t().admin_needs_localhost(),
                 Style::default().fg(theme.warning),
             ),
         ]
@@ -219,13 +220,10 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
         // Localhost but no admin key
         vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
-            Span::raw(" Nav  "),
+            Span::raw(format!(" {}  ", t().key_navigate())),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::raw(" Close  "),
-            Span::styled(
-                "(Set IRONBASE_ADMIN_KEY for admin ops)",
-                Style::default().fg(theme.warning),
-            ),
+            Span::raw(format!(" {}  ", t().key_close())),
+            Span::styled(t().admin_needs_key(), Style::default().fg(theme.warning)),
         ]
     };
 
@@ -238,10 +236,13 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
     // New key display (if just created)
     if let Some(ref key) = state.new_key {
         let new_key_text = Paragraph::new(Line::from(vec![
-            Span::styled("New key: ", Style::default().fg(theme.success)),
+            Span::styled(
+                format!("{}: ", t().new_key_label()),
+                Style::default().fg(theme.success),
+            ),
             Span::styled(key, Style::default().fg(theme.accent).bold()),
             Span::styled(
-                " (copy now, won't be shown again!)",
+                format!(" {}", t().new_key_warning()),
                 Style::default().fg(theme.warning),
             ),
         ]));
@@ -254,7 +255,7 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
 
 fn render_keys_list(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &Theme) {
     let block = Block::default()
-        .title(" API Keys ")
+        .title(format!(" {} ", t().api_keys_title()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
@@ -263,13 +264,13 @@ fn render_keys_list(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
     frame.render_widget(block, area);
 
     if state.loading {
-        let loading = Paragraph::new("Loading...").style(Style::default().fg(theme.muted));
+        let loading = Paragraph::new(t().loading()).style(Style::default().fg(theme.muted));
         frame.render_widget(loading, inner);
         return;
     }
 
     if state.keys.is_empty() {
-        let empty = Paragraph::new("No API keys").style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_api_keys()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -280,11 +281,20 @@ fn render_keys_list(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
     let header = Paragraph::new(Line::from(vec![
         Span::styled(format!("{:>4}", "ID"), Style::default().fg(theme.muted)),
         Span::raw("  "),
-        Span::styled(format!("{:<16}", "Name"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<16}", t().label_name()),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
-        Span::styled(format!("{:<16}", "Key"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<16}", t().label_key()),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
-        Span::styled(format!("{:<6}", "Status"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<6}", t().label_status()),
+            Style::default().fg(theme.muted),
+        ),
     ]));
     frame.render_widget(header, header_chunks[0]);
 
@@ -295,7 +305,11 @@ fn render_keys_list(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
         .enumerate()
         .map(|(i, key)| {
             let is_selected = i == state.selected;
-            let status = if key.enabled { "Active" } else { "Revoked" };
+            let status = if key.enabled {
+                t().status_active()
+            } else {
+                t().status_revoked()
+            };
             let status_color = if key.enabled {
                 theme.success
             } else {
@@ -341,12 +355,12 @@ fn render_create_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme:
 
     // Instructions
     let instructions =
-        Paragraph::new("Enter a name for the new API key:").style(Style::default().fg(theme.fg));
+        Paragraph::new(t().enter_new_key_name()).style(Style::default().fg(theme.fg));
     frame.render_widget(instructions, chunks[0]);
 
     // Input field
     let input_block = Block::default()
-        .title(" Name ")
+        .title(format!(" {} ", t().label_name()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
 
@@ -360,9 +374,9 @@ fn render_create_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme:
     // Buttons
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Create  "),
+        Span::raw(format!(" {}  ", t().key_create())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel"),
+        Span::raw(format!(" {}", t().key_cancel())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(buttons, chunks[2]);
@@ -380,28 +394,24 @@ fn render_confirm_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme
     .split(area);
 
     // Message
-    let action = match state.confirm_action {
-        Some(ConfirmAction::Revoke) => "REVOKE",
-        Some(ConfirmAction::Delete) => "DELETE",
-        None => "???",
+    let key_name = state.get_selected().map(|k| k.name.as_str()).unwrap_or("?");
+    let text = match state.confirm_action {
+        Some(ConfirmAction::Revoke) => t().confirm_revoke_key(key_name),
+        Some(ConfirmAction::Delete) => t().confirm_delete_key(key_name),
+        None => String::new(),
     };
 
-    let key_name = state.get_selected().map(|k| k.name.as_str()).unwrap_or("?");
-
-    let message = Paragraph::new(format!(
-        "Are you sure you want to {} the API key '{}'?",
-        action, key_name
-    ))
-    .style(Style::default().fg(theme.warning))
-    .wrap(ratatui::widgets::Wrap { trim: true });
+    let message = Paragraph::new(text)
+        .style(Style::default().fg(theme.warning))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(message, chunks[0]);
 
     // Buttons
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[y]", Style::default().fg(theme.error)),
-        Span::raw(" Yes  "),
+        Span::raw(format!(" {}  ", t().yes())),
         Span::styled("[n/Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" No"),
+        Span::raw(format!(" {}", t().no())),
     ]));
     frame.render_widget(buttons, chunks[1]);
 }
