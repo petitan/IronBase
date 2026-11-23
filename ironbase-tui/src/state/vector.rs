@@ -1,5 +1,6 @@
 //! Vector search state
 
+use crate::i18n::t;
 use crate::widgets::{push_digits, Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{VectorIndexInfo as IndexInfo, VectorMetric, VectorSearchHit};
 use serde_json::Value;
@@ -192,19 +193,19 @@ impl VectorSearchState {
     pub fn parse_vector(&self) -> Result<Vec<f64>, String> {
         let trimmed = self.vector_input.value().trim();
         if trimmed.is_empty() {
-            return Err("Vector input is empty".to_string());
+            return Err(t().vector_input_empty().to_string());
         }
 
         // Try to parse as JSON array
         match serde_json::from_str::<Vec<f64>>(trimmed) {
             Ok(v) => {
                 if v.is_empty() {
-                    Err("Vector is empty".to_string())
+                    Err(t().vector_empty().to_string())
                 } else {
                     Ok(v)
                 }
             }
-            Err(e) => Err(format!("Invalid vector JSON: {}", e)),
+            Err(e) => Err(t().invalid_vector(&e)),
         }
     }
 
@@ -217,7 +218,7 @@ impl VectorSearchState {
 
         match serde_json::from_str::<Value>(trimmed) {
             Ok(v) => Ok(Some(v)),
-            Err(e) => Err(format!("Invalid filter JSON: {}", e)),
+            Err(e) => Err(t().invalid_filter(&e)),
         }
     }
 

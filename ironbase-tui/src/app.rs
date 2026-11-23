@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
+use crate::i18n::{t, Op};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
@@ -436,12 +437,12 @@ impl App {
     pub fn open_delete_confirm(&mut self) {
         // Get current document and collection
         let Some(doc) = self.get_selected_document().cloned() else {
-            self.set_error("Nincs kivalasztott dokumentum");
+            self.set_error(t().no_document_selected());
             return;
         };
 
         let Some(coll_name) = self.current_collection_name().map(String::from) else {
-            self.set_error("Nincs kivalasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -455,7 +456,7 @@ impl App {
     /// Open delete confirmation for selected collection
     pub fn open_delete_collection_confirm(&mut self) {
         let Some(coll) = self.collections.get(self.selected_collection).cloned() else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -476,10 +477,7 @@ impl App {
         };
 
         if self.index_state.is_primary_index(&index_name) {
-            self.index_state.error = Some(format!(
-                "Az elsodleges _id index nem torolheto: {}",
-                index_name
-            ));
+            self.index_state.error = Some(t().primary_index_not_droppable(&index_name));
             return;
         }
 
@@ -511,7 +509,7 @@ impl App {
             .versions
             .get(self.script_state.selected_version)
         else {
-            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
+            self.script_state.error = Some(t().no_version_selected().to_string());
             return;
         };
 
@@ -562,7 +560,7 @@ impl App {
     /// Open insert document modal
     pub fn open_insert(&mut self) {
         let Some(coll_name) = self.current_collection_name().map(String::from) else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -610,12 +608,12 @@ impl App {
     /// Open edit document modal for selected document
     pub fn open_edit(&mut self) {
         let Some(doc) = self.get_selected_document().cloned() else {
-            self.set_error("Nincs kiválasztott dokumentum");
+            self.set_error(t().no_document_selected());
             return;
         };
 
         let Some(coll_name) = self.current_collection_name().map(String::from) else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -628,7 +626,7 @@ impl App {
     /// Open index management modal (sync, deferred index loading)
     pub fn open_index_modal(&mut self) {
         let Some(coll_name) = self.current_collection_name().map(String::from) else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -654,7 +652,7 @@ impl App {
                 self.index_state.index_entries = entries;
             }
             Err(e) => {
-                self.index_state.message = Some(format!("Hiba: {}", e));
+                self.index_state.message = Some(t().error(&e));
             }
         }
     }
@@ -667,7 +665,7 @@ impl App {
     /// Open query builder modal
     pub fn open_query_modal(&mut self) {
         let Some(coll_name) = self.current_collection_name().map(String::from) else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -680,7 +678,7 @@ impl App {
         let coll_name = match self.current_collection_name() {
             Some(name) => name.to_string(),
             None => {
-                self.set_error("Nincs kiválasztott kollekció");
+                self.set_error(t().no_collection_selected());
                 return;
             }
         };
@@ -698,7 +696,7 @@ impl App {
                 }
                 Err(e) => {
                     // Non-fatal - just no suggestions
-                    self.filter_state.error = Some(format!("Schema betoltes hiba: {}", e));
+                    self.filter_state.error = Some(t().failed(Op::LoadSchema, &e));
                 }
             }
         }
@@ -711,7 +709,7 @@ impl App {
     /// Open export modal
     pub fn open_export_modal(&mut self) {
         let Some(coll) = self.collections.get(self.selected_collection) else {
-            self.set_error("Nincs kiválasztott kollekció");
+            self.set_error(t().no_collection_selected());
             return;
         };
 
@@ -745,7 +743,7 @@ impl App {
     /// Load scripts from MCP server
     pub async fn load_scripts_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -756,7 +754,7 @@ impl App {
                 self.script_state.error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(format!("Script lista betöltése sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::LoadScripts, &e));
             }
         }
     }
@@ -773,7 +771,7 @@ impl App {
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -791,7 +789,7 @@ impl App {
                 );
             }
             Err(e) => {
-                self.script_state.error = Some(format!("Script betöltése sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::LoadScript, &e));
             }
         }
     }
@@ -799,12 +797,12 @@ impl App {
     /// Save current script to MCP server
     pub async fn save_script_async(&mut self) {
         if self.script_state.name.value().trim().is_empty() {
-            self.script_state.error = Some("Script név megadása kötelező".to_string());
+            self.script_state.error = Some(t().script_name_required().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -822,13 +820,13 @@ impl App {
                 let new_version = saved.version;
                 self.script_state.version = new_version;
                 self.script_state.dirty = false;
-                self.script_state.message = Some(format!("Script mentve (v{})", new_version));
+                self.script_state.message = Some(t().script_saved(new_version));
                 self.script_state.error = None;
                 // Reload script list to show new/updated scripts
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(format!("Mentés sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::Save, &e));
             }
         }
     }
@@ -845,7 +843,7 @@ impl App {
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -854,12 +852,12 @@ impl App {
         };
         match db.call::<ScriptDelete>(&args).await {
             Ok(_) => {
-                self.script_state.message = Some(format!("Script '{}' törölve", script_name));
+                self.script_state.message = Some(t().script_deleted(&script_name));
                 // Reload list
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(format!("Törlés sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::Delete, &e));
             }
         }
     }
@@ -867,7 +865,7 @@ impl App {
     /// Run script (saved or inline)
     pub async fn run_script_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -881,7 +879,7 @@ impl App {
                 match serde_json::from_str(self.script_state.params_input.value()) {
                     Ok(v) => Some(v),
                     Err(e) => {
-                        self.script_state.error = Some(format!("Hibás JSON paraméterek: {}", e));
+                        self.script_state.error = Some(t().invalid_json_params(&e));
                         return;
                     }
                 }
@@ -927,12 +925,12 @@ impl App {
     pub async fn load_script_history_async(&mut self) {
         let script_name = self.script_state.name.value().to_string();
         if script_name.is_empty() || script_name == "[inline]" {
-            self.script_state.error = Some("Nincs kiválasztva script".to_string());
+            self.script_state.error = Some(t().no_script_selected().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -947,7 +945,7 @@ impl App {
                 self.script_state.error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(format!("History betöltése sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::LoadHistory, &e));
             }
         }
     }
@@ -956,7 +954,7 @@ impl App {
     /// confirm dialog opens
     pub async fn rollback_script_async(&mut self, script_name: &str, target_version: u32) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.script_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -970,13 +968,12 @@ impl App {
             .map(|r| r.new_version)
         {
             Ok(new_version) => {
-                self.script_state.message =
-                    Some(format!("Rollback sikeres, új verzió: v{}", new_version));
+                self.script_state.message = Some(t().script_rolled_back(new_version));
                 // Reload the script into editor
                 self.load_script_for_edit_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(format!("Rollback sikertelen: {}", e));
+                self.script_state.error = Some(t().failed(Op::Rollback, &e));
             }
         }
     }
@@ -985,18 +982,18 @@ impl App {
     pub async fn create_collection_async(&mut self) {
         let name = self.new_collection_state.name.value().trim().to_string();
         if name.is_empty() {
-            self.new_collection_state.error = Some("Név megadása kötelező".to_string());
+            self.new_collection_state.error = Some(t().name_required().to_string());
             return;
         }
 
         // Check if collection already exists
         if self.collections.iter().any(|c| c.name == name) {
-            self.new_collection_state.error = Some("Ez a kollekció már létezik".to_string());
+            self.new_collection_state.error = Some(t().collection_exists().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1006,7 +1003,7 @@ impl App {
         match db.call::<CollectionCreate>(&args).await {
             Ok(_) => {
                 self.close_modal();
-                self.set_status(format!("Kollekció létrehozva: {}", name));
+                self.set_status(t().collection_created(&name));
                 self.reload_collections_async().await;
                 // Select the new collection
                 if let Some(idx) = self.collections.iter().position(|c| c.name == name) {
@@ -1014,7 +1011,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.new_collection_state.error = Some(format!("Hiba: {}", e));
+                self.new_collection_state.error = Some(t().error(&e));
             }
         }
     }
@@ -1025,7 +1022,7 @@ impl App {
     pub fn next_theme(&mut self) {
         self.theme_name = self.theme_name.next();
         self.theme = Theme::from_name(self.theme_name);
-        self.set_status(format!("Tema: {}", self.theme_name.name()));
+        self.set_status(t().theme_changed(self.theme_name.name()));
     }
 
     // === Status ===
@@ -1075,7 +1072,7 @@ impl App {
     /// Copy selected document JSON to clipboard
     pub fn copy_document_to_clipboard(&mut self) {
         let Some(doc) = self.get_selected_document() else {
-            self.set_error("Nincs kiválasztott dokumentum");
+            self.set_error(t().no_document_selected());
             return;
         };
 
@@ -1085,14 +1082,14 @@ impl App {
             Ok(mut clipboard) => match clipboard.set_text(&json) {
                 Ok(()) => {
                     let preview: String = json.chars().take(50).collect();
-                    self.set_status(format!("Vágólapra másolva: {}...", preview));
+                    self.set_status(t().copied(&preview));
                 }
                 Err(e) => {
-                    self.set_error(format!("Clipboard hiba: {}", e));
+                    self.set_error(t().failed(Op::Copy, &e));
                 }
             },
             Err(e) => {
-                self.set_error(format!("Clipboard nem elérhető: {}", e));
+                self.set_error(t().clipboard_unavailable(&e));
             }
         }
     }
@@ -1192,14 +1189,14 @@ impl App {
     /// (the document list is already cleared by then)
     pub async fn reload_documents_async(&mut self) {
         if let Err(e) = self.refresh_documents_async().await {
-            self.set_error(format!("Dokumentumok betoltese sikertelen: {}", e));
+            self.set_error(t().failed(Op::LoadDocuments, &e));
         }
     }
 
     /// Refresh collections + documents and surface a failure
     async fn reload_collections_async(&mut self) {
         if let Err(e) = self.refresh_collections_async().await {
-            self.set_error(format!("Frissites hiba: {}", e));
+            self.set_error(t().failed(Op::Refresh, &e));
         }
     }
 
@@ -1483,7 +1480,7 @@ impl App {
         self.search.result_offset = 0;
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbazis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1498,14 +1495,14 @@ impl App {
                     .collect();
             }
             Err(e) => {
-                self.set_error(format!("Kereses hiba: {}", e));
+                self.set_error(t().failed(Op::Search, &e));
             }
         }
 
         if self.search.results.is_empty() {
-            self.set_status("Nincs talalat");
+            self.set_status(t().no_matches());
         } else {
-            self.set_status(format!("{} talalat", self.search.results.len()));
+            self.set_status(t().match_count(self.search.results.len()));
         }
     }
 
@@ -1522,7 +1519,7 @@ impl App {
 
         // Get current document
         let Some(doc) = self.get_selected_document() else {
-            self.set_status("Nincs kivalasztott dokumentum");
+            self.set_status(t().no_document_selected());
             return;
         };
 
@@ -1541,12 +1538,9 @@ impl App {
         }
 
         if self.search.doc_matches.is_empty() {
-            self.set_status("Nincs talalat");
+            self.set_status(t().no_matches());
         } else {
-            self.set_status(format!(
-                "{} talalat (n/N: kovetkezo/elozo)",
-                self.search.doc_matches.len()
-            ));
+            self.set_status(t().match_count_with_hint(self.search.doc_matches.len()));
             // Jump to first match
             self.scroll_to_current_match();
         }
@@ -1565,11 +1559,9 @@ impl App {
         self.search.next_match();
         self.scroll_to_current_match();
         if !self.search.doc_matches.is_empty() {
-            self.set_status(format!(
-                "Talalat {}/{}",
-                self.search.current_match + 1,
-                self.search.doc_matches.len()
-            ));
+            self.set_status(
+                t().match_position(self.search.current_match + 1, self.search.doc_matches.len()),
+            );
         }
     }
 
@@ -1577,11 +1569,9 @@ impl App {
         self.search.prev_match();
         self.scroll_to_current_match();
         if !self.search.doc_matches.is_empty() {
-            self.set_status(format!(
-                "Talalat {}/{}",
-                self.search.current_match + 1,
-                self.search.doc_matches.len()
-            ));
+            self.set_status(
+                t().match_position(self.search.current_match + 1, self.search.doc_matches.len()),
+            );
         }
     }
 
@@ -1659,8 +1649,7 @@ impl App {
             };
             match db.call::<IndexDrop>(&args).await {
                 Ok(dropped) => {
-                    self.vector_state.message =
-                        Some(format!("Index '{}' deleted!", dropped.dropped));
+                    self.vector_state.message = Some(t().index_dropped(&dropped.dropped));
 
                     // Refresh index list
                     if let Ok(indexes) = db.vector_indexes(collection).await {
@@ -1687,7 +1676,7 @@ impl App {
             };
             match db.call::<AutoEmbedDisable>(&args).await {
                 Ok(_) => {
-                    self.rag_state.message = Some("Auto-embed disabled".to_string());
+                    self.rag_state.message = Some(t().auto_embed_disabled().to_string());
                     self.rag_state.auto_embed_config = None;
                 }
                 Err(e) => {
@@ -1739,7 +1728,7 @@ impl App {
                 .await
             {
                 Ok(result) => self.rag_state.set_jobs(result.jobs),
-                Err(e) => self.rag_state.error = Some(format!("Jobs: {}", e)),
+                Err(e) => self.rag_state.error = Some(t().failed(Op::LoadJobs, &e)),
             }
         }
     }
@@ -1747,7 +1736,7 @@ impl App {
     /// Actually delete a document (async)
     async fn do_delete_document_async(&mut self, collection: &str, doc_id: &Value) {
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1758,14 +1747,14 @@ impl App {
         match db.call::<DeleteOne>(&args).await {
             Ok(deleted) => {
                 if deleted.deleted_count > 0 {
-                    self.set_status("Dokumentum törölve");
+                    self.set_status(t().document_deleted());
                     self.reload_collections_async().await;
                 } else {
-                    self.set_error("Dokumentum nem található");
+                    self.set_error(t().document_not_found());
                 }
             }
             Err(e) => {
-                self.set_error(format!("Törlés hiba: {}", e));
+                self.set_error(t().failed(Op::Delete, &e));
             }
         }
     }
@@ -1773,7 +1762,7 @@ impl App {
     /// Actually delete a collection (async)
     async fn do_delete_collection_async(&mut self, name: &str) {
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1782,7 +1771,7 @@ impl App {
         };
         match db.call::<CollectionDrop>(&args).await {
             Ok(dropped) => {
-                self.set_status(format!("Kollekció törölve: {}", dropped.dropped));
+                self.set_status(t().collection_dropped(&dropped.dropped));
                 // Reset selection (also drops the dropped collection's
                 // filter/sort) and refresh
                 self.set_selected_collection(0);
@@ -1790,7 +1779,7 @@ impl App {
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.set_error(format!("Törlés hiba: {}", e));
+                self.set_error(t().failed(Op::Delete, &e));
             }
         }
     }
@@ -1802,25 +1791,25 @@ impl App {
         let doc = match self.insert.parse_json() {
             Ok(doc) => doc,
             Err(e) => {
-                self.insert.error = Some(format!("JSON hiba: {}", e));
+                self.insert.error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
         if !doc.is_object() {
-            self.insert.error = Some("A dokumentumnak objektumnak kell lennie".to_string());
+            self.insert.error = Some(t().document_must_be_object().to_string());
             return;
         }
 
         let collection = self.insert.collection.clone();
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
         if self.insert.is_edit_mode() {
             let Some(ref doc_id) = self.insert.original_doc_id else {
-                self.insert.error = Some("Eredeti dokumentum ID hiányzik".to_string());
+                self.insert.error = Some(t().document_id_missing().to_string());
                 return;
             };
 
@@ -1834,22 +1823,19 @@ impl App {
                 Ok(updated) => {
                     self.close_modal();
                     if updated.matched_count == 0 {
-                        self.set_status("Dokumentum nem található");
+                        self.set_status(t().document_not_found());
                     } else if let Some(err) = updated.auto_embed_error {
                         // The update is stored; only the vector is stale
-                        self.set_error(format!(
-                            "Dokumentum frissítve, de az újrabeágyazás hibázott (a vektor elavult): {}",
-                            err
-                        ));
+                        self.set_error(t().document_updated_vector_stale(&err));
                     } else if updated.modified_count == 0 {
-                        self.set_status("Dokumentum változatlan (nincs módosítás)");
+                        self.set_status(t().document_unchanged());
                     } else {
-                        self.set_status("Dokumentum frissítve");
+                        self.set_status(t().document_updated());
                     }
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(format!("Frissítés hiba: {}", e));
+                    self.insert.error = Some(t().failed(Op::Update, &e));
                 }
             }
         } else {
@@ -1860,14 +1846,11 @@ impl App {
             match db.call::<InsertOne>(&args).await {
                 Ok(inserted) => {
                     self.close_modal();
-                    self.set_status(format!(
-                        "Dokumentum beszúrva, _id: {}",
-                        inserted.inserted_id
-                    ));
+                    self.set_status(t().document_inserted(&inserted.inserted_id));
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(format!("Beszúrás hiba: {}", e));
+                    self.insert.error = Some(t().failed(Op::Insert, &e));
                 }
             }
         }
@@ -1880,7 +1863,7 @@ impl App {
         let fields = self.index_state.get_fields();
 
         if fields.is_empty() {
-            self.index_state.error = Some("Mező neve kötelező".to_string());
+            self.index_state.error = Some(t().field_name_required().to_string());
             return;
         }
 
@@ -1890,7 +1873,7 @@ impl App {
         let is_compound = self.index_state.is_compound;
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1924,27 +1907,21 @@ impl App {
                     format!(" [{}]", flags.join(", "))
                 };
 
-                let index_desc = if is_compound && fields.len() > 1 {
-                    format!("Compound index: {}{}", fields.join(", "), flags_str)
+                let compound = is_compound && fields.len() > 1;
+                let fields = if compound {
+                    fields.join(", ")
                 } else {
-                    format!(
-                        "Index: {}{}",
-                        fields.first().unwrap_or(&String::new()),
-                        flags_str
-                    )
+                    fields.first().cloned().unwrap_or_default()
                 };
-                self.index_state.message = Some(format!(
-                    "{} létrehozva ({})",
-                    index_desc,
-                    created.index_name()
-                ));
+                self.index_state.message =
+                    Some(t().index_created(&fields, compound, &flags_str, created.index_name()));
                 self.index_state.cancel_create();
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Refresh collection list to update index_count
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(format!("Hiba: {}", e));
+                self.index_state.error = Some(t().error(&e));
             }
         }
     }
@@ -1952,7 +1929,7 @@ impl App {
     /// Delete an index (async) - names are captured when the confirm dialog opens
     pub async fn execute_delete_index_async(&mut self, collection: &str, index_name: &str) {
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -1962,7 +1939,7 @@ impl App {
         };
         match db.call::<IndexDrop>(&args).await {
             Ok(dropped) => {
-                self.index_state.message = Some(format!("Index törölve: {}", dropped.dropped));
+                self.index_state.message = Some(t().index_dropped(&dropped.dropped));
                 self.index_state.error = None;
                 self.index_state.indexes = self.get_current_indexes_async().await;
                 // Adjust selection after deletion
@@ -1975,7 +1952,7 @@ impl App {
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(format!("Hiba: {}", e));
+                self.index_state.error = Some(t().error(&e));
             }
         }
     }
@@ -1985,13 +1962,13 @@ impl App {
         let collection = self.index_state.collection.clone();
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
         // Set analyzing state
         self.index_state.is_analyzing = true;
-        self.index_state.message = Some("Analyzing indexes...".to_string());
+        self.index_state.message = Some(t().analyzing_indexes().to_string());
 
         // Refresh statistics
         let args = IndexListParams {
@@ -2004,17 +1981,18 @@ impl App {
                 match db.btree_index_statistics(&collection).await {
                     Ok(stats) => {
                         self.index_state.update_statistics(stats);
-                        self.index_state.message = Some("Index statistics frissítve!".to_string());
+                        self.index_state.message =
+                            Some(t().index_statistics_refreshed().to_string());
                     }
                     Err(e) => {
                         self.index_state.is_analyzing = false;
-                        self.index_state.error = Some(format!("Stats load error: {}", e));
+                        self.index_state.error = Some(t().failed(Op::LoadStatistics, &e));
                     }
                 }
             }
             Err(e) => {
                 self.index_state.is_analyzing = false;
-                self.index_state.error = Some(format!("Analyze error: {}", e));
+                self.index_state.error = Some(t().failed(Op::Analyze, &e));
             }
         }
     }
@@ -2041,7 +2019,7 @@ impl App {
         let query = match self.query_state.parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(format!("JSON hiba: {}", e));
+                self.query_state.error = Some(t().invalid_json(&e));
                 return;
             }
         };
@@ -2049,7 +2027,7 @@ impl App {
         let collection = self.query_state.collection.clone();
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -2062,13 +2040,13 @@ impl App {
                 self.query_state.results = Some(docs);
                 self.query_state.error = None;
                 if count >= QUERY_LIMIT {
-                    self.set_status(format!("{}+ dokumentum (limit: {})", count, QUERY_LIMIT));
+                    self.set_status(t().query_found(count, Some(QUERY_LIMIT)));
                 } else {
-                    self.set_status(format!("{} dokumentum találva", count));
+                    self.set_status(t().query_found(count, None));
                 }
             }
             Err(e) => {
-                self.query_state.error = Some(format!("Lekérdezés hiba: {}", e));
+                self.query_state.error = Some(t().failed(Op::Query, &e));
             }
         }
     }
@@ -2078,7 +2056,7 @@ impl App {
         let query = match self.query_state.parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(format!("JSON hiba: {}", e));
+                self.query_state.error = Some(t().invalid_json(&e));
                 return;
             }
         };
@@ -2086,7 +2064,7 @@ impl App {
         let collection = self.query_state.collection.clone();
 
         let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         };
 
@@ -2100,10 +2078,10 @@ impl App {
                 self.query_state.explain_result = Some(plan);
                 self.query_state.show_explain = true;
                 self.query_state.error = None;
-                self.set_status("Query plan lekérdezve");
+                self.set_status(t().query_plan_loaded());
             }
             Err(e) => {
-                self.query_state.error = Some(format!("Explain hiba: {}", e));
+                self.query_state.error = Some(t().failed(Op::Explain, &e));
             }
         }
     }
@@ -2113,7 +2091,7 @@ impl App {
         let query = match self.query_state.parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(format!("JSON hiba: {}", e));
+                self.query_state.error = Some(t().invalid_json(&e));
                 return;
             }
         };
@@ -2140,7 +2118,7 @@ impl App {
         }
 
         if self.filter_state.filters.is_empty() {
-            self.filter_state.error = Some("Adj hozza legalabb egy szurot".to_string());
+            self.filter_state.error = Some(t().filter_needs_a_condition().to_string());
             return;
         }
 
@@ -2148,7 +2126,7 @@ impl App {
         let collection = match self.current_collection_name() {
             Some(name) => name.to_string(),
             None => {
-                self.filter_state.error = Some("Nincs kiválasztott kollekció".to_string());
+                self.filter_state.error = Some(t().no_collection_selected().to_string());
                 return;
             }
         };
@@ -2157,7 +2135,7 @@ impl App {
         let sort = self.filter_state.build_sort();
 
         let Some(db) = &self.db else {
-            self.filter_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            self.filter_state.error = Some(t().no_database().to_string());
             return;
         };
 
@@ -2165,7 +2143,7 @@ impl App {
         let total_count = match count_matching(db, &collection, &query).await {
             Ok(c) => c,
             Err(e) => {
-                self.filter_state.error = Some(format!("Szamlalas hiba: {}", e));
+                self.filter_state.error = Some(t().failed(Op::Count, &e));
                 return;
             }
         };
@@ -2174,10 +2152,8 @@ impl App {
             // 0 eredmény - maradjon nyitva a modal, mutassa a query-t
             self.filter_state.result_count = 0;
             self.filter_state.results = Some(vec![]);
-            self.filter_state.error = Some(format!(
-                "0 talalat. Query: {}",
-                serde_json::to_string(&query).unwrap_or_default()
-            ));
+            self.filter_state.error =
+                Some(t().filter_no_matches(&serde_json::to_string(&query).unwrap_or_default()));
             return;
         }
 
@@ -2196,13 +2172,13 @@ impl App {
                 self.active_filter = Some(query.clone()); // Store filter for pagination
                 self.active_sort = sort; // Store sort for pagination
 
-                self.set_status(format!("{} talalat", total_count));
+                self.set_status(t().match_count(total_count));
 
                 // Close the modal to show results
                 self.close_modal();
             }
             Err(e) => {
-                self.filter_state.error = Some(format!("Szures hiba: {}", e));
+                self.filter_state.error = Some(t().failed(Op::Filter, &e));
             }
         }
     }
@@ -2216,40 +2192,32 @@ impl App {
     /// failed export never truncates an existing file.
     pub async fn execute_export_async(&mut self) {
         if self.export_state.file_path.value().trim().is_empty() {
-            self.export_state.error = Some("Fájl útvonal megadása kötelező".to_string());
+            self.export_state.error = Some(t().file_path_required().to_string());
             return;
         }
 
         let file_path = self.export_state.file_path.value().to_string();
         let Some(tmp_path) = export_temp_path(std::path::Path::new(&file_path)) else {
-            self.export_state.error =
-                Some(format!("Fájl hiba: érvénytelen útvonal: {}", file_path));
+            self.export_state.error = Some(t().invalid_path(&file_path));
             return;
         };
 
         if self.db.is_none() {
-            self.set_error("Nincs megnyitva adatbázis");
+            self.set_error(t().no_database());
             return;
         }
 
         let result = match self.write_export_async(&tmp_path).await {
             Ok(count) => std::fs::rename(&tmp_path, &file_path)
                 .map(|()| count)
-                .map_err(|e| format!("Fájl hiba: {}", e)),
+                .map_err(|e| t().failed(Op::File, &e)),
             Err(e) => Err(e),
         };
 
         match result {
             Ok(count) => {
-                let filtered = if self.export_state.filtered {
-                    " (szűrt)"
-                } else {
-                    ""
-                };
-                self.export_state.message = Some(format!(
-                    "{} dokumentum exportálva{}: {}",
-                    count, filtered, file_path
-                ));
+                self.export_state.message =
+                    Some(t().exported(count, self.export_state.filtered, &file_path));
                 self.export_state.error = None;
             }
             Err(e) => {
@@ -2275,16 +2243,16 @@ impl App {
         let sort = self.active_sort.as_ref();
 
         let Some(db) = &self.db else {
-            return Err("Nincs megnyitva adatbázis".to_string());
+            return Err(t().no_database().to_string());
         };
 
-        let file = File::create(path).map_err(|e| format!("Fájl hiba: {}", e))?;
+        let file = File::create(path).map_err(|e| t().failed(Op::File, &e))?;
         let mut writer = BufWriter::new(file);
 
         let exported = match format {
             ExportFormat::Json => {
                 if let Err(e) = writeln!(writer, "[") {
-                    return Err(format!("Írási hiba: {}", e));
+                    return Err(t().failed(Op::Write, &e));
                 }
 
                 let mut exported = 0;
@@ -2296,7 +2264,7 @@ impl App {
                         match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
-                                return Err(format!("Lekérdezés hiba: {}", e));
+                                return Err(t().failed(Op::Query, &e));
                             }
                         };
 
@@ -2311,12 +2279,12 @@ impl App {
                         let json = match serde_json::to_string(doc) {
                             Ok(j) => j,
                             Err(e) => {
-                                return Err(format!("JSON hiba: {}", e));
+                                return Err(t().invalid_json(&e));
                             }
                         };
 
                         if let Err(e) = write!(writer, "{}{}", prefix, json) {
-                            return Err(format!("Írási hiba: {}", e));
+                            return Err(t().failed(Op::Write, &e));
                         }
                     }
 
@@ -2325,7 +2293,7 @@ impl App {
                 }
 
                 if let Err(e) = writeln!(writer, "\n]") {
-                    return Err(format!("Írási hiba: {}", e));
+                    return Err(t().failed(Op::Write, &e));
                 }
 
                 exported
@@ -2334,12 +2302,12 @@ impl App {
                 let sample = match find_page(db, &collection, &query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
-                        return Err(format!("Lekérdezés hiba: {}", e));
+                        return Err(t().failed(Op::Query, &e));
                     }
                 };
 
                 if sample.is_empty() {
-                    return Err("Nincs exportálandó dokumentum".to_string());
+                    return Err(t().nothing_to_export().to_string());
                 }
 
                 let mut fields: Vec<String> = Vec::new();
@@ -2354,7 +2322,7 @@ impl App {
                 }
 
                 if let Err(e) = writeln!(writer, "{}", fields.join(",")) {
-                    return Err(format!("Írási hiba: {}", e));
+                    return Err(t().failed(Op::Write, &e));
                 }
 
                 let mut exported = 0;
@@ -2365,7 +2333,7 @@ impl App {
                         match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
-                                return Err(format!("Lekérdezés hiba: {}", e));
+                                return Err(t().failed(Op::Query, &e));
                             }
                         };
 
@@ -2393,7 +2361,7 @@ impl App {
                             .collect();
 
                         if let Err(e) = writeln!(writer, "{}", row.join(",")) {
-                            return Err(format!("Írási hiba: {}", e));
+                            return Err(t().failed(Op::Write, &e));
                         }
                     }
 
@@ -2405,7 +2373,7 @@ impl App {
             }
         };
 
-        writer.flush().map_err(|e| format!("Flush hiba: {}", e))?;
+        writer.flush().map_err(|e| t().failed(Op::Flush, &e))?;
 
         Ok(exported)
     }

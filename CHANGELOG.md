@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: status and error messages in both languages (tuti-tui 0.3.486)
+
+The status line, error bar and the modals' own error/success lines (set by `app.rs` and `state/`) now come from
+the language layer (`i18n::Messages`) instead of fixed strings — Hungarian with accents (several were written
+without them: „Nincs talalat”, „Frissites hiba”, „Kereses hiba”) or English in an otherwise Hungarian screen
+(„Index '…' deleted!”, „Auto-embed disabled”, „Analyzing indexes...”, the RAG search summary).
+
+- A failure names the operation the same way everywhere: `Messages::failed(Op, error)` —
+  „Keresés sikertelen: …” / „Search failed: …” (23 operations), replacing the mixed „… hiba:”, „… sikertelen:”,
+  „… error:” forms.
+- English counts use the singular for one („1 match”, „1 document exported”, „Found 1 result”).
+- Tests: every new fixed text differs between the two languages, every operation has its own name, and the
+  English RAG search summary matches the earlier text; the handler tests compare against `t()` instead of
+  copies of the Hungarian strings.
+- The modals' labels, hints and titles and the key handlers' messages follow in the next PRs.
+
 ### Fixed — Compaction: no partial copy left on a full disk, free space checked before and while copying (ironbase-core 0.3.485, mcp-server 1.0.673)
 
 Compaction writes the compacted copy next to the database (`<db>.compact`) and swaps it in at the end, so

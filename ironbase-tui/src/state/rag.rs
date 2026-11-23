@@ -311,24 +311,12 @@ impl RagState {
 
     /// "Found N results", with what the server left out
     pub fn search_summary(&self) -> String {
-        let found = format!("Found {} results", self.search_results.len());
-        if !self.search_incomplete() {
-            return found;
-        }
-        let mut left_out = Vec::new();
-        if self.search_dropped_due_to_budget > 0 {
-            left_out.push(format!(
-                "{} more over the context budget",
-                self.search_dropped_due_to_budget
-            ));
-        }
-        if self.search_dropped_empty > 0 {
-            left_out.push(format!("{} without body text", self.search_dropped_empty));
-        }
-        if left_out.is_empty() {
-            left_out.push("passages shortened".to_string());
-        }
-        format!("{} (trimmed: {})", found, left_out.join(", "))
+        crate::i18n::t().search_summary(
+            self.search_results.len(),
+            self.search_dropped_due_to_budget,
+            self.search_dropped_empty,
+            self.search_trimmed,
+        )
     }
 
     // === Import tab ===
