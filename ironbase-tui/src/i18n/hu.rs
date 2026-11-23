@@ -1,6 +1,8 @@
 //! Hungarian texts
 
-use super::{Messages, Op};
+use super::{Messages, Op, ToolCategory};
+use crate::state::filter::{FilterOperator, SortDirection};
+use crate::state::query::QueryTemplate;
 use std::fmt::Display;
 
 pub struct Hu;
@@ -577,5 +579,243 @@ impl Messages for Hu {
     }
     fn cancel_job_button(&self) -> &'static str {
         "Megszakítás"
+    }
+
+    fn filter_title(&self) -> &'static str {
+        "Szűrő"
+    }
+    fn key_choose_field(&self) -> &'static str {
+        "Mezőválasztás"
+    }
+    fn key_next(&self) -> &'static str {
+        "Tovább"
+    }
+    fn field_title(&self, count: usize) -> String {
+        if count == 0 {
+            " Mező ".to_string()
+        } else {
+            format!(" Mező ({count} mező) [↑↓] ")
+        }
+    }
+    fn field_placeholder_examples(&self) -> &'static str {
+        "pl. name, age, email..."
+    }
+    fn field_placeholder_pick(&self) -> &'static str {
+        "gépelj, vagy válassz a nyilakkal..."
+    }
+    fn label_operator(&self) -> &'static str {
+        "Operátor"
+    }
+    fn label_value(&self) -> &'static str {
+        "Érték"
+    }
+    fn value_placeholder(&self) -> &'static str {
+        "keresett érték..."
+    }
+    fn hint_type_field(&self) -> &'static str {
+        "Írj be egy mezőnevet (pl. name, age, email)"
+    }
+    fn hint_field_next(&self) -> &'static str {
+        "Enter/Tab: tovább az operátorra"
+    }
+    fn hint_operator(&self) -> &'static str {
+        "←/→: operátorválasztás, Enter/Tab: tovább"
+    }
+    fn hint_add_exists(&self) -> &'static str {
+        "Enter: feltétel hozzáadása (érték nem kell)"
+    }
+    fn hint_type_value(&self) -> &'static str {
+        "Írd be a keresett értéket, vagy ^S: azonnali keresés"
+    }
+    fn hint_add_condition(&self) -> &'static str {
+        "Enter: feltétel hozzáadása | ^S: azonnali keresés"
+    }
+    fn hint_filters(&self) -> &'static str {
+        "Enter: szerkesztés | Del: törlés | Ctrl+↑↓: mozgatás | ^S: keresés"
+    }
+    fn hint_sort(&self) -> &'static str {
+        "←/→: mezőválasztás | Space: irány | ^S: keresés"
+    }
+    fn active_filters_title(&self, count: usize) -> String {
+        format!(" Aktív szűrők ({count}) ")
+    }
+    fn no_active_filters(&self) -> &'static str {
+        "Nincs aktív szűrő – adj hozzá egyet!"
+    }
+    fn label_sort(&self) -> &'static str {
+        "Rendezés"
+    }
+    fn no_sort(&self) -> &'static str {
+        "Nincs rendezés"
+    }
+    fn press_ctrl_s_to_search(&self) -> &'static str {
+        "Nyomd meg a ^S-t a kereséshez"
+    }
+    fn add_filters(&self) -> &'static str {
+        "Adj hozzá szűrőket"
+    }
+    fn query_title(&self) -> &'static str {
+        "Lekérdezés-építő"
+    }
+    fn key_run(&self) -> &'static str {
+        "Futtatás"
+    }
+    fn key_plan(&self) -> &'static str {
+        "Terv"
+    }
+    fn key_templates(&self) -> &'static str {
+        "Sablonok"
+    }
+    fn query_results_header(&self, count: usize, total: usize) -> String {
+        if total > count {
+            format!("Találatok ({count}/{total}) [^j/k] [Enter: szűrő]:")
+        } else {
+            format!("Találatok ({count}) [^j/k] [Enter: szűrő]:")
+        }
+    }
+    fn label_result(&self) -> &'static str {
+        "Eredmény"
+    }
+    fn query_prompt(&self) -> &'static str {
+        "Írj egy lekérdezést, és nyomd meg a ^S-t (Ctrl+S)"
+    }
+    fn query_status(&self, line: usize, column: usize, collection: &str, plan: bool) -> String {
+        {
+            let plan = if plan { " [terv]" } else { "" };
+            format!("Sor: {line} Oszlop: {column} | Kollekció: {collection}{plan}")
+        }
+    }
+    fn query_plan_title(&self) -> &'static str {
+        "Lekérdezési terv"
+    }
+    fn label_plan(&self) -> &'static str {
+        "Terv"
+    }
+    fn label_estimated_rows(&self) -> &'static str {
+        "Becsült sorok"
+    }
+    fn label_stage(&self) -> &'static str {
+        "Szakasz"
+    }
+    fn label_cost(&self) -> &'static str {
+        "Költség"
+    }
+    fn label_reason(&self) -> &'static str {
+        "Indoklás"
+    }
+    fn no_query_plan(&self) -> &'static str {
+        "Nincs lekérdezési terv. Nyomd meg a ^E-t."
+    }
+    fn query_plan_toggle_hint(&self) -> &'static str {
+        "[^E] Váltás az eredmények és a terv között"
+    }
+    fn server_info_title(&self) -> &'static str {
+        "Szerverinfó [j/k: görgetés, Esc: bezárás]"
+    }
+    fn loading(&self) -> &'static str {
+        "Betöltés..."
+    }
+    fn database_info(&self) -> &'static str {
+        "Adatbázis-információk"
+    }
+    fn label_server(&self) -> &'static str {
+        "Szerver"
+    }
+    fn label_api_key(&self) -> &'static str {
+        "API-kulcs"
+    }
+    fn api_key_required(&self) -> &'static str {
+        "Kötelező"
+    }
+    fn api_key_not_required(&self) -> &'static str {
+        "Nem szükséges"
+    }
+    fn label_database(&self) -> &'static str {
+        "Adatbázis"
+    }
+    fn label_file_size(&self) -> &'static str {
+        "Fájlméret"
+    }
+    fn label_collection_count(&self) -> &'static str {
+        "Kollekciók száma"
+    }
+    fn label_total_documents(&self) -> &'static str {
+        "Összes dokumentum"
+    }
+    fn label_total_indexes(&self) -> &'static str {
+        "Összes index"
+    }
+    fn label_of_which_vector(&self) -> &'static str {
+        "ebből vektor"
+    }
+    fn vector_index_summary(&self, indexes: usize, vectors: usize) -> String {
+        format!("{indexes} ({vectors} vektor)")
+    }
+    fn label_collections(&self) -> &'static str {
+        "Kollekciók"
+    }
+    fn available_tools(&self, count: usize) -> String {
+        format!("Elérhető MCP-eszközök ({count})")
+    }
+    fn available_prompts(&self, count: usize) -> String {
+        format!("Elérhető MCP-promptok ({count})")
+    }
+    fn no_description(&self) -> &'static str {
+        "Nincs leírás"
+    }
+    fn protocol_version(&self, version: &str) -> String {
+        format!("MCP-protokollverzió: {version}")
+    }
+
+    fn filter_operator(&self, operator: FilterOperator) -> &'static str {
+        match operator {
+            FilterOperator::Equals => "=",
+            FilterOperator::NotEquals => "≠",
+            FilterOperator::GreaterThan => ">",
+            FilterOperator::LessThan => "<",
+            FilterOperator::GreaterOrEq => ">=",
+            FilterOperator::LessOrEq => "<=",
+            FilterOperator::Contains => "tartalmazza",
+            FilterOperator::StartsWith => "ezzel kezdődik",
+            FilterOperator::Exists => "létezik",
+            FilterOperator::In => "listában",
+        }
+    }
+    fn sort_direction(&self, direction: SortDirection) -> &'static str {
+        match direction {
+            SortDirection::Asc => "↑ növekvő",
+            SortDirection::Desc => "↓ csökkenő",
+        }
+    }
+    fn query_template(&self, template: QueryTemplate) -> &'static str {
+        match template {
+            QueryTemplate::All => "Mind",
+            QueryTemplate::ById => "_id alapján",
+            QueryTemplate::Equals => "Egyenlőség",
+            QueryTemplate::GreaterThan => "Nagyobb mint",
+            QueryTemplate::LessThan => "Kisebb mint",
+            QueryTemplate::In => "Listában",
+            QueryTemplate::Exists => "Létezik",
+            QueryTemplate::Regex => "Regex",
+            QueryTemplate::And => "ÉS",
+            QueryTemplate::Or => "VAGY",
+        }
+    }
+    fn tool_category(&self, category: ToolCategory) -> &'static str {
+        match category {
+            ToolCategory::Database => "Adatbázis",
+            ToolCategory::Collections => "Kollekciók",
+            ToolCategory::Query => "Lekérdezés",
+            ToolCategory::Insert => "Beszúrás",
+            ToolCategory::Update => "Módosítás",
+            ToolCategory::Delete => "Törlés",
+            ToolCategory::Count => "Számlálás",
+            ToolCategory::Aggregate => "Aggregáció",
+            ToolCategory::Indexes => "Indexek",
+            ToolCategory::Schema => "Séma",
+            ToolCategory::Scripts => "Scriptek",
+            ToolCategory::Fuzzy => "Fuzzy keresés",
+            ToolCategory::Other => "Egyéb",
+        }
     }
 }

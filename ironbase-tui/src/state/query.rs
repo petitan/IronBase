@@ -4,18 +4,42 @@ use crate::widgets::{Input, InputOutcome, TextArea};
 use ironbase_mcp_types::responses::QueryPlanSummary;
 use serde_json::Value;
 
+/// A query template (its name comes from the language layer)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryTemplate {
+    All,
+    ById,
+    Equals,
+    GreaterThan,
+    LessThan,
+    In,
+    Exists,
+    Regex,
+    And,
+    Or,
+}
+
+impl QueryTemplate {
+    pub fn name(self) -> &'static str {
+        crate::i18n::t().query_template(self)
+    }
+}
+
 /// Query templates
-pub const QUERY_TEMPLATES: &[(&str, &str)] = &[
-    ("Osszes", "{}"),
-    ("ID alapjan", "{\"_id\": \"\"}"),
-    ("Egyenloseg", "{\"field\": \"value\"}"),
-    ("Nagyobb mint", "{\"field\": {\"$gt\": 0}}"),
-    ("Kisebb mint", "{\"field\": {\"$lt\": 100}}"),
-    ("Tartalmazza", "{\"field\": {\"$in\": [\"a\", \"b\"]}}"),
-    ("Letezik", "{\"field\": {\"$exists\": true}}"),
-    ("Regex", "{\"field\": {\"$regex\": \"pattern\"}}"),
-    ("AND", "{\"$and\": [{\"a\": 1}, {\"b\": 2}]}"),
-    ("OR", "{\"$or\": [{\"a\": 1}, {\"b\": 2}]}"),
+pub const QUERY_TEMPLATES: &[(QueryTemplate, &str)] = &[
+    (QueryTemplate::All, "{}"),
+    (QueryTemplate::ById, "{\"_id\": \"\"}"),
+    (QueryTemplate::Equals, "{\"field\": \"value\"}"),
+    (QueryTemplate::GreaterThan, "{\"field\": {\"$gt\": 0}}"),
+    (QueryTemplate::LessThan, "{\"field\": {\"$lt\": 100}}"),
+    (QueryTemplate::In, "{\"field\": {\"$in\": [\"a\", \"b\"]}}"),
+    (QueryTemplate::Exists, "{\"field\": {\"$exists\": true}}"),
+    (
+        QueryTemplate::Regex,
+        "{\"field\": {\"$regex\": \"pattern\"}}",
+    ),
+    (QueryTemplate::And, "{\"$and\": [{\"a\": 1}, {\"b\": 2}]}"),
+    (QueryTemplate::Or, "{\"$or\": [{\"a\": 1}, {\"b\": 2}]}"),
 ];
 
 /// Query builder state
@@ -242,7 +266,7 @@ mod tests {
         for (index, (name, _)) in QUERY_TEMPLATES.iter().enumerate() {
             state.template_index = index;
             state.apply_template();
-            assert!(state.parse_query().is_ok(), "{}", name);
+            assert!(state.parse_query().is_ok(), "{:?}", name);
         }
     }
 

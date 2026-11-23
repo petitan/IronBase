@@ -1,6 +1,7 @@
 //! Server Info modal - MCP server information display
 
 use super::render_modal_frame;
+use crate::i18n::{t, ToolCategory};
 use crate::theme::Theme;
 use ironbase_mcp_types::responses::{DbStatsResponse, DbStatsServer};
 use ratatui::prelude::*;
@@ -129,24 +130,16 @@ pub fn render(
     scroll: usize,
     theme: &Theme,
 ) {
-    let inner = render_modal_frame(
-        frame,
-        area,
-        "Szerver Info [j/k gorgetes, Esc bezar]",
-        theme,
-        70,
-        80,
-    );
+    let inner = render_modal_frame(frame, area, t().server_info_title(), theme, 70, 80);
 
     if state.loading {
-        let loading = Paragraph::new("Betoltes...").style(Style::default().fg(theme.fg));
+        let loading = Paragraph::new(t().loading()).style(Style::default().fg(theme.fg));
         frame.render_widget(loading, inner);
         return;
     }
 
     if let Some(ref error) = state.error {
-        let error_text =
-            Paragraph::new(format!("Hiba: {}", error)).style(Style::default().fg(theme.error));
+        let error_text = Paragraph::new(t().error(error)).style(Style::default().fg(theme.error));
         frame.render_widget(error_text, inner);
         return;
     }
@@ -155,15 +148,19 @@ pub fn render(
 
     // === Database Info Section ===
     lines.push(Line::from(Span::styled(
-        "Adatbazis Informaciok",
+        t().database_info(),
         Style::default().fg(theme.accent).bold(),
     )));
     lines.push(Line::from(""));
 
     if let Some(ref response) = state.db_stats {
-        let row = |label: &'static str, value: String| {
+        // Labels in a 20-column field, so the values line up in any language
+        let row = |label: &str, value: String| {
             Line::from(vec![
-                Span::styled(label, Style::default().fg(theme.accent)),
+                Span::styled(
+                    format!("{:<20}", format!("{label}:")),
+                    Style::default().fg(theme.accent),
+                ),
                 Span::raw(value),
             ])
         };
@@ -178,15 +175,15 @@ pub fn render(
         } = &response.server
         {
             lines.push(row(
-                "Szerver:            ",
+                t().label_server(),
                 format!("{}://{}:{}", protocol, host, port),
             ));
             lines.push(row(
-                "API kulcs:          ",
+                t().label_api_key(),
                 if *require_api_key {
-                    "Kotelezo"
+                    t().api_key_required()
                 } else {
-                    "Nem szukseges"
+                    t().api_key_not_required()
                 }
                 .to_string(),
             ));
@@ -194,40 +191,34 @@ pub fn render(
 
         // Database info section
         let stats = &response.stats;
-        lines.push(row("Adatbazis:          ", stats.database.path.clone()));
-        lines.push(row(
-            "Fajlmeret:          ",
-            stats.database.file_size.clone(),
-        ));
+        lines.push(row(t().label_database(), stats.database.path.clone()));
+        lines.push(row(t().label_file_size(), stats.database.file_size.clone()));
 
         // Summary section
         let summary = &stats.summary;
         lines.push(row(
-            "Kollekcio szam:     ",
+            t().label_collection_count(),
             summary.collection_count.to_string(),
         ));
         lines.push(row(
-            "Osszes dokumentum:  ",
+            t().label_total_documents(),
             summary.total_documents.to_string(),
         ));
         lines.push(row(
-            "Osszes index:       ",
+            t().label_total_indexes(),
             summary.total_btree_indexes.to_string(),
         ));
         lines.push(row(
             // The engine's index list already contains the vector indexes:
             // this line is a breakdown of the total above, not an addition
-            "  ebbol vektor:     ",
-            format!(
-                "{} ({} vektor)",
-                summary.total_vector_indexes, summary.total_vectors
-            ),
+            &format!("  {}", t().label_of_which_vector()),
+            t().vector_index_summary(summary.total_vector_indexes, summary.total_vectors),
         ));
 
         // Collection names
         let names: Vec<&str> = stats.collections.iter().map(|c| c.name.as_str()).collect();
         if !names.is_empty() {
-            lines.push(row("Kollekciok:         ", names.join(", ")));
+            lines.push(row(t().label_collections(), names.join(", ")));
         }
     }
 
@@ -235,31 +226,31 @@ pub fn render(
 
     // === MCP Tools Section ===
     lines.push(Line::from(Span::styled(
-        format!("Elerheto MCP Eszkozok ({})", state.tools.len()),
+        t().available_tools(state.tools.len()),
         Style::default().fg(theme.accent).bold(),
     )));
     lines.push(Line::from(""));
 
     // Group tools by category (based on name prefix)
     let categories = vec![
-        ("db_", "Adatbazis"),
-        ("collection_", "Kollekciok"),
-        ("find", "Lekerdezes"),
-        ("insert", "Beszuras"),
-        ("update", "Frissites"),
-        ("delete", "Torles"),
-        ("count", "Szamolas"),
-        ("aggregate", "Aggregacio"),
-        ("index_", "Indexek"),
-        ("schema_", "Sema"),
-        ("script_", "Szkriptek"),
-        ("fuzzy_", "Fuzzy kereses"),
+        ("db_", ToolCategory::Database),
+        ("collection_", ToolCategory::Collections),
+        ("find", ToolCategory::Query),
+        ("insert", ToolCategory::Insert),
+        ("update", ToolCategory::Update),
+        ("delete", ToolCategory::Delete),
+        ("count", ToolCategory::Count),
+        ("aggregate", ToolCategory::Aggregate),
+        ("index_", ToolCategory::Indexes),
+        ("schema_", ToolCategory::Schema),
+        ("script_", ToolCategory::Scripts),
+        ("fuzzy_", ToolCategory::Fuzzy),
     ];
 
     // First, show categorized tools
     let mut shown_tools: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    for (prefix, category_name) in &categories {
+    for (prefix, category) in &categories {
         let category_tools: Vec<&ToolInfo> = state
             .tools
             .iter()
@@ -268,7 +259,7 @@ pub fn render(
 
         if !category_tools.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("  {} ", category_name),
+                format!("  {} ", t().tool_category(*category)),
                 Style::default().fg(theme.secondary).italic(),
             )));
 
@@ -294,7 +285,7 @@ pub fn render(
 
     if !remaining.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  Egyeb ",
+            format!("  {} ", t().tool_category(ToolCategory::Other)),
             Style::default().fg(theme.secondary).italic(),
         )));
         for tool in remaining {
@@ -312,13 +303,16 @@ pub fn render(
 
     // === MCP Prompts Section ===
     lines.push(Line::from(Span::styled(
-        format!("Elerheto MCP Promptok ({})", state.prompts.len()),
+        t().available_prompts(state.prompts.len()),
         Style::default().fg(theme.accent).bold(),
     )));
     lines.push(Line::from(""));
 
     for prompt in &state.prompts {
-        let desc = prompt.description.as_deref().unwrap_or("Nincs leiras");
+        let desc = prompt
+            .description
+            .as_deref()
+            .unwrap_or(t().no_description());
         // Truncate description if too long
         let desc_truncated = if desc.chars().count() > 50 {
             format!("{}...", desc.chars().take(47).collect::<String>())
@@ -338,7 +332,7 @@ pub fn render(
 
     // === Footer ===
     lines.push(Line::from(Span::styled(
-        "MCP Protocol Version: 2024-11-05",
+        t().protocol_version("2024-11-05"),
         Style::default().fg(theme.secondary).italic(),
     )));
 

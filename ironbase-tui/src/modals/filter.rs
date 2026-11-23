@@ -2,13 +2,14 @@
 
 use super::render_modal_frame;
 use crate::app::{FilterFocus, FilterOperator, FilterState};
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 /// Render the visual filter modal
 pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Szuro", theme, 70, 75);
+    let inner = render_modal_frame(frame, area, t().filter_title(), theme, 70, 75);
 
     // Calculate suggestion height (max 5 visible)
     let suggestion_height = if state.show_suggestions && state.focus == FilterFocus::Field {
@@ -64,13 +65,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme)
 fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[↑↓]", Style::default().fg(theme.accent)),
-        Span::raw(" Valassz mezot  "),
+        Span::raw(format!(" {}  ", t().key_choose_field())),
         Span::styled("[Tab/Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Tovabb  "),
+        Span::raw(format!(" {}  ", t().key_next())),
         Span::styled("[^S]", Style::default().fg(theme.accent)),
-        Span::raw(" Kereses  "),
+        Span::raw(format!(" {}  ", t().key_search())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, area);
@@ -85,11 +86,7 @@ fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     };
 
     // Show field count hint if we have suggestions
-    let title = if !state.all_fields.is_empty() {
-        format!(" Mezo ({} mezo) [↑↓] ", state.all_fields.len())
-    } else {
-        " Mezo ".to_string()
-    };
+    let title = t().field_title(state.all_fields.len());
 
     let block = Block::default()
         .title(title)
@@ -100,9 +97,9 @@ fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     frame.render_widget(block, area);
 
     let placeholder = if state.all_fields.is_empty() {
-        "pl: name, age, email..."
+        t().field_placeholder_examples()
     } else {
-        "gepelj vagy nyilakkal valassz..."
+        t().field_placeholder_pick()
     };
     state.field_input.render_with_placeholder(
         frame,
@@ -174,7 +171,7 @@ fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
     };
 
     let block = Block::default()
-        .title(" Operator [</>] ")
+        .title(format!(" {} [</>] ", t().label_operator()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -213,7 +210,7 @@ fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     };
 
     let block = Block::default()
-        .title(" Ertek ")
+        .title(format!(" {} ", t().label_value()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -224,7 +221,7 @@ fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
         frame,
         inner,
         Style::default().fg(theme.fg),
-        Span::styled("keresett ertek...", Style::default().fg(theme.muted)),
+        Span::styled(t().value_placeholder(), Style::default().fg(theme.muted)),
         is_focused,
     );
 }
@@ -233,30 +230,16 @@ fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
     use crate::app::{FilterFocus, FilterOperator};
 
     let hint = match state.focus {
-        FilterFocus::Field if state.field_input.is_empty() => {
-            ("Irj be mezonevet (pl: name, age, email)", theme.muted)
-        }
-        FilterFocus::Field => ("Enter/Tab: tovabb az Operator-ra", theme.accent),
-        FilterFocus::Operator => ("<-/-> valassz operatort, Enter/Tab: tovabb", theme.accent),
+        FilterFocus::Field if state.field_input.is_empty() => (t().hint_type_field(), theme.muted),
+        FilterFocus::Field => (t().hint_field_next(), theme.accent),
+        FilterFocus::Operator => (t().hint_operator(), theme.accent),
         FilterFocus::Value if state.operator == FilterOperator::Exists => {
-            ("Enter: feltetel hozzaadasa (ertek nem kell)", theme.accent)
+            (t().hint_add_exists(), theme.accent)
         }
-        FilterFocus::Value if state.value_input.is_empty() => (
-            "Irj be keresett erteket, vagy ^S az azonnali kereseshez",
-            theme.muted,
-        ),
-        FilterFocus::Value => (
-            "Enter: feltetel hozzaadasa | ^S: azonnali kereses",
-            theme.accent,
-        ),
-        FilterFocus::Filters => (
-            "Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | ^S: kereses",
-            theme.accent,
-        ),
-        FilterFocus::SortField => (
-            "←/→: mezo valasztas | Space: irany | ^S: kereses",
-            theme.accent,
-        ),
+        FilterFocus::Value if state.value_input.is_empty() => (t().hint_type_value(), theme.muted),
+        FilterFocus::Value => (t().hint_add_condition(), theme.accent),
+        FilterFocus::Filters => (t().hint_filters(), theme.accent),
+        FilterFocus::SortField => (t().hint_sort(), theme.accent),
     };
 
     let p = Paragraph::new(hint.0)
@@ -273,7 +256,7 @@ fn render_filters(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Th
         theme.secondary
     };
 
-    let title = format!(" Aktiv szurok ({}) ", state.filters.len());
+    let title = t().active_filters_title(state.filters.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -283,7 +266,7 @@ fn render_filters(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Th
     frame.render_widget(block, area);
 
     if state.filters.is_empty() {
-        let msg = Paragraph::new("Nincs aktiv szuro - adj hozza egyet!")
+        let msg = Paragraph::new(t().no_active_filters())
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(msg, inner);
@@ -321,7 +304,7 @@ fn render_sort(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme
     };
 
     let block = Block::default()
-        .title(" Rendezés [←/→ Space] ")
+        .title(format!(" {} [←/→ Space] ", t().label_sort()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -330,7 +313,7 @@ fn render_sort(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme
 
     let sort_text = match &state.sort_field {
         Some(field) => format!("{} {}", field, state.sort_direction.label()),
-        None => "Nincs rendezés".to_string(),
+        None => t().no_sort().to_string(),
     };
 
     let style = if is_focused {
@@ -348,22 +331,25 @@ fn render_sort(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme
 fn render_status(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if state.result_count > 0 {
         Line::from(vec![Span::styled(
-            format!("{} talalat", state.result_count),
+            t().match_count(state.result_count),
             Style::default().fg(theme.accent),
         )])
     } else if !state.filters.is_empty() {
         Line::from(Span::styled(
-            "Nyomd meg ^S-t a kereséshez",
+            t().press_ctrl_s_to_search(),
             Style::default().fg(theme.muted),
         ))
     } else {
         Line::from(Span::styled(
-            "Adj hozza szuroket",
+            t().add_filters(),
             Style::default().fg(theme.muted),
         ))
     };
