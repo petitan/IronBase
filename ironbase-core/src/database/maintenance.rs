@@ -126,6 +126,7 @@ impl DatabaseCore<StorageEngine> {
         // temp path, so a blocking compact during a non-blocking Phase B would
         // truncate the file Phase B is still writing (audit 2026-10-06 #6).
         let _guard = CompactionGuard::acquire(&self.is_compacting)?;
+        crate::storage::compaction::compaction_precheck(&self.db_path)?;
 
         // Rebuild HNSW indexes to remove orphan nodes before flush
         {
@@ -193,6 +194,9 @@ impl DatabaseCore<StorageEngine> {
         config: &crate::storage::CompactionConfig,
         progress_callback: &dyn Fn(u64, u64),
     ) -> Result<crate::storage::CompactionStats> {
+        // A full disk is reported before the costly index work
+        crate::storage::compaction::compaction_precheck(&self.db_path)?;
+
         // Pre-Phase: HNSW rebuild + index flush (does NOT hold storage lock)
         {
             let _flush = self.index_flush_lock.lock();
@@ -1685,5 +1689,194 @@ mod lock_hold_tests {
         db.drop_collection("b").unwrap();
         // and released it again
         assert!(!db.is_compacting.load(Ordering::SeqCst));
+    }
+}
+
+/// Compaction writes the compacted copy next to the database (`<db>.compact`),
+/// so it needs free space about the size of the live data. It must not fill
+/// the disk, and must never leave a partial copy behind.
+#[cfg(test)]
+mod compaction_disk_space_tests {
+    use crate::storage::compaction::{compaction_free_space_reserve, test_space};
+    use crate::storage::{CompactionConfig, StorageEngine};
+    use crate::DatabaseCore;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    const MB: u64 = 1024 * 1024;
+
+    fn doc(value: serde_json::Value) -> std::collections::HashMap<String, serde_json::Value> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// 20 documents, 10 of them replaced once and 5 deleted
+    fn db_with_garbage() -> (TempDir, DatabaseCore<StorageEngine>, std::path::PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("space.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        let docs = (0..20)
+            .map(|i| doc(json!({"n": i, "pad": "x".repeat(200)})))
+            .collect();
+        db.insert_many("c", docs).unwrap();
+        db.update_many("c", &json!({"n": {"$lt": 10}}), &json!({"$set": {"v": 2}}))
+            .unwrap();
+        db.delete_many("c", &json!({"n": {"$gte": 15}})).unwrap();
+        (temp, db, path)
+    }
+
+    fn temp_copy(path: &std::path::Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.compact", path.display()))
+    }
+
+    fn assert_db_intact(db: &DatabaseCore<StorageEngine>) {
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 15);
+        assert_eq!(db.count_documents("c", &json!({"v": 2})).unwrap(), 10);
+        // Still writable
+        db.insert_one("c", doc(json!({"n": 99}))).unwrap();
+    }
+
+    fn storage_full(err: &crate::IronBaseError) -> String {
+        let crate::IronBaseError::Io(io) = err else {
+            panic!("expected an I/O error, got {err:?}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::StorageFull);
+        err.to_string()
+    }
+
+    /// No room even for the reserve: the compaction does not start (before
+    /// the index work), nothing is written, and the error says what is free
+    #[test]
+    fn compaction_without_room_is_refused_up_front() {
+        let (_t, db, path) = db_with_garbage();
+        test_space::set(&[0]);
+
+        let err = db
+            .compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap_err();
+        let blocking = db.compact().unwrap_err();
+        test_space::clear();
+
+        let text = storage_full(&err);
+        assert!(
+            text.contains("not enough disk space for compaction (before starting)"),
+            "{text}"
+        );
+        assert!(text.contains("0 MB is free"), "{text}");
+        storage_full(&blocking);
+        assert!(!temp_copy(&path).exists(), "no partial copy may be left");
+        assert_db_intact(&db);
+    }
+
+    /// The space runs out while copying: the compaction stops before the
+    /// disk fills and removes its partial copy (left behind, it kept the disk
+    /// full and the database unable to write)
+    #[test]
+    fn compaction_running_out_of_room_removes_the_partial_copy() {
+        let (_t, db, path) = db_with_garbage();
+        // The precheck, the setup and the first chunk have room, the next
+        // chunk does not
+        test_space::set(&[u64::MAX, u64::MAX, u64::MAX, 0]);
+
+        let err = db
+            .compact_nonblocking(&CompactionConfig::new().with_chunk_size(2), &|_, _| {})
+            .unwrap_err();
+        test_space::clear();
+
+        let text = storage_full(&err);
+        assert!(text.contains("(copying documents)"), "{text}");
+        assert!(
+            !temp_copy(&path).exists(),
+            "the partial copy must be removed"
+        );
+        assert_db_intact(&db);
+
+        // With room again, the compaction works
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 16);
+        assert!(!temp_copy(&path).exists());
+    }
+
+    /// A copy left by an interrupted compaction holds space the new copy
+    /// needs: it is removed before the free space is checked
+    #[test]
+    fn stale_partial_copy_is_removed_before_the_check() {
+        let (_t, db, path) = db_with_garbage();
+        std::fs::write(temp_copy(&path), vec![0u8; 4096]).unwrap();
+        test_space::set(&[0]);
+
+        let err = db
+            .compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap_err();
+        test_space::clear();
+
+        storage_full(&err);
+        assert!(!temp_copy(&path).exists(), "the stale copy must be gone");
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap();
+        assert_db_intact(&db);
+    }
+
+    /// After dropping a large collection the copy is tiny: little free space
+    /// is enough (an estimate from the remaining collections' counts took
+    /// the dropped data for live and refused)
+    #[test]
+    fn compaction_after_drop_collection_needs_little_room() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("drop.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        let big = (0..300)
+            .map(|i| doc(json!({"n": i, "pad": "x".repeat(10_000)})))
+            .collect();
+        db.insert_many("big", big).unwrap();
+        db.insert_one("small", doc(json!({"n": 1}))).unwrap();
+        db.drop_collection("big").unwrap();
+        let file = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            file > 2 * MB,
+            "setup: the dropped data stays in the file ({file})"
+        );
+
+        // Room for the reserve and a little more, far less than the file
+        test_space::set(&[compaction_free_space_reserve(file) + 64 * 1024]);
+        let stats = db
+            .compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap();
+        test_space::clear();
+
+        assert!(stats.size_after < 64 * 1024, "{stats:?}");
+        assert_eq!(db.count_documents("small", &json!({})).unwrap(), 1);
+    }
+
+    /// The storage-level entry point checks too, before its metadata flush
+    /// (the first write of a compaction)
+    #[test]
+    fn storage_engine_compaction_checks_before_writing() {
+        let (temp, db, path) = db_with_garbage();
+        drop(db);
+        let mut storage = StorageEngine::open(&path).unwrap();
+        // Unflushed metadata: a flush would write it
+        storage.create_collection("extra").unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        test_space::set(&[0]);
+        let err = storage.compact().unwrap_err();
+        test_space::clear();
+        storage_full(&err);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            size,
+            "nothing written"
+        );
+        assert!(!temp_copy(&path).exists());
+        drop(storage);
+        drop(temp);
+    }
+
+    /// The reserve follows the data: a tenth, between 1 and 64 MB
+    #[test]
+    fn reserve_scales_with_the_data() {
+        assert_eq!(compaction_free_space_reserve(0), MB);
+        assert_eq!(compaction_free_space_reserve(100 * MB), 10 * MB);
+        assert_eq!(compaction_free_space_reserve(100 * 1024 * MB), 64 * MB);
     }
 }

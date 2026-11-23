@@ -14,6 +14,137 @@ use std::sync::Arc;
 /// If exceeded, forces a flush to prevent OOM
 const MAX_COMPACTION_MEMORY_BYTES: u64 = 256 * 1024 * 1024; // 256 MB
 
+/// Free space a compaction keeps on the volume, so that the database itself
+/// can keep writing (and the WAL growing) while the compacted copy is built
+/// next to it: a tenth of the data, at least 1 MB, at most 64 MB (a fixed
+/// 64 MB would stop small databases on small volumes from ever compacting).
+pub fn compaction_free_space_reserve(data_bytes: u64) -> u64 {
+    const MB: u64 = 1024 * 1024;
+    (data_bytes / 10).clamp(MB, 64 * MB)
+}
+
+/// The path of the compacted copy of the database at `db_path`
+pub(crate) fn compaction_temp_path(db_path: &str) -> String {
+    format!("{}.compact", db_path)
+}
+
+/// Free bytes on the volume of `path` (the database file or its temp copy)
+fn available_space(path: &str) -> std::io::Result<u64> {
+    #[cfg(test)]
+    if let Some(bytes) = test_space::next() {
+        return Ok(bytes);
+    }
+    let dir = std::path::Path::new(path)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    fs2::available_space(dir)
+}
+
+/// The free-space limit one compaction works under: every write of the
+/// compacted copy (documents, catch-up, metadata) is checked first, so the
+/// compaction stops before the disk fills instead of after.
+#[derive(Debug, Clone)]
+pub(crate) struct SpaceCheck {
+    path: String,
+    reserve: u64,
+    /// False once the free space could not be read (an unsupported file
+    /// system): said once, then not checked (it must not block compaction)
+    enabled: bool,
+}
+
+impl SpaceCheck {
+    /// The limit for the database at `db_path` holding `data_bytes` of data
+    pub(crate) fn new(db_path: &str, data_bytes: u64) -> Self {
+        Self {
+            path: db_path.to_string(),
+            reserve: compaction_free_space_reserve(data_bytes),
+            enabled: true,
+        }
+    }
+
+    /// `Ok` when `needed` bytes can be written and the reserve still stays
+    /// free; else an `Io` error of kind `StorageFull` saying what is free and
+    /// what is needed (`stage`: where the compaction stopped)
+    pub(crate) fn ensure(&mut self, needed: u64, stage: &str) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let available = match available_space(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                crate::log_warn!("Compaction: free disk space unknown ({}), not checked", e);
+                self.enabled = false;
+                return Ok(());
+            }
+        };
+        if available >= needed.saturating_add(self.reserve) {
+            return Ok(());
+        }
+        const MB: u64 = 1024 * 1024;
+        Err(IronBaseError::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            format!(
+                "not enough disk space for compaction ({stage}): {} MB is free, {} MB is \
+                 needed for the next write and {} MB must stay free for the database. \
+                 The compaction stopped and its partial copy was removed; the database is \
+                 unchanged. Free up space (the compacted copy needs about the size of the \
+                 live data) or move the database to a larger volume.",
+                available / MB,
+                needed.div_ceil(MB),
+                self.reserve.div_ceil(MB),
+            ),
+        )))
+    }
+}
+
+/// Before a compaction (under its guard, so no other compaction owns the
+/// file): remove a copy left by an interrupted one (a crash, or a version
+/// that left it on a full disk) — it holds space the new copy needs — and
+/// check that the reserve is free. Done before the costly index work, so a
+/// full disk is reported at once.
+pub(crate) fn compaction_precheck(db_path: &str) -> Result<()> {
+    let temp_path = compaction_temp_path(db_path);
+    match fs::remove_file(&temp_path) {
+        Ok(()) => crate::log_warn!("Compaction: removed a stale partial copy {}", temp_path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let data_bytes = fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    SpaceCheck::new(db_path, data_bytes).ensure(0, "before starting")
+}
+
+/// Test hook: the free space `available_space` reports, one value per call
+/// (the last one repeats), for this thread only
+#[cfg(test)]
+pub(crate) mod test_space {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static QUEUE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Report these values, in order, then the last one forever
+    pub(crate) fn set(values: &[u64]) {
+        QUEUE.with(|q| *q.borrow_mut() = values.iter().rev().copied().collect());
+    }
+
+    pub(crate) fn clear() {
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
+    pub(super) fn next() -> Option<u64> {
+        QUEUE.with(|q| {
+            let mut q = q.borrow_mut();
+            match q.len() {
+                0 => None,
+                1 => q.last().copied(),
+                _ => q.pop(),
+            }
+        })
+    }
+}
+
 /// Compaction configuration
 #[derive(Debug, Clone, Default)]
 pub struct CompactionConfig {
@@ -203,10 +334,14 @@ impl StorageEngine {
     ///
     /// Returns CompactionSnapshot for use by compact_scan_standalone().
     pub fn compact_prepare(&mut self) -> Result<CompactionSnapshot> {
+        // Before anything is written (the metadata flush below writes too):
+        // remove a stale copy, check that the reserve is free
+        compaction_precheck(&self.file_path)?;
+
         // CRITICAL: Flush metadata first to ensure header.metadata_offset is up-to-date!
         self.flush_metadata()?;
 
-        let temp_path = format!("{}.compact", self.file_path);
+        let temp_path = compaction_temp_path(&self.file_path);
 
         // For version 2+: only scan up to metadata_offset (don't read metadata as documents!)
         let file_len = if self.header.version >= 2 && self.header.metadata_offset > 0 {
@@ -215,7 +350,10 @@ impl StorageEngine {
             self.file_len()?
         };
 
-        // Create temporary new file
+        // Create the temporary new file; removed again if the setup below
+        // fails. The guard is declared first so that it is dropped last,
+        // after the file is closed (Windows cannot remove an open file).
+        let mut temp_cleanup = TempFileCleanup::new(temp_path.clone());
         let mut new_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -241,6 +379,9 @@ impl StorageEngine {
         // and an idle/read-only compaction pays nothing.
         let snapshot_collections = Arc::clone(&self.collections);
 
+        // Phase B creates its own guard for the file
+        temp_cleanup.disarm();
+        drop(temp_cleanup);
         Ok(CompactionSnapshot {
             temp_file: new_file,
             temp_path,
@@ -267,12 +408,16 @@ impl StorageEngine {
     /// not O(total_docs).
     pub fn compact_finalize_with_catchup(
         &mut self,
-        mut scan_result: CompactionScanResult,
+        scan_result: CompactionScanResult,
         snapshot_collections: &HashMap<String, super::CollectionMeta>,
     ) -> Result<CompactionStats> {
-        // RAII guard: removes .compact temp file on error (any early ? return)
-        // Disarmed on success before finalize_compaction() renames it.
+        // Any early return below removes the temp file; disarmed only once
+        // it has replaced the database. The guard is declared before the
+        // local that owns the file, so the file is closed before removal
+        // (Windows cannot remove an open file).
         let mut temp_cleanup = TempFileCleanup::new(scan_result.temp_path.clone());
+        let mut scan_result = scan_result;
+        let mut space = SpaceCheck::new(&self.file_path, scan_result.stats.size_before);
 
         let mut stats = scan_result.stats;
 
@@ -389,6 +534,7 @@ impl StorageEngine {
                                 &doc_id,
                                 &doc_bytes,
                                 scan_result.write_offset,
+                                &mut space,
                             )?;
                             catchup_count += 1;
                         }
@@ -434,6 +580,7 @@ impl StorageEngine {
                                     &doc_id,
                                     &doc_bytes,
                                     scan_result.write_offset,
+                                    &mut space,
                                 )?;
                                 catchup_count += 1;
                             }
@@ -509,15 +656,18 @@ impl StorageEngine {
             &scan_result.header,
             &scan_result.new_collections,
             scan_result.write_offset,
+            &mut space,
         )?;
 
         stats.size_after = scan_result.temp_file.metadata()?.len();
 
-        // Disarm cleanup guard — finalize_compaction will rename (not delete) the temp file
-        temp_cleanup.disarm();
-
-        // Atomic file swap + reload
-        self.finalize_compaction(&scan_result.temp_path, scan_result.temp_file)?;
+        // Atomic file swap + reload; the temp file is the database now
+        // (on a failed rename the guard still removes it)
+        self.finalize_compaction(
+            &scan_result.temp_path,
+            scan_result.temp_file,
+            &mut temp_cleanup,
+        )?;
 
         Ok(stats)
     }
@@ -532,6 +682,7 @@ impl StorageEngine {
         header: &super::Header,
         new_collections: &HashMap<String, super::CollectionMeta>,
         metadata_offset: u64,
+        space: &mut SpaceCheck,
     ) -> Result<()> {
         // Serialize metadata body
         let mut metadata_buffer = std::io::Cursor::new(Vec::new());
@@ -550,7 +701,9 @@ impl StorageEngine {
         let metadata_bytes = metadata_buffer.into_inner();
         let metadata_size = metadata_bytes.len() as u64;
 
-        // Write metadata at end
+        // Write metadata at end (for millions of documents the catalogs are
+        // hundreds of MB: checked like the documents)
+        space.ensure(metadata_size, "writing the metadata")?;
         new_file.seek(SeekFrom::Start(metadata_offset))?;
         new_file.write_all(&metadata_bytes)?;
 
@@ -563,12 +716,19 @@ impl StorageEngine {
     }
 
     /// Finalize compaction: close files, rename temp to original, reload metadata
-    fn finalize_compaction(&mut self, temp_path: &str, new_file: std::fs::File) -> Result<()> {
+    fn finalize_compaction(
+        &mut self,
+        temp_path: &str,
+        new_file: std::fs::File,
+        cleanup: &mut TempFileCleanup,
+    ) -> Result<()> {
         // Close new file before renaming
         drop(new_file);
 
         // Atomic rename + parent directory fsync for durability on POSIX
         crate::fs_utils::atomic_rename_and_sync(temp_path, &self.file_path)?;
+        // The temp path no longer exists: nothing to remove from here on
+        cleanup.disarm();
 
         // Reopen the compacted file
         let mut file = OpenOptions::new()
@@ -598,6 +758,7 @@ impl StorageEngine {
 /// Used by compact_finalize_with_catchup() to ensure the .compact temp file
 /// is cleaned up on any error path (early ? return). On success, the guard
 /// is disarmed before finalize_compaction() renames the temp file.
+#[derive(Debug)]
 struct TempFileCleanup {
     path: String,
     armed: bool,
@@ -616,7 +777,17 @@ impl TempFileCleanup {
 impl Drop for TempFileCleanup {
     fn drop(&mut self) {
         if self.armed {
-            let _ = fs::remove_file(&self.path);
+            match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Said, so that the operator can remove the copy: it holds
+                // about the live data's size on the database's volume
+                Err(e) => crate::log_warn!(
+                    "Compaction: could not remove the partial copy {}: {}",
+                    self.path,
+                    e
+                ),
+            }
         }
     }
 }
@@ -642,6 +813,12 @@ pub fn compact_scan_standalone(
         ..Default::default()
     };
 
+    // Every early return below (a write error such as a full disk, the
+    // free-space check, cancellation) drops this guard, which removes the
+    // partial copy: left behind, it would keep the disk full and the database
+    // unable to write. Declared before the file, so it is dropped after it.
+    let mut temp_cleanup = TempFileCleanup::new(snapshot.temp_path.clone());
+    let mut space = SpaceCheck::new(&snapshot.source_path, snapshot.size_before);
     let mut temp_file = snapshot.temp_file;
     let mut write_offset = super::HEADER_SIZE;
 
@@ -687,7 +864,6 @@ pub fn compact_scan_standalone(
     for (coll_name, coll_meta) in snapshot.snapshot_collections.iter() {
         // Check for cancellation at collection boundary
         if config.is_cancelled() {
-            let _ = fs::remove_file(&snapshot.temp_path);
             return Err(IronBaseError::Cancelled(
                 "Compaction cancelled by user".to_string(),
             ));
@@ -702,7 +878,6 @@ pub fn compact_scan_standalone(
 
             // Check for cancellation periodically (every chunk)
             if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled() {
-                let _ = fs::remove_file(&snapshot.temp_path);
                 return Err(IronBaseError::Cancelled(
                     "Compaction cancelled by user".to_string(),
                 ));
@@ -761,6 +936,7 @@ pub fn compact_scan_standalone(
                                             docs,
                                             write_offset,
                                             &mut stats,
+                                            &mut space,
                                         )?;
                                         docs.clear();
                                     }
@@ -826,6 +1002,7 @@ pub fn compact_scan_standalone(
                 docs,
                 write_offset,
                 &mut stats,
+                &mut space,
             )?;
         }
     }
@@ -860,6 +1037,8 @@ pub fn compact_scan_standalone(
     // Final progress report
     progress_callback(docs_processed, total_docs);
 
+    // Phase C takes over the copy (and guards it itself)
+    temp_cleanup.disarm();
     Ok(CompactionScanResult {
         temp_file,
         temp_path: snapshot.temp_path,
@@ -882,7 +1061,11 @@ fn flush_compaction_chunk_standalone(
     docs_by_id: &mut HashMap<crate::document::DocumentId, Value>,
     mut write_offset: u64,
     stats: &mut CompactionStats,
+    space: &mut SpaceCheck,
 ) -> Result<u64> {
+    // Serialize the chunk first: the free-space check is for the bytes that
+    // are written (re-serialized, with the collection mark), not the source's
+    let mut records = Vec::with_capacity(docs_by_id.len());
     for (doc_id, doc) in docs_by_id.iter() {
         // Skip tombstones (deleted documents)
         if doc
@@ -893,12 +1076,20 @@ fn flush_compaction_chunk_standalone(
             stats.tombstones_removed += 1;
             continue;
         }
-
-        // Write document to new file
-        let doc_offset = write_offset;
         // Re-serialization sorts the keys: put the collection mark first again.
         let doc_bytes =
             super::io::mark_document_collection(coll_name, &serde_json::to_vec(doc)?)?.into_owned();
+        records.push((doc_id, doc_bytes));
+    }
+    let chunk_bytes = records
+        .iter()
+        .map(|(_, bytes)| 4 + bytes.len() as u64)
+        .sum::<u64>();
+    space.ensure(chunk_bytes, "copying documents")?;
+
+    for (doc_id, doc_bytes) in records {
+        // Write document to new file
+        let doc_offset = write_offset;
         let len = doc_bytes.len() as u32;
 
         new_file.write_all(&len.to_le_bytes())?;
@@ -930,7 +1121,9 @@ fn write_doc_to_temp(
     doc_id: &crate::document::DocumentId,
     doc_bytes: &[u8],
     write_offset: u64,
+    space: &mut SpaceCheck,
 ) -> Result<u64> {
+    space.ensure(4 + doc_bytes.len() as u64, "catching up")?;
     // Seek to write position
     temp_file.seek(SeekFrom::Start(write_offset))?;
 

@@ -68,7 +68,7 @@
 //! - [`traits`] - Storage trait definitions
 //! - [`io`] - Low-level I/O operations
 
-mod compaction;
+pub(crate) mod compaction;
 mod io;
 pub mod memory_storage; // NEW: MemoryStorage for testing
 pub mod metadata; // Make metadata public for CollectionMeta
