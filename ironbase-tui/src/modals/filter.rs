@@ -6,6 +6,7 @@ use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 /// Render the visual filter modal
 pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
@@ -178,11 +179,19 @@ fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Show all operators with current highlighted
+    // Show the operators with the current one highlighted; a row wider than
+    // the field (longer translated labels, a narrow terminal) starts later, so
+    // the selected operator is always visible
     let ops = FilterOperator::all();
+    let widths: Vec<usize> = ops
+        .iter()
+        .map(|op| op.label().width() + 3) // " label " and the separator
+        .collect();
+    let first = first_visible(&widths, state.operator_idx, inner.width as usize);
     let spans: Vec<Span> = ops
         .iter()
         .enumerate()
+        .skip(first)
         .flat_map(|(i, op)| {
             let is_selected = i == state.operator_idx;
             let style = if is_selected {
@@ -199,6 +208,17 @@ fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
 
     let p = Paragraph::new(Line::from(spans));
     frame.render_widget(p, inner);
+}
+
+/// The first item to draw so that item `selected` fits in `available`
+/// columns, given each item's width: 0 when everything up to it fits
+fn first_visible(widths: &[usize], selected: usize, available: usize) -> usize {
+    let selected = selected.min(widths.len().saturating_sub(1));
+    let mut first = 0;
+    while first < selected && widths[first..=selected].iter().sum::<usize>() > available {
+        first += 1;
+    }
+    first
 }
 
 fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
@@ -356,4 +376,23 @@ fn render_status(frame: &mut Frame, area: Rect, state: &FilterState, theme: &The
 
     let p = Paragraph::new(text);
     frame.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_visible;
+
+    #[test]
+    fn test_operator_row_keeps_the_selected_operator_visible() {
+        let widths = [4, 4, 14, 17, 10, 11];
+        // Everything up to the selected one fits: from the start
+        assert_eq!(first_visible(&widths, 2, 40), 0);
+        // The last one does not fit from the start: start later, as little as needed
+        let first = first_visible(&widths, 5, 40);
+        assert!(widths[first..=5].iter().sum::<usize>() <= 40);
+        assert!(widths[first - 1..=5].iter().sum::<usize>() > 40);
+        // Wider than the field by itself: it is drawn first (and clipped)
+        assert_eq!(first_visible(&widths, 3, 5), 3);
+        assert_eq!(first_visible(&[], 0, 10), 0);
+    }
 }

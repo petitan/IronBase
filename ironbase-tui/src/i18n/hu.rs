@@ -691,6 +691,9 @@ impl Messages for Hu {
     fn label_plan(&self) -> &'static str {
         "Terv"
     }
+    fn label_index(&self) -> &'static str {
+        "Index"
+    }
     fn label_estimated_rows(&self) -> &'static str {
         "Becsült sorok"
     }

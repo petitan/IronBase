@@ -339,6 +339,8 @@ pub trait Messages: Sync + sealed::Sealed {
     fn query_status(&self, line: usize, column: usize, collection: &str, plan: bool) -> String;
     fn query_plan_title(&self) -> &'static str;
     fn label_plan(&self) -> &'static str;
+    /// The same word in both languages
+    fn label_index(&self) -> &'static str;
     fn label_estimated_rows(&self) -> &'static str;
     fn label_stage(&self) -> &'static str;
     fn label_cost(&self) -> &'static str;
@@ -751,5 +753,14 @@ mod tests {
         assert_eq!(en.field_title(1), " Field (1 field) [↑↓] ");
         assert_eq!(hu.field_title(0), " Mező ");
         assert_eq!(en.vector_index_summary(1, 3), "1 (3 vectors)");
+        // The exact texts, not only that they differ
+        assert_eq!(hu.vector_index_summary(1, 3), "1 (3 vektor)");
+        assert_eq!(hu.filter_operator(FilterOperator::Contains), "tartalmazza");
+        assert_eq!(
+            en.filter_operator(FilterOperator::StartsWith),
+            "starts with"
+        );
+        assert_eq!(hu.sort_direction(SortDirection::Desc), "↓ csökkenő");
+        assert_eq!(en.query_template(QueryTemplate::ById), "By _id");
     }
 }

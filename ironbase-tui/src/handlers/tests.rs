@@ -1261,8 +1261,7 @@ async fn test_server_info_shows_index_totals() {
         "{screen}"
     );
     assert!(
-        line_with(&screen, &format!("{}:", t().label_of_which_vector()))
-            .contains(&t().vector_index_summary(1, 3)),
+        line_with(&screen, &format!("{}:", t().label_of_which_vector())).contains("1 (3 vektor)"),
         "{screen}"
     );
     assert!(

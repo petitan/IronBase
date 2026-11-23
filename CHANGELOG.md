@@ -20,6 +20,8 @@ English operator names and plan labels in a Hungarian screen („contains”, �
   fixed name.
 - The server info aligns its values whatever the length of the translated labels, and the query plan box keeps
   its width with a translated title.
+- The filter's operator row starts later when it is wider than the field (longer labels, a narrow terminal), so
+  the selected operator is always visible; before, the operators at the end were cut off.
 - Tests: the new texts differ between the two languages (the symbols are the same), the plan box's top border is
   as wide as its bottom one in both languages; the handler tests compare against `t()`.
 - Left for the next PRs: the API key, listener, vector, index, script, RAG and ACL modals and the key handlers'

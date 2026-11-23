@@ -710,6 +710,9 @@ impl Messages for En {
     fn label_plan(&self) -> &'static str {
         "Plan"
     }
+    fn label_index(&self) -> &'static str {
+        "Index"
+    }
     fn label_estimated_rows(&self) -> &'static str {
         "Est. rows"
     }

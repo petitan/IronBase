@@ -583,10 +583,7 @@ mod tests {
         );
         assert_eq!(
             condition("email", FilterOperator::Exists, "").display(),
-            format!(
-                "email {}",
-                crate::i18n::t().filter_operator(FilterOperator::Exists)
-            )
+            "email létezik"
         );
     }
 

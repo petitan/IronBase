@@ -268,7 +268,7 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
             plain.bold(),
         ));
         lines.push(field(
-            "Index",
+            t().label_index(),
             index_name.to_string(),
             if index_name == "-" {
                 Style::default().fg(theme.warning)
