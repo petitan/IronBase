@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Compaction: no partial copy left on a full disk, free space checked before and while copying (ironbase-core 0.3.485, mcp-server 1.0.673)
+
+Compaction writes the compacted copy next to the database (`<db>.compact`) and swaps it in at the end, so
+it needs free space about the size of the **live** data: up to the file's size again when little is garbage
+(a 100 GB file with ~100 GB live data needs ~200 GB at the peak), about 1.5× when the automatic compaction
+starts (at a bloat ratio of 2).
+
+- **A partial copy was left behind:** when the disk filled up while copying (or any other write error in the
+  copy phase), the error returned without removing `<db>.compact`. The disk stayed full, the database's own
+  writes failed, and the automatic compaction, 30 minutes later, filled it again. Every early exit of the copy
+  phase (and of its setup) now removes the partial copy; cancellation uses the same guard.
+- **No free-space check:** compaction ran until the disk was full. Now it does not start when the volume lacks
+  the estimated size of the copy plus a 64 MB reserve (`COMPACTION_FREE_SPACE_RESERVE`), and while copying it
+  stops before each chunk would go below the reserve, so the database can keep writing. The estimate is the
+  data region scaled by the share of live documents; the check while copying does not depend on it. The error
+  is an `Io` error of kind `StorageFull` ("not enough disk space for compaction: about X MB more is needed …,
+  Y MB is free"), so Python (`IOError`), C# and MCP report it as before as an I/O error; the database is
+  unchanged. Where the free space cannot be read, the check is skipped.
+- The compacted copy's size itself is unchanged; compacting in place (as MongoDB's WiredTiger does) or in
+  segments would remove the need for the extra space, but changes the file format and is not part of this
+  fix.
+
 ### Added — Tuti TUI: language layer, Hungarian with accents and English (ironbase-core 0.3.484)
 
 Phase 3i of the Tuti TUI overhaul: the first part of the bilingual UI.

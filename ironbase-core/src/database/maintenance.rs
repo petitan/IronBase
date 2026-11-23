@@ -1687,3 +1687,118 @@ mod lock_hold_tests {
         assert!(!db.is_compacting.load(Ordering::SeqCst));
     }
 }
+
+/// Compaction writes the compacted copy next to the database (`<db>.compact`),
+/// so it needs free space about the size of the live data. It must not fill
+/// the disk, and must never leave a partial copy behind.
+#[cfg(test)]
+mod compaction_disk_space_tests {
+    use crate::storage::compaction::test_space;
+    use crate::storage::{CompactionConfig, StorageEngine};
+    use crate::DatabaseCore;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    /// 20 documents, 10 of them replaced once and 5 deleted
+    fn doc(value: serde_json::Value) -> std::collections::HashMap<String, serde_json::Value> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn db_with_garbage() -> (TempDir, DatabaseCore<StorageEngine>, std::path::PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("space.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&path).unwrap();
+        let docs = (0..20)
+            .map(|i| doc(json!({"n": i, "pad": "x".repeat(200)})))
+            .collect();
+        db.insert_many("c", docs).unwrap();
+        db.update_many("c", &json!({"n": {"$lt": 10}}), &json!({"$set": {"v": 2}}))
+            .unwrap();
+        db.delete_many("c", &json!({"n": {"$gte": 15}})).unwrap();
+        (temp, db, path)
+    }
+
+    fn temp_copy(path: &std::path::Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.compact", path.display()))
+    }
+
+    fn assert_db_intact(db: &DatabaseCore<StorageEngine>) {
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 15);
+        assert_eq!(db.count_documents("c", &json!({"v": 2})).unwrap(), 10);
+        // Still writable
+        db.insert_one("c", doc(json!({"n": 99}))).unwrap();
+    }
+
+    /// Too little room: the compaction does not start (nothing is written)
+    /// and says how much space it needs
+    #[test]
+    fn compaction_without_room_is_refused_up_front() {
+        let (_t, db, path) = db_with_garbage();
+        test_space::set(&[1024 * 1024]); // 1 MB free: below the 64 MB reserve
+
+        let err = db
+            .compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap_err();
+        test_space::clear();
+
+        let crate::IronBaseError::Io(io) = &err else {
+            panic!("expected an I/O error, got {err:?}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::StorageFull);
+        let text = err.to_string();
+        assert!(
+            text.contains("not enough disk space for compaction"),
+            "{text}"
+        );
+        assert!(text.contains("1 MB is free"), "{text}");
+        assert!(!temp_copy(&path).exists(), "no partial copy may be left");
+        assert_db_intact(&db);
+    }
+
+    /// The space runs out while copying: the compaction stops before the
+    /// disk fills and removes its partial copy (left behind, it kept the disk
+    /// full and the database unable to write)
+    #[test]
+    fn compaction_running_out_of_room_removes_the_partial_copy() {
+        let (_t, db, path) = db_with_garbage();
+        // The start and the first chunk have room, the next chunk does not
+        test_space::set(&[u64::MAX, u64::MAX, 0]);
+
+        let err = db
+            .compact_nonblocking(&CompactionConfig::new().with_chunk_size(2), &|_, _| {})
+            .unwrap_err();
+        test_space::clear();
+
+        assert!(
+            err.to_string()
+                .contains("not enough disk space for compaction"),
+            "{err}"
+        );
+        assert!(
+            !temp_copy(&path).exists(),
+            "the partial copy must be removed"
+        );
+        assert_db_intact(&db);
+
+        // With room again, the compaction works
+        db.compact_nonblocking(&CompactionConfig::new(), &|_, _| {})
+            .unwrap();
+        assert_eq!(db.count_documents("c", &json!({})).unwrap(), 16);
+        assert!(!temp_copy(&path).exists());
+    }
+
+    /// The estimate counts only the live share of the data region
+    #[test]
+    fn estimated_copy_is_the_live_share() {
+        use crate::storage::compaction::estimated_compacted_bytes;
+        let mut colls = std::collections::HashMap::new();
+        let meta: crate::storage::CollectionMeta = serde_json::from_value(json!({
+            "name": "c", "document_count": 40, "live_document_count": 10,
+            "index_offset": 0, "last_id": 0
+        }))
+        .unwrap();
+        colls.insert("c".to_string(), meta);
+        assert_eq!(estimated_compacted_bytes(4000, &colls), 1000);
+        assert_eq!(estimated_compacted_bytes(4000, &Default::default()), 0);
+    }
+}

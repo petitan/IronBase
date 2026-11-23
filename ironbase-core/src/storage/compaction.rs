@@ -14,6 +14,104 @@ use std::sync::Arc;
 /// If exceeded, forces a flush to prevent OOM
 const MAX_COMPACTION_MEMORY_BYTES: u64 = 256 * 1024 * 1024; // 256 MB
 
+/// Free space a compaction leaves on the volume: it does not start, and stops
+/// while copying, rather than go below this, so the database itself can keep
+/// writing (and the WAL growing) while the compacted copy is built next to it.
+pub const COMPACTION_FREE_SPACE_RESERVE: u64 = 64 * 1024 * 1024; // 64 MB
+
+/// Free bytes on the volume of `path` (the database file or its temp copy)
+fn available_space(path: &str) -> std::io::Result<u64> {
+    #[cfg(test)]
+    if let Some(bytes) = test_space::next() {
+        return Ok(bytes);
+    }
+    let dir = std::path::Path::new(path)
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    fs2::available_space(dir)
+}
+
+/// `Ok` when the volume of `path` has `needed` bytes free on top of the
+/// reserve; else an `Io` error of kind `StorageFull` saying how much is
+/// needed and free. When the free space cannot be read (an unsupported
+/// file system), the check is skipped: it must not block compaction there.
+fn ensure_free_space(path: &str, needed: u64) -> Result<()> {
+    let available = match available_space(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            crate::log_warn!("Compaction: free disk space unknown ({}), not checked", e);
+            return Ok(());
+        }
+    };
+    let required = needed.saturating_add(COMPACTION_FREE_SPACE_RESERVE);
+    if available >= required {
+        return Ok(());
+    }
+    const MB: u64 = 1024 * 1024;
+    Err(IronBaseError::Io(std::io::Error::new(
+        std::io::ErrorKind::StorageFull,
+        format!(
+            "not enough disk space for compaction: about {} MB more is needed \
+             ({} MB of data plus a {} MB reserve), {} MB is free. Free up space \
+             or move the database to a larger volume; the database itself is unchanged.",
+            required.div_ceil(MB),
+            needed.div_ceil(MB),
+            COMPACTION_FREE_SPACE_RESERVE / MB,
+            available / MB
+        ),
+    )))
+}
+
+/// The compacted copy's expected size: the data region scaled by the share of
+/// live documents among all written ones (old versions and deleted documents
+/// are not copied). An estimate, exact only when documents are of one size;
+/// the free-space check while copying (`ensure_free_space` per chunk) does
+/// not depend on it.
+pub(crate) fn estimated_compacted_bytes(
+    data_region_bytes: u64,
+    collections: &HashMap<String, super::CollectionMeta>,
+) -> u64 {
+    let (written, live) = collections.values().fold((0u64, 0u64), |(w, l), meta| {
+        (w + meta.document_count, l + meta.live_document_count)
+    });
+    if written == 0 {
+        return 0;
+    }
+    (data_region_bytes as u128 * live.min(written) as u128 / written as u128) as u64
+}
+
+/// Test hook: the free space `available_space` reports, one value per call
+/// (the last one repeats), for this thread only
+#[cfg(test)]
+pub(crate) mod test_space {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static QUEUE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Report these values, in order, then the last one forever
+    pub(crate) fn set(values: &[u64]) {
+        QUEUE.with(|q| *q.borrow_mut() = values.iter().rev().copied().collect());
+    }
+
+    pub(crate) fn clear() {
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
+    pub(super) fn next() -> Option<u64> {
+        QUEUE.with(|q| {
+            let mut q = q.borrow_mut();
+            match q.len() {
+                0 => None,
+                1 => q.last().copied(),
+                _ => q.pop(),
+            }
+        })
+    }
+}
+
 /// Compaction configuration
 #[derive(Debug, Clone, Default)]
 pub struct CompactionConfig {
@@ -215,13 +313,21 @@ impl StorageEngine {
             self.file_len()?
         };
 
-        // Create temporary new file
+        // The copy goes next to the database: is there room for it? Checked
+        // before anything is written.
+        ensure_free_space(
+            &temp_path,
+            estimated_compacted_bytes(file_len, &self.collections),
+        )?;
+
+        // Create temporary new file; removed again if the setup below fails
         let mut new_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(&temp_path)?;
+        let mut temp_cleanup = TempFileCleanup::new(temp_path.clone());
 
         // Write header only (no metadata yet - documents start at HEADER_SIZE)
         new_file.seek(SeekFrom::Start(0))?;
@@ -241,6 +347,7 @@ impl StorageEngine {
         // and an idle/read-only compaction pays nothing.
         let snapshot_collections = Arc::clone(&self.collections);
 
+        temp_cleanup.disarm();
         Ok(CompactionSnapshot {
             temp_file: new_file,
             temp_path,
@@ -642,6 +749,10 @@ pub fn compact_scan_standalone(
         ..Default::default()
     };
 
+    // Every early return below (a write error such as a full disk, the
+    // free-space check, cancellation) removes the partial copy: left behind,
+    // it would keep the disk full and the database unable to write.
+    let mut temp_cleanup = TempFileCleanup::new(snapshot.temp_path.clone());
     let mut temp_file = snapshot.temp_file;
     let mut write_offset = super::HEADER_SIZE;
 
@@ -677,6 +788,8 @@ pub fn compact_scan_standalone(
 
     let mut chunk_count = 0;
     let mut total_memory_bytes: u64 = 0;
+    // Bytes of the documents buffered for the next chunk write
+    let mut pending_bytes: u64 = 0;
     let mut docs_processed: u64 = 0;
     // PR-2 / Fix B: high-water mark of the source prefix already dropped from the
     // page cache. Advances monotonically so each region is dropped at most once
@@ -687,7 +800,6 @@ pub fn compact_scan_standalone(
     for (coll_name, coll_meta) in snapshot.snapshot_collections.iter() {
         // Check for cancellation at collection boundary
         if config.is_cancelled() {
-            let _ = fs::remove_file(&snapshot.temp_path);
             return Err(IronBaseError::Cancelled(
                 "Compaction cancelled by user".to_string(),
             ));
@@ -702,7 +814,6 @@ pub fn compact_scan_standalone(
 
             // Check for cancellation periodically (every chunk)
             if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled() {
-                let _ = fs::remove_file(&snapshot.temp_path);
                 return Err(IronBaseError::Cancelled(
                     "Compaction cancelled by user".to_string(),
                 ));
@@ -737,6 +848,7 @@ pub fn compact_scan_standalone(
                             // String keys/values are heap-allocated, Map uses BTreeMap,
                             // Vec/Number/Bool have per-variant overhead
                             let doc_size_bytes = doc_bytes.len() as u64;
+                            pending_bytes += doc_size_bytes + 4;
                             total_memory_bytes += doc_size_bytes * 3 + 128;
 
                             let current_memory_mb = total_memory_bytes / (1024 * 1024);
@@ -751,6 +863,10 @@ pub fn compact_scan_standalone(
                                 || total_memory_bytes >= MAX_COMPACTION_MEMORY_BYTES;
 
                             if should_flush {
+                                // Stop before the disk fills: room for this
+                                // chunk plus the reserve
+                                ensure_free_space(&snapshot.temp_path, pending_bytes)?;
+                                pending_bytes = 0;
                                 let flush_start = write_offset;
                                 for (flush_coll_name, docs) in collection_docs.iter_mut() {
                                     if !docs.is_empty() {
@@ -816,6 +932,7 @@ pub fn compact_scan_standalone(
     }
 
     // Flush remaining documents
+    ensure_free_space(&snapshot.temp_path, pending_bytes)?;
     let final_flush_start = write_offset;
     for (coll_name, docs) in collection_docs.iter_mut() {
         if !docs.is_empty() {
@@ -860,6 +977,8 @@ pub fn compact_scan_standalone(
     // Final progress report
     progress_callback(docs_processed, total_docs);
 
+    // Phase C takes over the copy (and its own cleanup guard)
+    temp_cleanup.disarm();
     Ok(CompactionScanResult {
         temp_file,
         temp_path: snapshot.temp_path,
