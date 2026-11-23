@@ -18,13 +18,21 @@ starts (at a bloat ratio of 2).
   copy phase), the error returned without removing `<db>.compact`. The disk stayed full, the database's own
   writes failed, and the automatic compaction, 30 minutes later, filled it again. Every early exit of the copy
   phase (and of its setup) now removes the partial copy; cancellation uses the same guard.
-- **No free-space check:** compaction ran until the disk was full. Now it does not start when the volume lacks
-  the estimated size of the copy plus a 64 MB reserve (`COMPACTION_FREE_SPACE_RESERVE`), and while copying it
-  stops before each chunk would go below the reserve, so the database can keep writing. The estimate is the
-  data region scaled by the share of live documents; the check while copying does not depend on it. The error
-  is an `Io` error of kind `StorageFull` ("not enough disk space for compaction: about X MB more is needed …,
-  Y MB is free"), so Python (`IOError`), C# and MCP report it as before as an I/O error; the database is
-  unchanged. Where the free space cannot be read, the check is skipped.
+- **No free-space check:** compaction ran until the disk was full. Now every write of the compacted copy is
+  checked first — the documents (per chunk), the catch-up of the writes made meanwhile and the metadata block
+  (hundreds of MB for millions of documents) — and the compaction stops before it would go below a reserve
+  kept free for the database's own writes: a tenth of the file, at least 1 MB, at most 64 MB
+  (`compaction_free_space_reserve`). Before it starts (and before the index work, which an explicit compact
+  spends minutes on) it checks that the reserve is free, and removes a `<db>.compact` left by an interrupted
+  compaction, which would otherwise hold the space the new copy needs. There is no up-front refusal based on
+  an estimated copy size: an estimate from the document counts takes, for example, a dropped collection's data
+  for live and would refuse a compaction that needs almost no space.
+- The error is an `Io` error of kind `StorageFull` ("not enough disk space for compaction (copying documents):
+  X MB is free, Y MB is needed for the next write and Z MB must stay free for the database …"), so Python
+  (`IOError`), C# (`IoError`) and the MCP job report it as an I/O error, as before; the database is unchanged.
+  Where the free space cannot be read, this is logged once and the checks are skipped.
+- The temp file's cleanup guard is created with the file and handed through the phases; it is disarmed only
+  after the copy has replaced the database (a failed rename no longer leaves the copy either).
 - The compacted copy's size itself is unchanged; compacting in place (as MongoDB's WiredTiger does) or in
   segments would remove the need for the extra space, but changes the file format and is not part of this
   fix.
