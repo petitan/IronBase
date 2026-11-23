@@ -1,13 +1,14 @@
 //! Error detail modal - shows full error message with scrolling
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Render the error detail modal
 pub fn render(frame: &mut Frame, area: Rect, error_message: &str, scroll: usize, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Hiba reszletei", theme, 80, 60);
+    let inner = render_modal_frame(frame, area, t().error_details_title(), theme, 80, 60);
 
     // Split error message into lines for word-wrap
     let max_width = inner.width.saturating_sub(2) as usize;
@@ -31,11 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, error_message: &str, scroll: usize,
     // Add scroll indicator if needed
     if total_lines > visible_lines {
         text_lines.push(Line::from(""));
-        let scroll_hint = format!(
-            "({}/{}) - ↑/↓ gorgeteshez, Esc bezaras",
-            current_scroll + 1,
-            max_scroll + 1
-        );
+        let scroll_hint = t().error_scroll_hint(current_scroll + 1, max_scroll + 1);
         text_lines.push(Line::from(Span::styled(
             scroll_hint,
             Style::default().fg(theme.muted),
@@ -43,7 +40,7 @@ pub fn render(frame: &mut Frame, area: Rect, error_message: &str, scroll: usize,
     } else {
         text_lines.push(Line::from(""));
         text_lines.push(Line::from(Span::styled(
-            "Esc bezaras",
+            t().esc_to_close(),
             Style::default().fg(theme.muted),
         )));
     }

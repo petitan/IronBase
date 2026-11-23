@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::app::{DatabaseMode, DatabaseState};
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -9,8 +10,8 @@ use ratatui::widgets::Paragraph;
 /// Render the database open/create modal
 pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Theme) {
     let title = match state.mode {
-        DatabaseMode::Open => "Adatbazis Megnyitas",
-        DatabaseMode::Create => "Uj Adatbazis Letrehozasa",
+        DatabaseMode::Open => t().open_database_title(),
+        DatabaseMode::Create => t().create_database_title(),
     };
     let inner = render_modal_frame(frame, area, title, theme, 70, 50);
 
@@ -27,11 +28,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Mod valtas  "),
+        Span::raw(format!(" {}  ", t().key_switch_mode())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" OK  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -49,19 +50,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     };
 
     let mode_line = Line::from(vec![
-        Span::raw(" Mod: "),
-        Span::styled(" Megnyitas ", open_style),
+        Span::raw(format!(" {}: ", t().label_mode())),
+        Span::styled(format!(" {} ", t().mode_open()), open_style),
         Span::raw("  "),
-        Span::styled(" Letrehozas ", create_style),
+        Span::styled(format!(" {} ", t().mode_create()), create_style),
     ]);
     frame.render_widget(Paragraph::new(mode_line), chunks[1]);
 
     // Info text
     let info_text = match state.mode {
-        DatabaseMode::Open => "Add meg egy letezo adatbazis fajl utvonalat.".to_string(),
-        DatabaseMode::Create => {
-            "Add meg az uj adatbazis fajl utvonalat.\nA fajl nem letezhet meg!".to_string()
-        }
+        DatabaseMode::Open => t().open_database_info().to_string(),
+        DatabaseMode::Create => t().create_database_info().to_string(),
     };
     let info = Paragraph::new(info_text).style(Style::default().fg(theme.fg));
     frame.render_widget(info, chunks[2]);
@@ -70,7 +69,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     state.path.render_labeled(
         frame,
         chunks[3],
-        Span::styled(" Utvonal: ", Style::default().fg(theme.accent)),
+        Span::styled(
+            format!(" {}: ", t().label_path()),
+            Style::default().fg(theme.accent),
+        ),
         Style::default().fg(theme.fg),
         true,
     );
@@ -78,7 +80,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     // Status/error line
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled(" Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!(" {}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -88,15 +93,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
         )])
     } else if state.loading {
         Line::from(vec![Span::styled(
-            " Csatlakozas...",
+            format!(" {}", t().connecting()),
             Style::default().fg(theme.accent),
         )])
     } else {
         let tip = match state.mode {
-            DatabaseMode::Open => " Tipp: Hasznalj abszolut utvonalat (pl. /home/user/data.mlite)",
-            DatabaseMode::Create => " Tipp: A .mlite kiterjesztes ajanlott",
+            DatabaseMode::Open => t().open_database_tip(),
+            DatabaseMode::Create => t().create_database_tip(),
         };
-        Line::from(vec![Span::styled(tip, Style::default().fg(theme.muted))])
+        Line::from(vec![Span::styled(
+            format!(" {tip}"),
+            Style::default().fg(theme.muted),
+        )])
     };
     frame.render_widget(Paragraph::new(status_text), chunks[4]);
 }

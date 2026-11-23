@@ -2678,7 +2678,7 @@ mod tests {
         app.documents = vec![serde_json::json!({"_id": 7})];
         app.open_delete_confirm();
         assert_eq!(app.modal, Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("\"invoices\""));
+        assert!(app.confirm.message.contains("invoices"));
     }
 
     // === Export ===

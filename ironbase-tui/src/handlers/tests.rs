@@ -241,7 +241,11 @@ async fn test_delete_document_needs_explicit_yes() {
     assert_eq!(app.modal, Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     let screen = render_to_string(&app, 120, 36);
-    assert!(screen.contains("Dokumentum torlese"), "{}", screen);
+    assert!(
+        screen.contains(t().confirm_delete_document_title()),
+        "{}",
+        screen
+    );
 
     // Enter on the default = cancel: nothing is deleted
     press(&mut app, KeyCode::Enter).await;
@@ -1673,7 +1677,10 @@ async fn test_fulltext_tab_drops_the_previous_fields_results() {
     assert!(app.fulltext_state.results.is_empty());
     assert_eq!(app.fulltext_state.selected_result, 0);
     let screen = render_to_string(&app, 120, 36);
-    assert!(screen.contains("Talalatok (0)"), "{screen}");
+    assert!(
+        screen.contains(t().results_title(0, false).trim()),
+        "{screen}"
+    );
     assert!(!screen.contains("Rust developer"), "{screen}");
 }
 
@@ -1730,13 +1737,19 @@ async fn test_fulltext_full_page_says_more_may_exist() {
 
     assert_eq!(server.calls_to("fulltext_search")[0]["limit"], 50);
     let screen = render_to_string(&app, 120, 36);
-    assert!(screen.contains("Talalatok (50+)"), "{screen}");
+    assert!(
+        screen.contains(t().results_title(50, true).trim()),
+        "{screen}"
+    );
 
     // Fewer hits than the limit: every match is shown
     server.respond("fulltext_search", fulltext_hits(3));
     press(&mut app, KeyCode::Enter).await;
     let screen = render_to_string(&app, 120, 36);
-    assert!(screen.contains("Talalatok (3)"), "{screen}");
+    assert!(
+        screen.contains(t().results_title(3, false).trim()),
+        "{screen}"
+    );
     assert!(
         line_with(&screen, "Rust developer 0").contains("3.50"),
         "{screen}"
@@ -2424,17 +2437,24 @@ async fn test_new_collection_name_uses_the_terminal_cursor() {
     let screen = render_to_string(&app, 100, 30);
     let line = screen
         .lines()
-        .find(|l| l.contains("Nev:"))
+        .find(|l| l.contains(&format!("{}:", t().label_name())))
         .unwrap_or_default()
         .to_string();
-    assert!(line.contains("Nev: users2"), "{}", line);
+    assert!(
+        line.contains(&format!("{}: users2", t().label_name())),
+        "{}",
+        line
+    );
     assert!(!line.contains('|'), "{}", line);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal
         .draw(|frame| crate::ui::render_ui(frame, &app))
         .unwrap();
-    let y = screen.lines().position(|l| l.contains("Nev:")).unwrap() as u16;
+    let y = screen
+        .lines()
+        .position(|l| l.contains(&format!("{}:", t().label_name())))
+        .unwrap() as u16;
     // Columns, not bytes: the frame's border characters are multi-byte
     let x = line[..line.find("users2").unwrap()].chars().count() as u16 + 5;
     assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(x, y));

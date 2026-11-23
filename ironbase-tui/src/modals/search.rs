@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::app::{App, SearchMode};
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{List, ListItem, Paragraph};
@@ -9,8 +10,8 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 /// Render the search modal
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let title = match app.search.mode {
-        SearchMode::Collections => "Kollekciok keresese",
-        SearchMode::Document => "Kereses a dokumentumban",
+        SearchMode::Collections => t().search_collections_title(),
+        SearchMode::Document => t().search_document_title(),
     };
 
     let inner = render_modal_frame(frame, area, title, theme, 60, 50);
@@ -38,8 +39,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn render_search_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let placeholder = match app.search.mode {
-        SearchMode::Collections => "Irj be kollekcio nevet...",
-        SearchMode::Document => "Irj be keresett szoveget...",
+        SearchMode::Collections => t().type_collection_name(),
+        SearchMode::Document => t().type_search_text(),
     };
 
     if app.search.query_input.is_empty() {
@@ -65,15 +66,27 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let line = match app.search.mode {
         SearchMode::Collections => Line::from(vec![
             Span::styled("[Enter]", Style::default().fg(theme.accent)),
-            Span::styled(" Kereses/Ugras  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!(" {}  ", t().key_search_or_jump()),
+                Style::default().fg(theme.muted),
+            ),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::styled(" Bezar", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!(" {}", t().key_close()),
+                Style::default().fg(theme.muted),
+            ),
         ]),
         SearchMode::Document => Line::from(vec![
             Span::styled("[Enter]", Style::default().fg(theme.accent)),
-            Span::styled(" Kereses  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!(" {}  ", t().key_search()),
+                Style::default().fg(theme.muted),
+            ),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::styled(" Bezar", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!(" {}", t().key_close()),
+                Style::default().fg(theme.muted),
+            ),
         ]),
     };
 
@@ -86,7 +99,7 @@ fn render_collection_results(frame: &mut Frame, area: Rect, app: &App, theme: &T
         let msg = if app.search.query_input.is_empty() {
             ""
         } else {
-            "Nincs talalat"
+            t().no_matches()
         };
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(theme.muted))
@@ -111,7 +124,10 @@ fn render_collection_results(frame: &mut Frame, area: Rect, app: &App, theme: &T
                 Style::default().fg(theme.fg)
             };
 
-            let text = format!("  {} ({} docs)", result.name, result.doc_count);
+            let text = format!(
+                "  {}",
+                t().collection_with_count(&result.name, result.doc_count)
+            );
 
             ListItem::new(text).style(style)
         })
@@ -124,16 +140,12 @@ fn render_collection_results(frame: &mut Frame, area: Rect, app: &App, theme: &T
 fn render_doc_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let text = if app.search.doc_matches.is_empty() {
         if app.search.query_input.is_empty() {
-            "Kezdj el gepelni a kereséshez".to_string()
+            t().start_typing_to_search().to_string()
         } else {
-            "Nincs talalat".to_string()
+            t().no_matches().to_string()
         }
     } else {
-        format!(
-            "Talalat: {}/{}\n\n[n] Kovetkezo  [N] Elozo\n[Esc] Bezar (talaltok kijelolve maradnak)",
-            app.search.current_match + 1,
-            app.search.doc_matches.len()
-        )
+        t().document_match_help(app.search.current_match + 1, app.search.doc_matches.len())
     };
 
     let style = if app.search.doc_matches.is_empty() {
