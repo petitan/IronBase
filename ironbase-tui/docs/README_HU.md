@@ -31,6 +31,9 @@ tuti-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
 
 # API key környezeti változóból
 IRONBASE_API_KEY=sk-xxx tuti-tui --url https://192.168.0.136:8080/mcp --insecure
+
+# Helyi adatbázis a TUI által indított szerverfolyamaton át (stdio)
+tuti-tui --server ./mcp-ironbase-server mydata.mlite
 ```
 
 ## CLI Opciók
@@ -99,6 +102,60 @@ Options:
 | `Shift+K` | API Key kezelés |
 | `Shift+D` | A kiválasztott kollekció törlése (Kollekciók panel, megerősítést kér) |
 | `a`, majd `b` | Adatbázis megnyitása / váltása (az akciók menüből) |
+
+## Nyelv
+
+A felület ékezetes magyar vagy angol.
+
+- A `config.toml`-ban `language = "hu"` vagy `"en"` választja ki (kis- és nagybetű mindegy).
+- Ha nincs megadva, a rendszer nyelvét követi: az első beállított `LC_ALL`, `LC_MESSAGES`, `LANG` változót. `hu`-val kezdődő értéknél magyar, minden másnál angol (a `C` és a hiányzó locale is, például konténerben vagy Windows-szolgáltatásban).
+- Ismeretlen érték esetén a rendszer nyelve marad, és figyelmeztetés kerül a naplóba; a konfiguráció többi része betöltődik.
+
+A fejléc, a parancssáv és a négy panel már le van fordítva. A modalok és az állapot- és hibaüzenetek fordítása a következő lépésekben jön; addig ezek egy része angol felületen is magyar.
+
+## Szövegszerkesztés
+
+Minden szövegmező ugyanazokat a szerkesztőbillentyűket használja.
+
+### Egysoros mezők
+
+Keresés, szűrő, nevek, útvonalak, a lekérdező vektor, az API-kulcs neve, a listener mezői, a RAG mezői.
+
+| Billentyű | Művelet |
+|-----------|---------|
+| `←` / `→` | Kurzor mozgatása |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | A mező eleje / vége |
+| `Backspace` / `Delete` | Törlés a kurzor előtt / alatt |
+| `Ctrl+U` / `Ctrl+K` | Törlés az elejéig / a végéig |
+| `Ctrl+W` | A kurzor előtti szó törlése |
+
+A hosszú érték görgetve fér el a mezőben; a terminál saját kurzora mutatja, hova írsz. Kivételek: a fulltext- és a RAG-keresésben a `Ctrl+J` / `Ctrl+K` a találatok között lép (RAG-ban csak, amíg van találat), a vektorkeresésben a `j` / `k` és a nyilak.
+
+### Többsoros szerkesztők
+
+A dokumentumszerkesztő (beszúrás / szerkesztés), a lekérdezés-szerkesztő, az IronRhai script kódja és a RAG import tartalma. A fenti billentyűk az aktuális sorban működnek, és ezen felül:
+
+| Billentyű | Művelet |
+|-----------|---------|
+| `Enter` | Új sor (lekérdezésnél, ha van találat: szűrőként alkalmazza; RAG importnál: indítja az importot) |
+| `Tab` | Két szóköz (script-szerkesztőben: következő mező) |
+| `↑` / `↓`, `PgUp` / `PgDn` | Előző / következő sor, 10 sor |
+| `Ctrl+Home` / `Ctrl+End` | A szöveg eleje / vége |
+| `Ctrl+S` | Mentés (dokumentum), futtatás (lekérdezés), mentés és futtatás (script) |
+
+Lekérdezés-szerkesztő: `Ctrl+E` explain, `Ctrl+T` sablonok, `Ctrl+J` / `Ctrl+K` lépés a találatok között. A sor elején a Backspace, a sor végén a Delete összevonja a sorokat; a hosszú sor oldalra görget.
+
+### Beillesztés
+
+A terminál bracketed paste módja be van kapcsolva: a beillesztett szöveg egyben érkezik, és csak a fókuszban lévő mezőbe kerül.
+
+- A többsoros szerkesztő megtartja a sorokat.
+- Az egysoros mező egy sort kap: a sortörések (`\n`, `\r\n`, `\r`) és a tabulátorok szóközök lesznek.
+- A számmező (vektordimenzió, RAG chunk size és overlap) a számjegyeket veszi át.
+- Az új kollekció neve csak a névben megengedett karaktereket tartja meg.
+- Ha nincs fókuszban szövegmező, vagy nincs nyitott ablak, a beillesztés elvész: a beillesztett karakterek sosem futnak parancsként.
+
+Windows-on a konzol billentyűleütésekként adja át a beillesztést, ezért ott ezek a szabályok nem érvényesek.
 
 ## HTTPS beállítás mkcert-tel
 
@@ -192,6 +249,9 @@ mcp_insecure = false
 
 # Téma: "Claude", "Dark", "Light", "Ocean"
 theme = "Claude"
+
+# A felület nyelve: "hu" vagy "en"; ha nincs megadva: a rendszeré (LANG)
+language = "hu"
 ```
 
 ## Naplózás
@@ -212,22 +272,22 @@ A TUI csak fájlba naplóz (a terminálra soha): `~/.local/state/ironbase-tui/tu
 ```
 ironbase-tui/
 ├── src/
-│   ├── main.rs          # Entry point, event loop, key handlers
-│   ├── app.rs           # App state, business logic
-│   ├── config.rs        # Configuration loading
+│   ├── main.rs          # CLI, terminal setup, event loop
+│   ├── lib.rs           # Library root (everything but the binary)
+│   ├── app.rs           # App state, MCP calls
+│   ├── config.rs        # config.toml loading / saving
+│   ├── logging.rs       # File logging, secret redaction
 │   ├── theme.rs         # Color themes
-│   ├── db.rs            # Database wrapper (MCP client)
-│   ├── mcp/             # MCP protocol client
-│   │   ├── client.rs    # High-level MCP client
-│   │   ├── transport.rs # HTTP/STDIO transport
-│   │   ├── protocol.rs  # JSON-RPC types
-│   │   └── error.rs     # Error types
-│   ├── modals/          # Modal dialogs
-│   │   ├── help.rs      # Help modal
-│   │   ├── search.rs    # Search modal
-│   │   └── ...
-│   ├── panes/           # Main UI panels
-│   └── widgets/         # Reusable UI components
+│   ├── db.rs            # Typed MCP calls (ironbase-mcp-types)
+│   ├── i18n/            # Texts: Messages trait, hu.rs, en.rs
+│   ├── handlers/        # Key and paste handlers, one per modal
+│   ├── state/           # Modal state (filter, query, script, RAG, ...)
+│   ├── modals/          # Modal rendering
+│   ├── panes/           # Collections, documents, detail panels
+│   ├── ui/              # Header, command bar, layout
+│   ├── widgets/         # TextInput (one line), TextArea (multi-line)
+│   ├── mcp/             # MCP client: JSON-RPC, HTTP / stdio transport
+│   └── testing.rs       # Fake MCP server for the tests
 └── Cargo.toml
 ```
 

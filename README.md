@@ -633,16 +633,16 @@ Terminal UI for interactive database management:
 
 ```bash
 # Connect to MCP server (HTTP)
-ironbase-tui --url http://localhost:8080/mcp
+tuti-tui --url http://localhost:8080/mcp
 
 # With API key and self-signed cert
-ironbase-tui --url https://myserver:8080/mcp -k sk-your-key --insecure
+tuti-tui --url https://myserver:8080/mcp -k sk-your-key --insecure
 
 # Connect via stdio (spawns server process)
-ironbase-tui --server ./mcp-ironbase-server mydata.mlite
+tuti-tui --server ./mcp-ironbase-server mydata.mlite
 ```
 
-**Keyboard shortcuts:** `Shift+K` API key management, `j/k` navigate, `n` new key, `r` revoke, `d` delete.
+The binary is `tuti-tui` (the release archives are named `ironbase-tui-<os>`). Hungarian or English UI (`language` in its config, else the system locale). Keys, text editing, pasting, configuration: [ironbase-tui/README.md](ironbase-tui/README.md).
 
 ## API Key Authentication
 
