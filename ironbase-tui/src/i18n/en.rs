@@ -329,4 +329,272 @@ impl Messages for En {
     fn unexpected_search_response(&self) -> &'static str {
         "The search did not answer in the requested form (a document list)"
     }
+
+    fn key_save(&self) -> &'static str {
+        "Save"
+    }
+    fn key_cancel(&self) -> &'static str {
+        "Cancel"
+    }
+    fn key_close(&self) -> &'static str {
+        "Close"
+    }
+    fn key_create(&self) -> &'static str {
+        "Create"
+    }
+    fn key_search(&self) -> &'static str {
+        "Search"
+    }
+    fn key_search_or_jump(&self) -> &'static str {
+        "Search/jump"
+    }
+    fn key_format(&self) -> &'static str {
+        "Format"
+    }
+    fn key_export(&self) -> &'static str {
+        "Export"
+    }
+    fn key_switch_mode(&self) -> &'static str {
+        "Switch mode"
+    }
+    fn key_switch_field(&self) -> &'static str {
+        "Switch field"
+    }
+    fn key_navigate(&self) -> &'static str {
+        "Navigate"
+    }
+    fn key_indent(&self) -> &'static str {
+        "2 spaces"
+    }
+    fn label_error(&self) -> &'static str {
+        "Error"
+    }
+    fn label_name(&self) -> &'static str {
+        "Name"
+    }
+    fn label_file(&self) -> &'static str {
+        "File"
+    }
+    fn label_format(&self) -> &'static str {
+        "Format"
+    }
+    fn label_path(&self) -> &'static str {
+        "Path"
+    }
+    fn label_mode(&self) -> &'static str {
+        "Mode"
+    }
+    fn label_field(&self) -> &'static str {
+        "Field"
+    }
+    fn collection_label(&self, name: &str) -> String {
+        format!("Collection: {name}")
+    }
+    fn error_details_title(&self) -> &'static str {
+        "Error details"
+    }
+    fn error_scroll_hint(&self, current: usize, total: usize) -> String {
+        format!("({current}/{total}) – ↑/↓: scroll, Esc: close")
+    }
+    fn esc_to_close(&self) -> &'static str {
+        "Esc: close"
+    }
+    fn new_collection_title(&self) -> &'static str {
+        "New collection"
+    }
+    fn collection_name_hint(&self) -> &'static str {
+        "Enter a name (a-z, 0-9, _, -)"
+    }
+    fn edit_document_title(&self) -> &'static str {
+        "Edit document"
+    }
+    fn new_document_title(&self) -> &'static str {
+        "New document"
+    }
+    fn cursor_position(&self, line: usize, column: usize) -> String {
+        format!("Line: {line} Column: {column}")
+    }
+    fn update_check_title(&self) -> &'static str {
+        "Update check [Esc: close]"
+    }
+    fn checking_for_updates(&self) -> &'static str {
+        "Checking for updates..."
+    }
+    fn current_version(&self) -> &'static str {
+        "Current version"
+    }
+    fn latest_version(&self) -> &'static str {
+        "Latest version"
+    }
+    fn update_available(&self) -> &'static str {
+        "A new version is available!"
+    }
+    fn update_instructions(&self) -> &'static str {
+        "To update, run in PowerShell:"
+    }
+    fn whats_new(&self) -> &'static str {
+        "What's new:"
+    }
+    fn up_to_date(&self) -> &'static str {
+        "You are running the latest version!"
+    }
+    fn export_title(&self) -> &'static str {
+        "Export"
+    }
+    fn export_collection_info(&self, collection: &str, count: usize, filtered: bool) -> String {
+        {
+            let filtered = if filtered { ", filtered" } else { "" };
+            let documents = if count == 1 { "document" } else { "documents" };
+            format!("Collection: {collection} ({count} {documents}{filtered})")
+        }
+    }
+    fn press_enter_to_export(&self) -> &'static str {
+        "Press Enter to export"
+    }
+    fn search_collections_title(&self) -> &'static str {
+        "Search collections"
+    }
+    fn search_document_title(&self) -> &'static str {
+        "Search in the document"
+    }
+    fn type_collection_name(&self) -> &'static str {
+        "Type a collection name..."
+    }
+    fn type_search_text(&self) -> &'static str {
+        "Type the text to search for..."
+    }
+    fn collection_with_count(&self, name: &str, documents: usize) -> String {
+        {
+            let label = if documents == 1 {
+                "document"
+            } else {
+                "documents"
+            };
+            format!("{name} ({documents} {label})")
+        }
+    }
+    fn start_typing_to_search(&self) -> &'static str {
+        "Start typing to search"
+    }
+    fn document_match_help(&self, current: usize, total: usize) -> String {
+        format!("Match: {current}/{total}\n\n[n] Next  [N] Previous\n[Esc] Close (the matches stay highlighted)")
+    }
+    fn open_database_title(&self) -> &'static str {
+        "Open a database"
+    }
+    fn create_database_title(&self) -> &'static str {
+        "Create a new database"
+    }
+    fn mode_open(&self) -> &'static str {
+        "Open"
+    }
+    fn mode_create(&self) -> &'static str {
+        "Create"
+    }
+    fn open_database_info(&self) -> &'static str {
+        "Enter the path of an existing database file."
+    }
+    fn create_database_info(&self) -> &'static str {
+        "Enter the path of the new database file.\nThe file must not exist yet!"
+    }
+    fn connecting(&self) -> &'static str {
+        "Connecting..."
+    }
+    fn open_database_tip(&self) -> &'static str {
+        "Tip: use an absolute path (e.g. /home/user/data.mlite)"
+    }
+    fn create_database_tip(&self) -> &'static str {
+        "Tip: the .mlite extension is recommended"
+    }
+    fn fulltext_title(&self) -> &'static str {
+        "Full-text search"
+    }
+    fn no_fulltext_index(&self) -> &'static str {
+        "No full-text index – create one first."
+    }
+    fn results_title(&self, count: usize, more: bool) -> String {
+        {
+            let more = if more { "+" } else { "" };
+            format!(" Results ({count}{more}) ")
+        }
+    }
+    fn searching(&self) -> &'static str {
+        "Searching..."
+    }
+    fn confirm_title(&self) -> &'static str {
+        "Confirmation"
+    }
+    fn confirm_message(&self) -> &'static str {
+        "Are you sure you want to continue?"
+    }
+    fn yes(&self) -> &'static str {
+        "Yes"
+    }
+    fn confirm_delete_document_title(&self) -> &'static str {
+        "Delete document"
+    }
+    fn confirm_delete_document(&self, collection: &str, preview: &str) -> String {
+        format!("Delete the document from the \"{collection}\" collection?\n\n{preview}")
+    }
+    fn confirm_drop_collection_title(&self) -> &'static str {
+        "Drop collection"
+    }
+    fn confirm_drop_collection(&self, name: &str, documents: usize) -> String {
+        {
+            let will_be = if documents == 1 {
+                "document will be"
+            } else {
+                "documents will be"
+            };
+            format!("Drop the \"{name}\" collection?\n\n{documents} {will_be} deleted!")
+        }
+    }
+    fn confirm_drop_index_title(&self) -> &'static str {
+        "Drop index"
+    }
+    fn confirm_drop_index(&self, index: &str, collection: &str) -> String {
+        format!("Drop the \"{index}\" index?\n\nCollection: {collection}")
+    }
+    fn confirm_drop_vector_index_title(&self) -> &'static str {
+        "Drop vector index"
+    }
+    fn confirm_drop_vector_index(&self, index: &str, collection: &str) -> String {
+        format!("Drop the \"{index}\" vector index?\n\nCollection: {collection}")
+    }
+    fn confirm_rollback_title(&self) -> &'static str {
+        "Roll back script"
+    }
+    fn confirm_rollback(&self, name: &str, version: u32) -> String {
+        format!("Roll the \"{name}\" script back to v{version}?")
+    }
+    fn rollback_button(&self) -> &'static str {
+        "Roll back"
+    }
+    fn confirm_disable_auto_embed_title(&self) -> &'static str {
+        "Disable auto-embed"
+    }
+    fn confirm_disable_auto_embed(&self, collection: &str) -> String {
+        format!("Disable auto-embed on the \"{collection}\" collection?")
+    }
+    fn disable_button(&self) -> &'static str {
+        "Disable"
+    }
+    fn confirm_clear_cache_title(&self) -> &'static str {
+        "Clear embedding cache"
+    }
+    fn confirm_clear_cache(&self) -> &'static str {
+        "Clear the whole embedding cache?"
+    }
+    fn clear_button(&self) -> &'static str {
+        "Clear"
+    }
+    fn confirm_cancel_job_title(&self) -> &'static str {
+        "Cancel embed job"
+    }
+    fn confirm_cancel_job(&self, job_id: &str) -> String {
+        format!("Cancel the \"{job_id}\" embed job?")
+    }
+    fn cancel_job_button(&self) -> &'static str {
+        "Cancel job"
+    }
 }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the simpler modals in both languages (tuti-tui 0.3.487, mcp-server 1.0.675 — version only, for the release tag)
+
+The error details, new collection, insert/edit document, update check, export, search, database open/create,
+full-text search and every confirmation dialog take their titles, labels, key hints and messages from the
+language layer (`i18n::Messages`), Hungarian with accents or English. Before, they were fixed Hungarian strings
+written without accents („Uj Kollekcio”, „Biztosan torli a(z) … kollekciot?”, „Talalatok”).
+
+- The key hints share one set of texts (`key_save`, `key_cancel`, `key_close`, …) and the field labels another
+  (`label_error`, `label_name`, `label_path`, …), so the same key or field reads the same in every modal.
+- The confirmations address the user the way the rest of the UI does („Biztosan törlöd …?”) and use
+  Hungarian quotation marks.
+- English counts use the singular for one („1 document”, „1 document will be deleted!”).
+- `i18n::Messages` is sealed: only this crate's languages implement it, so a new text (a required method,
+  which a language missing it does not compile without) cannot break another crate.
+- Tests: every new fixed text differs between the two languages, plus the parameterized ones; the handler
+  tests compare against `t()` instead of copies of the Hungarian strings.
+- Left for the next PRs: the filter, query, server info, API key, listener, vector, index, script, RAG and
+  ACL modals and the key handlers' messages; the actions menu and the help are generated from the key map.
+
 ### Changed — Tuti TUI: status and error messages in both languages (tuti-tui 0.3.486, mcp-server 1.0.674 — version only, for the release tag)
 
 The status line, error bar and the modals' own error/success lines (set by `app.rs` and `state/`) now come from

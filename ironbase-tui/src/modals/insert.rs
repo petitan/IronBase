@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::app::InsertState;
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::text_area::plain;
 use ratatui::prelude::*;
@@ -10,9 +11,9 @@ use ratatui::widgets::Paragraph;
 /// Render the insert/edit document modal
 pub fn render(frame: &mut Frame, area: Rect, state: &InsertState, theme: &Theme) {
     let title = if state.is_edit_mode() {
-        "Dokumentum szerkesztese"
+        t().edit_document_title()
     } else {
-        "Uj dokumentum"
+        t().new_document_title()
     };
     let inner = render_modal_frame(frame, area, title, theme, 70, 60);
 
@@ -27,11 +28,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &InsertState, theme: &Theme)
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[^S]", Style::default().fg(theme.accent)),
-        Span::raw(" Mentes  "),
+        Span::raw(format!(" {}  ", t().key_save())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Megse  "),
+        Span::raw(format!(" {}  ", t().key_cancel())),
         Span::styled("[Tab]", Style::default().fg(theme.muted)),
-        Span::raw(" 2 space"),
+        Span::raw(format!(" {}", t().key_indent())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -57,14 +58,17 @@ fn render_editor(frame: &mut Frame, area: Rect, state: &InsertState, theme: &The
 fn render_status(frame: &mut Frame, area: Rect, state: &InsertState, theme: &Theme) {
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else {
         let (line, col) = state.editor.cursor();
         let (line, col) = (line + 1, col + 1);
         Line::from(vec![Span::styled(
-            format!("Sor: {} Oszlop: {}", line, col),
+            t().cursor_position(line, col),
             Style::default().fg(theme.muted),
         )])
     };

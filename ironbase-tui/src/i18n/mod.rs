@@ -101,7 +101,7 @@ pub fn t() -> &'static dyn Messages {
 /// Every text of the UI, one method each. Every method returns the text in
 /// its own language; the forms quoted in the docs below are the English ones,
 /// as examples.
-pub trait Messages: Sync {
+pub trait Messages: Sync + sealed::Sealed {
     // === Header ===
     /// `IronBase v{version} | {db} ({collections} coll, {docs} docs)`
     fn header_db(&self, version: &str, db: &str, collections: usize, docs: usize) -> String;
@@ -218,6 +218,100 @@ pub trait Messages: Sync {
     fn script_rolled_back(&self, version: u32) -> String;
     /// `search` answered in another shape than the one asked for
     fn unexpected_search_response(&self) -> &'static str;
+
+    // === Modals (shared keys and labels, then per modal) ===
+    fn key_save(&self) -> &'static str;
+    fn key_cancel(&self) -> &'static str;
+    fn key_close(&self) -> &'static str;
+    fn key_create(&self) -> &'static str;
+    fn key_search(&self) -> &'static str;
+    fn key_search_or_jump(&self) -> &'static str;
+    fn key_format(&self) -> &'static str;
+    fn key_export(&self) -> &'static str;
+    fn key_switch_mode(&self) -> &'static str;
+    fn key_switch_field(&self) -> &'static str;
+    fn key_navigate(&self) -> &'static str;
+    fn key_indent(&self) -> &'static str;
+    fn label_error(&self) -> &'static str;
+    fn label_name(&self) -> &'static str;
+    fn label_file(&self) -> &'static str;
+    fn label_format(&self) -> &'static str;
+    fn label_path(&self) -> &'static str;
+    fn label_mode(&self) -> &'static str;
+    fn label_field(&self) -> &'static str;
+    fn collection_label(&self, name: &str) -> String;
+    fn error_details_title(&self) -> &'static str;
+    fn error_scroll_hint(&self, current: usize, total: usize) -> String;
+    fn esc_to_close(&self) -> &'static str;
+    fn new_collection_title(&self) -> &'static str;
+    fn collection_name_hint(&self) -> &'static str;
+    fn edit_document_title(&self) -> &'static str;
+    fn new_document_title(&self) -> &'static str;
+    fn cursor_position(&self, line: usize, column: usize) -> String;
+    fn update_check_title(&self) -> &'static str;
+    fn checking_for_updates(&self) -> &'static str;
+    fn current_version(&self) -> &'static str;
+    fn latest_version(&self) -> &'static str;
+    fn update_available(&self) -> &'static str;
+    fn update_instructions(&self) -> &'static str;
+    fn whats_new(&self) -> &'static str;
+    fn up_to_date(&self) -> &'static str;
+    fn export_title(&self) -> &'static str;
+    fn export_collection_info(&self, collection: &str, count: usize, filtered: bool) -> String;
+    fn press_enter_to_export(&self) -> &'static str;
+    fn search_collections_title(&self) -> &'static str;
+    fn search_document_title(&self) -> &'static str;
+    fn type_collection_name(&self) -> &'static str;
+    fn type_search_text(&self) -> &'static str;
+    fn collection_with_count(&self, name: &str, documents: usize) -> String;
+    fn start_typing_to_search(&self) -> &'static str;
+    fn document_match_help(&self, current: usize, total: usize) -> String;
+    fn open_database_title(&self) -> &'static str;
+    fn create_database_title(&self) -> &'static str;
+    fn mode_open(&self) -> &'static str;
+    fn mode_create(&self) -> &'static str;
+    fn open_database_info(&self) -> &'static str;
+    fn create_database_info(&self) -> &'static str;
+    fn connecting(&self) -> &'static str;
+    fn open_database_tip(&self) -> &'static str;
+    fn create_database_tip(&self) -> &'static str;
+    fn fulltext_title(&self) -> &'static str;
+    fn no_fulltext_index(&self) -> &'static str;
+    fn results_title(&self, count: usize, more: bool) -> String;
+    fn searching(&self) -> &'static str;
+    fn confirm_title(&self) -> &'static str;
+    fn confirm_message(&self) -> &'static str;
+    fn yes(&self) -> &'static str;
+    fn confirm_delete_document_title(&self) -> &'static str;
+    fn confirm_delete_document(&self, collection: &str, preview: &str) -> String;
+    fn confirm_drop_collection_title(&self) -> &'static str;
+    fn confirm_drop_collection(&self, name: &str, documents: usize) -> String;
+    fn confirm_drop_index_title(&self) -> &'static str;
+    fn confirm_drop_index(&self, index: &str, collection: &str) -> String;
+    fn confirm_drop_vector_index_title(&self) -> &'static str;
+    fn confirm_drop_vector_index(&self, index: &str, collection: &str) -> String;
+    fn confirm_rollback_title(&self) -> &'static str;
+    fn confirm_rollback(&self, name: &str, version: u32) -> String;
+    fn rollback_button(&self) -> &'static str;
+    fn confirm_disable_auto_embed_title(&self) -> &'static str;
+    fn confirm_disable_auto_embed(&self, collection: &str) -> String;
+    fn disable_button(&self) -> &'static str;
+    fn confirm_clear_cache_title(&self) -> &'static str;
+    fn confirm_clear_cache(&self) -> &'static str;
+    fn clear_button(&self) -> &'static str;
+    fn confirm_cancel_job_title(&self) -> &'static str;
+    fn confirm_cancel_job(&self, job_id: &str) -> String;
+    fn cancel_job_button(&self) -> &'static str;
+}
+
+/// `Messages` is implemented only by the languages of this crate: a new text
+/// is a required method that every language must provide (a missing
+/// translation does not compile), and no other crate can implement the trait,
+/// so adding a text never breaks one.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Hu {}
+    impl Sealed for super::En {}
 }
 
 /// An operation a failure message names ([`Messages::failed`])
@@ -386,6 +480,101 @@ mod tests {
         assert_eq!(
             hu.search_summary(1, 0, 0, true),
             "1 találat (kimaradt: rövidített szakaszok)"
+        );
+    }
+
+    /// The modals' texts are translated, not left in one language
+    #[test]
+    fn test_modal_texts_differ_between_the_languages() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 68] = [
+            |m| m.key_save(),
+            |m| m.key_cancel(),
+            |m| m.key_close(),
+            |m| m.key_create(),
+            |m| m.key_search(),
+            |m| m.key_search_or_jump(),
+            |m| m.key_format(),
+            |m| m.key_export(),
+            |m| m.key_switch_mode(),
+            |m| m.key_switch_field(),
+            |m| m.key_navigate(),
+            |m| m.key_indent(),
+            |m| m.label_error(),
+            |m| m.label_name(),
+            |m| m.label_file(),
+            |m| m.label_format(),
+            |m| m.label_path(),
+            |m| m.label_mode(),
+            |m| m.label_field(),
+            |m| m.error_details_title(),
+            |m| m.esc_to_close(),
+            |m| m.new_collection_title(),
+            |m| m.collection_name_hint(),
+            |m| m.edit_document_title(),
+            |m| m.new_document_title(),
+            |m| m.update_check_title(),
+            |m| m.checking_for_updates(),
+            |m| m.current_version(),
+            |m| m.latest_version(),
+            |m| m.update_available(),
+            |m| m.update_instructions(),
+            |m| m.whats_new(),
+            |m| m.up_to_date(),
+            |m| m.export_title(),
+            |m| m.press_enter_to_export(),
+            |m| m.search_collections_title(),
+            |m| m.search_document_title(),
+            |m| m.type_collection_name(),
+            |m| m.type_search_text(),
+            |m| m.start_typing_to_search(),
+            |m| m.open_database_title(),
+            |m| m.create_database_title(),
+            |m| m.mode_open(),
+            |m| m.mode_create(),
+            |m| m.open_database_info(),
+            |m| m.create_database_info(),
+            |m| m.connecting(),
+            |m| m.open_database_tip(),
+            |m| m.create_database_tip(),
+            |m| m.fulltext_title(),
+            |m| m.no_fulltext_index(),
+            |m| m.searching(),
+            |m| m.confirm_title(),
+            |m| m.confirm_message(),
+            |m| m.yes(),
+            |m| m.confirm_delete_document_title(),
+            |m| m.confirm_drop_collection_title(),
+            |m| m.confirm_drop_index_title(),
+            |m| m.confirm_drop_vector_index_title(),
+            |m| m.confirm_rollback_title(),
+            |m| m.rollback_button(),
+            |m| m.confirm_disable_auto_embed_title(),
+            |m| m.disable_button(),
+            |m| m.confirm_clear_cache_title(),
+            |m| m.confirm_clear_cache(),
+            |m| m.clear_button(),
+            |m| m.confirm_cancel_job_title(),
+            |m| m.cancel_job_button(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        assert_ne!(
+            hu.confirm_drop_collection("a", 2),
+            en.confirm_drop_collection("a", 2)
+        );
+        assert_eq!(en.collection_with_count("a", 1), "a (1 document)");
+        assert!(en
+            .confirm_drop_collection("a", 1)
+            .ends_with("1 document will be deleted!"));
+        assert!(en
+            .confirm_drop_collection("a", 2)
+            .ends_with("2 documents will be deleted!"));
+        assert_eq!(hu.results_title(50, true), " Találatok (50+) ");
+        assert_eq!(
+            en.export_collection_info("a", 2, true),
+            "Collection: a (2 documents, filtered)"
         );
     }
 }

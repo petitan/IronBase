@@ -2,13 +2,14 @@
 
 use super::render_modal_frame;
 use crate::app::ExportState;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Render the export modal
 pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Export", theme, 60, 50);
+    let inner = render_modal_frame(frame, area, t().export_title(), theme, 60, 50);
 
     // Split into sections
     let chunks = Layout::vertical([
@@ -23,11 +24,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Format  "),
+        Span::raw(format!(" {}  ", t().key_format())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Exportalas  "),
+        Span::raw(format!(" {}  ", t().key_export())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -45,7 +46,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     };
 
     let format_line = Line::from(vec![
-        Span::raw(" Formatum: "),
+        Span::raw(format!(" {}: ", t().label_format())),
         Span::styled("JSON", json_style),
         Span::raw("  "),
         Span::styled("CSV", csv_style),
@@ -56,17 +57,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     state.file_path.render_labeled(
         frame,
         chunks[2],
-        " Fajl: ",
+        format!(" {}: ", t().label_file()),
         Style::default().fg(theme.fg),
         true,
     );
 
     // Status info
-    let filtered = if state.filtered { " - szűrt" } else { "" };
     let info_line = Line::from(vec![Span::styled(
         format!(
-            " Kollekció: {} ({} dokumentum{})",
-            state.collection, state.doc_count, filtered
+            " {}",
+            t().export_collection_info(&state.collection, state.doc_count, state.filtered)
         ),
         Style::default().fg(theme.muted),
     )]);
@@ -75,7 +75,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
     // Status/error line
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled(" Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!(" {}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -85,7 +88,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
         )])
     } else {
         Line::from(vec![Span::styled(
-            " Nyomd meg Enter-t az exportáláshoz",
+            format!(" {}", t().press_enter_to_export()),
             Style::default().fg(theme.muted),
         )])
     };

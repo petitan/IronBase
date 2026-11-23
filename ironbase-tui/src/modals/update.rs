@@ -1,6 +1,7 @@
 //! Update modal - check for and display server update information
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -62,25 +63,17 @@ impl UpdateState {
 
 /// Render the update modal
 pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme) {
-    let inner = render_modal_frame(
-        frame,
-        area,
-        "Frissites Ellenorzes [Esc bezar]",
-        theme,
-        60,
-        50,
-    );
+    let inner = render_modal_frame(frame, area, t().update_check_title(), theme, 60, 50);
 
     if state.loading {
         let loading =
-            Paragraph::new("Frissites ellenorzese...").style(Style::default().fg(theme.fg));
+            Paragraph::new(t().checking_for_updates()).style(Style::default().fg(theme.fg));
         frame.render_widget(loading, inner);
         return;
     }
 
     if let Some(ref error) = state.error {
-        let error_text =
-            Paragraph::new(format!("Hiba: {}", error)).style(Style::default().fg(theme.error));
+        let error_text = Paragraph::new(t().error(error)).style(Style::default().fg(theme.error));
         frame.render_widget(error_text, inner);
         return;
     }
@@ -89,7 +82,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
 
     // Current version
     lines.push(Line::from(vec![
-        Span::styled("Jelenlegi verzio: ", Style::default().fg(theme.accent)),
+        Span::styled(
+            format!("{}: ", t().current_version()),
+            Style::default().fg(theme.accent),
+        ),
         Span::styled(&state.current_version, Style::default().fg(theme.fg).bold()),
     ]));
     lines.push(Line::from(""));
@@ -97,7 +93,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
     // Latest version
     if let Some(ref latest) = state.latest_version {
         lines.push(Line::from(vec![
-            Span::styled("Legujabb verzio:  ", Style::default().fg(theme.accent)),
+            Span::styled(
+                format!("{}: ", t().latest_version()),
+                Style::default().fg(theme.accent),
+            ),
             Span::styled(latest, Style::default().fg(theme.fg).bold()),
         ]));
         lines.push(Line::from(""));
@@ -107,14 +106,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
     if state.update_available {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Uj verzio elerheto!",
+            t().update_available(),
             Style::default().fg(theme.success).bold(),
         )));
         lines.push(Line::from(""));
 
         // Instructions
         lines.push(Line::from(Span::styled(
-            "Frissiteshez futtasd PowerShell-ben:",
+            t().update_instructions(),
             Style::default().fg(theme.secondary),
         )));
         lines.push(Line::from(""));
@@ -127,7 +126,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
         if let Some(ref notes) = state.release_notes {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Ujdonsagok:",
+                t().whats_new(),
                 Style::default().fg(theme.accent).bold(),
             )));
             // Show first few lines of release notes
@@ -138,7 +137,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "A legujabb verzio fut!",
+            t().up_to_date(),
             Style::default().fg(theme.success).bold(),
         )));
     }

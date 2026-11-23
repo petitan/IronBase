@@ -2,13 +2,14 @@
 
 use super::render_modal_frame;
 use crate::app::FulltextState;
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 /// Render the fulltext search modal
 pub fn render(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Fulltext kereses", theme, 70, 80);
+    let inner = render_modal_frame(frame, area, t().fulltext_title(), theme, 70, 80);
 
     // Split into sections
     let chunks = Layout::vertical([
@@ -39,13 +40,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Them
 fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Kereses  "),
+        Span::raw(format!(" {}  ", t().key_search())),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Mezo valtas  "),
+        Span::raw(format!(" {}  ", t().key_switch_field())),
         Span::styled("[↑/↓]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigacio  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, area);
@@ -53,7 +54,7 @@ fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
 
 fn render_field_selector(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
     let block = Block::default()
-        .title(" Mezo ")
+        .title(format!(" {} ", t().label_field()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
@@ -62,8 +63,7 @@ fn render_field_selector(frame: &mut Frame, area: Rect, state: &FulltextState, t
     frame.render_widget(block, area);
 
     if state.indexed_fields.is_empty() {
-        let msg = Paragraph::new("Nincs fulltext index! Hozz letre egyet elobb.")
-            .style(Style::default().fg(theme.error));
+        let msg = Paragraph::new(t().no_fulltext_index()).style(Style::default().fg(theme.error));
         frame.render_widget(msg, inner);
     } else {
         let fields: Vec<Span> = state
@@ -90,7 +90,7 @@ fn render_field_selector(frame: &mut Frame, area: Rect, state: &FulltextState, t
 
 fn render_search_input(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
     let block = Block::default()
-        .title(" Kereses ")
+        .title(format!(" {} ", t().key_search()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
@@ -100,7 +100,7 @@ fn render_search_input(frame: &mut Frame, area: Rect, state: &FulltextState, the
 
     if state.query.is_empty() {
         frame.render_widget(
-            Paragraph::new("Irj be keresett szoveget...").style(Style::default().fg(theme.muted)),
+            Paragraph::new(t().type_search_text()).style(Style::default().fg(theme.muted)),
             inner,
         );
         frame.set_cursor_position(Position::new(inner.x, inner.y));
@@ -113,9 +113,8 @@ fn render_search_input(frame: &mut Frame, area: Rect, state: &FulltextState, the
 
 fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
     // A full page may not be every match: "50+"
-    let more = if state.may_have_more() { "+" } else { "" };
     let block = Block::default()
-        .title(format!(" Talalatok ({}{}) ", state.results.len(), more))
+        .title(t().results_title(state.results.len(), state.may_have_more()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
@@ -124,7 +123,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
     frame.render_widget(block, area);
 
     if state.loading {
-        let loading = Paragraph::new("Kereses...")
+        let loading = Paragraph::new(t().searching())
             .style(Style::default().fg(theme.accent))
             .alignment(Alignment::Center);
         frame.render_widget(loading, inner);
@@ -135,7 +134,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
         let msg = if state.query.is_empty() {
             ""
         } else {
-            "Nincs talalat"
+            t().no_matches()
         };
         let empty = Paragraph::new(msg)
             .style(Style::default().fg(theme.muted))
@@ -206,12 +205,15 @@ fn format_doc_preview(doc: &serde_json::Map<String, serde_json::Value>, max_len:
 fn render_status(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &Theme) {
     let text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else {
         Line::from(vec![Span::styled(
-            format!("Kollekcio: {}", state.collection),
+            t().collection_label(&state.collection),
             Style::default().fg(theme.muted),
         )])
     };

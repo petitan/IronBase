@@ -325,4 +325,257 @@ impl Messages for Hu {
     fn unexpected_search_response(&self) -> &'static str {
         "A keresés nem a kért formában (dokumentumlistaként) válaszolt"
     }
+
+    fn key_save(&self) -> &'static str {
+        "Mentés"
+    }
+    fn key_cancel(&self) -> &'static str {
+        "Mégse"
+    }
+    fn key_close(&self) -> &'static str {
+        "Bezárás"
+    }
+    fn key_create(&self) -> &'static str {
+        "Létrehozás"
+    }
+    fn key_search(&self) -> &'static str {
+        "Keresés"
+    }
+    fn key_search_or_jump(&self) -> &'static str {
+        "Keresés/ugrás"
+    }
+    fn key_format(&self) -> &'static str {
+        "Formátum"
+    }
+    fn key_export(&self) -> &'static str {
+        "Exportálás"
+    }
+    fn key_switch_mode(&self) -> &'static str {
+        "Módváltás"
+    }
+    fn key_switch_field(&self) -> &'static str {
+        "Mezőváltás"
+    }
+    fn key_navigate(&self) -> &'static str {
+        "Navigáció"
+    }
+    fn key_indent(&self) -> &'static str {
+        "2 szóköz"
+    }
+    fn label_error(&self) -> &'static str {
+        "Hiba"
+    }
+    fn label_name(&self) -> &'static str {
+        "Név"
+    }
+    fn label_file(&self) -> &'static str {
+        "Fájl"
+    }
+    fn label_format(&self) -> &'static str {
+        "Formátum"
+    }
+    fn label_path(&self) -> &'static str {
+        "Útvonal"
+    }
+    fn label_mode(&self) -> &'static str {
+        "Mód"
+    }
+    fn label_field(&self) -> &'static str {
+        "Mező"
+    }
+    fn collection_label(&self, name: &str) -> String {
+        format!("Kollekció: {name}")
+    }
+    fn error_details_title(&self) -> &'static str {
+        "Hiba részletei"
+    }
+    fn error_scroll_hint(&self, current: usize, total: usize) -> String {
+        format!("({current}/{total}) – ↑/↓: görgetés, Esc: bezárás")
+    }
+    fn esc_to_close(&self) -> &'static str {
+        "Esc: bezárás"
+    }
+    fn new_collection_title(&self) -> &'static str {
+        "Új kollekció"
+    }
+    fn collection_name_hint(&self) -> &'static str {
+        "Adj meg egy nevet (a-z, 0-9, _, -)"
+    }
+    fn edit_document_title(&self) -> &'static str {
+        "Dokumentum szerkesztése"
+    }
+    fn new_document_title(&self) -> &'static str {
+        "Új dokumentum"
+    }
+    fn cursor_position(&self, line: usize, column: usize) -> String {
+        format!("Sor: {line} Oszlop: {column}")
+    }
+    fn update_check_title(&self) -> &'static str {
+        "Frissítés ellenőrzése [Esc: bezárás]"
+    }
+    fn checking_for_updates(&self) -> &'static str {
+        "Frissítés ellenőrzése..."
+    }
+    fn current_version(&self) -> &'static str {
+        "Jelenlegi verzió"
+    }
+    fn latest_version(&self) -> &'static str {
+        "Legújabb verzió"
+    }
+    fn update_available(&self) -> &'static str {
+        "Új verzió érhető el!"
+    }
+    fn update_instructions(&self) -> &'static str {
+        "A frissítéshez futtasd PowerShellben:"
+    }
+    fn whats_new(&self) -> &'static str {
+        "Újdonságok:"
+    }
+    fn up_to_date(&self) -> &'static str {
+        "A legújabb verzió fut!"
+    }
+    fn export_title(&self) -> &'static str {
+        "Exportálás"
+    }
+    fn export_collection_info(&self, collection: &str, count: usize, filtered: bool) -> String {
+        {
+            let filtered = if filtered { " – szűrt" } else { "" };
+            format!("Kollekció: {collection} ({count} dokumentum{filtered})")
+        }
+    }
+    fn press_enter_to_export(&self) -> &'static str {
+        "Nyomd meg az Entert az exportáláshoz"
+    }
+    fn search_collections_title(&self) -> &'static str {
+        "Kollekciók keresése"
+    }
+    fn search_document_title(&self) -> &'static str {
+        "Keresés a dokumentumban"
+    }
+    fn type_collection_name(&self) -> &'static str {
+        "Írj be egy kollekciónevet..."
+    }
+    fn type_search_text(&self) -> &'static str {
+        "Írd be a keresett szöveget..."
+    }
+    fn collection_with_count(&self, name: &str, documents: usize) -> String {
+        format!("{name} ({documents} dokumentum)")
+    }
+    fn start_typing_to_search(&self) -> &'static str {
+        "Kezdj el gépelni a kereséshez"
+    }
+    fn document_match_help(&self, current: usize, total: usize) -> String {
+        format!("Találat: {current}/{total}\n\n[n] Következő  [N] Előző\n[Esc] Bezárás (a találatok kijelölve maradnak)")
+    }
+    fn open_database_title(&self) -> &'static str {
+        "Adatbázis megnyitása"
+    }
+    fn create_database_title(&self) -> &'static str {
+        "Új adatbázis létrehozása"
+    }
+    fn mode_open(&self) -> &'static str {
+        "Megnyitás"
+    }
+    fn mode_create(&self) -> &'static str {
+        "Létrehozás"
+    }
+    fn open_database_info(&self) -> &'static str {
+        "Add meg egy létező adatbázisfájl útvonalát."
+    }
+    fn create_database_info(&self) -> &'static str {
+        "Add meg az új adatbázisfájl útvonalát.\nA fájl még nem létezhet!"
+    }
+    fn connecting(&self) -> &'static str {
+        "Csatlakozás..."
+    }
+    fn open_database_tip(&self) -> &'static str {
+        "Tipp: használj abszolút útvonalat (pl. /home/user/data.mlite)"
+    }
+    fn create_database_tip(&self) -> &'static str {
+        "Tipp: a .mlite kiterjesztés ajánlott"
+    }
+    fn fulltext_title(&self) -> &'static str {
+        "Teljes szöveges keresés"
+    }
+    fn no_fulltext_index(&self) -> &'static str {
+        "Nincs fulltext index – előbb hozz létre egyet."
+    }
+    fn results_title(&self, count: usize, more: bool) -> String {
+        {
+            let more = if more { "+" } else { "" };
+            format!(" Találatok ({count}{more}) ")
+        }
+    }
+    fn searching(&self) -> &'static str {
+        "Keresés..."
+    }
+    fn confirm_title(&self) -> &'static str {
+        "Megerősítés"
+    }
+    fn confirm_message(&self) -> &'static str {
+        "Biztosan folytatod?"
+    }
+    fn yes(&self) -> &'static str {
+        "Igen"
+    }
+    fn confirm_delete_document_title(&self) -> &'static str {
+        "Dokumentum törlése"
+    }
+    fn confirm_delete_document(&self, collection: &str, preview: &str) -> String {
+        format!("Biztosan törlöd a dokumentumot a(z) „{collection}” kollekcióból?\n\n{preview}")
+    }
+    fn confirm_drop_collection_title(&self) -> &'static str {
+        "Kollekció törlése"
+    }
+    fn confirm_drop_collection(&self, name: &str, documents: usize) -> String {
+        format!("Biztosan törlöd a(z) „{name}” kollekciót?\n\n{documents} dokumentum törlődik!")
+    }
+    fn confirm_drop_index_title(&self) -> &'static str {
+        "Index törlése"
+    }
+    fn confirm_drop_index(&self, index: &str, collection: &str) -> String {
+        format!("Biztosan törlöd a(z) „{index}” indexet?\n\nKollekció: {collection}")
+    }
+    fn confirm_drop_vector_index_title(&self) -> &'static str {
+        "Vektorindex törlése"
+    }
+    fn confirm_drop_vector_index(&self, index: &str, collection: &str) -> String {
+        format!("Biztosan törlöd a(z) „{index}” vektorindexet?\n\nKollekció: {collection}")
+    }
+    fn confirm_rollback_title(&self) -> &'static str {
+        "Script visszaállítása"
+    }
+    fn confirm_rollback(&self, name: &str, version: u32) -> String {
+        format!("Biztosan visszaállítod a(z) „{name}” scriptet a v{version} verzióra?")
+    }
+    fn rollback_button(&self) -> &'static str {
+        "Visszaállítás"
+    }
+    fn confirm_disable_auto_embed_title(&self) -> &'static str {
+        "Automatikus beágyazás kikapcsolása"
+    }
+    fn confirm_disable_auto_embed(&self, collection: &str) -> String {
+        format!("Biztosan kikapcsolod az automatikus beágyazást a(z) „{collection}” kollekción?")
+    }
+    fn disable_button(&self) -> &'static str {
+        "Kikapcsolás"
+    }
+    fn confirm_clear_cache_title(&self) -> &'static str {
+        "Beágyazási gyorsítótár ürítése"
+    }
+    fn confirm_clear_cache(&self) -> &'static str {
+        "Biztosan üríted a teljes beágyazási gyorsítótárat?"
+    }
+    fn clear_button(&self) -> &'static str {
+        "Ürítés"
+    }
+    fn confirm_cancel_job_title(&self) -> &'static str {
+        "Beágyazási job megszakítása"
+    }
+    fn confirm_cancel_job(&self, job_id: &str) -> String {
+        format!("Biztosan megszakítod a(z) „{job_id}” beágyazási jobot?")
+    }
+    fn cancel_job_button(&self) -> &'static str {
+        "Megszakítás"
+    }
 }
