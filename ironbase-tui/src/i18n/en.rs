@@ -540,7 +540,14 @@ impl Messages for En {
         "Drop collection"
     }
     fn confirm_drop_collection(&self, name: &str, documents: usize) -> String {
-        format!("Drop the \"{name}\" collection?\n\n{documents} documents will be deleted!")
+        {
+            let will_be = if documents == 1 {
+                "document will be"
+            } else {
+                "documents will be"
+            };
+            format!("Drop the \"{name}\" collection?\n\n{documents} {will_be} deleted!")
+        }
     }
     fn confirm_drop_index_title(&self) -> &'static str {
         "Drop index"

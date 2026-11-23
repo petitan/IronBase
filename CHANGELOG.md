@@ -18,7 +18,9 @@ written without accents („Uj Kollekcio”, „Biztosan torli a(z) … kollekci
   (`label_error`, `label_name`, `label_path`, …), so the same key or field reads the same in every modal.
 - The confirmations address the user the way the rest of the UI does („Biztosan törlöd …?”) and use
   Hungarian quotation marks.
-- English counts use the singular for one („1 document”).
+- English counts use the singular for one („1 document”, „1 document will be deleted!”).
+- `i18n::Messages` is sealed: only this crate's languages implement it, so a new text (a required method,
+  which a language missing it does not compile without) cannot break another crate.
 - Tests: every new fixed text differs between the two languages, plus the parameterized ones; the handler
   tests compare against `t()` instead of copies of the Hungarian strings.
 - Left for the next PRs: the filter, query, server info, API key, listener, vector, index, script, RAG and

@@ -101,7 +101,7 @@ pub fn t() -> &'static dyn Messages {
 /// Every text of the UI, one method each. Every method returns the text in
 /// its own language; the forms quoted in the docs below are the English ones,
 /// as examples.
-pub trait Messages: Sync {
+pub trait Messages: Sync + sealed::Sealed {
     // === Header ===
     /// `IronBase v{version} | {db} ({collections} coll, {docs} docs)`
     fn header_db(&self, version: &str, db: &str, collections: usize, docs: usize) -> String;
@@ -302,6 +302,16 @@ pub trait Messages: Sync {
     fn confirm_cancel_job_title(&self) -> &'static str;
     fn confirm_cancel_job(&self, job_id: &str) -> String;
     fn cancel_job_button(&self) -> &'static str;
+}
+
+/// `Messages` is implemented only by the languages of this crate: a new text
+/// is a required method that every language must provide (a missing
+/// translation does not compile), and no other crate can implement the trait,
+/// so adding a text never breaks one.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Hu {}
+    impl Sealed for super::En {}
 }
 
 /// An operation a failure message names ([`Messages::failed`])
@@ -555,6 +565,12 @@ mod tests {
             en.confirm_drop_collection("a", 2)
         );
         assert_eq!(en.collection_with_count("a", 1), "a (1 document)");
+        assert!(en
+            .confirm_drop_collection("a", 1)
+            .ends_with("1 document will be deleted!"));
+        assert!(en
+            .confirm_drop_collection("a", 2)
+            .ends_with("2 documents will be deleted!"));
         assert_eq!(hu.results_title(50, true), " Találatok (50+) ");
         assert_eq!(
             en.export_collection_info("a", 2, true),
