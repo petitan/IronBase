@@ -3,6 +3,7 @@
 
 use crate::app::{App, Modal, Pane};
 use crate::config::Config;
+use crate::i18n::{t, Op};
 use crate::modals::confirm::ConfirmOption;
 use crate::state::rag::RagTab;
 use crate::state::vector::VectorTab;
@@ -218,7 +219,7 @@ async fn test_failed_document_refresh_after_switch_leaves_empty_list_and_error()
     assert_eq!(app.total_docs, 0);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(
-        error.contains("Dokumentumok betoltese sikertelen"),
+        error.contains(&t().failed(Op::LoadDocuments, &"")),
         "{}",
         error
     );
@@ -361,7 +362,7 @@ async fn test_vector_index_drop_executes_with_captured_names() {
     assert_eq!(app.vector_state.error, None);
     assert_eq!(
         app.vector_state.message.as_deref(),
-        Some("Index 'users_emb_vec' deleted!")
+        Some(t().index_dropped("users_emb_vec").as_str())
     );
 }
 
@@ -463,7 +464,7 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
     );
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("Auto-embed disabled")
+        Some(t().auto_embed_disabled())
     );
 }
 
@@ -1556,7 +1557,7 @@ async fn test_index_analyze_and_collection_create_drop_use_built_ins() {
     assert_eq!(app.index_state.error, None);
     assert_eq!(
         app.index_state.message.as_deref(),
-        Some("Index statistics frissítve!")
+        Some(t().index_statistics_refreshed())
     );
     press(&mut app, KeyCode::Esc).await;
 
@@ -1819,15 +1820,34 @@ async fn test_rag_search_reports_trimmed_and_dropped_results() {
     press(&mut app, KeyCode::Enter).await;
 
     let message = app.rag_state.message.clone().unwrap_or_default();
-    assert!(message.contains("trimmed"), "{message}");
-    assert!(message.contains("2 more"), "{message}");
-    assert!(message.contains("1 without body text"), "{message}");
+    assert_eq!(message, t().search_summary(1, 2, 1, true));
     let screen = render_to_string(&app, 140, 45);
     assert!(screen.contains("Results (1, trimmed)"), "{screen}");
     assert!(
         line_with(&screen, "[Needles] needle filler filler").contains("0.0492"),
         "{screen}"
     );
+}
+
+/// A `search` answer in the context-block shape (not asked for): a
+/// translated error, no results
+#[tokio::test]
+async fn test_rag_search_context_block_answer_is_a_translated_error() {
+    let server = two_collections();
+    server.respond(
+        "search",
+        wire(r#"{"verdict":"unknown","context":"some context","count":0,"trimmed":false}"#),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "needle").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(
+        app.rag_state.error.as_deref(),
+        Some(t().unexpected_search_response())
+    );
+    assert!(app.rag_state.search_results.is_empty());
 }
 
 #[tokio::test]
@@ -1839,7 +1859,10 @@ async fn test_rag_search_complete_results_through_the_fake_server() {
     press(&mut app, KeyCode::Enter).await;
 
     assert_eq!(app.rag_state.error, None);
-    assert_eq!(app.rag_state.message.as_deref(), Some("Found 2 results"));
+    assert_eq!(
+        app.rag_state.message.as_deref(),
+        Some(t().search_summary(2, 0, 0, false).as_str())
+    );
     let screen = render_to_string(&app, 140, 45);
     assert!(screen.contains("Results (2)"), "{screen}");
     assert!(
@@ -2290,7 +2313,11 @@ async fn test_script_list_with_a_malformed_entry_is_an_error_not_a_guess() {
 
     assert!(app.script_state.scripts.is_empty());
     let error = app.script_state.error.clone().unwrap_or_default();
-    assert!(error.contains("Script lista"), "{}", error);
+    assert!(
+        error.contains(&t().failed(Op::LoadScripts, &"")),
+        "{}",
+        error
+    );
 }
 
 #[tokio::test]

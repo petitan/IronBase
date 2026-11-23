@@ -11,6 +11,7 @@ mod en;
 mod hu;
 
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub use en::En;
@@ -97,7 +98,9 @@ pub fn t() -> &'static dyn Messages {
     }
 }
 
-/// Every text of the UI, one method each
+/// Every text of the UI, one method each. Every method returns the text in
+/// its own language; the forms quoted in the docs below are the English ones,
+/// as examples.
 pub trait Messages: Sync {
     // === Header ===
     /// `IronBase v{version} | {db} ({collections} coll, {docs} docs)`
@@ -136,6 +139,115 @@ pub trait Messages: Sync {
     /// The detail pane title; `matches` is (current, total) while searching
     fn detail_title(&self, matches: Option<(usize, usize)>) -> String;
     fn select_document(&self) -> &'static str;
+
+    // === Status and errors ===
+    fn no_database(&self) -> &'static str;
+    fn no_collection_selected(&self) -> &'static str;
+    fn no_document_selected(&self) -> &'static str;
+    fn no_script_selected(&self) -> &'static str;
+    fn no_version_selected(&self) -> &'static str;
+    /// The failure of an operation, e.g. `Search failed: {error}`
+    fn failed(&self, op: Op, error: &dyn Display) -> String;
+    /// A failure with no operation to name, e.g. `Error: {error}`
+    fn error(&self, error: &dyn Display) -> String;
+    fn clipboard_unavailable(&self, error: &dyn Display) -> String;
+    fn invalid_json(&self, error: &dyn Display) -> String;
+    fn invalid_json_params(&self, error: &dyn Display) -> String;
+    fn name_required(&self) -> &'static str;
+    fn field_name_required(&self) -> &'static str;
+    fn file_path_required(&self) -> &'static str;
+    fn invalid_path(&self, path: &str) -> String;
+    fn theme_changed(&self, theme: &str) -> String;
+    fn copied(&self, preview: &str) -> String;
+
+    // Search and filter
+    fn no_matches(&self) -> &'static str;
+    fn match_count(&self, count: usize) -> String;
+    /// The match count with the keys that step through them
+    fn match_count_with_hint(&self, count: usize) -> String;
+    fn match_position(&self, current: usize, total: usize) -> String;
+    fn filter_needs_a_condition(&self) -> &'static str;
+    fn filter_no_matches(&self, query: &str) -> String;
+
+    // Collections and documents
+    fn collection_exists(&self) -> &'static str;
+    fn collection_created(&self, name: &str) -> String;
+    fn collection_dropped(&self, name: &str) -> String;
+    fn document_deleted(&self) -> &'static str;
+    fn document_not_found(&self) -> &'static str;
+    fn document_unchanged(&self) -> &'static str;
+    fn document_updated(&self) -> &'static str;
+    /// The update is stored, only re-embedding it failed
+    fn document_updated_vector_stale(&self, error: &dyn Display) -> String;
+    fn document_inserted(&self, id: &dyn Display) -> String;
+    fn document_must_be_object(&self) -> &'static str;
+    fn document_id_missing(&self) -> &'static str;
+    /// `limit`: the result count reached the query limit
+    fn query_found(&self, count: usize, limit: Option<usize>) -> String;
+    fn query_plan_loaded(&self) -> &'static str;
+    fn exported(&self, count: usize, filtered: bool, path: &str) -> String;
+    fn nothing_to_export(&self) -> &'static str;
+
+    // Indexes
+    fn primary_index_not_droppable(&self, index: &str) -> String;
+    /// `fields` joined, `flags` such as ` [unique]` (or empty)
+    fn index_created(&self, fields: &str, compound: bool, flags: &str, name: &str) -> String;
+    fn index_dropped(&self, name: &str) -> String;
+    fn analyzing_indexes(&self) -> &'static str;
+    fn index_statistics_refreshed(&self) -> &'static str;
+    fn vector_input_empty(&self) -> &'static str;
+    fn vector_empty(&self) -> &'static str;
+    fn invalid_vector(&self, error: &dyn Display) -> String;
+    fn invalid_filter(&self, error: &dyn Display) -> String;
+
+    // RAG and embedding
+    fn auto_embed_disabled(&self) -> &'static str;
+    /// `search` summary: what the server left out of the results
+    fn search_summary(
+        &self,
+        found: usize,
+        over_budget: usize,
+        without_body: usize,
+        trimmed: bool,
+    ) -> String;
+
+    // Scripts
+    fn script_name_required(&self) -> &'static str;
+    fn script_saved(&self, version: u32) -> String;
+    fn script_deleted(&self, name: &str) -> String;
+    fn script_rolled_back(&self, version: u32) -> String;
+    /// `search` answered in another shape than the one asked for
+    fn unexpected_search_response(&self) -> &'static str;
+}
+
+/// An operation a failure message names ([`Messages::failed`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Search,
+    Refresh,
+    LoadDocuments,
+    LoadSchema,
+    LoadScripts,
+    LoadScript,
+    LoadHistory,
+    LoadJobs,
+    LoadStatistics,
+    LoadIndexes,
+    Save,
+    Create,
+    Delete,
+    Rollback,
+    Insert,
+    Update,
+    Query,
+    Explain,
+    Count,
+    Filter,
+    Analyze,
+    Copy,
+    File,
+    Write,
+    Flush,
 }
 
 #[cfg(test)]
@@ -168,5 +280,112 @@ mod tests {
         );
         assert_eq!(en.detail_title(Some((2, 5))), " Details [2/5] ");
         assert_eq!(hu.detail_title(None), " Részletek ");
+    }
+
+    /// Every status and error text is translated, not left in one language
+    #[test]
+    fn test_status_texts_differ_between_the_languages() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 26] = [
+            |m| m.unexpected_search_response(),
+            |m| m.no_database(),
+            |m| m.no_collection_selected(),
+            |m| m.no_document_selected(),
+            |m| m.no_script_selected(),
+            |m| m.no_version_selected(),
+            |m| m.name_required(),
+            |m| m.field_name_required(),
+            |m| m.file_path_required(),
+            |m| m.no_matches(),
+            |m| m.filter_needs_a_condition(),
+            |m| m.collection_exists(),
+            |m| m.document_deleted(),
+            |m| m.document_not_found(),
+            |m| m.document_unchanged(),
+            |m| m.document_updated(),
+            |m| m.document_must_be_object(),
+            |m| m.document_id_missing(),
+            |m| m.query_plan_loaded(),
+            |m| m.nothing_to_export(),
+            |m| m.analyzing_indexes(),
+            |m| m.index_statistics_refreshed(),
+            |m| m.vector_input_empty(),
+            |m| m.vector_empty(),
+            |m| m.auto_embed_disabled(),
+            |m| m.script_name_required(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        let ops = [
+            Op::Search,
+            Op::Refresh,
+            Op::LoadDocuments,
+            Op::LoadSchema,
+            Op::LoadScripts,
+            Op::LoadScript,
+            Op::LoadHistory,
+            Op::LoadJobs,
+            Op::LoadStatistics,
+            Op::LoadIndexes,
+            Op::Save,
+            Op::Create,
+            Op::Delete,
+            Op::Rollback,
+            Op::Insert,
+            Op::Update,
+            Op::Query,
+            Op::Explain,
+            Op::Count,
+            Op::Filter,
+            Op::Analyze,
+            Op::Copy,
+            Op::File,
+            Op::Write,
+            Op::Flush,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for op in ops {
+            let (h, e) = (hu.failed(op, &"x"), en.failed(op, &"x"));
+            assert!(h.ends_with("sikertelen: x"), "{h}");
+            assert!(e.ends_with("failed: x"), "{e}");
+            // Each operation has its own name
+            assert!(seen.insert(e));
+        }
+    }
+
+    #[test]
+    fn test_status_texts_with_values() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        assert_eq!(
+            hu.failed(Op::Search, &"timeout"),
+            "Keresés sikertelen: timeout"
+        );
+        assert_eq!(en.match_count(1), "1 match");
+        assert_eq!(en.match_count(3), "3 matches");
+        assert_eq!(hu.match_count(3), "3 találat");
+        assert_eq!(en.query_found(5, Some(5)), "5+ documents (limit: 5)");
+        assert_eq!(
+            en.exported(1, true, "/x.json"),
+            "1 document exported (filtered): /x.json"
+        );
+        assert_eq!(
+            hu.index_created("a, b", true, " [unique]", "a_1_b_1"),
+            "Összetett index: a, b [unique] létrehozva (a_1_b_1)"
+        );
+        // The English search summary is the one the RAG modal showed before
+        assert_eq!(en.search_summary(2, 0, 0, false), "Found 2 results");
+        assert_eq!(
+            en.search_summary(1, 2, 1, true),
+            "Found 1 result (trimmed: 2 more over the context budget, 1 without body text)"
+        );
+        assert_eq!(
+            en.search_summary(1, 0, 0, true),
+            "Found 1 result (trimmed: passages shortened)"
+        );
+        assert_eq!(
+            hu.search_summary(1, 0, 0, true),
+            "1 találat (kimaradt: rövidített szakaszok)"
+        );
     }
 }

@@ -282,7 +282,7 @@ impl RagState {
     /// Take a `search` response: its documents and what the server left out
     pub fn set_search_response(&mut self, response: SearchResponse) -> Result<(), String> {
         let SearchBody::Documents(documents) = response.body else {
-            return Err("search: expected documents, got a context block".to_string());
+            return Err(crate::i18n::t().unexpected_search_response().to_string());
         };
         self.search_results = documents;
         self.search_trimmed = response.trimmed;
@@ -309,26 +309,14 @@ impl RagState {
             || self.search_dropped_empty > 0
     }
 
-    /// "Found N results", with what the server left out
+    /// The result count with what the server left out (in the UI language)
     pub fn search_summary(&self) -> String {
-        let found = format!("Found {} results", self.search_results.len());
-        if !self.search_incomplete() {
-            return found;
-        }
-        let mut left_out = Vec::new();
-        if self.search_dropped_due_to_budget > 0 {
-            left_out.push(format!(
-                "{} more over the context budget",
-                self.search_dropped_due_to_budget
-            ));
-        }
-        if self.search_dropped_empty > 0 {
-            left_out.push(format!("{} without body text", self.search_dropped_empty));
-        }
-        if left_out.is_empty() {
-            left_out.push("passages shortened".to_string());
-        }
-        format!("{} (trimmed: {})", found, left_out.join(", "))
+        crate::i18n::t().search_summary(
+            self.search_results.len(),
+            self.search_dropped_due_to_budget,
+            self.search_dropped_empty,
+            self.search_trimmed,
+        )
     }
 
     // === Import tab ===
