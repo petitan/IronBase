@@ -1,6 +1,8 @@
 //! English texts
 
-use super::{Messages, Op};
+use super::{Messages, Op, ToolCategory};
+use crate::state::filter::{FilterOperator, SortDirection};
+use crate::state::query::QueryTemplate;
 use std::fmt::Display;
 
 pub struct En;
@@ -596,5 +598,249 @@ impl Messages for En {
     }
     fn cancel_job_button(&self) -> &'static str {
         "Cancel job"
+    }
+
+    fn filter_title(&self) -> &'static str {
+        "Filter"
+    }
+    fn key_choose_field(&self) -> &'static str {
+        "Choose field"
+    }
+    fn key_next(&self) -> &'static str {
+        "Next"
+    }
+    fn field_title(&self, count: usize) -> String {
+        match count {
+            0 => " Field ".to_string(),
+            1 => " Field (1 field) [↑↓] ".to_string(),
+            _ => format!(" Field ({count} fields) [↑↓] "),
+        }
+    }
+    fn field_placeholder_examples(&self) -> &'static str {
+        "e.g. name, age, email..."
+    }
+    fn field_placeholder_pick(&self) -> &'static str {
+        "type, or pick with the arrows..."
+    }
+    fn label_operator(&self) -> &'static str {
+        "Operator"
+    }
+    fn label_value(&self) -> &'static str {
+        "Value"
+    }
+    fn value_placeholder(&self) -> &'static str {
+        "value to search for..."
+    }
+    fn hint_type_field(&self) -> &'static str {
+        "Type a field name (e.g. name, age, email)"
+    }
+    fn hint_field_next(&self) -> &'static str {
+        "Enter/Tab: on to the operator"
+    }
+    fn hint_operator(&self) -> &'static str {
+        "←/→: choose the operator, Enter/Tab: next"
+    }
+    fn hint_add_exists(&self) -> &'static str {
+        "Enter: add the condition (no value needed)"
+    }
+    fn hint_type_value(&self) -> &'static str {
+        "Type the value to search for, or ^S: search now"
+    }
+    fn hint_add_condition(&self) -> &'static str {
+        "Enter: add the condition | ^S: search now"
+    }
+    fn hint_filters(&self) -> &'static str {
+        "Enter: edit | Del: remove | Ctrl+↑↓: move | ^S: search"
+    }
+    fn hint_sort(&self) -> &'static str {
+        "←/→: choose the field | Space: direction | ^S: search"
+    }
+    fn active_filters_title(&self, count: usize) -> String {
+        format!(" Active filters ({count}) ")
+    }
+    fn no_active_filters(&self) -> &'static str {
+        "No active filter – add one!"
+    }
+    fn label_sort(&self) -> &'static str {
+        "Sort"
+    }
+    fn no_sort(&self) -> &'static str {
+        "No sort"
+    }
+    fn press_ctrl_s_to_search(&self) -> &'static str {
+        "Press ^S to search"
+    }
+    fn add_filters(&self) -> &'static str {
+        "Add filters"
+    }
+    fn query_title(&self) -> &'static str {
+        "Query builder"
+    }
+    fn key_run(&self) -> &'static str {
+        "Run"
+    }
+    fn key_plan(&self) -> &'static str {
+        "Plan"
+    }
+    fn key_templates(&self) -> &'static str {
+        "Templates"
+    }
+    fn query_results_header(&self, count: usize, total: usize) -> String {
+        if total > count {
+            format!("Results ({count}/{total}) [^j/k] [Enter: filter]:")
+        } else {
+            format!("Results ({count}) [^j/k] [Enter: filter]:")
+        }
+    }
+    fn label_result(&self) -> &'static str {
+        "Result"
+    }
+    fn query_prompt(&self) -> &'static str {
+        "Write a query and press ^S (Ctrl+S)"
+    }
+    fn query_status(&self, line: usize, column: usize, collection: &str, plan: bool) -> String {
+        {
+            let plan = if plan { " [plan]" } else { "" };
+            format!("Line: {line} Column: {column} | Collection: {collection}{plan}")
+        }
+    }
+    fn query_plan_title(&self) -> &'static str {
+        "Query plan"
+    }
+    fn label_plan(&self) -> &'static str {
+        "Plan"
+    }
+    fn label_index(&self) -> &'static str {
+        "Index"
+    }
+    fn label_estimated_rows(&self) -> &'static str {
+        "Est. rows"
+    }
+    fn label_stage(&self) -> &'static str {
+        "Stage"
+    }
+    fn label_cost(&self) -> &'static str {
+        "Cost"
+    }
+    fn label_reason(&self) -> &'static str {
+        "Reason"
+    }
+    fn no_query_plan(&self) -> &'static str {
+        "No query plan yet. Press ^E."
+    }
+    fn query_plan_toggle_hint(&self) -> &'static str {
+        "[^E] Switch between the results and the plan"
+    }
+    fn server_info_title(&self) -> &'static str {
+        "Server info [j/k: scroll, Esc: close]"
+    }
+    fn loading(&self) -> &'static str {
+        "Loading..."
+    }
+    fn database_info(&self) -> &'static str {
+        "Database information"
+    }
+    fn label_server(&self) -> &'static str {
+        "Server"
+    }
+    fn label_api_key(&self) -> &'static str {
+        "API key"
+    }
+    fn api_key_required(&self) -> &'static str {
+        "Required"
+    }
+    fn api_key_not_required(&self) -> &'static str {
+        "Not required"
+    }
+    fn label_database(&self) -> &'static str {
+        "Database"
+    }
+    fn label_file_size(&self) -> &'static str {
+        "File size"
+    }
+    fn label_collection_count(&self) -> &'static str {
+        "Collections"
+    }
+    fn label_total_documents(&self) -> &'static str {
+        "Total documents"
+    }
+    fn label_total_indexes(&self) -> &'static str {
+        "Total indexes"
+    }
+    fn label_of_which_vector(&self) -> &'static str {
+        "of which vector"
+    }
+    fn vector_index_summary(&self, indexes: usize, vectors: usize) -> String {
+        {
+            let label = if vectors == 1 { "vector" } else { "vectors" };
+            format!("{indexes} ({vectors} {label})")
+        }
+    }
+    fn label_collections(&self) -> &'static str {
+        "Collections"
+    }
+    fn available_tools(&self, count: usize) -> String {
+        format!("Available MCP tools ({count})")
+    }
+    fn available_prompts(&self, count: usize) -> String {
+        format!("Available MCP prompts ({count})")
+    }
+    fn no_description(&self) -> &'static str {
+        "No description"
+    }
+    fn protocol_version(&self, version: &str) -> String {
+        format!("MCP protocol version: {version}")
+    }
+
+    fn filter_operator(&self, operator: FilterOperator) -> &'static str {
+        match operator {
+            FilterOperator::Equals => "=",
+            FilterOperator::NotEquals => "≠",
+            FilterOperator::GreaterThan => ">",
+            FilterOperator::LessThan => "<",
+            FilterOperator::GreaterOrEq => ">=",
+            FilterOperator::LessOrEq => "<=",
+            FilterOperator::Contains => "contains",
+            FilterOperator::StartsWith => "starts with",
+            FilterOperator::Exists => "exists",
+            FilterOperator::In => "in list",
+        }
+    }
+    fn sort_direction(&self, direction: SortDirection) -> &'static str {
+        match direction {
+            SortDirection::Asc => "↑ ascending",
+            SortDirection::Desc => "↓ descending",
+        }
+    }
+    fn query_template(&self, template: QueryTemplate) -> &'static str {
+        match template {
+            QueryTemplate::All => "All",
+            QueryTemplate::ById => "By _id",
+            QueryTemplate::Equals => "Equality",
+            QueryTemplate::GreaterThan => "Greater than",
+            QueryTemplate::LessThan => "Less than",
+            QueryTemplate::In => "In a list",
+            QueryTemplate::Exists => "Exists",
+            QueryTemplate::Regex => "Regex",
+            QueryTemplate::And => "AND",
+            QueryTemplate::Or => "OR",
+        }
+    }
+    fn tool_category(&self, category: ToolCategory) -> &'static str {
+        match category {
+            ToolCategory::Database => "Database",
+            ToolCategory::Collections => "Collections",
+            ToolCategory::Query => "Query",
+            ToolCategory::Insert => "Insert",
+            ToolCategory::Update => "Update",
+            ToolCategory::Delete => "Delete",
+            ToolCategory::Count => "Count",
+            ToolCategory::Aggregate => "Aggregation",
+            ToolCategory::Indexes => "Indexes",
+            ToolCategory::Schema => "Schema",
+            ToolCategory::Scripts => "Scripts",
+            ToolCategory::Fuzzy => "Fuzzy search",
+            ToolCategory::Other => "Other",
+        }
     }
 }

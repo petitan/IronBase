@@ -10,6 +10,8 @@
 mod en;
 mod hu;
 
+use crate::state::filter::{FilterOperator, SortDirection};
+use crate::state::query::QueryTemplate;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -302,6 +304,90 @@ pub trait Messages: Sync + sealed::Sealed {
     fn confirm_cancel_job_title(&self) -> &'static str;
     fn confirm_cancel_job(&self, job_id: &str) -> String;
     fn cancel_job_button(&self) -> &'static str;
+
+    // Filter, query and server info modals
+    fn filter_title(&self) -> &'static str;
+    fn key_choose_field(&self) -> &'static str;
+    fn key_next(&self) -> &'static str;
+    fn field_title(&self, count: usize) -> String;
+    fn field_placeholder_examples(&self) -> &'static str;
+    fn field_placeholder_pick(&self) -> &'static str;
+    fn label_operator(&self) -> &'static str;
+    fn label_value(&self) -> &'static str;
+    fn value_placeholder(&self) -> &'static str;
+    fn hint_type_field(&self) -> &'static str;
+    fn hint_field_next(&self) -> &'static str;
+    fn hint_operator(&self) -> &'static str;
+    fn hint_add_exists(&self) -> &'static str;
+    fn hint_type_value(&self) -> &'static str;
+    fn hint_add_condition(&self) -> &'static str;
+    fn hint_filters(&self) -> &'static str;
+    fn hint_sort(&self) -> &'static str;
+    fn active_filters_title(&self, count: usize) -> String;
+    fn no_active_filters(&self) -> &'static str;
+    fn label_sort(&self) -> &'static str;
+    fn no_sort(&self) -> &'static str;
+    fn press_ctrl_s_to_search(&self) -> &'static str;
+    fn add_filters(&self) -> &'static str;
+    fn query_title(&self) -> &'static str;
+    fn key_run(&self) -> &'static str;
+    fn key_plan(&self) -> &'static str;
+    fn key_templates(&self) -> &'static str;
+    fn query_results_header(&self, count: usize, total: usize) -> String;
+    fn label_result(&self) -> &'static str;
+    fn query_prompt(&self) -> &'static str;
+    fn query_status(&self, line: usize, column: usize, collection: &str, plan: bool) -> String;
+    fn query_plan_title(&self) -> &'static str;
+    fn label_plan(&self) -> &'static str;
+    /// The same word in both languages
+    fn label_index(&self) -> &'static str;
+    fn label_estimated_rows(&self) -> &'static str;
+    fn label_stage(&self) -> &'static str;
+    fn label_cost(&self) -> &'static str;
+    fn label_reason(&self) -> &'static str;
+    fn no_query_plan(&self) -> &'static str;
+    fn query_plan_toggle_hint(&self) -> &'static str;
+    fn server_info_title(&self) -> &'static str;
+    fn loading(&self) -> &'static str;
+    fn database_info(&self) -> &'static str;
+    fn label_server(&self) -> &'static str;
+    fn label_api_key(&self) -> &'static str;
+    fn api_key_required(&self) -> &'static str;
+    fn api_key_not_required(&self) -> &'static str;
+    fn label_database(&self) -> &'static str;
+    fn label_file_size(&self) -> &'static str;
+    fn label_collection_count(&self) -> &'static str;
+    fn label_total_documents(&self) -> &'static str;
+    fn label_total_indexes(&self) -> &'static str;
+    fn label_of_which_vector(&self) -> &'static str;
+    fn vector_index_summary(&self, indexes: usize, vectors: usize) -> String;
+    fn label_collections(&self) -> &'static str;
+    fn available_tools(&self, count: usize) -> String;
+    fn available_prompts(&self, count: usize) -> String;
+    fn no_description(&self) -> &'static str;
+    fn protocol_version(&self, version: &str) -> String;
+    fn filter_operator(&self, operator: FilterOperator) -> &'static str;
+    fn sort_direction(&self, direction: SortDirection) -> &'static str;
+    fn query_template(&self, template: QueryTemplate) -> &'static str;
+    fn tool_category(&self, category: ToolCategory) -> &'static str;
+}
+
+/// A group of MCP tools in the server info
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    Database,
+    Collections,
+    Query,
+    Insert,
+    Update,
+    Delete,
+    Count,
+    Aggregate,
+    Indexes,
+    Schema,
+    Scripts,
+    Fuzzy,
+    Other,
 }
 
 /// `Messages` is implemented only by the languages of this crate: a new text
@@ -576,5 +662,105 @@ mod tests {
             en.export_collection_info("a", 2, true),
             "Collection: a (2 documents, filtered)"
         );
+    }
+
+    /// The filter, query and server info texts are translated, and so are
+    /// the operator, sort, template and tool category names that have words
+    #[test]
+    fn test_filter_query_server_info_texts_differ_between_the_languages() {
+        use crate::state::filter::{FilterOperator, SortDirection};
+        use crate::state::query::QueryTemplate;
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 50] = [
+            |m| m.filter_title(),
+            |m| m.key_choose_field(),
+            |m| m.key_next(),
+            |m| m.field_placeholder_examples(),
+            |m| m.field_placeholder_pick(),
+            |m| m.label_operator(),
+            |m| m.label_value(),
+            |m| m.value_placeholder(),
+            |m| m.hint_type_field(),
+            |m| m.hint_field_next(),
+            |m| m.hint_operator(),
+            |m| m.hint_add_exists(),
+            |m| m.hint_type_value(),
+            |m| m.hint_add_condition(),
+            |m| m.hint_filters(),
+            |m| m.hint_sort(),
+            |m| m.no_active_filters(),
+            |m| m.label_sort(),
+            |m| m.no_sort(),
+            |m| m.press_ctrl_s_to_search(),
+            |m| m.add_filters(),
+            |m| m.query_title(),
+            |m| m.key_run(),
+            |m| m.key_plan(),
+            |m| m.key_templates(),
+            |m| m.label_result(),
+            |m| m.query_prompt(),
+            |m| m.query_plan_title(),
+            |m| m.label_plan(),
+            |m| m.label_estimated_rows(),
+            |m| m.label_stage(),
+            |m| m.label_cost(),
+            |m| m.label_reason(),
+            |m| m.no_query_plan(),
+            |m| m.query_plan_toggle_hint(),
+            |m| m.server_info_title(),
+            |m| m.loading(),
+            |m| m.database_info(),
+            |m| m.label_server(),
+            |m| m.label_api_key(),
+            |m| m.api_key_required(),
+            |m| m.api_key_not_required(),
+            |m| m.label_database(),
+            |m| m.label_file_size(),
+            |m| m.label_collection_count(),
+            |m| m.label_total_documents(),
+            |m| m.label_total_indexes(),
+            |m| m.label_of_which_vector(),
+            |m| m.label_collections(),
+            |m| m.no_description(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        for operator in [
+            FilterOperator::Contains,
+            FilterOperator::StartsWith,
+            FilterOperator::Exists,
+            FilterOperator::In,
+        ] {
+            assert_ne!(hu.filter_operator(operator), en.filter_operator(operator));
+        }
+        // A symbol reads the same in both
+        assert_eq!(hu.filter_operator(FilterOperator::GreaterOrEq), ">=");
+        assert_eq!(en.filter_operator(FilterOperator::GreaterOrEq), ">=");
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            assert_ne!(hu.sort_direction(direction), en.sort_direction(direction));
+        }
+        for template in [
+            QueryTemplate::All,
+            QueryTemplate::ById,
+            QueryTemplate::Exists,
+        ] {
+            assert_ne!(hu.query_template(template), en.query_template(template));
+        }
+        for category in [ToolCategory::Database, ToolCategory::Other] {
+            assert_ne!(hu.tool_category(category), en.tool_category(category));
+        }
+        assert_eq!(en.field_title(1), " Field (1 field) [↑↓] ");
+        assert_eq!(hu.field_title(0), " Mező ");
+        assert_eq!(en.vector_index_summary(1, 3), "1 (3 vectors)");
+        // The exact texts, not only that they differ
+        assert_eq!(hu.vector_index_summary(1, 3), "1 (3 vektor)");
+        assert_eq!(hu.filter_operator(FilterOperator::Contains), "tartalmazza");
+        assert_eq!(
+            en.filter_operator(FilterOperator::StartsWith),
+            "starts with"
+        );
+        assert_eq!(hu.sort_direction(SortDirection::Desc), "↓ csökkenő");
+        assert_eq!(en.query_template(QueryTemplate::ById), "By _id");
     }
 }

@@ -2,6 +2,7 @@
 
 use super::render_modal_frame;
 use crate::app::{QueryState, QUERY_TEMPLATES};
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::text_area::plain;
 use ratatui::prelude::*;
@@ -9,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 /// Render the query builder modal
 pub fn render(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Query Epito", theme, 75, 70);
+    let inner = render_modal_frame(frame, area, t().query_title(), theme, 75, 70);
 
     // Split into sections
     let chunks = Layout::vertical([
@@ -23,15 +24,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) 
     // Help text - include Explain button
     let help = Paragraph::new(Line::from(vec![
         Span::styled("^S", Style::default().fg(theme.accent)),
-        Span::raw(" Futtat  "),
+        Span::raw(format!(" {}  ", t().key_run())),
         Span::styled("^E", Style::default().fg(theme.accent)),
-        Span::raw(" Explain  "),
+        Span::raw(format!(" {}  ", t().key_plan())),
         Span::styled("^j/k", Style::default().fg(theme.accent)),
-        Span::raw(" Nav  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("^T", Style::default().fg(theme.accent)),
-        Span::raw(" Tpl  "),
+        Span::raw(format!(" {}  ", t().key_templates())),
         Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -75,7 +76,7 @@ fn render_templates(frame: &mut Frame, area: Rect, state: &QueryState, theme: &T
     let items: Vec<ListItem> = QUERY_TEMPLATES
         .iter()
         .enumerate()
-        .map(|(idx, (name, template))| {
+        .map(|(idx, (kind, template))| {
             let is_selected = idx == state.template_index;
             let style = if is_selected {
                 Style::default().fg(theme.bg).bg(theme.accent)
@@ -84,7 +85,7 @@ fn render_templates(frame: &mut Frame, area: Rect, state: &QueryState, theme: &T
             };
 
             let line = Line::from(vec![
-                Span::styled(format!("{:<14}", name), style.bold()),
+                Span::styled(format!("{:<14}", kind.name()), style.bold()),
                 Span::styled(" ", style),
                 Span::styled(truncate(template, 30), style),
             ]);
@@ -95,7 +96,7 @@ fn render_templates(frame: &mut Frame, area: Rect, state: &QueryState, theme: &T
 
     let list = List::new(items).block(
         Block::default()
-            .title(" Sablonok [j/k] [Enter] ")
+            .title(format!(" {} [j/k] [Enter] ", t().key_templates()))
             .title_style(Style::default().fg(theme.accent).bold())
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.accent))
@@ -103,6 +104,17 @@ fn render_templates(frame: &mut Frame, area: Rect, state: &QueryState, theme: &T
     );
 
     frame.render_widget(list, popup_area);
+}
+
+/// The top border of the plan box, `title` in it: as wide as the bottom border
+fn box_top(title: &str) -> String {
+    const WIDTH: usize = 48;
+    let used = 4 + title.chars().count();
+    format!(
+        "┌─ {} {}┐",
+        title,
+        "─".repeat(WIDTH.saturating_sub(used + 1))
+    )
 }
 
 /// Truncate string for display
@@ -135,12 +147,10 @@ fn render_results(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
         let total = state.total_count;
 
         // Header with count
-        let header_text = if total > count {
-            format!("Talalatok ({}/{}) [^j/k] [Enter=Szuro]:", count, total)
-        } else if count > 0 {
-            format!("Talalatok ({}) [^j/k] [Enter=Szuro]:", count)
+        let header_text = if count > 0 {
+            t().query_results_header(count, total)
         } else {
-            "Nincs talalat".to_string()
+            t().no_matches().to_string()
         };
 
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
@@ -180,9 +190,12 @@ fn render_results(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
         frame.render_widget(results_widget, area);
     } else {
         let help = Paragraph::new(vec![
-            Line::from(Span::styled("Eredmeny:", Style::default().fg(theme.accent))),
             Line::from(Span::styled(
-                "Irj query-t es nyomd meg ^S (Ctrl+S)",
+                format!("{}:", t().label_result()),
+                Style::default().fg(theme.accent),
+            )),
+            Line::from(Span::styled(
+                t().query_prompt(),
                 Style::default().fg(theme.muted),
             )),
         ]);
@@ -193,18 +206,17 @@ fn render_results(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
 fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else {
         let (line, col) = state.editor.cursor();
         let (line, col) = (line + 1, col + 1);
-        let view_indicator = if state.show_explain { " [Explain]" } else { "" };
         Line::from(vec![Span::styled(
-            format!(
-                "Sor: {} Oszlop: {} | Kollekció: {}{}",
-                line, col, state.collection, view_indicator
-            ),
+            t().query_status(line, col, &state.collection, state.show_explain),
             Style::default().fg(theme.muted),
         )])
     };
@@ -216,7 +228,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
 /// Render query explain panel
 fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        "┌─ Query Plan ─────────────────────────────────┐",
+        box_top(t().query_plan_title()),
         Style::default().fg(theme.accent).bold(),
     ))];
 
@@ -244,19 +256,19 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
         let field = |label: &'static str, value: String, style: Style| {
             Line::from(vec![
                 Span::styled("│ ", Style::default().fg(theme.accent)),
-                Span::styled(label, Style::default().fg(theme.muted)),
+                Span::styled(format!("{label}: "), Style::default().fg(theme.muted)),
                 Span::styled(value, style),
             ])
         };
         let plain = Style::default().fg(theme.fg);
 
         lines.push(field(
-            "Plan: ",
+            t().label_plan(),
             format!("{} {}", plan_icon, plan_type),
             plain.bold(),
         ));
         lines.push(field(
-            "Index: ",
+            t().label_index(),
             index_name.to_string(),
             if index_name == "-" {
                 Style::default().fg(theme.warning)
@@ -264,12 +276,12 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
                 Style::default().fg(theme.success)
             },
         ));
-        lines.push(field("Est. rows: ", estimated_rows, plain));
-        lines.push(field("Stage: ", stage.to_string(), plain));
-        lines.push(field("Cost: ", cost.to_string(), plain));
+        lines.push(field(t().label_estimated_rows(), estimated_rows, plain));
+        lines.push(field(t().label_stage(), stage.to_string(), plain));
+        lines.push(field(t().label_cost(), cost.to_string(), plain));
         if let Some(ref reason) = explain.selection_reason {
             lines.push(field(
-                "Reason: ",
+                t().label_reason(),
                 truncate(reason, area.width.saturating_sub(10) as usize),
                 Style::default().fg(theme.muted),
             ));
@@ -277,10 +289,7 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
     } else {
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(theme.accent)),
-            Span::styled(
-                "Nincs explain eredmény. Nyomj ^E-t.",
-                Style::default().fg(theme.muted),
-            ),
+            Span::styled(t().no_query_plan(), Style::default().fg(theme.muted)),
         ]));
     }
 
@@ -291,7 +300,7 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
 
     // Toggle hint
     lines.push(Line::from(Span::styled(
-        "[^E] Váltás eredmények/explain között",
+        t().query_plan_toggle_hint(),
         Style::default().fg(theme.muted),
     )));
 
@@ -302,6 +311,22 @@ fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Messages;
+
+    /// The plan box's top border is as wide as its bottom border in either
+    /// language, whatever the length of the title
+    #[test]
+    fn test_plan_box_top_matches_the_bottom_border() {
+        let bottom = "└──────────────────────────────────────────────┘";
+        for title in [
+            crate::i18n::Hu.query_plan_title(),
+            crate::i18n::En.query_plan_title(),
+        ] {
+            let top = box_top(title);
+            assert_eq!(top.chars().count(), bottom.chars().count(), "{top}");
+            assert!(top.contains(title));
+        }
+    }
 
     #[test]
     fn test_truncate_zero_width_does_not_underflow() {

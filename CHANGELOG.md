@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the filter, query builder and server info in both languages (tuti-tui 0.3.488, mcp-server 1.0.676 — version only, for the release tag)
+
+The visual filter, the query builder (with its templates and the query plan panel) and the server info take
+their texts from the language layer (`i18n::Messages`), Hungarian with accents or English. Before, they were
+fixed strings: Hungarian without accents („Szuro”, „Aktiv szurok”, „Query Epito”, „Osszes dokumentum”), and
+English operator names and plan labels in a Hungarian screen („contains”, „starts with”, „Est. rows”).
+
+- The filter operators with words („tartalmazza” / „contains”, „létezik” / „exists”, …), the sort direction,
+  the query template names and the server info's tool categories come from the language layer; the operator
+  symbols (`=`, `>=`, …) read the same in both. `QUERY_TEMPLATES` holds a `QueryTemplate` kind instead of a
+  fixed name.
+- The server info aligns its values whatever the length of the translated labels, and the query plan box keeps
+  its width with a translated title.
+- The filter's operator row starts later when it is wider than the field (longer labels, a narrow terminal), so
+  the selected operator is always visible; before, the operators at the end were cut off.
+- Tests: the new texts differ between the two languages (the symbols are the same), the plan box's top border is
+  as wide as its bottom one in both languages; the handler tests compare against `t()`.
+- Left for the next PRs: the API key, listener, vector, index, script, RAG and ACL modals and the key handlers'
+  messages; the actions menu and the help are generated from the key map.
+
 ### Changed — Tuti TUI: the simpler modals in both languages (tuti-tui 0.3.487, mcp-server 1.0.675 — version only, for the release tag)
 
 The error details, new collection, insert/edit document, update check, export, search, database open/create,

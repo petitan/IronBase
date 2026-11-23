@@ -35,19 +35,9 @@ impl FilterOperator {
         ]
     }
 
+    /// The operator as the UI shows it (in the UI language)
     pub fn label(&self) -> &'static str {
-        match self {
-            Self::Equals => "=",
-            Self::NotEquals => "≠",
-            Self::GreaterThan => ">",
-            Self::LessThan => "<",
-            Self::GreaterOrEq => ">=",
-            Self::LessOrEq => "<=",
-            Self::Contains => "contains",
-            Self::StartsWith => "starts with",
-            Self::Exists => "exists",
-            Self::In => "in list",
-        }
+        crate::i18n::t().filter_operator(*self)
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -171,11 +161,9 @@ impl SortDirection {
         }
     }
 
+    /// The direction as the UI shows it (in the UI language)
     pub fn label(&self) -> &'static str {
-        match self {
-            SortDirection::Asc => "↑ Növekvő",
-            SortDirection::Desc => "↓ Csökkenő",
-        }
+        crate::i18n::t().sort_direction(*self)
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -595,7 +583,7 @@ mod tests {
         );
         assert_eq!(
             condition("email", FilterOperator::Exists, "").display(),
-            "email exists"
+            "email létezik"
         );
     }
 

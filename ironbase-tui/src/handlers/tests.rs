@@ -1220,21 +1220,24 @@ async fn test_explain_modal_shows_real_plan_fields() {
     assert_eq!(server.calls_to("explain").len(), 1);
     let screen = render_to_string(&app, 140, 45);
     assert!(
-        line_with(&screen, "Plan:").contains("IndexScan"),
+        line_with(&screen, &format!("{}:", t().label_plan())).contains("IndexScan"),
         "{screen}"
     );
     assert!(
         line_with(&screen, "Index:").contains("users_email"),
         "{screen}"
     );
-    let rows_line = line_with(&screen, "Est. rows:");
+    let rows_line = line_with(&screen, &format!("{}:", t().label_estimated_rows()));
     assert!(rows_line.contains("33"), "{screen}");
     assert!(!rows_line.contains("33.3"), "{screen}");
     assert!(
-        line_with(&screen, "Stage:").contains("FETCH_WITH_INDEX"),
+        line_with(&screen, &format!("{}:", t().label_stage())).contains("FETCH_WITH_INDEX"),
         "{screen}"
     );
-    assert!(line_with(&screen, "Cost:").contains("O(log n)"), "{screen}");
+    assert!(
+        line_with(&screen, &format!("{}:", t().label_cost())).contains("O(log n)"),
+        "{screen}"
+    );
     assert!(!screen.contains("Unknown"), "{screen}");
 }
 
@@ -1254,15 +1257,15 @@ async fn test_server_info_shows_index_totals() {
     assert_eq!(app.modal, Some(Modal::ServerInfo));
     let screen = render_to_string(&app, 140, 45);
     assert!(
-        line_with(&screen, "Osszes index:").contains('7'),
+        line_with(&screen, &format!("{}:", t().label_total_indexes())).contains('7'),
         "{screen}"
     );
     assert!(
-        line_with(&screen, "ebbol vektor:").contains("1 (3 vektor)"),
+        line_with(&screen, &format!("{}:", t().label_of_which_vector())).contains("1 (3 vektor)"),
         "{screen}"
     );
     assert!(
-        line_with(&screen, "Szerver:").contains("http://127.0.0.1:8080"),
+        line_with(&screen, &format!("{}:", t().label_server())).contains("http://127.0.0.1:8080"),
         "{screen}"
     );
 }
