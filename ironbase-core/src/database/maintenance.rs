@@ -1848,6 +1848,30 @@ mod compaction_disk_space_tests {
         assert_eq!(db.count_documents("small", &json!({})).unwrap(), 1);
     }
 
+    /// The storage-level entry point checks too, before its metadata flush
+    /// (the first write of a compaction)
+    #[test]
+    fn storage_engine_compaction_checks_before_writing() {
+        let (temp, db, path) = db_with_garbage();
+        drop(db);
+        let mut storage = StorageEngine::open(&path).unwrap();
+        // Unflushed metadata: a flush would write it
+        storage.create_collection("extra").unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        test_space::set(&[0]);
+        let err = storage.compact().unwrap_err();
+        test_space::clear();
+        storage_full(&err);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            size,
+            "nothing written"
+        );
+        assert!(!temp_copy(&path).exists());
+        drop(storage);
+        drop(temp);
+    }
+
     /// The reserve follows the data: a tenth, between 1 and 64 MB
     #[test]
     fn reserve_scales_with_the_data() {
