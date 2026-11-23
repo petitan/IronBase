@@ -130,8 +130,10 @@ impl Messages for En {
             Op::LoadHistory => "Loading the history",
             Op::LoadJobs => "Loading the jobs",
             Op::LoadStatistics => "Loading the statistics",
+            Op::LoadIndexes => "Loading the indexes",
             Op::Save => "Saving",
             Op::Delete => "Deleting",
+            Op::Create => "Creating",
             Op::Rollback => "Rollback",
             Op::Insert => "Insert",
             Op::Update => "Update",
@@ -323,5 +325,8 @@ impl Messages for En {
     }
     fn script_rolled_back(&self, version: u32) -> String {
         format!("Rolled back, new version: v{version}")
+    }
+    fn unexpected_search_response(&self) -> &'static str {
+        "The search did not answer in the requested form (a document list)"
     }
 }

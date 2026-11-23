@@ -130,8 +130,10 @@ impl Messages for Hu {
             Op::LoadHistory => "Az előzmények betöltése",
             Op::LoadJobs => "A jobok betöltése",
             Op::LoadStatistics => "A statisztika betöltése",
+            Op::LoadIndexes => "Az indexek betöltése",
             Op::Save => "Mentés",
             Op::Delete => "Törlés",
+            Op::Create => "Létrehozás",
             Op::Rollback => "Visszaállítás",
             Op::Insert => "Beszúrás",
             Op::Update => "Módosítás",
@@ -319,5 +321,8 @@ impl Messages for Hu {
     }
     fn script_rolled_back(&self, version: u32) -> String {
         format!("Visszaállítva, új verzió: v{version}")
+    }
+    fn unexpected_search_response(&self) -> &'static str {
+        "A keresés nem a kért formában (dokumentumlistaként) válaszolt"
     }
 }

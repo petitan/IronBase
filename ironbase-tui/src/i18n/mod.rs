@@ -98,7 +98,9 @@ pub fn t() -> &'static dyn Messages {
     }
 }
 
-/// Every text of the UI, one method each
+/// Every text of the UI, one method each. Every method returns the text in
+/// its own language; the forms quoted in the docs below are the English ones,
+/// as examples.
 pub trait Messages: Sync {
     // === Header ===
     /// `IronBase v{version} | {db} ({collections} coll, {docs} docs)`
@@ -144,9 +146,9 @@ pub trait Messages: Sync {
     fn no_document_selected(&self) -> &'static str;
     fn no_script_selected(&self) -> &'static str;
     fn no_version_selected(&self) -> &'static str;
-    /// `{operation} failed: {error}`
+    /// The failure of an operation, e.g. `Search failed: {error}`
     fn failed(&self, op: Op, error: &dyn Display) -> String;
-    /// A failure with nothing more specific to name
+    /// A failure with no operation to name, e.g. `Error: {error}`
     fn error(&self, error: &dyn Display) -> String;
     fn clipboard_unavailable(&self, error: &dyn Display) -> String;
     fn invalid_json(&self, error: &dyn Display) -> String;
@@ -214,6 +216,8 @@ pub trait Messages: Sync {
     fn script_saved(&self, version: u32) -> String;
     fn script_deleted(&self, name: &str) -> String;
     fn script_rolled_back(&self, version: u32) -> String;
+    /// `search` answered in another shape than the one asked for
+    fn unexpected_search_response(&self) -> &'static str;
 }
 
 /// An operation a failure message names ([`Messages::failed`])
@@ -228,7 +232,9 @@ pub enum Op {
     LoadHistory,
     LoadJobs,
     LoadStatistics,
+    LoadIndexes,
     Save,
+    Create,
     Delete,
     Rollback,
     Insert,
@@ -280,7 +286,8 @@ mod tests {
     #[test]
     fn test_status_texts_differ_between_the_languages() {
         let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
-        let fixed: [fn(&dyn Messages) -> &'static str; 25] = [
+        let fixed: [fn(&dyn Messages) -> &'static str; 26] = [
+            |m| m.unexpected_search_response(),
             |m| m.no_database(),
             |m| m.no_collection_selected(),
             |m| m.no_document_selected(),
@@ -320,7 +327,9 @@ mod tests {
             Op::LoadHistory,
             Op::LoadJobs,
             Op::LoadStatistics,
+            Op::LoadIndexes,
             Op::Save,
+            Op::Create,
             Op::Delete,
             Op::Rollback,
             Op::Insert,

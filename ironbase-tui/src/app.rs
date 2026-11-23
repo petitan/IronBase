@@ -652,7 +652,7 @@ impl App {
                 self.index_state.index_entries = entries;
             }
             Err(e) => {
-                self.index_state.message = Some(t().error(&e));
+                self.index_state.message = Some(t().failed(Op::LoadIndexes, &e));
             }
         }
     }
@@ -1011,7 +1011,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.new_collection_state.error = Some(t().error(&e));
+                self.new_collection_state.error = Some(t().failed(Op::Create, &e));
             }
         }
     }
@@ -1921,7 +1921,7 @@ impl App {
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().error(&e));
+                self.index_state.error = Some(t().failed(Op::Create, &e));
             }
         }
     }
@@ -1952,7 +1952,7 @@ impl App {
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().error(&e));
+                self.index_state.error = Some(t().failed(Op::Delete, &e));
             }
         }
     }

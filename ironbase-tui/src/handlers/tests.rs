@@ -1829,6 +1829,27 @@ async fn test_rag_search_reports_trimmed_and_dropped_results() {
     );
 }
 
+/// A `search` answer in the context-block shape (not asked for): a
+/// translated error, no results
+#[tokio::test]
+async fn test_rag_search_context_block_answer_is_a_translated_error() {
+    let server = two_collections();
+    server.respond(
+        "search",
+        wire(r#"{"verdict":"unknown","context":"some context","count":0,"trimmed":false}"#),
+    );
+    let mut app = app_with_server(&server).await;
+    open_rag_search(&mut app).await;
+    type_text(&mut app, "needle").await;
+    press(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(
+        app.rag_state.error.as_deref(),
+        Some(t().unexpected_search_response())
+    );
+    assert!(app.rag_state.search_results.is_empty());
+}
+
 #[tokio::test]
 async fn test_rag_search_complete_results_through_the_fake_server() {
     let server = search_docs();
