@@ -3,7 +3,7 @@
 use super::render_modal_frame;
 use crate::i18n::t;
 use crate::theme::Theme;
-use crate::widgets::{Input, InputOutcome, TextInput};
+use crate::widgets::{marked, Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{
     AclDocument, AclInterface, AclPermissions, AclPrincipal, AclRule,
 };
@@ -767,7 +767,7 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
                 Style::default().fg(theme.fg)
             };
 
-            ListItem::new(line).style(style)
+            ListItem::new(marked(is_selected, line)).style(style)
         })
         .collect();
 
@@ -845,7 +845,7 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
                     Style::default().fg(theme.fg)
                 };
 
-                ListItem::new(line).style(style)
+                ListItem::new(marked(is_selected, line)).style(style)
             })
             .collect();
 
@@ -960,7 +960,7 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
                 Style::default().fg(theme.fg)
             };
 
-            ListItem::new(line).style(style)
+            ListItem::new(marked(is_selected, line)).style(style)
         })
         .collect();
 

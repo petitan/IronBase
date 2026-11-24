@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::app::FulltextState;
 use crate::i18n::t;
 use crate::theme::Theme;
+use crate::widgets::marked;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -159,8 +160,8 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
 
             let preview = format_doc_preview(&result.document, 60);
 
-            let text = format!(" {:.2}  {}", result.score, preview);
-            ListItem::new(text).style(style)
+            let text = format!("{:.2}  {}", result.score, preview);
+            ListItem::new(marked(is_selected, text)).style(style)
         })
         .collect();
 

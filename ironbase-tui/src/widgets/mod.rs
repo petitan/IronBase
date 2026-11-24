@@ -7,6 +7,37 @@ pub mod text_input;
 pub use text_area::TextArea;
 pub use text_input::{Input, InputOutcome, TextInput};
 
+use ratatui::text::{Line, Span};
+
+/// The mark in front of a list's selected row, and the same width of space
+/// in front of the others: the selection shows without color too (`NO_COLOR`,
+/// a monochrome terminal, color blindness)
+pub fn selection_mark(selected: bool) -> &'static str {
+    if selected {
+        "▶ "
+    } else {
+        "  "
+    }
+}
+
+/// A list row with the selection mark in front
+pub fn marked<'a>(selected: bool, line: impl Into<Line<'a>>) -> Line<'a> {
+    let mut line = line.into();
+    line.spans.insert(0, Span::raw(selection_mark(selected)));
+    line
+}
+
+/// A choice among a few options (a button, a mode): the chosen one in
+/// brackets, the others padded to the same width, so the choice shows
+/// without color too
+pub fn choice(label: &str, chosen: bool) -> String {
+    if chosen {
+        format!("[{label}]")
+    } else {
+        format!(" {label} ")
+    }
+}
+
 /// `value` with the ASCII digits of `text` appended, as typed into a number
 /// field (other characters are skipped; it stops growing at `usize::MAX`
 /// instead of overflowing)
@@ -21,7 +52,7 @@ pub fn push_digits(value: usize, text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::push_digits;
+    use super::{choice, marked, push_digits};
 
     #[test]
     fn test_push_digits() {
@@ -29,5 +60,21 @@ mod tests {
         assert_eq!(push_digits(0, " 1,0x2\n"), 102);
         assert_eq!(push_digits(5, "abc٣"), 5);
         assert_eq!(push_digits(1, "99999999999999999999999"), usize::MAX);
+    }
+
+    /// The selection shows as text, not only as color
+    #[test]
+    fn test_selection_shows_without_color() {
+        let text = |line: ratatui::text::Line| -> String {
+            line.spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+        assert_eq!(text(marked(true, "users")), "▶ users");
+        assert_eq!(text(marked(false, "users")), "  users");
+        assert_eq!(choice("Mégse", true), "[Mégse]");
+        assert_eq!(choice("Mégse", false), " Mégse ");
+        assert_eq!(
+            choice("x", true).chars().count(),
+            choice("x", false).chars().count()
+        );
     }
 }

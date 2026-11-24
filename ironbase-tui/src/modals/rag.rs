@@ -5,6 +5,7 @@ use crate::i18n::t;
 use crate::state::rag::{RagState, RagTab};
 use crate::theme::Theme;
 use crate::widgets::text_area::plain;
+use crate::widgets::{choice, marked};
 use ironbase_mcp_types::responses::{
     AutoEmbedStatusResponse, EmbedCacheStatsResponse, EmbedTextResponse, JobInfo, JobStatus,
     JobType, ModelInfo, RagCollectionStatsResponse, RagDocumentImportResponse,
@@ -51,6 +52,12 @@ fn render_tabs(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
         RagTab::Models => 3,
         RagTab::Jobs => 4,
     };
+    // The selected tab in brackets: it shows without color too
+    let titles: Vec<String> = titles
+        .into_iter()
+        .enumerate()
+        .map(|(i, title)| choice(title, i == selected))
+        .collect();
 
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::BOTTOM))
@@ -182,8 +189,8 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme:
                 truncate_str(&content_preview, 80).to_string()
             };
 
-            let text = format!("  {:.4}  {}", r.relevance, preview);
-            ListItem::new(text).style(style)
+            let text = format!("{:.4}  {}", r.relevance, preview);
+            ListItem::new(marked(i == state.selected_result, text)).style(style)
         })
         .collect();
 
@@ -382,7 +389,11 @@ fn render_collections_tab(frame: &mut Frame, area: Rect, state: &RagState, theme
                 Style::default().fg(theme.fg)
             };
 
-            ListItem::new(rag_collection_line(c)).style(style)
+            ListItem::new(marked(
+                i == state.selected_collection,
+                rag_collection_line(c),
+            ))
+            .style(style)
         })
         .collect();
 
@@ -509,7 +520,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
                     Style::default().fg(theme.fg)
                 };
 
-                ListItem::new(model_line(m)).style(style)
+                ListItem::new(marked(i == state.selected_model, model_line(m))).style(style)
             })
             .collect();
 
@@ -641,7 +652,7 @@ fn render_jobs_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Them
             };
 
             let text = job_line(j);
-            ListItem::new(text).style(style)
+            ListItem::new(marked(i == state.selected_job, text)).style(style)
         })
         .collect();
 
@@ -696,23 +707,17 @@ pub(crate) fn import_result_text(result: &RagDocumentImportResponse) -> String {
 /// provider (read from the nested `stats` and `config`)
 pub(crate) fn rag_collection_line(c: &RagCollectionStatsResponse) -> String {
     let provider = c.config.as_ref().map(|cfg| cfg.provider.as_str());
-    format!(
-        "  {}",
-        t().rag_collection_row(
-            &c.collection,
-            &c.stats.chunk_count,
-            &c.stats.source_document_count,
-            provider
-        )
+    t().rag_collection_row(
+        &c.collection,
+        &c.stats.chunk_count,
+        &c.stats.source_document_count,
+        provider,
     )
 }
 
 /// A provider of the Models tab: name, model and dimension
 fn model_line(m: &ModelInfo) -> String {
-    format!(
-        "  {}",
-        t().model_row(&m.provider, &m.model, m.dimension, m.available)
-    )
+    t().model_row(&m.provider, &m.model, m.dimension, m.available)
 }
 
 /// The collection's auto-embedding: source → target field and provider, and
@@ -792,7 +797,7 @@ fn job_line(job: &JobInfo) -> String {
         _ => String::new(),
     };
     format!(
-        "  {} | {} | {}{}",
+        "{} | {} | {}{}",
         truncate_str(&job.id, 12),
         status,
         target,

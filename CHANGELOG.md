@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Tuti TUI: the selection shows without color, and `NO_COLOR` (tuti-tui 0.3.495, mcp-server 1.0.683 — version only, for the release tag)
+
+Most lists, the confirmation buttons, the database mode, the vector and RAG tabs and the filter's operators showed
+what is selected only by its color: on a monochrome terminal, for a color-blind user, or with colors off, the
+confirmation dialog did not show whether Cancel or Delete was chosen.
+
+- **A mark on the selected row** (`widgets::selection_mark` / `widgets::marked`): `▶ ` in front of the selected
+  row of every list — documents, API keys, listeners, ACL rules, indexes, search, full-text, vector and RAG
+  results, collections, models, jobs — and the same width of space in front of the others (rows that were
+  indented by two spaces keep their width).
+- **The chosen option in brackets** (`widgets::choice`): the confirmation buttons, the database open/create mode,
+  the vector and RAG tabs and the filter's operators.
+- **`NO_COLOR`** (https://no-color.org): set to any non-empty value, the TUI draws with the terminal's own colors
+  only (`Theme::monochrome`); the marks and brackets carry the selection.
+- Tests: the mark and the brackets, `NO_COLOR` without colors in any theme, and a rendered screen without colors
+  that shows the selected document row and the preselected and the switched confirmation button.
+- With this the plan's phase 3 (widgets, language layer, key map, theme) is complete.
+
 ### Fixed — Tuti TUI: every text color reads at WCAG AA contrast in every theme (tuti-tui 0.3.494, mcp-server 1.0.682 — version only, for the release tag)
 
 Hints, key help, disabled items and dimmed labels (`muted`), borders and section labels (`secondary`) and, in the

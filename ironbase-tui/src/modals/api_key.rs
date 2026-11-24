@@ -3,7 +3,7 @@
 use super::render_modal_frame;
 use crate::i18n::t;
 use crate::theme::Theme;
-use crate::widgets::{Input, InputOutcome, TextInput};
+use crate::widgets::{marked, Input, InputOutcome, TextInput};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -335,7 +335,7 @@ fn render_keys_list(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
                 Style::default().fg(theme.fg)
             };
 
-            ListItem::new(line).style(style)
+            ListItem::new(marked(is_selected, line)).style(style)
         })
         .collect();
 

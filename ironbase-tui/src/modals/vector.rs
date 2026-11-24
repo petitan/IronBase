@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::i18n::t;
 use crate::state::vector::{DistanceMetric, VectorSearchState, VectorTab};
 use crate::theme::Theme;
+use crate::widgets::{choice, marked};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 
@@ -44,6 +45,12 @@ fn render_tabs(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: 
         VectorTab::CreateIndex => 1,
         VectorTab::ListIndexes => 2,
     };
+    // The selected tab in brackets: it shows without color too
+    let titles: Vec<String> = titles
+        .into_iter()
+        .enumerate()
+        .map(|(i, title)| choice(title, i == selected))
+        .collect();
 
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::BOTTOM))
@@ -189,8 +196,8 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
             let score = r
                 .score
                 .map_or_else(|| format!("{:>6}", "n/a"), |s| format!("{s:.4}"));
-            let text = format!("  {}  {}", score, doc_preview);
-            ListItem::new(text).style(style)
+            let text = format!("{}  {}", score, doc_preview);
+            ListItem::new(marked(i == state.selected_result, text)).style(style)
         })
         .collect();
 
@@ -331,17 +338,14 @@ fn render_list_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, the
             };
 
             // Format: name | field | dimension | metric | count
-            let text = format!(
-                "  {}",
-                t().vector_index_row(
-                    &idx.name,
-                    &idx.field,
-                    idx.dimension,
-                    &idx.metric.to_string(),
-                    idx.vector_count
-                )
+            let text = t().vector_index_row(
+                &idx.name,
+                &idx.field,
+                idx.dimension,
+                &idx.metric.to_string(),
+                idx.vector_count,
             );
-            ListItem::new(text).style(style)
+            ListItem::new(marked(i == state.selected_index, text)).style(style)
         })
         .collect();
 

@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::app::{FilterFocus, FilterOperator, FilterState};
 use crate::i18n::t;
 use crate::theme::Theme;
+use crate::widgets::choice;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -200,7 +201,7 @@ fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
                 Style::default().fg(theme.muted)
             };
             vec![
-                Span::styled(format!(" {} ", op.label()), style),
+                Span::styled(choice(op.label(), is_selected), style),
                 Span::raw(" "),
             ]
         })

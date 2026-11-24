@@ -181,7 +181,7 @@ pub struct App {
 impl App {
     pub fn new(config: Config) -> Self {
         let theme_name = config.theme;
-        let theme = Theme::from_name(theme_name);
+        let theme = Theme::for_terminal(theme_name);
 
         Self {
             should_quit: false,
@@ -1021,7 +1021,7 @@ impl App {
     /// Cycle to next theme
     pub fn next_theme(&mut self) {
         self.theme_name = self.theme_name.next();
-        self.theme = Theme::from_name(self.theme_name);
+        self.theme = Theme::for_terminal(self.theme_name);
         self.set_status(t().theme_changed(self.theme_name.name()));
     }
 

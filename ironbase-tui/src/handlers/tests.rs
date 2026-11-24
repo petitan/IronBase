@@ -228,6 +228,35 @@ async fn test_failed_document_refresh_after_switch_leaves_empty_list_and_error()
 
 // === Delete document ===
 
+/// Without colors (`NO_COLOR`) the selection still shows: the selected
+/// document row has its mark, the preselected button its brackets
+#[tokio::test]
+async fn test_selection_shows_without_colors() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.theme = crate::theme::Theme::monochrome();
+    press(&mut app, KeyCode::Tab).await;
+
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("▶ "), "{screen}");
+
+    press(&mut app, KeyCode::Char('d')).await;
+    let screen = render_to_string(&app, 120, 36);
+    assert!(
+        screen.contains(&format!("[{}]", t().key_cancel())),
+        "{screen}"
+    );
+    press(&mut app, KeyCode::Left).await;
+    press(&mut app, KeyCode::Right).await;
+    let selected = app.confirm.selected;
+    let screen = render_to_string(&app, 120, 36);
+    let bracketed = match selected {
+        ConfirmOption::Cancel => format!("[{}]", t().key_cancel()),
+        ConfirmOption::Confirm => format!("[{}]", t().cmd_delete()),
+    };
+    assert!(screen.contains(&bracketed), "{screen}");
+}
+
 #[tokio::test]
 async fn test_delete_document_needs_explicit_yes() {
     let server = two_collections();
