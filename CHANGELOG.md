@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the ACL modal in both languages (tuti-tui 0.3.491, mcp-server 1.0.679 — version only, for the release tag)
+
+The ACL modal was English only. Its titles, column headers, key hints, labels, confirmations and validation
+messages take their texts from the language layer (`i18n::Messages`) now, and so does the message that refuses to
+edit an ACL with rules the editor cannot represent. The principal types (`interface`, `apikey`, `ip`, `iprange`) and
+the permission names in a rule (`read`, `write`, `admin`) are the server's terms and stay as they are.
+
+- English counts use the singular for one („1 rule”, „1 rule will be applied”).
+- Tests: every new text differs between the two languages, with exact English texts for the refusal and the save
+  confirmation; the handler and ACL tests expect the Hungarian refusal.
+- With this every modal but the actions menu and the help speaks both languages; those two are generated from the
+  key map next, then the key handlers' messages follow.
+
 ### Changed — Tuti TUI: the script and RAG modals in both languages (tuti-tui 0.3.490, mcp-server 1.0.678 — version only, for the release tag)
 
 The IronRhai script modal was Hungarian without accents („Uj script”, „Utolso futtas”, „Kod elonezet”), the RAG &

@@ -1392,4 +1392,86 @@ impl Messages for Hu {
     fn script_name_line(&self, name: &str) -> String {
         format!("Script: „{name}”")
     }
+
+    fn acl_editor_title(&self, collection: &str) -> String {
+        format!("ACL-szerkesztő: {collection}")
+    }
+    fn acl_rules_title(&self) -> &'static str {
+        "ACL-szabályok"
+    }
+    fn key_add(&self) -> &'static str {
+        "Hozzáadás"
+    }
+    fn no_acl_rules(&self) -> &'static str {
+        "Nincs ACL-szabály. Egy kollekción az [a] billentyűvel adhatsz hozzá."
+    }
+    fn label_collection(&self) -> &'static str {
+        "Kollekció"
+    }
+    fn label_rules(&self) -> &'static str {
+        "Szabályok"
+    }
+    fn label_type(&self) -> &'static str {
+        "Típus"
+    }
+    fn acl_builtin(&self) -> &'static str {
+        "beépített"
+    }
+    fn acl_custom(&self) -> &'static str {
+        "egyéni"
+    }
+    fn rule_count(&self, count: usize) -> String {
+        format!("{count} szabály")
+    }
+    fn no_rules_defined(&self) -> &'static str {
+        "Nincs megadott szabály"
+    }
+    fn label_principal(&self) -> &'static str {
+        "Jogosult"
+    }
+    fn label_permissions(&self) -> &'static str {
+        "Jogosultságok"
+    }
+    fn rules_title(&self, count: usize) -> String {
+        format!(" Szabályok ({count}) ")
+    }
+    fn no_rules_yet(&self) -> &'static str {
+        "Még nincs szabály. Új: [n]."
+    }
+    fn add_rule_title(&self) -> &'static str {
+        "Szabály hozzáadása"
+    }
+    fn change_hint(&self) -> &'static str {
+        "(←/→: váltás)"
+    }
+    fn perm_read(&self) -> &'static str {
+        "Olvasás"
+    }
+    fn perm_write(&self) -> &'static str {
+        "Írás"
+    }
+    fn perm_admin(&self) -> &'static str {
+        "Adminisztráció"
+    }
+    fn confirm_delete_acl(&self, collection: &str) -> String {
+        format!("Biztosan TÖRLÖD a(z) „{collection}” kollekció ACL-jét?\nA kollekció visszakapja az alapértelmezett jogosultságokat.")
+    }
+    fn confirm_save_acl(&self, collection: &str, rules: usize) -> String {
+        format!("Elmented a(z) „{collection}” kollekció ACL-jét?\n\n{rules} szabály lép életbe.")
+    }
+    fn acl_read_only(&self) -> &'static str {
+        "Csak olvasható: az ACL szerkesztéséhez localhost-kapcsolat kell"
+    }
+    fn acl_uneditable(&self, collection: &str, reasons: &str) -> String {
+        format!("A(z) „{collection}” ACL-je olyan szabályt tartalmaz, amelyet ez a szerkesztő még nem tud szerkeszteni: {reasons}")
+    }
+    fn principal_value_empty(&self) -> &'static str {
+        "A jogosult értéke nem lehet üres"
+    }
+    fn select_a_permission(&self) -> &'static str {
+        "Válassz legalább egy jogosultságot"
+    }
+    fn add_a_rule(&self) -> &'static str {
+        "Adj hozzá legalább egy szabályt"
+    }
 }
