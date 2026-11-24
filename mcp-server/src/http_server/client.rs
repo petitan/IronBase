@@ -27,6 +27,20 @@ pub(crate) fn tracked_request_id(client: &str, request_id: &str) -> String {
     format!("{client}\u{1f}{request_id}")
 }
 
+/// The request id a `notifications/cancelled` names, as tracked: MCP's
+/// `RequestId` is a string or a number (a number is tracked by its decimal
+/// form, like the request's own id); `request_id` is accepted too
+pub(crate) fn cancelled_request_id(params: &serde_json::Value) -> Option<String> {
+    let id = params
+        .get("requestId")
+        .or_else(|| params.get("request_id"))?;
+    match id {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// Check if a client has been initialized (MCP lifecycle)
 pub(crate) fn is_client_initialized(
     initialized_clients: &Mutex<HashSet<String>>,
@@ -61,6 +75,27 @@ pub(crate) fn mark_client_initialized(
 
 #[cfg(test)]
 mod tests {
+    /// A client that numbers its requests cancels them by number (the TUI
+    /// does): only a string id used to be found
+    #[test]
+    fn test_cancelled_request_id_takes_strings_and_numbers() {
+        use serde_json::json;
+        assert_eq!(
+            cancelled_request_id(&json!({"requestId": 42})).as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({"requestId": "req-1"})).as_deref(),
+            Some("req-1")
+        );
+        assert_eq!(
+            cancelled_request_id(&json!({"request_id": 7})).as_deref(),
+            Some("7")
+        );
+        assert_eq!(cancelled_request_id(&json!({"requestId": null})), None);
+        assert_eq!(cancelled_request_id(&json!({})), None);
+    }
+
     use super::*;
 
     /// Two clients' requests with the same JSON-RPC id are tracked apart,

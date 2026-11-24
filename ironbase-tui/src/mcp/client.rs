@@ -2,7 +2,7 @@
 
 use crate::logging::{redact_arguments, sanitize_for_log};
 use crate::mcp::error::{McpError, McpResult};
-use crate::mcp::protocol::{JsonRpcRequest, ToolCallResult};
+use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallResult};
 use crate::mcp::transport::{HttpTransport, StdioTransport, Transport};
 use ironbase_mcp_types::Tool;
 use serde_json::Value;
@@ -117,7 +117,7 @@ impl McpClient {
         }
 
         let request = JsonRpcRequest::tool_call(name, arguments.clone());
-        let mut response = self.transport.send(&request).await?;
+        let mut response = self.send_cancellable(&request).await?;
 
         // The server restarted and forgot this client: initialize again and
         // repeat the request once
@@ -132,7 +132,7 @@ impl McpClient {
             );
             self.handshake().await?;
             let request = JsonRpcRequest::tool_call(name, arguments);
-            response = self.transport.send(&request).await?;
+            response = self.send_cancellable(&request).await?;
         }
 
         // Check for RPC error
@@ -158,6 +158,18 @@ impl McpClient {
         let value: Value = serde_json::from_str(text)?;
 
         Ok(value)
+    }
+
+    /// Send a request; if the caller stops waiting for it (a cancelled
+    /// background load), the server is told to stop working on it
+    async fn send_cancellable(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
+        let guard = CancelOnDrop {
+            transport: Some(self.transport.clone()),
+            id: request.id,
+        };
+        let response = self.transport.send(request).await;
+        guard.disarm();
+        response
     }
 
     /// Call the tool `T` with typed arguments. The result must parse as
@@ -251,10 +263,42 @@ impl Drop for McpClient {
     }
 }
 
+/// Sends `notifications/cancelled` for a request whose answer nobody waits
+/// for any more (its future was dropped before the answer came)
+struct CancelOnDrop {
+    transport: Option<Arc<dyn Transport>>,
+    id: u64,
+}
+
+impl CancelOnDrop {
+    /// The answer came: nothing to cancel
+    fn disarm(mut self) {
+        self.transport = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let Some(transport) = self.transport.take() else {
+            return;
+        };
+        let id = self.id;
+        // Without a runtime (shutdown) there is no one to send it
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let params =
+                    serde_json::json!({"requestId": id, "reason": "cancelled by the user"});
+                if let Err(e) = transport.notify("notifications/cancelled", params).await {
+                    tracing::debug!(error = %e, request = id, "could not send the cancellation");
+                }
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::protocol::JsonRpcResponse;
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -344,5 +388,74 @@ mod tests {
             error
         );
         assert_eq!(*server.methods.lock().unwrap(), vec!["tools/call"]);
+    }
+
+    /// A server that answers a tool call only when told to, and records the
+    /// notifications it gets
+    struct SlowServer {
+        answer: tokio::sync::Notify,
+        notifications: Mutex<Vec<(String, Value)>>,
+    }
+
+    #[async_trait]
+    impl Transport for SlowServer {
+        async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
+            self.answer.notified().await;
+            let text = serde_json::json!({"ok": true}).to_string();
+            Ok(serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "result": {"content": [{"type": "text", "text": text}]}
+            }))?)
+        }
+
+        async fn notify(&self, method: &str, params: Value) -> McpResult<()> {
+            self.notifications
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params));
+            Ok(())
+        }
+
+        async fn close(&self) -> McpResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A call nobody waits for any more tells the server to stop it (the
+    /// server could not tell before, and kept working on a cancelled load);
+    /// an answered call sends nothing
+    #[tokio::test]
+    async fn test_a_dropped_call_is_cancelled_on_the_server() {
+        let server = Arc::new(SlowServer {
+            answer: tokio::sync::Notify::new(),
+            notifications: Mutex::new(Vec::new()),
+        });
+        let client = McpClient::with_transport(server.clone());
+
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            client.call_tool("find", serde_json::json!({})),
+        )
+        .await;
+        assert!(pending.is_err(), "the server did not answer");
+        // The notification is sent by a task of its own
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let notifications = server.notifications.lock().unwrap().clone();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].0, "notifications/cancelled");
+        assert!(notifications[0].1["requestId"].is_u64());
+
+        server.answer.notify_one();
+        client
+            .call_tool("find", serde_json::json!({}))
+            .await
+            .unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(server.notifications.lock().unwrap().len(), 1);
     }
 }

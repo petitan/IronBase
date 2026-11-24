@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a cancelled request stops on the server, and a cancelled stdio request no longer garbles the next (tuti-tui 0.3.505, mcp-server 1.0.693)
+
+- **MCP server: `notifications/cancelled` with a numeric `requestId`.** MCP's `RequestId` is a string or a number,
+  but the HTTP server read it only as a string, so a client that numbers its requests (the TUI does) could not
+  cancel any of them. A number is now matched by its decimal form, like the request's own id
+  (`http_server::client::cancelled_request_id`; `request_id` is still accepted).
+- **Tuti TUI: a dropped call tells the server.** When the TUI stops waiting for an answer (Esc on a running load, a
+  newer load replacing it), it sends `notifications/cancelled` for that request (HTTP), so the server stops working
+  on it instead of finishing a result nobody reads.
+- **Tuti TUI: a cancelled stdio request no longer garbles the next one.** A stdio request and the reading of its
+  answer are one exchange on the server's pipes; a caller that stopped waiting while a large request was being
+  written left half a line behind, and the next request was appended to it: the server misread it and the TUI
+  waited for an answer that never came (30 s timeout). The exchange now runs as a task of its own and is finished
+  (its answer read and dropped) even when nobody waits for it.
+- Tests: numeric and string `requestId`; a dropped call sends one `notifications/cancelled`, an answered one none;
+  a request dropped while being written does not keep the next one from its answer (both TUI tests fail without
+  the fix).
+
 ### Changed — Tuti TUI: the document list loads in the background (phase 5, first step) (tuti-tui 0.3.504, mcp-server 1.0.692 — version only, for the release tag)
 
 Every network call blocked the screen until it returned: paging through a large or slow collection froze the TUI

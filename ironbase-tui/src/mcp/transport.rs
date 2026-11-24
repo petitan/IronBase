@@ -25,6 +25,12 @@ pub trait Transport: Send + Sync {
     /// Send a request and receive a response
     async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse>;
 
+    /// Send a notification (no answer). Only HTTP sends one; stdio serves
+    /// one request at a time, so there is nothing a notification could stop
+    async fn notify(&self, _method: &str, _params: serde_json::Value) -> McpResult<()> {
+        Ok(())
+    }
+
     /// Close the transport connection
     async fn close(&self) -> McpResult<()>;
 
@@ -110,6 +116,23 @@ impl Transport for HttpTransport {
             // A non-2xx answer without a JSON-RPC error (a proxy, a crash page)
             (false, _) => Err(McpError::connection(format!("HTTP error: {}", status))),
         }
+    }
+
+    async fn notify(&self, method: &str, params: serde_json::Value) -> McpResult<()> {
+        let notification =
+            serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params});
+        let mut req = self.client.post(self.mcp_url()).json(&notification);
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        let response = req.send().await?;
+        if !response.status().is_success() {
+            return Err(McpError::connection(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
+        }
+        Ok(())
     }
 
     async fn close(&self) -> McpResult<()> {
@@ -227,25 +250,34 @@ impl Transport for StdioTransport {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
 
-        let mut io = self.io.lock().await;
-        let StdioPipes { stdin, stdout } = &mut *io;
-        let Some(stdin) = stdin.as_mut() else {
-            return Err(McpError::connection("Connection is closed"));
-        };
+        // The exchange runs as a task of its own: a caller that stops waiting
+        // (a cancelled load) must not cut a request line in half or leave its
+        // answer half read - the next request would be garbled or misread
+        let io = self.io.clone();
+        let id = request.id;
+        tokio::spawn(async move {
+            let mut io = io.lock().await;
+            let StdioPipes { stdin, stdout } = &mut *io;
+            let Some(stdin) = stdin.as_mut() else {
+                return Err(McpError::connection("Connection is closed"));
+            };
 
-        // Send request with timeout
-        tokio::time::timeout(STDIO_TIMEOUT, async {
-            stdin.write_all(json.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok::<_, std::io::Error>(())
+            // Send request with timeout
+            tokio::time::timeout(STDIO_TIMEOUT, async {
+                stdin.write_all(json.as_bytes()).await?;
+                stdin.flush().await?;
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|_| McpError::connection("Timeout sending request to server"))??;
+
+            // Read this request's response with timeout
+            tokio::time::timeout(STDIO_TIMEOUT, read_response(stdout, id))
+                .await
+                .map_err(|_| McpError::connection("Timeout waiting for server response"))?
         })
         .await
-        .map_err(|_| McpError::connection("Timeout sending request to server"))??;
-
-        // Read this request's response with timeout
-        tokio::time::timeout(STDIO_TIMEOUT, read_response(stdout, request.id))
-            .await
-            .map_err(|_| McpError::connection("Timeout waiting for server response"))?
+        .map_err(|e| McpError::connection(format!("Request to the server failed: {e}")))?
     }
 
     async fn close(&self) -> McpResult<()> {
@@ -397,6 +429,36 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         assert_eq!(content.trim(), "done");
         assert!(transport.child.lock().await.is_none());
+    }
+
+    /// A caller that stops waiting in the middle of a request (a cancelled
+    /// load) does not leave half a request line behind: the next request
+    /// gets its own answer. The request is larger than a pipe's buffer and
+    /// the server reads it late, so the caller stops while it is being
+    /// written; the server answers each line with the line's first id.
+    #[tokio::test]
+    async fn test_a_dropped_request_does_not_garble_the_next() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            r#"sleep 0.5; while read -r line; do id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([0-9]*\),.*/\1/p'); printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"; done"#,
+        );
+        let transport = StdioTransport::spawn(command).unwrap();
+
+        let big =
+            JsonRpcRequest::tool_call("insert", serde_json::json!({"blob": "a".repeat(300_000)}));
+        let dropped = tokio::time::timeout(Duration::from_millis(100), transport.send(&big)).await;
+        assert!(dropped.is_err(), "the server reads it late");
+
+        let next = JsonRpcRequest::tools_list();
+        let response = tokio::time::timeout(Duration::from_secs(10), transport.send(&next))
+            .await
+            .expect("the next request is answered")
+            .unwrap();
+        assert_eq!(response.id, Some(next.id));
+        transport
+            .close_with_timeout(Duration::from_millis(500))
+            .await
+            .unwrap();
     }
 
     /// A server that does not exit on EOF is killed after the timeout

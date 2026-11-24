@@ -497,15 +497,11 @@ async fn run_http_server_internal(
         // Handle notifications/cancelled immediately (before spawn_blocking)
         // This ensures cancellation is processed without waiting for tool execution
         if request.method == "notifications/cancelled" && request.is_notification() {
-            let request_id = request
-                .params
-                .get("requestId")
-                .and_then(|v| v.as_str())
-                .or_else(|| request.params.get("request_id").and_then(|v| v.as_str()));
+            let request_id = client::cancelled_request_id(&request.params);
             let reason = request.params.get("reason").and_then(|v| v.as_str());
 
             if let Some(id) = request_id {
-                state.request_tracker.cancel(&tracked(id), reason);
+                state.request_tracker.cancel(&tracked(&id), reason);
             }
             // Notifications don't get responses
             return StatusCode::NO_CONTENT.into_response();
