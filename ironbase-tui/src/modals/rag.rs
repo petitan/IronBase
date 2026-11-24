@@ -1,6 +1,7 @@
 //! RAG & Embedding modal - search, import, collections, models, jobs
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::state::rag::{RagState, RagTab};
 use crate::theme::Theme;
 use crate::widgets::text_area::plain;
@@ -13,7 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
 
 /// Render the RAG & Embedding modal
 pub fn render(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "RAG & Embedding", theme, 85, 90);
+    let inner = render_modal_frame(frame, area, t().rag_title(), theme, 85, 90);
 
     let chunks = Layout::vertical([
         Constraint::Length(3), // Tabs
@@ -36,7 +37,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
-    let titles = vec!["Search", "Import", "Collections", "Models", "Jobs"];
+    let titles = vec![
+        t().key_search(),
+        t().tab_import(),
+        t().label_collections(),
+        t().tab_models(),
+        t().tab_jobs(),
+    ];
     let selected = match state.active_tab {
         RagTab::Search => 0,
         RagTab::Import => 1,
@@ -72,13 +79,13 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Tabs  "),
+        Span::raw(format!(" {}  ", t().key_tabs())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Search  "),
+        Span::raw(format!(" {}  ", t().key_search())),
         Span::styled("[↑/↓]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -90,7 +97,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         Style::default().fg(theme.muted)
     };
     let query_block = Block::default()
-        .title(" Query ")
+        .title(format!(" {} ", t().label_query()))
         .borders(Borders::ALL)
         .border_style(query_style);
     let inner = query_block.inner(chunks[1]);
@@ -99,7 +106,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         frame,
         inner,
         Style::default().fg(theme.fg),
-        Span::styled("Enter search query...", Style::default().fg(theme.muted)),
+        Span::styled(t().type_search_text(), Style::default().fg(theme.muted)),
         state.search_focus == 0,
     );
 
@@ -112,7 +119,7 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         Style::default().fg(theme.muted)
     };
     let block = Block::default()
-        .title(" Limit ")
+        .title(format!(" {} ", t().label_limit()))
         .borders(Borders::ALL)
         .border_style(style);
     let text = Paragraph::new(state.search_limit.to_string())
@@ -125,13 +132,11 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 }
 
 fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
-    let title = if state.is_loading {
-        " Results (loading...) ".to_string()
-    } else if state.search_incomplete() {
-        format!(" Results ({}, trimmed) ", state.search_results.len())
-    } else {
-        format!(" Results ({}) ", state.search_results.len())
-    };
+    let title = t().rag_results_title(
+        state.search_results.len(),
+        state.is_loading,
+        state.search_incomplete(),
+    );
 
     let block = Block::default()
         .title(title)
@@ -143,9 +148,9 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme:
 
     if state.search_results.is_empty() {
         let msg = if state.is_loading {
-            "Searching..."
+            t().searching()
         } else {
-            "No results. Enter query and press Enter."
+            t().no_rag_results()
         };
         let empty = Paragraph::new(msg).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
@@ -201,13 +206,13 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Fields  "),
+        Span::raw(format!(" {}  ", t().key_fields())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Import  "),
+        Span::raw(format!(" {}  ", t().key_import())),
         Span::styled("[Space]", Style::default().fg(theme.accent)),
-        Span::raw(" Toggle mode  "),
+        Span::raw(format!(" {}  ", t().key_switch_mode())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -219,7 +224,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         Style::default().fg(theme.muted)
     };
     let title_block = Block::default()
-        .title(" Title (optional) ")
+        .title(format!(" {} ", t().label_title_optional()))
         .borders(Borders::ALL)
         .border_style(title_style);
     let inner = title_block.inner(chunks[1]);
@@ -228,7 +233,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         frame,
         inner,
         Style::default().fg(theme.fg),
-        Span::styled("Document title...", Style::default().fg(theme.muted)),
+        Span::styled(t().title_placeholder(), Style::default().fg(theme.muted)),
         state.import_form_field == 1,
     );
 
@@ -240,7 +245,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     };
     let content = state.import_content.text();
     let content_block = Block::default()
-        .title(format!(" Content ({} chars) ", content.chars().count()))
+        .title(t().content_title(content.chars().count()))
         .borders(Borders::ALL)
         .border_style(content_style);
     let inner = content_block.inner(chunks[2]);
@@ -255,7 +260,7 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     );
     if state.import_content.is_empty() {
         frame.render_widget(
-            Paragraph::new("Paste or type content here...").style(Style::default().fg(theme.muted)),
+            Paragraph::new(t().content_placeholder()).style(Style::default().fg(theme.muted)),
             inner,
         );
     }
@@ -269,9 +274,13 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     .split(chunks[3]);
 
     let opt_items = [
-        (2, "Chunk Size", state.import_chunk_size.to_string()),
-        (3, "Overlap", state.import_overlap.to_string()),
-        (4, "Mode", state.import_mode.clone()),
+        (
+            2,
+            t().label_chunk_size(),
+            state.import_chunk_size.to_string(),
+        ),
+        (3, t().label_overlap(), state.import_overlap.to_string()),
+        (4, t().label_mode(), state.import_mode.clone()),
     ];
 
     for (field_idx, label, value) in &opt_items {
@@ -298,13 +307,13 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
             .style(Style::default().fg(theme.success))
             .block(
                 Block::default()
-                    .title(" Result ")
+                    .title(format!(" {} ", t().label_result()))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.success)),
             );
         frame.render_widget(result_text, chunks[4]);
     } else {
-        let hint = Paragraph::new(format!("Collection: {}", state.collection))
+        let hint = Paragraph::new(t().collection_label(&state.collection))
             .style(Style::default().fg(theme.muted))
             .block(
                 Block::default()
@@ -332,21 +341,21 @@ fn render_collections_tab(frame: &mut Frame, area: Rect, state: &RagState, theme
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[c]", Style::default().fg(theme.accent)),
-        Span::raw(" Create  "),
+        Span::raw(format!(" {}  ", t().key_create())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Stats  "),
+        Span::raw(format!(" {}  ", t().key_stats())),
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[r]", Style::default().fg(theme.accent)),
-        Span::raw(" Refresh  "),
+        Span::raw(format!(" {}  ", t().cmd_refresh())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Collection list
-    let title = format!(" RAG Collections ({}) ", state.rag_collections.len());
+    let title = t().rag_collections_title(state.rag_collections.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -356,8 +365,8 @@ fn render_collections_tab(frame: &mut Frame, area: Rect, state: &RagState, theme
     frame.render_widget(block, chunks[1]);
 
     if state.rag_collections.is_empty() {
-        let empty = Paragraph::new("No RAG collections. Press [c] to create one.")
-            .style(Style::default().fg(theme.muted));
+        let empty =
+            Paragraph::new(t().no_rag_collections()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -395,23 +404,23 @@ fn render_create_collection_form(frame: &mut Frame, area: Rect, state: &RagState
 
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Fields  "),
+        Span::raw(format!(" {}  ", t().key_fields())),
         Span::styled("[Space]", Style::default().fg(theme.accent)),
-        Span::raw(" Toggle  "),
+        Span::raw(format!(" {}  ", t().key_toggle())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Create  "),
+        Span::raw(format!(" {}  ", t().key_create())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel"),
+        Span::raw(format!(" {}", t().key_cancel())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     let labels = [
-        "Collection Name",
-        "Embedding Field",
-        "Text Field",
-        "Provider [Space]",
-        "Language [Space]",
+        t().label_collection_name(),
+        t().label_embedding_field(),
+        t().label_text_field(),
+        t().label_provider_space(),
+        t().label_language_space(),
     ];
     for (field_idx, label) in labels.into_iter().enumerate() {
         let focused = state.create_form_field == field_idx;
@@ -462,21 +471,21 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[e]", Style::default().fg(theme.accent)),
-        Span::raw(" Enable auto-embed  "),
+        Span::raw(format!(" {}  ", t().key_enable_auto_embed())),
         Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::raw(" Disable  "),
+        Span::raw(format!(" {}  ", t().key_disable())),
         Span::styled("[c]", Style::default().fg(theme.accent)),
-        Span::raw(" Cache stats  "),
+        Span::raw(format!(" {}  ", t().key_cache_stats())),
         Span::styled("[x]", Style::default().fg(theme.accent)),
-        Span::raw(" Clear cache  "),
+        Span::raw(format!(" {}  ", t().key_clear_cache())),
         Span::styled("[t]", Style::default().fg(theme.accent)),
-        Span::raw(" Test embed"),
+        Span::raw(format!(" {}", t().key_test_embed())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Models list
-    let title = format!(" Embedding Models ({}) ", state.models.len());
+    let title = t().embedding_models_title(state.models.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -486,7 +495,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     frame.render_widget(block, chunks[1]);
 
     if state.models.is_empty() {
-        let empty = Paragraph::new("Loading models...").style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().loading_models()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
     } else {
         let items: Vec<ListItem> = state
@@ -514,7 +523,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     // Auto-embed status
     let ae_block = Block::default()
-        .title(" Auto-Embed ")
+        .title(format!(" {} ", t().auto_embed_title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let ae_text = auto_embed_text(state.auto_embed_config.as_ref());
@@ -525,7 +534,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     // Cache stats
     let cache_block = Block::default()
-        .title(" Cache ")
+        .title(format!(" {} ", t().cache_title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let cache_text = cache_text(state.cache_stats.as_ref());
@@ -545,15 +554,15 @@ fn render_embed_test(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Embed  "),
+        Span::raw(format!(" {}  ", t().key_embed())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Back"),
+        Span::raw(format!(" {}", t().key_back())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     let input_block = Block::default()
-        .title(" Text to embed ")
+        .title(format!(" {} ", t().text_to_embed_title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
     let inner = input_block.inner(chunks[1]);
@@ -562,17 +571,17 @@ fn render_embed_test(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         frame,
         inner,
         Style::default().fg(theme.fg),
-        Span::styled("Type text here...", Style::default().fg(theme.muted)),
+        Span::styled(t().type_text_here(), Style::default().fg(theme.muted)),
         true,
     );
 
     let result_block = Block::default()
-        .title(" Result ")
+        .title(format!(" {} ", t().label_result()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let result_text = match state.embed_test_result {
         Some(ref result) => embed_result_text(result),
-        None => "No result yet".to_string(),
+        None => t().no_result_yet().to_string(),
     };
     let result_para = Paragraph::new(result_text)
         .block(result_block)
@@ -593,19 +602,19 @@ fn render_jobs_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Them
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[x]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel job  "),
+        Span::raw(format!(" {}  ", t().key_cancel_job())),
         Span::styled("[r]", Style::default().fg(theme.accent)),
-        Span::raw(" Refresh  "),
+        Span::raw(format!(" {}  ", t().cmd_refresh())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Job list
-    let title = format!(" Jobs ({}) ", state.jobs.len());
+    let title = t().jobs_title(state.jobs.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -615,8 +624,7 @@ fn render_jobs_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Them
     frame.render_widget(block, chunks[1]);
 
     if state.jobs.is_empty() {
-        let empty = Paragraph::new("No jobs. Press [r] to refresh.")
-            .style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_jobs()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -646,7 +654,10 @@ fn render_jobs_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Them
 fn render_status(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Error: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -656,7 +667,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme)
         )])
     } else {
         Line::from(vec![Span::styled(
-            format!("Collection: {}", state.collection),
+            t().collection_label(&state.collection),
             Style::default().fg(theme.muted),
         )])
     };
@@ -670,20 +681,13 @@ fn render_status(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme)
 /// The outcome of a document import: chunks stored, or why none were
 pub(crate) fn import_result_text(result: &RagDocumentImportResponse) -> String {
     match result {
-        RagDocumentImportResponse::Imported(r) => {
-            let mut text = format!(
-                "Imported '{}': {} chunks created",
-                r.doc_id, r.chunks_created
-            );
-            if r.chunks_replaced > 0 {
-                text.push_str(&format!(", {} replaced", r.chunks_replaced));
-            }
-            if r.language_ignored {
-                text.push_str(" (language ignored: the collection keeps its own)");
-            }
-            text
-        }
-        RagDocumentImportResponse::Skipped(r) => format!("'{}': {}", r.doc_id, r.message),
+        RagDocumentImportResponse::Imported(r) => t().import_result(
+            &r.doc_id,
+            r.chunks_created,
+            r.chunks_replaced,
+            r.language_ignored,
+        ),
+        RagDocumentImportResponse::Skipped(r) => format!("„{}”: {}", r.doc_id, r.message),
         RagDocumentImportResponse::Empty(r) => r.message.clone(),
     }
 }
@@ -691,22 +695,23 @@ pub(crate) fn import_result_text(result: &RagDocumentImportResponse) -> String {
 /// A RAG collection of the Collections tab: chunks, source documents and
 /// provider (read from the nested `stats` and `config`)
 pub(crate) fn rag_collection_line(c: &RagCollectionStatsResponse) -> String {
-    let provider = c
-        .config
-        .as_ref()
-        .map_or("no RAG config", |cfg| &cfg.provider);
+    let provider = c.config.as_ref().map(|cfg| cfg.provider.as_str());
     format!(
-        "  {} | {} chunks | {} docs | {}",
-        c.collection, c.stats.chunk_count, c.stats.source_document_count, provider
+        "  {}",
+        t().rag_collection_row(
+            &c.collection,
+            &c.stats.chunk_count,
+            &c.stats.source_document_count,
+            provider
+        )
     )
 }
 
 /// A provider of the Models tab: name, model and dimension
 fn model_line(m: &ModelInfo) -> String {
-    let status = if m.available { "OK" } else { "N/A" };
     format!(
-        "  {} | {} | dim:{} | {}",
-        m.provider, m.model, m.dimension, status
+        "  {}",
+        t().model_row(&m.provider, &m.model, m.dimension, m.available)
     )
 }
 
@@ -714,45 +719,38 @@ fn model_line(m: &ModelInfo) -> String {
 /// what still needs attention (a pending re-embed, a removed provider)
 fn auto_embed_text(status: Option<&AutoEmbedStatusResponse>) -> String {
     match status {
-        None => "Not loaded".to_string(),
-        Some(AutoEmbedStatusResponse::NotConfigured { .. }) => "Disabled".to_string(),
+        None => t().not_loaded().to_string(),
+        Some(AutoEmbedStatusResponse::NotConfigured { .. }) => t().auto_embed_off().to_string(),
         Some(AutoEmbedStatusResponse::Configured {
             enabled,
             config,
             reembed_pending,
             requires_reconfiguration,
             ..
-        }) => {
-            let mut text = format!(
-                "{}: {} -> {} ({})",
-                if *enabled {
-                    "Enabled"
-                } else {
-                    "Configured, off"
-                },
-                config.source_field,
-                config.target_field,
-                config.provider
-            );
-            if *reembed_pending {
-                text.push_str(" | re-embed pending");
-            }
-            if requires_reconfiguration.unwrap_or(false) {
-                text.push_str(" | provider removed: enable again");
-            }
-            text
-        }
+        }) => t().auto_embed_status(
+            *enabled,
+            &config.source_field,
+            &config.target_field,
+            &config.provider,
+            *reembed_pending,
+            requires_reconfiguration.unwrap_or(false),
+        ),
     }
 }
 
 /// The embedding cache: entries and hit rate (already a percentage)
 fn cache_text(stats: Option<&EmbedCacheStatsResponse>) -> String {
     match stats {
-        None => "Press [c] to load".to_string(),
-        Some(EmbedCacheStatsResponse::Disabled { .. }) => "Disabled on the server".to_string(),
-        Some(EmbedCacheStatsResponse::Enabled { stats, .. }) => format!(
-            "{}/{} entries | {:.1}% hit rate ({} hits, {} misses)",
-            stats.entries, stats.max_entries, stats.hit_rate, stats.hits, stats.misses
+        None => t().cache_not_loaded().to_string(),
+        Some(EmbedCacheStatsResponse::Disabled { .. }) => {
+            t().cache_disabled_on_server().to_string()
+        }
+        Some(EmbedCacheStatsResponse::Enabled { stats, .. }) => t().cache_stats(
+            stats.entries,
+            stats.max_entries,
+            stats.hit_rate,
+            stats.hits,
+            stats.misses,
         ),
     }
 }
@@ -766,31 +764,27 @@ fn embed_result_text(result: &EmbedTextResponse) -> String {
         .map(|v| format!("{:.4}", v))
         .collect();
     let more = if result.vector.len() > 5 { ", ..." } else { "" };
-    format!(
-        "Provider: {} ({}) | Dim: {} | [{}{}]",
-        result.provider,
-        result.model,
+    t().embed_result(
+        &result.provider,
+        &result.model,
         result.dimension,
-        preview.join(", "),
-        more
+        &format!("{}{}", preview.join(", "), more),
     )
 }
 
 /// A job of the Jobs tab: id, state, what it works on and its progress
 fn job_line(job: &JobInfo) -> String {
     let status = match &job.status {
-        JobStatus::Pending => "pending".to_string(),
-        JobStatus::Running { progress, .. } => format!("running {:.0}%", progress),
-        JobStatus::Completed { .. } => "completed".to_string(),
-        JobStatus::Failed { error } => format!("failed: {}", error),
-        JobStatus::Cancelled => "cancelled".to_string(),
+        JobStatus::Pending => t().job_pending().to_string(),
+        JobStatus::Running { progress, .. } => t().job_running(*progress),
+        JobStatus::Completed { .. } => t().job_completed().to_string(),
+        JobStatus::Failed { error } => t().job_failed(error),
+        JobStatus::Cancelled => t().job_cancelled().to_string(),
     };
     let target = match &job.job_type {
-        JobType::EmbedBackfill { collection, .. } => format!("backfill {}", collection),
-        JobType::EmbedDocument { collection, doc_id } => {
-            format!("import {} / {}", collection, doc_id)
-        }
-        JobType::Compact => "compact".to_string(),
+        JobType::EmbedBackfill { collection, .. } => t().job_backfill(collection),
+        JobType::EmbedDocument { collection, doc_id } => t().job_import(collection, doc_id),
+        JobType::Compact => t().job_compact().to_string(),
         JobType::Custom { name } => name.clone(),
     };
     let progress = match job.items_total {
@@ -850,19 +844,19 @@ mod tests {
     fn auto_embed_text_reads_the_nested_config() {
         assert_eq!(
             auto_embed_text(Some(&configured(false, false))),
-            "Enabled: content -> embedding (vllm)"
+            "Bekapcsolva: content -> embedding (vllm)"
         );
         assert_eq!(
             auto_embed_text(Some(&configured(true, true))),
-            "Enabled: content -> embedding (vllm) | re-embed pending | provider removed: enable again"
+            "Bekapcsolva: content -> embedding (vllm) | újrabeágyazás folyamatban | a szolgáltató megszűnt: kapcsold be újra"
         );
         let none = AutoEmbedStatusResponse::NotConfigured {
             collection: "kb".to_string(),
             enabled: Flag,
             config: (),
         };
-        assert_eq!(auto_embed_text(Some(&none)), "Disabled");
-        assert_eq!(auto_embed_text(None), "Not loaded");
+        assert_eq!(auto_embed_text(Some(&none)), "Kikapcsolva");
+        assert_eq!(auto_embed_text(None), "Nincs betöltve");
     }
 
     /// The stats are read from the nested `stats`, and the hit rate is
@@ -883,13 +877,13 @@ mod tests {
         };
         assert_eq!(
             cache_text(Some(&stats)),
-            "1/100 entries | 50.0% hit rate (1 hits, 1 misses)"
+            "1/100 bejegyzés | 50.0% találati arány (1 találat, 1 hiány)"
         );
         let disabled = EmbedCacheStatsResponse::Disabled {
             enabled: Flag,
             message: "Embedding cache is not enabled".to_string(),
         };
-        assert_eq!(cache_text(Some(&disabled)), "Disabled on the server");
+        assert_eq!(cache_text(Some(&disabled)), "A szerveren kikapcsolva");
     }
 
     /// The vector is read from `vector` (before: from `embedding`: "N/A")
@@ -903,7 +897,7 @@ mod tests {
         };
         assert_eq!(
             embed_result_text(&result),
-            "Provider: vllm (bge-m3) | Dim: 6 | [0.1000, 0.2000, 0.3000, 0.4000, 0.5000, ...]"
+            "Szolgáltató: vllm (bge-m3) | Dim: 6 | [0.1000, 0.2000, 0.3000, 0.4000, 0.5000, ...]"
         );
     }
 }

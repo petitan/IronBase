@@ -629,11 +629,11 @@ async fn test_rag_jobs_tab_shows_the_job_fields() {
 
     let screen = render_to_string(&app, 120, 36);
     assert!(
-        screen.contains("job_2 | running 25% | backfill users 1/4"),
+        screen.contains("job_2 | fut 25% | visszamenőleges beágyazás: users 1/4"),
         "{screen}"
     );
     assert!(
-        screen.contains("job_1 | failed: Provider 'nope' not available"),
+        screen.contains("job_1 | sikertelen: Provider 'nope' not available"),
         "{screen}"
     );
 }
@@ -706,7 +706,7 @@ async fn test_rag_models_tab_uses_the_selected_provider() {
     );
     let screen = render_to_string(&app, 120, 36);
     assert!(
-        screen.contains("Provider: vllm (vllm-model) | Dim: 2 | [0.5000, 1.0000]"),
+        screen.contains("Szolgáltató: vllm (vllm-model) | Dim: 2 | [0.5000, 1.0000]"),
         "{screen}"
     );
 
@@ -1795,9 +1795,9 @@ async fn test_rag_search_has_no_dead_mode_or_rrf_k_controls() {
     open_rag_search(&mut app).await;
 
     let screen = render_to_string(&app, 140, 45);
-    assert!(screen.contains(" Limit "), "{screen}");
+    assert!(screen.contains(" Korlát "), "{screen}");
     assert!(!screen.contains("RRF K"), "{screen}");
-    assert!(!screen.contains(" Mode "), "{screen}");
+    assert!(!screen.contains(" Mód "), "{screen}");
 
     // Tab: query → limit → query
     press(&mut app, KeyCode::Tab).await;
@@ -1838,7 +1838,7 @@ async fn test_rag_search_reports_trimmed_and_dropped_results() {
     let message = app.rag_state.message.clone().unwrap_or_default();
     assert_eq!(message, t().search_summary(1, 2, 1, true));
     let screen = render_to_string(&app, 140, 45);
-    assert!(screen.contains("Results (1, trimmed)"), "{screen}");
+    assert!(screen.contains("Találatok (1, rövidítve)"), "{screen}");
     assert!(
         line_with(&screen, "[Needles] needle filler filler").contains("0.0492"),
         "{screen}"
@@ -1880,7 +1880,7 @@ async fn test_rag_search_complete_results_through_the_fake_server() {
         Some(t().search_summary(2, 0, 0, false).as_str())
     );
     let screen = render_to_string(&app, 140, 45);
-    assert!(screen.contains("Results (2)"), "{screen}");
+    assert!(screen.contains("Találatok (2)"), "{screen}");
     assert!(
         line_with(&screen, "[Anna] Notes on Rust").contains("0.5000"),
         "{screen}"
@@ -2069,7 +2069,7 @@ async fn test_rag_collections_tab_shows_the_nested_stats() {
     );
     let screen = render_to_string(&app, 120, 36);
     assert!(
-        screen.contains("users | 6 chunks | 4 docs | length"),
+        screen.contains("users | 6 darab | 4 dokumentum | length"),
         "{screen}"
     );
 
@@ -2112,7 +2112,7 @@ async fn test_rag_import_reports_the_stored_chunks() {
     );
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("Imported 'd1': 3 chunks created, 1 replaced")
+        Some("Importálva: „d1”, 3 darab létrehozva, 1 lecserélve")
     );
     assert!(app.rag_state.import_result.is_some());
 

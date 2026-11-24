@@ -1087,4 +1087,342 @@ impl Messages for En {
             _ => format!("{count} stale indexes – [a] Analyze"),
         }
     }
+
+    fn confirm_discard_title(&self) -> &'static str {
+        "Discard changes"
+    }
+    fn confirm_discard(&self) -> &'static str {
+        "Discard the unsaved changes?"
+    }
+    fn confirm_delete_script_title(&self) -> &'static str {
+        "Delete script"
+    }
+    fn confirm_delete_script(&self) -> &'static str {
+        "Delete this script?"
+    }
+    fn scripts_title(&self) -> &'static str {
+        "IronRhai scripts"
+    }
+    fn key_edit(&self) -> &'static str {
+        "Edit"
+    }
+    fn key_history(&self) -> &'static str {
+        "History"
+    }
+    fn key_inline(&self) -> &'static str {
+        "Inline"
+    }
+    fn key_back(&self) -> &'static str {
+        "Back"
+    }
+    fn key_save_run(&self) -> &'static str {
+        "Save/run"
+    }
+    fn key_focus(&self) -> &'static str {
+        "Focus"
+    }
+    fn key_view(&self) -> &'static str {
+        "View"
+    }
+    fn no_scripts(&self) -> &'static str {
+        "No scripts. New script: [n]."
+    }
+    fn run_count(&self, count: u64) -> String {
+        match count {
+            1 => format!("{count:>5} run "),
+            _ => format!("{count:>5} runs"),
+        }
+    }
+    fn no_description_parens(&self) -> &'static str {
+        "(no description)"
+    }
+    fn never(&self) -> &'static str {
+        "never"
+    }
+    fn label_description(&self) -> &'static str {
+        "Description"
+    }
+    fn label_last_run(&self) -> &'static str {
+        "Last run"
+    }
+    fn script_editor_new_title(&self) -> &'static str {
+        "IronRhai – new script"
+    }
+    fn script_editor_inline_title(&self) -> &'static str {
+        "IronRhai – inline"
+    }
+    fn script_editor_title(&self) -> &'static str {
+        "IronRhai editor"
+    }
+    fn label_tags(&self) -> &'static str {
+        "Tags"
+    }
+    fn label_code(&self) -> &'static str {
+        "Code"
+    }
+    fn label_params_json(&self) -> &'static str {
+        "Parameters (JSON)"
+    }
+    fn script_logs(&self, count: usize, first: &str) -> String {
+        format!(" | Logs: [{count}] {first}")
+    }
+    fn result_error(&self) -> &'static str {
+        "ERROR"
+    }
+    fn script_result_placeholder(&self) -> &'static str {
+        "Result: (^S: run)"
+    }
+    fn script_history_title(&self, name: &str) -> String {
+        format!("IronRhai history: {name}")
+    }
+    fn no_version_history(&self) -> &'static str {
+        "No version history."
+    }
+    fn current_marker(&self) -> &'static str {
+        "(current)"
+    }
+    fn code_preview_title(&self) -> &'static str {
+        "Code preview"
+    }
+
+    fn rag_title(&self) -> &'static str {
+        "RAG & embedding"
+    }
+    fn tab_import(&self) -> &'static str {
+        "Import"
+    }
+    fn tab_models(&self) -> &'static str {
+        "Models"
+    }
+    fn tab_jobs(&self) -> &'static str {
+        "Jobs"
+    }
+    fn label_query(&self) -> &'static str {
+        "Query"
+    }
+    fn label_limit(&self) -> &'static str {
+        "Limit"
+    }
+    fn rag_results_title(&self, count: usize, loading: bool, trimmed: bool) -> String {
+        if loading {
+            " Results (loading...) ".to_string()
+        } else if trimmed {
+            format!(" Results ({count}, trimmed) ")
+        } else {
+            format!(" Results ({count}) ")
+        }
+    }
+    fn no_rag_results(&self) -> &'static str {
+        "No results. Enter a query and press Enter."
+    }
+    fn key_fields(&self) -> &'static str {
+        "Fields"
+    }
+    fn key_import(&self) -> &'static str {
+        "Import"
+    }
+    fn label_title_optional(&self) -> &'static str {
+        "Title (optional)"
+    }
+    fn title_placeholder(&self) -> &'static str {
+        "Document title..."
+    }
+    fn content_title(&self, chars: usize) -> String {
+        format!(" Content ({chars} chars) ")
+    }
+    fn content_placeholder(&self) -> &'static str {
+        "Paste or type the content here..."
+    }
+    fn label_chunk_size(&self) -> &'static str {
+        "Chunk size"
+    }
+    fn label_overlap(&self) -> &'static str {
+        "Overlap"
+    }
+    fn key_stats(&self) -> &'static str {
+        "Stats"
+    }
+    fn rag_collections_title(&self, count: usize) -> String {
+        format!(" RAG collections ({count}) ")
+    }
+    fn no_rag_collections(&self) -> &'static str {
+        "No RAG collections. Press [c] to create one."
+    }
+    fn key_toggle(&self) -> &'static str {
+        "Toggle"
+    }
+    fn label_collection_name(&self) -> &'static str {
+        "Collection name"
+    }
+    fn label_embedding_field(&self) -> &'static str {
+        "Embedding field"
+    }
+    fn label_text_field(&self) -> &'static str {
+        "Text field"
+    }
+    fn label_provider_space(&self) -> &'static str {
+        "Provider [Space]"
+    }
+    fn label_language_space(&self) -> &'static str {
+        "Language [Space]"
+    }
+    fn key_enable_auto_embed(&self) -> &'static str {
+        "Enable auto-embed"
+    }
+    fn key_cache_stats(&self) -> &'static str {
+        "Cache stats"
+    }
+    fn key_clear_cache(&self) -> &'static str {
+        "Clear cache"
+    }
+    fn key_test_embed(&self) -> &'static str {
+        "Test embed"
+    }
+    fn embedding_models_title(&self, count: usize) -> String {
+        format!(" Embedding models ({count}) ")
+    }
+    fn loading_models(&self) -> &'static str {
+        "Loading models..."
+    }
+    fn auto_embed_title(&self) -> &'static str {
+        "Auto-embed"
+    }
+    fn cache_title(&self) -> &'static str {
+        "Cache"
+    }
+    fn key_embed(&self) -> &'static str {
+        "Embed"
+    }
+    fn text_to_embed_title(&self) -> &'static str {
+        "Text to embed"
+    }
+    fn type_text_here(&self) -> &'static str {
+        "Type text here..."
+    }
+    fn no_result_yet(&self) -> &'static str {
+        "No result yet"
+    }
+    fn key_cancel_job(&self) -> &'static str {
+        "Cancel job"
+    }
+    fn jobs_title(&self, count: usize) -> String {
+        format!(" Jobs ({count}) ")
+    }
+    fn no_jobs(&self) -> &'static str {
+        "No jobs. Press [r] to refresh."
+    }
+    fn import_result(
+        &self,
+        doc_id: &str,
+        created: usize,
+        replaced: u64,
+        language_ignored: bool,
+    ) -> String {
+        {
+            let chunks = if created == 1 { "chunk" } else { "chunks" };
+            let mut text = format!("Imported \"{doc_id}\": {created} {chunks} created");
+            if replaced > 0 {
+                text.push_str(&format!(", {replaced} replaced"));
+            }
+            if language_ignored {
+                text.push_str(" (language ignored: the collection keeps its own)");
+            }
+            text
+        }
+    }
+    fn rag_collection_row(
+        &self,
+        name: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+        provider: Option<&str>,
+    ) -> String {
+        {
+            let provider = provider.unwrap_or("no RAG config");
+            format!("{name} | {chunks} chunks | {documents} docs | {provider}")
+        }
+    }
+    fn model_row(&self, provider: &str, model: &str, dimension: usize, available: bool) -> String {
+        {
+            let status = if available { "OK" } else { "N/A" };
+            format!("{provider} | {model} | dim:{dimension} | {status}")
+        }
+    }
+    fn not_loaded(&self) -> &'static str {
+        "Not loaded"
+    }
+    fn auto_embed_off(&self) -> &'static str {
+        "Disabled"
+    }
+    fn auto_embed_status(
+        &self,
+        enabled: bool,
+        source: &str,
+        target: &str,
+        provider: &str,
+        reembed_pending: bool,
+        provider_removed: bool,
+    ) -> String {
+        {
+            let state = if enabled {
+                "Enabled"
+            } else {
+                "Configured, off"
+            };
+            let mut text = format!("{state}: {source} -> {target} ({provider})");
+            if reembed_pending {
+                text.push_str(" | re-embed pending");
+            }
+            if provider_removed {
+                text.push_str(" | provider removed: enable again");
+            }
+            text
+        }
+    }
+    fn cache_not_loaded(&self) -> &'static str {
+        "Press [c] to load"
+    }
+    fn cache_disabled_on_server(&self) -> &'static str {
+        "Disabled on the server"
+    }
+    fn cache_stats(
+        &self,
+        entries: usize,
+        max_entries: usize,
+        hit_rate: f64,
+        hits: u64,
+        misses: u64,
+    ) -> String {
+        format!("{entries}/{max_entries} entries | {hit_rate:.1}% hit rate ({hits} hits, {misses} misses)")
+    }
+    fn embed_result(&self, provider: &str, model: &str, dimension: usize, preview: &str) -> String {
+        format!("Provider: {provider} ({model}) | Dim: {dimension} | [{preview}]")
+    }
+    fn job_pending(&self) -> &'static str {
+        "pending"
+    }
+    fn job_running(&self, progress: f64) -> String {
+        format!("running {progress:.0}%")
+    }
+    fn job_completed(&self) -> &'static str {
+        "completed"
+    }
+    fn job_failed(&self, error: &str) -> String {
+        format!("failed: {error}")
+    }
+    fn job_cancelled(&self) -> &'static str {
+        "cancelled"
+    }
+    fn job_backfill(&self, collection: &str) -> String {
+        format!("backfill {collection}")
+    }
+    fn job_import(&self, collection: &str, doc_id: &str) -> String {
+        format!("import {collection} / {doc_id}")
+    }
+    fn job_compact(&self) -> &'static str {
+        "compact"
+    }
+    fn script_name_line(&self, name: &str) -> String {
+        format!("Script: \"{name}\"")
+    }
 }
