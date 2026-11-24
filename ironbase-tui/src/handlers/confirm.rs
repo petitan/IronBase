@@ -14,7 +14,9 @@ pub(crate) async fn handle_confirm_key_async(app: &mut App, key: KeyCode) {
             app.execute_confirm_action_async().await;
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            app.confirm.selected = crate::modals::confirm::ConfirmOption::Confirm;
+            if let Some(state) = app.confirm_state_mut() {
+                state.selected = crate::modals::confirm::ConfirmOption::Confirm;
+            }
             app.execute_confirm_action_async().await;
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {

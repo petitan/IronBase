@@ -248,7 +248,7 @@ async fn test_selection_shows_without_colors() {
     );
     press(&mut app, KeyCode::Left).await;
     press(&mut app, KeyCode::Right).await;
-    let selected = app.confirm.selected;
+    let selected = app.confirm_state().unwrap().selected;
     let screen = render_to_string(&app, 120, 36);
     let bracketed = match selected {
         ConfirmOption::Cancel => format!("[{}]", t().key_cancel()),
@@ -268,7 +268,7 @@ async fn test_delete_document_needs_explicit_yes() {
     // `d` opens the confirm, Cancel preselected
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     let screen = render_to_string(&app, 120, 36);
     assert!(
         screen.contains(t().confirm_delete_document_title()),
@@ -334,7 +334,7 @@ async fn test_index_list_drop_flow() {
     press(&mut app, KeyCode::Char('j')).await;
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     press(&mut app, KeyCode::Esc).await;
     assert_eq!(app.modal(), Some(Modal::Index));
     press(&mut app, KeyCode::Char('d')).await;
@@ -381,7 +381,7 @@ async fn test_vector_index_drop_executes_with_captured_names() {
 
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     // The modal state changing under the dialog must not change the target
     app.vector_state.collection = "other".to_string();
     app.vector_state.indexes.clear();
@@ -439,7 +439,7 @@ async fn test_script_rollback_executes_with_captured_names() {
 
     press(&mut app, KeyCode::Char('r')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     app.script_state.name.set_value("other");
     app.script_state.selected_version = 0;
 
@@ -486,7 +486,7 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
 
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     app.rag_state.collection = "other".to_string();
 
     press(&mut app, KeyCode::Char('y')).await;
@@ -621,7 +621,7 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
 
     press(&mut app, KeyCode::Char('x')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
-    assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
+    assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     app.rag_state.selected_job = 0;
 
     press(&mut app, KeyCode::Char('y')).await;

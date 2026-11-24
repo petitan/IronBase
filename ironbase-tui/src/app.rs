@@ -137,9 +137,6 @@ pub struct App {
     // Search state
     pub search: SearchState,
 
-    // Confirm dialog state
-    pub confirm: ConfirmState,
-
     // Index management state
     pub index_state: IndexState,
 
@@ -198,7 +195,6 @@ impl App {
             active_sort: None,
             detail_scroll: 0,
             search: SearchState::new(),
-            confirm: ConfirmState::default(),
             index_state: IndexState::default(),
             filter_state: FilterState::default(),
             script_state: ScriptState::default(),
@@ -481,8 +477,7 @@ impl App {
         let doc_id = doc.get("_id").cloned().unwrap_or(Value::Null);
         let preview = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string());
 
-        self.confirm = ConfirmState::delete_document(coll_name, doc_id, &preview);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::delete_document(coll_name, doc_id, &preview));
     }
 
     /// Open delete confirmation for selected collection
@@ -493,8 +488,7 @@ impl App {
         };
 
         let doc_count = coll.doc_count.unwrap_or(0);
-        self.confirm = ConfirmState::delete_collection(coll.name, doc_count);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::delete_collection(coll.name, doc_count));
     }
 
     /// Open drop confirmation for the selected index (index modal)
@@ -514,8 +508,7 @@ impl App {
         }
 
         let collection = self.index_state.collection.clone();
-        self.confirm = ConfirmState::drop_index(collection, index_name);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::drop_index(collection, index_name));
     }
 
     /// Open drop confirmation for the selected vector index (vector modal)
@@ -530,8 +523,7 @@ impl App {
 
         let index_name = index.name.clone();
         let collection = self.vector_state.collection.clone();
-        self.confirm = ConfirmState::drop_vector_index(collection, index_name);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::drop_vector_index(collection, index_name));
     }
 
     /// Open rollback confirmation for the selected script version (script history)
@@ -547,21 +539,18 @@ impl App {
 
         let version = version_info.version;
         let name = self.script_state.name.value().to_string();
-        self.confirm = ConfirmState::rollback_script(name, version);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::rollback_script(name, version));
     }
 
     /// Open confirmation for disabling auto-embed (RAG modal)
     pub fn open_disable_auto_embed_confirm(&mut self) {
         let collection = self.rag_state.collection.clone();
-        self.confirm = ConfirmState::disable_auto_embed(collection);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::disable_auto_embed(collection));
     }
 
     /// Open confirmation for clearing the embedding cache (RAG modal)
     pub fn open_clear_embed_cache_confirm(&mut self) {
-        self.confirm = ConfirmState::clear_embed_cache();
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::clear_embed_cache());
     }
 
     /// Open confirmation for cancelling the selected embed job (RAG modal)
@@ -570,18 +559,44 @@ impl App {
             return;
         };
 
-        self.confirm = ConfirmState::cancel_embed_job(job_id);
-        self.set_modal(Modal::Confirm);
+        self.open_confirm(ConfirmState::cancel_embed_job(job_id));
     }
 
-    /// Close the confirm dialog and return to the modal it was opened from (if any)
+    /// Open a confirm dialog over the open modal (if any), which it keeps
+    /// and gives back when it closes
+    pub fn open_confirm(&mut self, state: ConfirmState) {
+        let previous = self.open_modal.take().map(Box::new);
+        self.open_modal = Some(OpenModal::Confirm { state, previous });
+    }
+
+    /// The open confirm dialog's state
+    pub fn confirm_state(&self) -> Option<&ConfirmState> {
+        match &self.open_modal {
+            Some(OpenModal::Confirm { state, .. }) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn confirm_state_mut(&mut self) -> Option<&mut ConfirmState> {
+        match &mut self.open_modal {
+            Some(OpenModal::Confirm { state, .. }) => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Close the confirm dialog and return to the modal it was opened from,
+    /// as it was (or to the panes)
     pub fn close_confirm(&mut self) {
-        self.open_modal = self.confirm.return_to.take().map(OpenModal::Plain);
+        if let Some(OpenModal::Confirm { previous, .. }) = self.open_modal.take() {
+            self.open_modal = previous.map(|modal| *modal);
+        }
     }
 
     /// Toggle confirm dialog selection
     pub fn confirm_toggle(&mut self) {
-        self.confirm.toggle_selection();
+        if let Some(state) = self.confirm_state_mut() {
+            state.toggle_selection();
+        }
     }
 
     // execute_confirm_action, do_delete_document, execute_insert törölve
@@ -1635,13 +1650,14 @@ impl App {
 
     /// Execute the confirmed action (async)
     pub async fn execute_confirm_action_async(&mut self) {
-        if self.confirm.selected != ConfirmOption::Confirm {
-            self.close_confirm();
+        let Some(state) = self.confirm_state() else {
             return;
-        }
-
-        let action = self.confirm.on_confirm.clone();
+        };
+        let action = (state.selected == ConfirmOption::Confirm).then(|| state.on_confirm.clone());
         self.close_confirm();
+        let Some(action) = action else {
+            return;
+        };
 
         match action {
             ConfirmAction::DeleteDocument { collection, doc_id } => {
@@ -2734,7 +2750,7 @@ mod tests {
         app.documents = vec![serde_json::json!({"_id": 7})];
         app.open_delete_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("invoices"));
+        assert!(app.confirm_state().unwrap().message.contains("invoices"));
     }
 
     // === Export ===
@@ -2882,11 +2898,11 @@ mod tests {
 
         app.open_drop_index_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
-        assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
-        assert!(app.confirm.message.contains("users_age"));
-        assert!(app.confirm.message.contains("users"));
+        assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
+        assert!(app.confirm_state().unwrap().message.contains("users_age"));
+        assert!(app.confirm_state().unwrap().message.contains("users"));
         assert!(matches!(
-            &app.confirm.on_confirm,
+            &app.confirm_state().unwrap().on_confirm,
             ConfirmAction::DropIndex { collection, index_name }
                 if collection == "users" && index_name == "users_age"
         ));
@@ -2926,10 +2942,10 @@ mod tests {
 
         app.open_rollback_script_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("cleanup"));
-        assert!(app.confirm.message.contains("v3"));
+        assert!(app.confirm_state().unwrap().message.contains("cleanup"));
+        assert!(app.confirm_state().unwrap().message.contains("v3"));
         assert!(matches!(
-            &app.confirm.on_confirm,
+            &app.confirm_state().unwrap().on_confirm,
             ConfirmAction::RollbackScript { name, version } if name == "cleanup" && *version == 3
         ));
 
@@ -2954,14 +2970,14 @@ mod tests {
         app.set_modal(Modal::Rag);
         app.open_disable_auto_embed_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("kb"));
+        assert!(app.confirm_state().unwrap().message.contains("kb"));
         app.close_confirm();
         assert_eq!(app.modal(), Some(Modal::Rag));
 
         app.open_clear_embed_cache_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
         assert!(matches!(
-            app.confirm.on_confirm,
+            app.confirm_state().unwrap().on_confirm,
             ConfirmAction::ClearEmbedCache
         ));
         app.close_confirm();
@@ -2969,7 +2985,7 @@ mod tests {
 
         app.open_cancel_embed_job_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("job-1"));
+        assert!(app.confirm_state().unwrap().message.contains("job-1"));
         app.close_confirm();
         assert_eq!(app.modal(), Some(Modal::Rag));
     }
@@ -2977,14 +2993,38 @@ mod tests {
     #[test]
     fn test_document_delete_confirm_closes_to_panes() {
         let mut app = App::new(Config::default());
-        app.confirm = ConfirmState::delete_collection("users".to_string(), 0);
-        app.set_modal(Modal::Confirm);
+        app.open_confirm(ConfirmState::delete_collection("users".to_string(), 0));
         app.close_confirm();
         assert_eq!(app.modal(), None);
     }
 
     /// A modal's state lives with the open modal: closing drops it (reopening
     /// starts empty) and a late answer for a closed modal changes nothing
+    /// A confirm dialog keeps the modal it was opened from and gives it back
+    /// as it was (it used to reopen the modal by kind only)
+    #[test]
+    fn test_confirm_gives_back_the_modal_it_was_opened_from() {
+        let mut app = App::new(Config::default());
+        let mut state = ExportState::new("users".to_string(), 3);
+        state.file_path.insert_str("-draft");
+        app.open_modal = Some(OpenModal::Export(state));
+
+        app.open_confirm(ConfirmState::clear_embed_cache());
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.export_state().is_none());
+        app.close_confirm();
+        assert_eq!(
+            app.export_state().unwrap().file_path.value(),
+            "users.json-draft"
+        );
+
+        // A confirm with nothing under it closes to the panes
+        app.close_modal();
+        app.open_confirm(ConfirmState::clear_embed_cache());
+        app.close_confirm();
+        assert_eq!(app.modal(), None);
+    }
+
     #[test]
     fn test_modal_state_lives_with_the_open_modal() {
         let mut app = App::new(Config::default());

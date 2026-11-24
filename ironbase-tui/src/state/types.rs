@@ -77,6 +77,12 @@ pub enum OpenModal {
     ApiKey(crate::modals::api_key::ApiKeyState),
     Acl(crate::modals::acl::AclState),
     Listener(crate::modals::listener::ListenerState),
+    /// A confirm dialog; `previous` is the modal it was opened from, given
+    /// back as it was when the dialog closes (`None`: back to the panes)
+    Confirm {
+        state: crate::modals::confirm::ConfirmState,
+        previous: Option<Box<OpenModal>>,
+    },
 }
 
 impl OpenModal {
@@ -94,6 +100,7 @@ impl OpenModal {
             OpenModal::ApiKey(_) => Modal::ApiKey,
             OpenModal::Acl(_) => Modal::Acl,
             OpenModal::Listener(_) => Modal::Listener,
+            OpenModal::Confirm { .. } => Modal::Confirm,
         }
     }
 }

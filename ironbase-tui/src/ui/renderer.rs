@@ -76,7 +76,11 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Search => modals::search::render(frame, frame.area(), app, &theme),
             Modal::Actions => modals::actions::render(frame, frame.area(), app, &theme),
             Modal::Help => modals::help::render(frame, frame.area(), app.help_scroll, &theme),
-            Modal::Confirm => modals::confirm::render(frame, frame.area(), &app.confirm, &theme),
+            Modal::Confirm => {
+                if let Some(state) = app.confirm_state() {
+                    modals::confirm::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::Insert => {
                 if let Some(state) = app.insert_state() {
                     modals::insert::render(frame, frame.area(), state, &theme);

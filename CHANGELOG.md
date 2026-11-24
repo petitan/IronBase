@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the confirm dialog keeps the modal it was opened from (tuti-tui 0.3.500, mcp-server 1.0.688 — version only, for the release tag)
+
+The confirm dialog moves into `OpenModal` (`Confirm { state, previous }`): opened over a modal, it holds that modal
+as it was and gives it back when it closes. It used to reopen the modal by kind only (`ConfirmState::return_to`, now
+removed), which works only while that modal's state lives in `App`; the index, vector, script and RAG modals, which
+open confirm dialogs, can now move into `OpenModal` too. No change of behavior.
+
 ### Changed — Tuti TUI: the API key, ACL and listener modals' state lives with the open modal (tuti-tui 0.3.499, mcp-server 1.0.687 — version only, for the release tag)
 
 The three admin modals move into `OpenModal` (`ApiKey`, `Acl`, `Listener`), with no change of behavior: their state
