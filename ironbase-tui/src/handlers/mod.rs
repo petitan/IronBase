@@ -77,16 +77,22 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Some(Modal::Insert) => app.insert.handle_input(input),
         Some(Modal::Index) => app.index_state.handle_input(input),
         Some(Modal::Query) => app.query_state.handle_input(input),
-        Some(Modal::Export) => app.export_state.handle_input(input),
+        Some(Modal::Export) => app
+            .export_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Filter) => app.filter_state.handle_field_input(input),
         Some(Modal::NewCollection) => match app.open_modal_mut() {
             Some(OpenModal::NewCollection(state)) => state.handle_input(input),
             _ => InputOutcome::Ignored,
         },
         Some(Modal::Script) => app.script_state.handle_input(input),
-        Some(Modal::Database) => app.database_state.handle_input(input),
+        Some(Modal::Database) => app
+            .database_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::ApiKey) => app.api_key_state.handle_input(input),
-        Some(Modal::Fulltext) => app.fulltext_state.handle_input(input),
+        Some(Modal::Fulltext) => app
+            .fulltext_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Acl) => app.acl_state.handle_principal_input(input),
         Some(Modal::Listener) => app.listener_state.handle_input(input),
         Some(Modal::VectorSearch) => app.vector_state.handle_text_input(input),

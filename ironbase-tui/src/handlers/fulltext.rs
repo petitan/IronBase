@@ -1,12 +1,23 @@
 //! Key handlers: fulltext
 
-use crate::app::{App, FulltextState, Modal};
+use crate::app::{App, FulltextState, OpenModal};
 use crate::i18n::{t, Op};
 use crate::state::fulltext::FULLTEXT_LIMIT;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::FulltextSearchParams;
 use ironbase_mcp_types::tools::FulltextSearch;
+
+/// The open full-text modal's state, borrowing only `app.open_modal` (so
+/// `app.db` stays usable next to it); the handler returns when it is not open
+macro_rules! state {
+    ($app:expr) => {
+        match &mut $app.open_modal {
+            Some(OpenModal::Fulltext(state)) => state,
+            _ => return,
+        }
+    };
+}
 
 /// Open fulltext search modal
 pub(crate) async fn handle_fulltext_open(app: &mut App) {
@@ -41,8 +52,10 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
         return;
     }
 
-    app.fulltext_state = FulltextState::new(collection.to_string(), indexed_fields);
-    app.set_modal(Modal::Fulltext);
+    app.open_modal = Some(OpenModal::Fulltext(FulltextState::new(
+        collection.to_string(),
+        indexed_fields,
+    )));
 }
 
 /// Async fulltext key handler
@@ -53,26 +66,24 @@ pub(crate) async fn handle_fulltext_key_async(
 ) {
     match key {
         KeyCode::Esc => app.close_modal(),
-        KeyCode::Tab => app.fulltext_state.next_field(),
+        KeyCode::Tab => state!(app).next_field(),
         // Plain j/k belong to the query input; results: arrows or Ctrl+j/k
-        KeyCode::Up => app.fulltext_state.select_up(),
-        KeyCode::Down => app.fulltext_state.select_down(),
-        KeyCode::Char('k') if modifiers == KeyModifiers::CONTROL => app.fulltext_state.select_up(),
-        KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
-            app.fulltext_state.select_down()
-        }
+        KeyCode::Up => state!(app).select_up(),
+        KeyCode::Down => state!(app).select_down(),
+        KeyCode::Char('k') if modifiers == KeyModifiers::CONTROL => state!(app).select_up(),
+        KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => state!(app).select_down(),
         KeyCode::Enter => {
             // Execute fulltext search
-            if app.fulltext_state.query.is_empty() {
+            if state!(app).query.is_empty() {
                 return;
             }
 
-            app.fulltext_state.loading = true;
+            state!(app).loading = true;
 
             if let Some(ref db) = app.db {
-                let collection = app.fulltext_state.collection.clone();
-                let field = app.fulltext_state.field.clone();
-                let query = app.fulltext_state.query.value().to_string();
+                let collection = state!(app).collection.clone();
+                let field = state!(app).field.clone();
+                let query = state!(app).query.value().to_string();
 
                 let args = FulltextSearchParams {
                     collection,
@@ -92,21 +103,21 @@ pub(crate) async fn handle_fulltext_key_async(
                 };
                 match db.call::<FulltextSearch>(&args).await {
                     Ok(response) => {
-                        app.fulltext_state.results = response.results;
-                        app.fulltext_state.selected_result = 0;
-                        app.fulltext_state.error = None;
+                        state!(app).results = response.results;
+                        state!(app).selected_result = 0;
+                        state!(app).error = None;
                     }
                     Err(e) => {
-                        app.fulltext_state.error = Some(format!("{}", e));
-                        app.fulltext_state.results.clear();
+                        state!(app).error = Some(format!("{}", e));
+                        state!(app).results.clear();
                     }
                 }
             }
 
-            app.fulltext_state.loading = false;
+            state!(app).loading = false;
         }
         _ => {
-            app.fulltext_state.handle_input(Input::Key(key, modifiers));
+            state!(app).handle_input(Input::Key(key, modifiers));
         }
     }
 }

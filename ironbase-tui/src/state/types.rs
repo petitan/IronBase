@@ -69,6 +69,9 @@ pub enum OpenModal {
     NewCollection(crate::state::NewCollectionState),
     ServerInfo(crate::modals::server_info::ServerInfoState),
     Update(crate::modals::update::UpdateState),
+    Export(crate::state::ExportState),
+    Fulltext(crate::state::FulltextState),
+    Database(crate::state::DatabaseState),
 }
 
 impl OpenModal {
@@ -78,6 +81,9 @@ impl OpenModal {
             OpenModal::NewCollection(_) => Modal::NewCollection,
             OpenModal::ServerInfo(_) => Modal::ServerInfo,
             OpenModal::Update(_) => Modal::Update,
+            OpenModal::Export(_) => Modal::Export,
+            OpenModal::Fulltext(_) => Modal::Fulltext,
+            OpenModal::Database(_) => Modal::Database,
         }
     }
 }

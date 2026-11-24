@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the export, full-text and database modals' state lives with the open modal (tuti-tui 0.3.497, mcp-server 1.0.685 — version only, for the release tag)
+
+The next three modals move into `OpenModal` (`Export`, `Fulltext`, `Database`), with no change of behavior: their
+state is created when they open and dropped when they close.
+
+- `App` gives each moved modal's state as `export_state()` / `export_state_mut()` (and so on, from one
+  `modal_state!` macro); the key handlers reach it through the `open_modal` field (a `state!` macro per handler),
+  so `app.db` stays usable next to it without cloning.
+- The export takes its collection and format as arguments instead of reading them from a field mid-export.
+
 ### Changed — Tuti TUI: a modal's state lives with the open modal (first step of phase 4) (tuti-tui 0.3.496, mcp-server 1.0.684 — version only, for the release tag)
 
 `App` kept every modal's state in a field of its own (17 of them), alive whether the modal was open or not, next to

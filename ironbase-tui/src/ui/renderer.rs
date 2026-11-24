@@ -80,7 +80,11 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Insert => modals::insert::render(frame, frame.area(), &app.insert, &theme),
             Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
             Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
-            Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
+            Modal::Export => {
+                if let Some(state) = app.export_state() {
+                    modals::export::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
             Modal::NewCollection => {
                 if let Some(OpenModal::NewCollection(state)) = app.open_modal() {
@@ -112,13 +116,17 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::Database => {
-                modals::database::render(frame, frame.area(), &app.database_state, &theme);
+                if let Some(state) = app.database_state() {
+                    modals::database::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::ApiKey => {
                 modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
             }
             Modal::Fulltext => {
-                modals::fulltext::render(frame, frame.area(), &app.fulltext_state, &theme);
+                if let Some(state) = app.fulltext_state() {
+                    modals::fulltext::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Acl => {
                 modals::acl::render(frame, frame.area(), &app.acl_state, &theme);

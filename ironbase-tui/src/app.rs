@@ -77,6 +77,26 @@ const MIN_PAGE_SIZE: usize = 1;
 /// Detail pane scroll step (also used for page jump in collections)
 const SCROLL_STEP: usize = 10;
 
+/// `$get` / `$get_mut`: the open modal's state when the open modal is
+/// `OpenModal::$variant`, else `None`
+macro_rules! modal_state {
+    ($get:ident, $get_mut:ident, $variant:ident, $state:ty) => {
+        pub fn $get(&self) -> Option<&$state> {
+            match &self.open_modal {
+                Some(OpenModal::$variant(state)) => Some(state),
+                _ => None,
+            }
+        }
+
+        pub fn $get_mut(&mut self) -> Option<&mut $state> {
+            match &mut self.open_modal {
+                Some(OpenModal::$variant(state)) => Some(state),
+                _ => None,
+            }
+        }
+    };
+}
+
 /// Main application state
 pub struct App {
     // Quit flag
@@ -84,7 +104,9 @@ pub struct App {
 
     // Focus management
     pub active_pane: Pane,
-    open_modal: Option<OpenModal>,
+    /// The open modal and its state; handlers reach a modal's state through
+    /// this field (not a method) so `db` stays usable next to it
+    pub(crate) open_modal: Option<OpenModal>,
     pub help_scroll: usize,
 
     // Theme
@@ -129,9 +151,6 @@ pub struct App {
     // Visual filter state
     pub filter_state: FilterState,
 
-    // Export state
-    pub export_state: ExportState,
-
     // IronRhai script editor state
     pub script_state: ScriptState,
 
@@ -140,14 +159,8 @@ pub struct App {
 
     // Update modal state
 
-    // Database open/create modal state
-    pub database_state: DatabaseState,
-
     // API Key modal state
     pub api_key_state: crate::modals::api_key::ApiKeyState,
-
-    // Fulltext search state
-    pub fulltext_state: FulltextState,
 
     // ACL modal state
     pub acl_state: crate::modals::acl::AclState,
@@ -204,12 +217,9 @@ impl App {
             index_state: IndexState::default(),
             query_state: QueryState::default(),
             filter_state: FilterState::default(),
-            export_state: ExportState::default(),
             script_state: ScriptState::default(),
             server_info_scroll: 0,
-            database_state: DatabaseState::default(),
             api_key_state: crate::modals::api_key::ApiKeyState::new(),
-            fulltext_state: FulltextState::default(),
             acl_state: crate::modals::acl::AclState::new(),
             listener_state: crate::modals::listener::ListenerState::new(),
             vector_state: VectorSearchState::default(),
@@ -446,6 +456,10 @@ impl App {
     pub fn open_modal_mut(&mut self) -> Option<&mut OpenModal> {
         self.open_modal.as_mut()
     }
+
+    modal_state!(export_state, export_state_mut, Export, ExportState);
+    modal_state!(fulltext_state, fulltext_state_mut, Fulltext, FulltextState);
+    modal_state!(database_state, database_state_mut, Database, DatabaseState);
 
     /// Open a modal whose state lives in `App` (the others have their own
     /// `open_*`, which creates their state)
@@ -735,14 +749,14 @@ impl App {
             return;
         };
 
-        self.export_state = ExportState::new(coll.name.clone(), coll.doc_count.unwrap_or(0));
+        let mut state = ExportState::new(coll.name.clone(), coll.doc_count.unwrap_or(0));
         // The export follows the document list: with an active filter the
         // count is the filtered one
         if self.active_filter.is_some() {
-            self.export_state.doc_count = self.total_docs;
-            self.export_state.filtered = true;
+            state.doc_count = self.total_docs;
+            state.filtered = true;
         }
-        self.set_modal(Modal::Export);
+        self.open_modal = Some(OpenModal::Export(state));
     }
 
     // === New Collection ===
@@ -2221,14 +2235,24 @@ impl App {
     /// goes to a temp file next to the target and is renamed on success, so a
     /// failed export never truncates an existing file.
     pub async fn execute_export_async(&mut self) {
-        if self.export_state.file_path.value().trim().is_empty() {
-            self.export_state.error = Some(t().file_path_required().to_string());
+        let Some(state) = self.export_state() else {
+            return;
+        };
+        let file_path = state.file_path.value().to_string();
+        let (collection, format, filtered) =
+            (state.collection.clone(), state.format, state.filtered);
+        let set_error = |app: &mut Self, error: String| {
+            if let Some(state) = app.export_state_mut() {
+                state.error = Some(error);
+            }
+        };
+        if file_path.trim().is_empty() {
+            set_error(self, t().file_path_required().to_string());
             return;
         }
 
-        let file_path = self.export_state.file_path.value().to_string();
         let Some(tmp_path) = export_temp_path(std::path::Path::new(&file_path)) else {
-            self.export_state.error = Some(t().invalid_path(&file_path));
+            set_error(self, t().invalid_path(&file_path));
             return;
         };
 
@@ -2237,7 +2261,10 @@ impl App {
             return;
         }
 
-        let result = match self.write_export_async(&tmp_path).await {
+        let result = match self
+            .write_export_async(&tmp_path, &collection, format)
+            .await
+        {
             Ok(count) => std::fs::rename(&tmp_path, &file_path)
                 .map(|()| count)
                 .map_err(|e| t().failed(Op::File, &e)),
@@ -2246,28 +2273,32 @@ impl App {
 
         match result {
             Ok(count) => {
-                self.export_state.message =
-                    Some(t().exported(count, self.export_state.filtered, &file_path));
-                self.export_state.error = None;
+                if let Some(state) = self.export_state_mut() {
+                    state.message = Some(t().exported(count, filtered, &file_path));
+                    state.error = None;
+                }
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp_path);
-                self.export_state.error = Some(e);
+                set_error(self, e);
             }
         }
     }
 
     /// Write the export into `path` (the temp file); returns the exported
     /// document count. On error the caller removes the file.
-    async fn write_export_async(&self, path: &std::path::Path) -> Result<usize, String> {
+    async fn write_export_async(
+        &self,
+        path: &std::path::Path,
+        collection: &str,
+        format: crate::modals::export::ExportFormat,
+    ) -> Result<usize, String> {
         use crate::modals::export::ExportFormat;
         use std::fs::File;
         use std::io::{BufWriter, Write};
 
         const BATCH_SIZE: usize = 1000;
 
-        let collection = self.export_state.collection.clone();
-        let format = self.export_state.format;
         // Same filter + sort as the document list
         let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
         let sort = self.active_sort.as_ref();
@@ -2291,7 +2322,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2329,7 +2360,7 @@ impl App {
                 exported
             }
             ExportFormat::Csv => {
-                let sample = match find_page(db, &collection, &query, 0, 100, sort).await {
+                let sample = match find_page(db, collection, &query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
                         return Err(t().failed(Op::Query, &e));
@@ -2360,7 +2391,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2740,8 +2771,8 @@ mod tests {
         app.refresh_documents_async().await.unwrap();
 
         app.open_export_modal();
-        assert_eq!(app.export_state.doc_count, 5);
-        assert!(app.export_state.filtered);
+        assert_eq!(app.export_state().unwrap().doc_count, 5);
+        assert!(app.export_state().unwrap().filtered);
 
         let target = export_target("filtered");
         let dir = target
@@ -2753,13 +2784,15 @@ mod tests {
             .unwrap()
             .to_path_buf();
         std::fs::create_dir_all(dir.join("out.v1")).unwrap();
-        app.export_state
+        app.export_state_mut()
+            .unwrap()
             .file_path
             .set_value(target.to_string_lossy().into_owned());
         app.execute_export_async().await;
-        assert_eq!(app.export_state.error, None);
+        assert_eq!(app.export_state().unwrap().error, None);
         assert!(app
-            .export_state
+            .export_state()
+            .unwrap()
             .message
             .as_deref()
             .unwrap()
@@ -2783,8 +2816,8 @@ mod tests {
         let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
         let mut app = app_with_server(&server).await;
         app.open_export_modal();
-        assert_eq!(app.export_state.doc_count, 10);
-        assert!(!app.export_state.filtered);
+        assert_eq!(app.export_state().unwrap().doc_count, 10);
+        assert!(!app.export_state().unwrap().filtered);
     }
 
     /// A failed export reports the error, keeps the existing target file
@@ -2800,7 +2833,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("docs.json");
         std::fs::write(&target, "precious").unwrap();
-        app.export_state
+        app.export_state_mut()
+            .unwrap()
             .file_path
             .set_value(target.to_string_lossy().into_owned());
 
@@ -2808,12 +2842,13 @@ mod tests {
         app.execute_export_async().await;
 
         assert!(app
-            .export_state
+            .export_state()
+            .unwrap()
             .error
             .as_deref()
             .unwrap()
             .contains("find failed"));
-        assert_eq!(app.export_state.message, None);
+        assert_eq!(app.export_state().unwrap().message, None);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
         assert_eq!(files_in(&dir), ["docs.json"]);
         let _ = std::fs::remove_dir_all(&dir);

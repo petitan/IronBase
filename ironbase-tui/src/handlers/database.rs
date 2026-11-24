@@ -1,6 +1,6 @@
 //! Key handlers: database
 
-use crate::app::{App, Modal};
+use crate::app::{App, OpenModal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
 use crate::i18n::{t, Op};
@@ -9,12 +9,25 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::DbOpenParams;
 use ironbase_mcp_types::tools::DbOpen;
 
+/// The open database modal's state, borrowing only `app.open_modal` (so
+/// `app.db` stays usable next to it); the handler returns when it is not open
+macro_rules! state {
+    ($app:expr) => {
+        match &mut $app.open_modal {
+            Some(OpenModal::Database(state)) => state,
+            _ => return,
+        }
+    };
+}
+
 /// Open database modal
 pub(crate) fn handle_database_open(app: &mut App) {
     let is_http = app.config.transport == TransportMode::Http;
     let current_path = app.db_path.as_ref().map(|p| p.display().to_string());
-    app.database_state = crate::app::DatabaseState::new(current_path.as_deref(), is_http);
-    app.set_modal(Modal::Database);
+    app.open_modal = Some(OpenModal::Database(crate::app::DatabaseState::new(
+        current_path.as_deref(),
+        is_http,
+    )));
 }
 
 /// Handle database modal keys
@@ -31,22 +44,22 @@ pub(crate) async fn handle_database_key_async(
         }
         KeyCode::Tab => {
             // Toggle between Open and Create mode
-            app.database_state.toggle_mode();
+            state!(app).toggle_mode();
         }
         KeyCode::Enter => {
-            let path = app.database_state.path.value().trim().to_string();
+            let path = state!(app).path.value().trim().to_string();
             if path.is_empty() {
-                app.database_state.error = Some(t().path_required().to_string());
+                state!(app).error = Some(t().path_required().to_string());
                 return;
             }
 
-            let create = app.database_state.mode == DatabaseMode::Create;
+            let create = state!(app).mode == DatabaseMode::Create;
 
             // HTTP mode: use db_open MCP tool
-            if app.database_state.is_http_mode {
+            if state!(app).is_http_mode {
                 if let Some(ref db) = app.db {
-                    app.database_state.loading = true;
-                    app.database_state.error = None;
+                    state!(app).loading = true;
+                    state!(app).error = None;
 
                     let args = DbOpenParams {
                         path: path.clone(),
@@ -54,13 +67,13 @@ pub(crate) async fn handle_database_key_async(
                     };
                     match db.call::<DbOpen>(&args).await {
                         Ok(_) => {
-                            app.database_state.loading = false;
+                            state!(app).loading = false;
                             let ok = if create {
                                 t().created_ok()
                             } else {
                                 t().opened_ok()
                             };
-                            app.database_state.message = Some(ok.to_string());
+                            state!(app).message = Some(ok.to_string());
 
                             // Reset UI state and refresh collections
                             app.reset_for_new_database();
@@ -76,12 +89,12 @@ pub(crate) async fn handle_database_key_async(
                             }
                         }
                         Err(e) => {
-                            app.database_state.loading = false;
-                            app.database_state.error = Some(format!("{}", e));
+                            state!(app).loading = false;
+                            state!(app).error = Some(format!("{}", e));
                         }
                     }
                 } else {
-                    app.database_state.error = Some(t().no_connection().to_string());
+                    state!(app).error = Some(t().no_connection().to_string());
                 }
                 return;
             }
@@ -91,23 +104,23 @@ pub(crate) async fn handle_database_key_async(
             let file_exists = path_buf.exists();
 
             // Validate based on mode
-            match app.database_state.mode {
+            match state!(app).mode {
                 DatabaseMode::Open => {
                     if !file_exists {
-                        app.database_state.error = Some(t().file_missing_use_create().to_string());
+                        state!(app).error = Some(t().file_missing_use_create().to_string());
                         return;
                     }
                 }
                 DatabaseMode::Create => {
                     if file_exists {
-                        app.database_state.error = Some(t().file_exists_use_open().to_string());
+                        state!(app).error = Some(t().file_exists_use_open().to_string());
                         return;
                     }
                 }
             }
 
-            app.database_state.loading = true;
-            app.database_state.error = None;
+            state!(app).loading = true;
+            state!(app).error = None;
 
             let server_path = app.config.get_mcp_server_path();
 
@@ -122,15 +135,15 @@ pub(crate) async fn handle_database_key_async(
                 Ok(db) => {
                     app.db = Some(db);
                     app.db_path = Some(path_buf);
-                    app.database_state.loading = false;
+                    state!(app).loading = false;
 
-                    let create = app.database_state.mode == DatabaseMode::Create;
+                    let create = state!(app).mode == DatabaseMode::Create;
                     let ok = if create {
                         t().created_ok()
                     } else {
                         t().opened_ok()
                     };
-                    app.database_state.message = Some(ok.to_string());
+                    state!(app).message = Some(ok.to_string());
 
                     // Reset UI state and refresh collections
                     app.reset_for_new_database();
@@ -146,13 +159,13 @@ pub(crate) async fn handle_database_key_async(
                     }
                 }
                 Err(e) => {
-                    app.database_state.loading = false;
-                    app.database_state.error = Some(t().failed(Op::Connect, &e));
+                    state!(app).loading = false;
+                    state!(app).error = Some(t().failed(Op::Connect, &e));
                 }
             }
         }
         _ => {
-            app.database_state.handle_input(Input::Key(key, modifiers));
+            state!(app).handle_input(Input::Key(key, modifiers));
         }
     }
 }

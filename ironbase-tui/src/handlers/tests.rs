@@ -955,14 +955,14 @@ async fn open_database_modal_with_path(app: &mut App, path: &str) {
     press(app, KeyCode::Char('a')).await;
     press(app, KeyCode::Char('b')).await;
     assert_eq!(app.modal(), Some(Modal::Database));
-    assert!(app.database_state.is_http_mode);
+    assert!(app.database_state_mut().unwrap().is_http_mode);
     // The path input may be prefilled with the current database
-    while !app.database_state.path.is_empty() {
+    while !app.database_state_mut().unwrap().path.is_empty() {
         press(app, KeyCode::End).await;
         press(app, KeyCode::Backspace).await;
     }
     type_text(app, path).await;
-    assert_eq!(app.database_state.path.value(), path);
+    assert_eq!(app.database_state_mut().unwrap().path.value(), path);
 }
 
 #[tokio::test]
@@ -1036,8 +1036,8 @@ async fn test_j_and_k_go_into_fulltext_query() {
     assert_eq!(app.modal(), Some(Modal::Fulltext));
     type_text(&mut app, "jk").await;
 
-    assert_eq!(app.fulltext_state.query.value(), "jk");
-    assert_eq!(app.fulltext_state.selected_result, 0);
+    assert_eq!(app.fulltext_state_mut().unwrap().query.value(), "jk");
+    assert_eq!(app.fulltext_state_mut().unwrap().selected_result, 0);
 }
 
 #[tokio::test]
@@ -1047,11 +1047,14 @@ async fn test_uppercase_j_and_c_go_into_export_path() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('o')).await;
     assert_eq!(app.modal(), Some(Modal::Export));
-    assert_eq!(app.export_state.file_path.value(), "users.json");
+    assert_eq!(app.export_state().unwrap().file_path.value(), "users.json");
 
     type_text(&mut app, "JC").await;
 
-    assert_eq!(app.export_state.file_path.value(), "users.jsonJC");
+    assert_eq!(
+        app.export_state().unwrap().file_path.value(),
+        "users.jsonJC"
+    );
     assert_eq!(app.modal(), Some(Modal::Export));
 }
 
@@ -1633,9 +1636,9 @@ fn search_docs() -> Arc<FakeServer> {
 /// The fulltext modal open on "users" over the `bio` and `name` fields, as
 /// the open path leaves it
 fn open_fulltext_modal(app: &mut App) {
-    app.fulltext_state =
-        crate::app::FulltextState::new("users".into(), vec!["bio".into(), "name".into()]);
-    app.set_modal(Modal::Fulltext);
+    app.open_modal = Some(crate::app::OpenModal::Fulltext(
+        crate::app::FulltextState::new("users".into(), vec!["bio".into(), "name".into()]),
+    ));
 }
 
 /// A `fulltext_search` answer with `count` hits, as the server sends it
@@ -1672,8 +1675,11 @@ async fn test_fulltext_fields_come_from_the_index_field_not_its_name() {
         "{:?}",
         app.error_message
     );
-    assert_eq!(app.fulltext_state.indexed_fields, ["body", "bio"]);
-    assert_eq!(app.fulltext_state.field, "body");
+    assert_eq!(
+        app.fulltext_state_mut().unwrap().indexed_fields,
+        ["body", "bio"]
+    );
+    assert_eq!(app.fulltext_state_mut().unwrap().field, "body");
     assert_eq!(
         server.calls_to("index_list").last().unwrap()["type"],
         "fulltext"
@@ -1709,14 +1715,14 @@ async fn test_fulltext_tab_drops_the_previous_fields_results() {
     open_fulltext_modal(&mut app);
     type_text(&mut app, "rust").await;
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.fulltext_state.results.len(), 2);
+    assert_eq!(app.fulltext_state_mut().unwrap().results.len(), 2);
     press(&mut app, KeyCode::Down).await;
 
     press(&mut app, KeyCode::Tab).await;
 
-    assert_eq!(app.fulltext_state.field, "name");
-    assert!(app.fulltext_state.results.is_empty());
-    assert_eq!(app.fulltext_state.selected_result, 0);
+    assert_eq!(app.fulltext_state_mut().unwrap().field, "name");
+    assert!(app.fulltext_state_mut().unwrap().results.is_empty());
+    assert_eq!(app.fulltext_state_mut().unwrap().selected_result, 0);
     let screen = render_to_string(&app, 120, 36);
     assert!(
         screen.contains(t().results_title(0, false).trim()),
@@ -1730,8 +1736,9 @@ async fn test_fulltext_tab_with_a_single_field_keeps_the_results() {
     let server = two_collections();
     server.respond("fulltext_search", fulltext_hits(2));
     let mut app = app_with_server(&server).await;
-    app.fulltext_state = crate::app::FulltextState::new("users".into(), vec!["bio".into()]);
-    app.set_modal(Modal::Fulltext);
+    app.open_modal = Some(crate::app::OpenModal::Fulltext(
+        crate::app::FulltextState::new("users".into(), vec!["bio".into()]),
+    ));
     type_text(&mut app, "rust").await;
     press(&mut app, KeyCode::Enter).await;
     press(&mut app, KeyCode::Down).await;
@@ -1739,9 +1746,9 @@ async fn test_fulltext_tab_with_a_single_field_keeps_the_results() {
     // The field does not change: its hits still belong to it
     press(&mut app, KeyCode::Tab).await;
 
-    assert_eq!(app.fulltext_state.field, "bio");
-    assert_eq!(app.fulltext_state.results.len(), 2);
-    assert_eq!(app.fulltext_state.selected_result, 1);
+    assert_eq!(app.fulltext_state_mut().unwrap().field, "bio");
+    assert_eq!(app.fulltext_state_mut().unwrap().results.len(), 2);
+    assert_eq!(app.fulltext_state_mut().unwrap().selected_result, 1);
 }
 
 #[tokio::test]
@@ -1760,9 +1767,9 @@ async fn test_fulltext_search_keeps_a_documents_own_highlights_field() {
     type_text(&mut app, "rust").await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.fulltext_state.error, None);
-    assert_eq!(app.fulltext_state.results.len(), 2);
-    let hit = &app.fulltext_state.results[0];
+    assert_eq!(app.fulltext_state_mut().unwrap().error, None);
+    assert_eq!(app.fulltext_state_mut().unwrap().results.len(), 2);
+    let hit = &app.fulltext_state_mut().unwrap().results[0];
     assert_eq!(hit.highlights, None);
     assert_eq!(hit.document["_highlights"], 5);
 }
@@ -1809,9 +1816,12 @@ async fn test_fulltext_search_through_the_fake_server() {
     type_text(&mut app, "developer").await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.fulltext_state.error, None);
-    assert_eq!(app.fulltext_state.results.len(), 2);
-    assert_eq!(app.fulltext_state.results[0].document["name"], "Anna");
+    assert_eq!(app.fulltext_state_mut().unwrap().error, None);
+    assert_eq!(app.fulltext_state_mut().unwrap().results.len(), 2);
+    assert_eq!(
+        app.fulltext_state_mut().unwrap().results[0].document["name"],
+        "Anna"
+    );
     let screen = render_to_string(&app, 120, 36);
     assert!(
         line_with(&screen, r#"name: "Anna", bio: "Rust developer""#).contains("1.00"),
@@ -2454,14 +2464,14 @@ async fn test_database_path_takes_readline_keys() {
     open_database_modal_with_path(&mut app, "/data/old.mlite").await;
 
     press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.database_state.path.value(), "");
+    assert_eq!(app.database_state_mut().unwrap().path.value(), "");
     type_text(&mut app, "/data/new.mlite").await;
     press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL).await;
     press(&mut app, KeyCode::Right).await;
     press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.database_state.path.value(), "/");
+    assert_eq!(app.database_state_mut().unwrap().path.value(), "/");
     press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.database_state.path.value(), "");
+    assert_eq!(app.database_state_mut().unwrap().path.value(), "");
 }
 
 /// The field shows the text as typed, with the terminal's cursor at the
@@ -2522,10 +2532,16 @@ async fn test_export_path_is_edited_at_the_cursor() {
     }
     type_text(&mut app, "-2026").await;
 
-    assert_eq!(app.export_state.file_path.value(), "out/users-2026.json");
+    assert_eq!(
+        app.export_state().unwrap().file_path.value(),
+        "out/users-2026.json"
+    );
     // The format switch still replaces the extension of the edited path
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.export_state.file_path.value(), "out/users-2026.csv");
+    assert_eq!(
+        app.export_state().unwrap().file_path.value(),
+        "out/users-2026.csv"
+    );
 }
 
 /// The index field name is edited at the cursor and re-parsed on each change
@@ -2567,10 +2583,13 @@ async fn test_fulltext_query_keeps_its_result_keys() {
     type_text(&mut app, "rust").await;
 
     press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.fulltext_state.query.value(), "rust");
+    assert_eq!(app.fulltext_state_mut().unwrap().query.value(), "rust");
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "async ").await;
-    assert_eq!(app.fulltext_state.query.value(), "async rust");
+    assert_eq!(
+        app.fulltext_state_mut().unwrap().query.value(),
+        "async rust"
+    );
 }
 
 /// The API key name is edited at the cursor (it took characters only at its end)
