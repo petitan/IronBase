@@ -14,7 +14,7 @@ pub(crate) fn handle_database_open(app: &mut App) {
     let is_http = app.config.transport == TransportMode::Http;
     let current_path = app.db_path.as_ref().map(|p| p.display().to_string());
     app.database_state = crate::app::DatabaseState::new(current_path.as_deref(), is_http);
-    app.modal = Some(Modal::Database);
+    app.set_modal(Modal::Database);
 }
 
 /// Handle database modal keys

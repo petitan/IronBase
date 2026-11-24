@@ -26,7 +26,7 @@ pub(crate) async fn handle_vector_open(app: &mut App) {
 
     // Initialize vector state
     app.vector_state = VectorSearchState::new(collection.clone());
-    app.modal = Some(Modal::VectorSearch);
+    app.set_modal(Modal::VectorSearch);
 
     // Load vector indexes for this collection
     if let Some(ref db) = app.db {

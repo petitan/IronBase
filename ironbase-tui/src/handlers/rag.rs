@@ -31,7 +31,7 @@ pub(crate) async fn handle_rag_open(app: &mut App) {
     }
 
     app.rag_state = RagState::new(collection.clone());
-    app.modal = Some(Modal::Rag);
+    app.set_modal(Modal::Rag);
 
     // Load models + auto-embed status
     if let Some(ref db) = app.db {

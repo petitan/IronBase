@@ -67,7 +67,7 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
         // Error detail modal (if error present, 'e' opens error details)
         Action::ErrorDetails => {
             app.error_scroll = 0;
-            app.modal = Some(Modal::ErrorDetail);
+            app.set_modal(Modal::ErrorDetail);
         }
 
         // Edit (Detail pane, Documents pane) - only if no error message
@@ -128,7 +128,7 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
                                 app.acl_state.is_localhost = true;
                                 app.acl_state.start_edit(coll);
                                 app.acl_state.load_edit_rules(&rules);
-                                app.modal = Some(Modal::Acl);
+                                app.set_modal(Modal::Acl);
                             }
                         }
                         Err(e) => app.set_error(t().failed(Op::LoadAcl, &e)),
@@ -162,7 +162,7 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
         Action::ApiKeys => {
             app.api_key_state = modals::api_key::ApiKeyState::new();
             app.api_key_state.is_localhost = app.connection_type.is_localhost();
-            app.modal = Some(Modal::ApiKey);
+            app.set_modal(Modal::ApiKey);
             // Load API keys if admin key is available and can_admin
             if app.api_key_state.can_admin() {
                 if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
@@ -187,7 +187,7 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
         Action::AclRules => {
             app.acl_state = modals::acl::AclState::new();
             app.acl_state.is_localhost = app.connection_type.is_localhost();
-            app.modal = Some(Modal::Acl);
+            app.set_modal(Modal::Acl);
             // Load ACL rules
             if let Some(ref db) = app.db {
                 app.acl_state.loading = true;
@@ -208,7 +208,7 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
         Action::Listeners => {
             app.listener_state = modals::listener::ListenerState::new();
             app.listener_state.is_localhost = app.connection_type.is_localhost();
-            app.modal = Some(Modal::Listener);
+            app.set_modal(Modal::Listener);
             // Load listeners
             if let Some(ref db) = app.db {
                 app.listener_state.loading = true;

@@ -1,6 +1,6 @@
 //! Key handlers: new_collection
 
-use crate::app::App;
+use crate::app::{App, OpenModal};
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -16,8 +16,9 @@ pub(crate) async fn handle_new_collection_key_async(
             app.create_collection_async().await;
         }
         _ => {
-            app.new_collection_state
-                .handle_input(Input::Key(key, modifiers));
+            if let Some(OpenModal::NewCollection(state)) = app.open_modal_mut() {
+                state.handle_input(Input::Key(key, modifiers));
+            }
         }
     }
 }

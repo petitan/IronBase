@@ -55,6 +55,33 @@ pub enum Modal {
     Rag,
 }
 
+/// The open modal and the state it owns: it is created when the modal opens
+/// and dropped when it closes, so a modal never shows a previous opening's
+/// state. `Plain` is for the modals whose state still lives in `App` (they
+/// move here one by one); `kind` names the modal either way.
+// One value of it lives in `App` (one modal is open at a time), so its size
+// is the largest modal state's either way; boxing each variant would add an
+// indirection to every access for nothing
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum OpenModal {
+    Plain(Modal),
+    NewCollection(crate::state::NewCollectionState),
+    ServerInfo(crate::modals::server_info::ServerInfoState),
+    Update(crate::modals::update::UpdateState),
+}
+
+impl OpenModal {
+    pub fn kind(&self) -> Modal {
+        match self {
+            OpenModal::Plain(kind) => *kind,
+            OpenModal::NewCollection(_) => Modal::NewCollection,
+            OpenModal::ServerInfo(_) => Modal::ServerInfo,
+            OpenModal::Update(_) => Modal::Update,
+        }
+    }
+}
+
 /// Connection type for permission checks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionType {

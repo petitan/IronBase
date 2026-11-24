@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: a modal's state lives with the open modal (first step of phase 4) (tuti-tui 0.3.496, mcp-server 1.0.684 — version only, for the release tag)
+
+`App` kept every modal's state in a field of its own (17 of them), alive whether the modal was open or not, next to
+`modal: Option<Modal>` that said which one was open. Now the open modal is one value, `OpenModal`, that owns its
+state: it is created when the modal opens and dropped when it closes (`App::modal()` gives its kind,
+`open_modal()` / `open_modal_mut()` the value, `set_modal(kind)` opens a modal whose state still lives in `App`).
+
+- Moved first: the new collection, server info and update check modals (`OpenModal::NewCollection`, `ServerInfo`,
+  `Update`); the others follow one by one, `OpenModal::Plain(kind)` carries them meanwhile.
+- A late answer for a closed modal (the server info or the update check arriving after Esc) no longer writes into
+  a hidden state: there is none.
+- Tests: reopening starts empty, a late answer changes nothing; the existing tests pass with `app.modal()` for the
+  kind.
+
 ### Added — Tuti TUI: the selection shows without color, and `NO_COLOR` (tuti-tui 0.3.495, mcp-server 1.0.683 — version only, for the release tag)
 
 Most lists, the confirmation buttons, the database mode, the vector and RAG tabs and the filter's operators showed

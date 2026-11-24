@@ -267,7 +267,7 @@ async fn test_delete_document_needs_explicit_yes() {
 
     // `d` opens the confirm, Cancel preselected
     press(&mut app, KeyCode::Char('d')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     let screen = render_to_string(&app, 120, 36);
     assert!(
@@ -278,13 +278,13 @@ async fn test_delete_document_needs_explicit_yes() {
 
     // Enter on the default = cancel: nothing is deleted
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert!(server.calls().is_empty());
 
     // `y` deletes exactly the selected document
     press(&mut app, KeyCode::Char('d')).await;
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert_eq!(
         server.calls_to("delete_one"),
         vec![json!({"collection": "users", "filter": {"_id": 1}})]
@@ -318,34 +318,34 @@ async fn test_index_list_drop_flow() {
 
     // Actions -> x opens the index modal and loads the list
     press(&mut app, KeyCode::Char('a')).await;
-    assert_eq!(app.modal, Some(Modal::Actions));
+    assert_eq!(app.modal(), Some(Modal::Actions));
     press(&mut app, KeyCode::Char('x')).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     assert_eq!(app.index_state.indexes, vec!["users_id", "users_age"]);
     server.clear_calls();
 
     // The primary `<collection>_id` index: no confirm, no call
     press(&mut app, KeyCode::Char('d')).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     assert!(app.index_state.error.is_some());
     assert!(server.calls().is_empty());
 
     // Another index: confirm; Esc and Enter (default Cancel) return to the index modal
     press(&mut app, KeyCode::Char('j')).await;
     press(&mut app, KeyCode::Char('d')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     press(&mut app, KeyCode::Esc).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     press(&mut app, KeyCode::Char('d')).await;
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     assert!(server.calls().is_empty());
 
     // `y`: exactly one index_drop
     press(&mut app, KeyCode::Char('d')).await;
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     assert_eq!(
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_age"})]
@@ -373,21 +373,21 @@ async fn test_vector_index_drop_executes_with_captured_names() {
     );
 
     shift(&mut app, 'V').await;
-    assert_eq!(app.modal, Some(Modal::VectorSearch));
+    assert_eq!(app.modal(), Some(Modal::VectorSearch));
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Tab).await;
     assert_eq!(app.vector_state.active_tab, VectorTab::ListIndexes);
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('d')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     // The modal state changing under the dialog must not change the target
     app.vector_state.collection = "other".to_string();
     app.vector_state.indexes.clear();
 
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::VectorSearch));
+    assert_eq!(app.modal(), Some(Modal::VectorSearch));
     assert_eq!(
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_emb_vec"})]
@@ -429,7 +429,7 @@ async fn test_script_rollback_executes_with_captured_names() {
 
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('s')).await;
-    assert_eq!(app.modal, Some(Modal::Script));
+    assert_eq!(app.modal(), Some(Modal::Script));
     assert_eq!(app.script_state.scripts.len(), 1);
     press(&mut app, KeyCode::Char('h')).await;
     assert_eq!(app.script_state.mode, ScriptMode::History);
@@ -438,13 +438,13 @@ async fn test_script_rollback_executes_with_captured_names() {
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('r')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     app.script_state.name.set_value("other");
     app.script_state.selected_version = 0;
 
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::Script));
+    assert_eq!(app.modal(), Some(Modal::Script));
     assert_eq!(
         server.calls_to("script_rollback"),
         vec![json!({"name": "cleanup", "version": 2})]
@@ -462,7 +462,7 @@ async fn test_script_rollback_executes_with_captured_names() {
 /// Shift+E, then BackTab to the Models tab (Tab is text input on Search)
 async fn open_rag_models_tab(app: &mut App) {
     shift(app, 'E').await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
     press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
     assert_eq!(app.rag_state.active_tab, RagTab::Models);
@@ -485,12 +485,12 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('d')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     app.rag_state.collection = "other".to_string();
 
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert_eq!(
         server.calls_to("auto_embed_disable"),
         vec![json!({"collection": "users"})]
@@ -518,15 +518,15 @@ async fn test_embed_cache_clear_executes_after_confirm() {
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('x')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     // Enter on the default cancels
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert!(server.calls().is_empty());
 
     press(&mut app, KeyCode::Char('x')).await;
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert_eq!(server.calls_to("embed_cache_clear").len(), 1);
     assert_eq!(
         app.rag_state.message.as_deref(),
@@ -620,12 +620,12 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('x')).await;
-    assert_eq!(app.modal, Some(Modal::Confirm));
+    assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
     app.rag_state.selected_job = 0;
 
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert_eq!(
         server.calls_to("embed_job_cancel"),
         vec![json!({"job_id": "job_1"})]
@@ -755,7 +755,7 @@ async fn test_rag_open_reports_a_failing_models_list() {
     server.fail("embed_models_list", "Embedding not available");
     let mut app = app_with_server(&server).await;
     shift(&mut app, 'E').await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert!(
         app.rag_state
             .error
@@ -807,7 +807,7 @@ async fn test_script_delete_confirm_enter_does_not_confirm() {
     );
     press(&mut app, KeyCode::Enter).await;
     assert_eq!(app.script_state.confirm_action, None);
-    assert_eq!(app.modal, Some(Modal::Script));
+    assert_eq!(app.modal(), Some(Modal::Script));
     assert!(server.calls().is_empty());
 
     // Only `y` deletes
@@ -872,7 +872,7 @@ async fn test_shift_p_loads_stored_rules_into_editor() {
 
     shift(&mut app, 'P').await;
 
-    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.modal(), Some(Modal::Acl));
     assert_eq!(
         server.calls_to("acl_get"),
         vec![json!({"collection": "users"})]
@@ -905,7 +905,7 @@ async fn test_shift_p_refuses_uneditable_rule() {
 
     shift(&mut app, 'P').await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(
         error.contains("amelyet ez a szerkesztő még nem tud szerkeszteni"),
@@ -924,7 +924,7 @@ async fn test_shift_p_reports_acl_get_error_and_does_not_open() {
 
     shift(&mut app, 'P').await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(error.contains("Az ACL betöltése sikertelen"), "{}", error);
     assert!(error.contains("permission denied"), "{}", error);
@@ -941,7 +941,7 @@ async fn test_shift_p_needs_localhost() {
 
     shift(&mut app, 'P').await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert_eq!(
         app.error_message.as_deref(),
         Some("Az ACL szerkesztéséhez localhost-kapcsolat kell")
@@ -954,7 +954,7 @@ async fn test_shift_p_needs_localhost() {
 async fn open_database_modal_with_path(app: &mut App, path: &str) {
     press(app, KeyCode::Char('a')).await;
     press(app, KeyCode::Char('b')).await;
-    assert_eq!(app.modal, Some(Modal::Database));
+    assert_eq!(app.modal(), Some(Modal::Database));
     assert!(app.database_state.is_http_mode);
     // The path input may be prefilled with the current database
     while !app.database_state.path.is_empty() {
@@ -978,7 +978,7 @@ async fn test_database_switch_reports_success() {
 
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert_eq!(
         server.calls_to("db_open"),
         vec![json!({"path": "/data/New.mlite", "create": false})]
@@ -1003,7 +1003,7 @@ async fn test_database_switch_keeps_collection_list_error_visible() {
 
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert_eq!(server.calls_to("db_open").len(), 1);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(
@@ -1033,7 +1033,7 @@ async fn test_j_and_k_go_into_fulltext_query() {
     );
 
     shift(&mut app, 'F').await;
-    assert_eq!(app.modal, Some(Modal::Fulltext));
+    assert_eq!(app.modal(), Some(Modal::Fulltext));
     type_text(&mut app, "jk").await;
 
     assert_eq!(app.fulltext_state.query.value(), "jk");
@@ -1046,13 +1046,13 @@ async fn test_uppercase_j_and_c_go_into_export_path() {
     let mut app = app_with_server(&server).await;
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('o')).await;
-    assert_eq!(app.modal, Some(Modal::Export));
+    assert_eq!(app.modal(), Some(Modal::Export));
     assert_eq!(app.export_state.file_path.value(), "users.json");
 
     type_text(&mut app, "JC").await;
 
     assert_eq!(app.export_state.file_path.value(), "users.jsonJC");
-    assert_eq!(app.modal, Some(Modal::Export));
+    assert_eq!(app.modal(), Some(Modal::Export));
 }
 
 // === Rendering smoke test ===
@@ -1093,12 +1093,12 @@ async fn test_main_screen_and_every_modal_render_at_all_sizes() {
 
     for mut app in [offline, connected] {
         for (width, height) in SIZES {
-            app.modal = None;
+            app.close_modal();
             let screen = render_to_string(&app, width, height);
             assert_eq!(screen.lines().count(), height as usize);
 
             for modal in ALL_MODALS {
-                app.modal = Some(modal);
+                app.set_modal(modal);
                 render_to_string(&app, width, height);
             }
         }
@@ -1210,7 +1210,7 @@ async fn test_modals_opened_by_keys_render_at_all_sizes() {
         for (code, modifiers) in &keys {
             press_with(&mut app, *code, *modifiers).await;
         }
-        assert_eq!(app.modal, Some(modal), "keys: {:?}", keys);
+        assert_eq!(app.modal(), Some(modal), "keys: {:?}", keys);
         for (width, height) in SIZES {
             render_to_string(&app, width, height);
         }
@@ -1247,7 +1247,7 @@ async fn test_explain_modal_shows_real_plan_fields() {
 
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('r')).await;
-    assert_eq!(app.modal, Some(Modal::Query));
+    assert_eq!(app.modal(), Some(Modal::Query));
     press_with(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
 
     assert_eq!(server.calls_to("explain").len(), 1);
@@ -1287,7 +1287,7 @@ async fn test_server_info_shows_index_totals() {
 
     shift(&mut app, 'I').await;
 
-    assert_eq!(app.modal, Some(Modal::ServerInfo));
+    assert_eq!(app.modal(), Some(Modal::ServerInfo));
     let screen = render_to_string(&app, 140, 45);
     assert!(
         line_with(&screen, &format!("{}:", t().label_total_indexes())).contains('7'),
@@ -1312,7 +1312,7 @@ async fn test_index_list_shows_fuzzy_and_vector_indexes() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('x')).await;
 
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     let screen = render_to_string(&app, 140, 45);
     let fuzzy = line_with(&screen, "users_name_fuzzy");
     assert!(fuzzy.contains("[FZ]"), "{fuzzy}");
@@ -1358,7 +1358,7 @@ async fn open_edit_of_first_user(app: &mut App) {
         press(app, KeyCode::Tab).await;
     }
     press(app, KeyCode::Char('e')).await;
-    assert_eq!(app.modal, Some(Modal::Insert));
+    assert_eq!(app.modal(), Some(Modal::Insert));
     assert!(app.insert.is_edit_mode());
 }
 
@@ -1449,11 +1449,11 @@ async fn test_insert_reports_inserted_id_as_sent() {
     let mut app = app_with_server(&server).await;
 
     press(&mut app, KeyCode::Char('i')).await;
-    assert_eq!(app.modal, Some(Modal::Insert));
+    assert_eq!(app.modal(), Some(Modal::Insert));
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
 
     assert_eq!(server.calls_to("insert_one").len(), 1);
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     assert_eq!(
         app.status_message.as_deref(),
         Some("Dokumentum beszúrva, _id: 31")
@@ -1480,7 +1480,7 @@ async fn test_insert_into_fake_server_stores_the_document() {
 async fn open_index_create_form(app: &mut App, field: &str) {
     press(app, KeyCode::Char('a')).await;
     press(app, KeyCode::Char('x')).await;
-    assert_eq!(app.modal, Some(Modal::Index));
+    assert_eq!(app.modal(), Some(Modal::Index));
     press(app, KeyCode::Char('n')).await;
     assert!(app.index_state.is_creating);
     type_text(app, field).await;
@@ -1635,7 +1635,7 @@ fn search_docs() -> Arc<FakeServer> {
 fn open_fulltext_modal(app: &mut App) {
     app.fulltext_state =
         crate::app::FulltextState::new("users".into(), vec!["bio".into(), "name".into()]);
-    app.modal = Some(Modal::Fulltext);
+    app.set_modal(Modal::Fulltext);
 }
 
 /// A `fulltext_search` answer with `count` hits, as the server sends it
@@ -1666,7 +1666,12 @@ async fn test_fulltext_fields_come_from_the_index_field_not_its_name() {
 
     shift(&mut app, 'F').await;
 
-    assert_eq!(app.modal, Some(Modal::Fulltext), "{:?}", app.error_message);
+    assert_eq!(
+        app.modal(),
+        Some(Modal::Fulltext),
+        "{:?}",
+        app.error_message
+    );
     assert_eq!(app.fulltext_state.indexed_fields, ["body", "bio"]);
     assert_eq!(app.fulltext_state.field, "body");
     assert_eq!(
@@ -1683,7 +1688,7 @@ async fn test_fulltext_open_shows_why_the_index_listing_failed() {
 
     shift(&mut app, 'F').await;
 
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(error.contains("connection reset by peer"), "{error}");
     assert!(!error.contains("Nincs fulltext index"), "{error}");
@@ -1691,7 +1696,7 @@ async fn test_fulltext_open_shows_why_the_index_listing_failed() {
     // An empty listing is "no index"
     server.respond("index_list", fulltext_index_list(&[]));
     shift(&mut app, 'F').await;
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(error.contains("Nincs fulltext index"), "{error}");
 }
@@ -1726,7 +1731,7 @@ async fn test_fulltext_tab_with_a_single_field_keeps_the_results() {
     server.respond("fulltext_search", fulltext_hits(2));
     let mut app = app_with_server(&server).await;
     app.fulltext_state = crate::app::FulltextState::new("users".into(), vec!["bio".into()]);
-    app.modal = Some(Modal::Fulltext);
+    app.set_modal(Modal::Fulltext);
     type_text(&mut app, "rust").await;
     press(&mut app, KeyCode::Enter).await;
     press(&mut app, KeyCode::Down).await;
@@ -1817,7 +1822,7 @@ async fn test_fulltext_search_through_the_fake_server() {
 /// Open the RAG modal on the selected collection (search tab, query focused)
 async fn open_rag_search(app: &mut App) {
     shift(app, 'E').await;
-    assert_eq!(app.modal, Some(Modal::Rag));
+    assert_eq!(app.modal(), Some(Modal::Rag));
     assert_eq!(app.rag_state.active_tab, RagTab::Search);
 }
 
@@ -1962,7 +1967,7 @@ async fn test_rag_search_rejects_a_malformed_response() {
 /// The vector modal on "docs", the vector `[1.0, 0.0]` typed in
 async fn open_vector_search(app: &mut App) {
     shift(app, 'V').await;
-    assert_eq!(app.modal, Some(Modal::VectorSearch));
+    assert_eq!(app.modal(), Some(Modal::VectorSearch));
     app.vector_state.search_field = "emb".into();
     type_text(app, "[1.0, 0.0]").await;
 }
@@ -2222,7 +2227,7 @@ async fn test_acl_delete_reports_a_missing_acl() {
     let mut app = app_with_server(&server).await;
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'A').await;
-    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.modal(), Some(Modal::Acl));
     assert_eq!(app.acl_state.acls.len(), 1);
 
     server.clear_calls();
@@ -2245,7 +2250,7 @@ async fn test_shift_p_without_a_stored_acl_opens_an_empty_editor() {
     let mut app = app_with_server(&server).await;
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'P').await;
-    assert_eq!(app.modal, Some(Modal::Acl));
+    assert_eq!(app.modal(), Some(Modal::Acl));
     assert_eq!(app.acl_state.edit_collection, "users");
     assert!(app.acl_state.edit_rules.is_empty());
 }
@@ -2267,7 +2272,7 @@ async fn test_listener_create_reports_replace_and_restart() {
     let mut app = app_with_server(&server).await;
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'L').await;
-    assert_eq!(app.modal, Some(Modal::Listener));
+    assert_eq!(app.modal(), Some(Modal::Listener));
     assert_eq!(app.listener_state.listeners.len(), 1);
     assert_eq!(app.listener_state.listeners[0].bind, "127.0.0.1:9090");
 
@@ -2380,7 +2385,7 @@ async fn test_api_key_revoke_reports_a_failed_list_reload() {
     );
     server.fail("admin_apikey_list", "list failed");
     let mut app = app_with_server(&server).await;
-    app.modal = Some(Modal::ApiKey);
+    app.set_modal(Modal::ApiKey);
     app.api_key_state.admin_key = Some("adm".to_string());
     app.api_key_state.is_localhost = true;
     app.api_key_state.set_keys(vec![ApiKeyInfo {
@@ -2415,7 +2420,7 @@ async fn test_api_key_revoke_of_a_missing_key_says_so() {
         json!({"success": false, "id": 7, "error": "API key not found"}),
     );
     let mut app = app_with_server(&server).await;
-    app.modal = Some(Modal::ApiKey);
+    app.set_modal(Modal::ApiKey);
     app.api_key_state.admin_key = Some("adm".to_string());
     app.api_key_state.is_localhost = true;
     app.api_key_state.set_keys(vec![ApiKeyInfo {
@@ -2507,7 +2512,7 @@ async fn test_export_path_is_edited_at_the_cursor() {
     let mut app = app_with_server(&server).await;
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('o')).await;
-    assert_eq!(app.modal, Some(Modal::Export));
+    assert_eq!(app.modal(), Some(Modal::Export));
 
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "out/").await;
@@ -2531,7 +2536,7 @@ async fn test_index_fields_are_edited_at_the_cursor() {
     app.index_state = crate::state::index::IndexState::new("users".to_string(), vec![]);
     app.index_state.start_create();
     app.index_state.toggle_compound();
-    app.modal = Some(Modal::Index);
+    app.set_modal(Modal::Index);
 
     type_text(&mut app, "city").await;
     press(&mut app, KeyCode::Home).await;
@@ -2575,7 +2580,7 @@ async fn test_api_key_name_is_edited_at_the_cursor() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.modal = Some(Modal::ApiKey);
+    app.set_modal(Modal::ApiKey);
     app.api_key_state.mode = ApiKeyModalMode::Create;
 
     type_text(&mut app, "runner").await;
@@ -2592,7 +2597,7 @@ async fn test_acl_principal_value_takes_readline_keys() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.modal = Some(Modal::Acl);
+    app.set_modal(Modal::Acl);
     app.acl_state.mode = AclModalMode::Edit;
     app.acl_state.start_add_rule();
     app.acl_state.edit_field = EditField::PrincipalValue;
@@ -2616,7 +2621,7 @@ async fn test_listener_id_is_edited_at_the_cursor() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.modal = Some(Modal::Listener);
+    app.set_modal(Modal::Listener);
     app.listener_state.mode = ListenerModalMode::Add;
     app.listener_state.add_field = AddField::Id;
 
@@ -2634,7 +2639,7 @@ async fn test_vector_input_is_edited_at_the_cursor() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
     app.vector_state = crate::state::vector::VectorSearchState::new("users".to_string());
-    app.modal = Some(Modal::VectorSearch);
+    app.set_modal(Modal::VectorSearch);
 
     type_text(&mut app, "[1,3]").await;
     press(&mut app, KeyCode::Left).await;
@@ -2679,7 +2684,7 @@ async fn test_filter_inputs_are_edited_at_the_cursor() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
     app.filter_state.reset_inputs();
-    app.modal = Some(Modal::Filter);
+    app.set_modal(Modal::Filter);
 
     type_text(&mut app, "ge").await;
     press(&mut app, KeyCode::Home).await;
@@ -2769,7 +2774,7 @@ async fn test_document_editor_keys() {
     );
     press(&mut app, KeyCode::Backspace).await;
     assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
-    assert_eq!(app.modal, Some(Modal::Insert));
+    assert_eq!(app.modal(), Some(Modal::Insert));
 }
 
 /// A paste goes into the document editor in one piece: its line breaks are
@@ -2784,7 +2789,7 @@ async fn test_paste_into_the_document_editor() {
     crate::handlers::handle_paste(&mut app, "\r\n  \"a\": 1,\r\n  \"b\": 2\r\n");
     assert_eq!(app.insert.editor.text(), "{\n  \"a\": 1,\n  \"b\": 2\n}");
     assert_eq!(app.insert.editor.cursor(), (3, 0));
-    assert_eq!(app.modal, Some(Modal::Insert));
+    assert_eq!(app.modal(), Some(Modal::Insert));
     assert!(server.calls_to("update_one").is_empty());
 }
 
@@ -2803,7 +2808,10 @@ async fn test_paste_into_a_single_line_input_is_one_line() {
     app.close_modal();
     app.open_new_collection();
     crate::handlers::handle_paste(&mut app, "my coll/ection-1\n");
-    assert_eq!(app.new_collection_state.name.value(), "mycollection-1");
+    let Some(crate::app::OpenModal::NewCollection(state)) = app.open_modal() else {
+        panic!("the new collection modal is not open");
+    };
+    assert_eq!(state.name.value(), "mycollection-1");
 }
 
 /// Pasted text is never taken as commands: without a focused input (or
@@ -2815,11 +2823,11 @@ async fn test_paste_without_a_focused_input_is_dropped() {
     // No modal: "q" would quit, "d" would delete
     crate::handlers::handle_paste(&mut app, "qd");
     assert!(!app.should_quit);
-    assert_eq!(app.modal, None);
+    assert_eq!(app.modal(), None);
 
     // Filter modal, operator focus: nothing changes
     app.filter_state.reset_inputs();
-    app.modal = Some(Modal::Filter);
+    app.set_modal(Modal::Filter);
     app.filter_state.focus = crate::app::FilterFocus::Operator;
     crate::handlers::handle_paste(&mut app, "age");
     assert_eq!(app.filter_state.field_input.value(), "");

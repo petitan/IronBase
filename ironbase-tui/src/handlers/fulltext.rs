@@ -42,7 +42,7 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
     }
 
     app.fulltext_state = FulltextState::new(collection.to_string(), indexed_fields);
-    app.modal = Some(Modal::Fulltext);
+    app.set_modal(Modal::Fulltext);
 }
 
 /// Async fulltext key handler

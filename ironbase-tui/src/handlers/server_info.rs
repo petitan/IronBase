@@ -1,6 +1,6 @@
 //! Key handlers: server_info
 
-use crate::app::App;
+use crate::app::{App, OpenModal};
 use crate::i18n::t;
 use crossterm::event::KeyCode;
 use ironbase_mcp_types::params::NoParams;
@@ -8,7 +8,11 @@ use ironbase_mcp_types::tools::DbStats;
 
 /// Server info modal key handler with scrolling support
 pub(crate) fn handle_server_info_key(app: &mut App, key: KeyCode) {
-    let max_scroll = app.server_info_state.total_lines.saturating_sub(20);
+    let total_lines = match app.open_modal() {
+        Some(OpenModal::ServerInfo(state)) => state.total_lines,
+        _ => 0,
+    };
+    let max_scroll = total_lines.saturating_sub(20);
     match key {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('I') => {
             app.server_info_scroll = 0;

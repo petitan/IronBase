@@ -1,6 +1,6 @@
 //! Main UI renderer
 
-use crate::app::{App, ConnectionType, Modal, Pane};
+use crate::app::{App, ConnectionType, Modal, OpenModal, Pane};
 use crate::i18n::t;
 use crate::modals;
 use crate::panes;
@@ -71,7 +71,7 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
     render_command_bar(frame, layout[2], app, &theme);
 
     // Render modal if active
-    if let Some(modal) = app.modal {
+    if let Some(modal) = app.modal() {
         match modal {
             Modal::Search => modals::search::render(frame, frame.area(), app, &theme),
             Modal::Actions => modals::actions::render(frame, frame.area(), app, &theme),
@@ -82,12 +82,11 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
             Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
             Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
-            Modal::NewCollection => modals::new_collection::render(
-                frame,
-                frame.area(),
-                &app.new_collection_state,
-                &theme,
-            ),
+            Modal::NewCollection => {
+                if let Some(OpenModal::NewCollection(state)) = app.open_modal() {
+                    modals::new_collection::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::ErrorDetail => {
                 if let Some(ref err) = app.error_message {
                     modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
@@ -97,16 +96,20 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 modals::script::render(frame, frame.area(), &app.script_state, &theme);
             }
             Modal::ServerInfo => {
-                modals::server_info::render(
-                    frame,
-                    frame.area(),
-                    &app.server_info_state,
-                    app.server_info_scroll,
-                    &theme,
-                );
+                if let Some(OpenModal::ServerInfo(state)) = app.open_modal() {
+                    modals::server_info::render(
+                        frame,
+                        frame.area(),
+                        state,
+                        app.server_info_scroll,
+                        &theme,
+                    );
+                }
             }
             Modal::Update => {
-                modals::update::render(frame, frame.area(), &app.update_state, &theme);
+                if let Some(OpenModal::Update(state)) = app.open_modal() {
+                    modals::update::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Database => {
                 modals::database::render(frame, frame.area(), &app.database_state, &theme);
