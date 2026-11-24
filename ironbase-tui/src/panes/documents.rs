@@ -82,7 +82,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     let header = Row::new(header_cells).height(1);
 
     // Build data rows
-    let local_selected = app.selected_document.saturating_sub(app.doc_scroll_offset);
+    // While the list reloads its rows are the old page: none is the selected one
+    let local_selected = if app.documents_loading() {
+        usize::MAX
+    } else {
+        app.selected_document.saturating_sub(app.doc_scroll_offset)
+    };
     let visible_height = visible_rows(area.height);
 
     let rows: Vec<Row> = documents

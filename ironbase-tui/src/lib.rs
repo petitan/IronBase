@@ -12,6 +12,7 @@ pub mod logging;
 pub mod mcp;
 pub mod modals;
 pub mod panes;
+pub mod runtime;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod testing;

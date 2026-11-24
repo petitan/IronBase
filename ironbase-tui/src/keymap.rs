@@ -78,6 +78,7 @@ pub enum Action {
     GoToStart,
     GoToEnd,
     ClearFilter,
+    CancelTasks,
     OpenSearch,
     OpenActions,
     OpenHelp,
@@ -126,6 +127,8 @@ pub struct Context {
     pub has_error: bool,
     pub has_filter: bool,
     pub has_matches: bool,
+    /// A request runs in the background
+    pub busy: bool,
 }
 
 impl Action {
@@ -135,6 +138,7 @@ impl Action {
         let document_pane = matches!(ctx.pane, Pane::Documents | Pane::Detail);
         match self {
             Action::ClearFilter => ctx.has_filter,
+            Action::CancelTasks => ctx.busy,
             Action::ErrorDetails => ctx.has_error,
             Action::EditDocument | Action::DeleteDocument | Action::CopyDocument => document_pane,
             Action::InsertDocument => matches!(ctx.pane, Pane::Collections | Pane::Documents),
@@ -182,6 +186,8 @@ pub const MAIN: &[Binding] = &[
         Action::GoToEnd,
         Navigation,
     ),
+    // While a request runs, Esc stops it (before clearing the filter)
+    bind(&[Code(KeyCode::Esc)], Action::CancelTasks, General),
     bind(&[Code(KeyCode::Esc)], Action::ClearFilter, Navigation),
     bind(&[Ctrl('c'), Char('q')], Action::Quit, General),
     bind(&[Char('/')], Action::OpenSearch, General),
@@ -260,6 +266,7 @@ mod tests {
             has_error: false,
             has_filter: false,
             has_matches: false,
+            busy: false,
         }
     }
 
@@ -365,6 +372,7 @@ mod tests {
             has_error: true,
             has_filter: true,
             has_matches: true,
+            busy: true,
         });
         for (i, a) in MAIN.iter().enumerate() {
             for b in &MAIN[i + 1..] {
@@ -378,6 +386,7 @@ mod tests {
                         contexts
                             .map(|c| Context {
                                 has_error: false,
+                                busy: false,
                                 ..c
                             })
                             .iter(),

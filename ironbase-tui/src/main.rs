@@ -26,7 +26,10 @@ fn parse_bool_flexible(s: &str) -> Result<bool, String> {
         )),
     }
 }
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEventKind,
+};
+use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -352,32 +355,41 @@ async fn run_app(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Resul
     let size = terminal.size()?;
     app.update_page_size(size.height);
 
+    let mut events = EventStream::new();
+    // Redraws while nothing happens: status expiry, the busy indicator
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         // Clear expired status messages
         app.clear_status_if_expired();
 
         terminal.draw(|f| ui::render_ui(f, app))?;
 
-        // Use poll with timeout for non-blocking check
-        if event::poll(std::time::Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) => {
+        tokio::select! {
+            event = events.next() => match event {
+                Some(Ok(Event::Key(key))) => {
                     // Windows sends both Press and Release events - only handle Press
-                    if key.kind != KeyEventKind::Press {
-                        continue;
+                    if key.kind == KeyEventKind::Press {
+                        // Modal keys first, global keys otherwise
+                        handlers::handle_key(app, key).await;
                     }
-                    // Modal keys first, global keys otherwise
-                    handlers::handle_key(app, key).await;
                 }
-                Event::Paste(text) => handlers::handle_paste(app, &text),
-                Event::Resize(_, height)
+                Some(Ok(Event::Paste(text))) => handlers::handle_paste(app, &text),
+                Some(Ok(Event::Resize(_, height))) => {
                     // Update page_size when terminal is resized
-                    if app.update_page_size(height) => {
+                    if app.update_page_size(height) {
                         // Refresh documents with new page size
-                        app.reload_documents_async().await;
+                        app.reload_documents();
                     }
-                _ => {}
-            }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e.into()),
+                // The terminal's input closed
+                None => return Ok(()),
+            },
+            finished = app.tasks.next_finished() => app.apply_finished(finished),
+            _ = tick.tick() => {}
         }
 
         if app.should_quit {

@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::i18n::{t, Op};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
+use crate::runtime::{Slot, Tasks, Update};
 use crate::state::open_state;
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
@@ -116,6 +117,8 @@ pub struct App {
 
     // Database
     pub db: Option<DbWrapper>,
+    /// Requests running in the background (`crate::runtime`)
+    pub tasks: Tasks,
     pub db_path: Option<PathBuf>,
 
     // Collections pane
@@ -174,6 +177,7 @@ impl App {
             theme_name,
             theme,
             db: None,
+            tasks: Tasks::default(),
             db_path: None,
             collections: Vec::new(),
             selected_collection: 0,
@@ -235,6 +239,10 @@ impl App {
 
     /// Get selected document
     pub fn get_selected_document(&self) -> Option<&Value> {
+        // While the list reloads its rows are the old page: nothing is selected
+        if self.documents_loading() {
+            return None;
+        }
         self.documents.get(
             self.selected_document
                 .saturating_sub(self.doc_scroll_offset),
@@ -1043,7 +1051,7 @@ impl App {
                 self.reload_collections_async().await;
                 // Select the new collection
                 if let Some(idx) = self.collections.iter().position(|c| c.name == name) {
-                    self.switch_collection_async(idx).await;
+                    self.switch_collection(idx);
                 }
             }
             Err(e) => {
@@ -1095,6 +1103,7 @@ impl App {
 
     /// Reset UI state for database switch (clear documents, filters, selections)
     pub fn reset_for_new_database(&mut self) {
+        self.tasks.cancel(Slot::Documents);
         self.documents.clear();
         self.selected_collection = 0;
         self.selected_document = 0;
@@ -1207,26 +1216,58 @@ impl App {
         self.filter_state = FilterState::new(); // Clear filter state too
     }
 
-    /// Switch to another collection and load its documents (async)
-    async fn switch_collection_async(&mut self, idx: usize) {
+    /// Switch to another collection and load its documents (in the background)
+    fn switch_collection(&mut self, idx: usize) {
         self.set_selected_collection(idx);
-        self.reload_documents_async().await;
+        self.reload_documents();
     }
 
     /// Drop the loaded documents (nothing is selected, nothing is shown)
     fn clear_documents(&mut self) {
+        self.tasks.cancel(Slot::Documents);
         self.documents.clear();
         self.selected_document = 0;
         self.doc_scroll_offset = 0;
         self.total_docs = 0;
     }
 
-    /// Refresh documents and surface a failure instead of swallowing it
-    /// (the document list is already cleared by then)
-    pub async fn reload_documents_async(&mut self) {
-        if let Err(e) = self.refresh_documents_async().await {
-            self.set_error(t().failed(Op::LoadDocuments, &e));
+    /// Reload the document list in the background: the screen keeps
+    /// drawing meanwhile (the old page stays shown, but nothing is selected
+    /// until the new one arrives). A failure clears the list and is shown.
+    pub fn reload_documents(&mut self) {
+        let (Some(db), Some(request)) = (self.db.clone(), self.documents_request()) else {
+            self.tasks.cancel(Slot::Documents);
+            return;
+        };
+        self.tasks.spawn(Slot::Documents, async move {
+            let page = fetch_documents(&db, &request).await;
+            Box::new(move |app: &mut App| {
+                // The view changed meanwhile without a new load: not this page
+                if app.documents_request().as_ref() != Some(&request) {
+                    return;
+                }
+                if let Err(e) = app.apply_documents(page) {
+                    app.set_error(t().failed(Op::LoadDocuments, &e));
+                }
+            }) as Update
+        });
+    }
+
+    /// Stop the background loads. A stopped document load leaves the old
+    /// page's rows under the new position, so the list is cleared
+    pub fn cancel_tasks(&mut self) {
+        let documents = self.documents_loading();
+        if self.tasks.cancel_all() {
+            if documents {
+                self.clear_documents();
+            }
+            self.set_status(t().tasks_cancelled());
         }
+    }
+
+    /// Whether the document list is being reloaded (its rows are the old page)
+    pub fn documents_loading(&self) -> bool {
+        self.tasks.is_running(Slot::Documents)
     }
 
     /// Refresh collections + documents and surface a failure
@@ -1249,71 +1290,64 @@ impl App {
         self.refresh_documents_inner().await
     }
 
-    /// Refresh documents; on failure the list is cleared, so the panes never
-    /// show (and `d`/`e` never act on) another collection's or page's documents
+    /// Refresh documents and wait for them; on failure the list is cleared,
+    /// so the panes never show (and `d`/`e` never act on) another
+    /// collection's or page's documents. A background reload still running
+    /// is superseded.
     async fn refresh_documents_inner(&mut self) -> anyhow::Result<()> {
-        let result = self.fetch_documents_inner().await;
-        if result.is_err() {
-            self.clear_documents();
-        }
-        result
+        self.tasks.cancel(Slot::Documents);
+        let (Some(db), Some(request)) = (self.db.as_ref(), self.documents_request()) else {
+            if self.collections.get(self.selected_collection).is_none() {
+                self.clear_documents();
+            }
+            return Ok(());
+        };
+        let page = fetch_documents(db, &request).await;
+        self.apply_documents(page)
     }
 
-    async fn fetch_documents_inner(&mut self) -> anyhow::Result<()> {
-        let coll_name = match self.collections.get(self.selected_collection) {
-            Some(coll) => coll.name.clone(),
-            None => {
+    /// What the document list shows now: the page to load for it
+    fn documents_request(&self) -> Option<DocumentsRequest> {
+        let collection = self.collections.get(self.selected_collection)?.name.clone();
+        Some(DocumentsRequest {
+            collection,
+            filter: self.active_filter.clone(),
+            sort: self.active_sort.clone(),
+            skip: self.doc_scroll_offset,
+            limit: self.page_size,
+        })
+    }
+
+    /// Show a loaded page (or clear the list on failure)
+    fn apply_documents(&mut self, page: anyhow::Result<DocumentsPage>) -> anyhow::Result<()> {
+        let page = match page {
+            Ok(page) => page,
+            Err(e) => {
                 self.clear_documents();
-                return Ok(());
+                return Err(e);
             }
         };
-
-        if let Some(db) = &self.db {
-            let skip = self.doc_scroll_offset;
-
-            // Use active filter/sort if set
-            let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
-            let docs = find_page(
-                db,
-                &coll_name,
-                &query,
-                skip,
-                self.page_size,
-                self.active_sort.as_ref(),
-            )
-            .await?;
-            self.documents = docs;
-
-            // BUG FIX: Always refresh total_docs, not just when needs_details
-            if let Some(filter) = &self.active_filter {
-                // When filter is active, count matching documents
-                let count = count_matching(db, &coll_name, filter).await?;
-                self.total_docs = count;
-            } else {
-                // No filter - get total collection count
-                let (doc_count, index_names) = db.load_collection_details(&coll_name).await?;
-                self.total_docs = doc_count;
-
-                // Update cached collection info
-                if let Some(coll) = self.collections.get_mut(self.selected_collection) {
-                    coll.doc_count = Some(doc_count);
-                    coll.index_count = Some(index_names.len());
-                }
-
-                self.collection_indexes = index_names;
+        self.documents = page.documents;
+        self.total_docs = page.total;
+        if let Some((doc_count, index_names)) = page.details {
+            // Update cached collection info
+            if let Some(coll) = self.collections.get_mut(self.selected_collection) {
+                coll.doc_count = Some(doc_count);
+                coll.index_count = Some(index_names.len());
             }
+            self.collection_indexes = index_names;
+        }
 
-            // BUG FIX: Validate selected_document after refresh
-            // If document count decreased, selected_document might be out of bounds
-            if self.total_docs == 0 {
-                self.selected_document = 0;
-                self.doc_scroll_offset = 0;
-            } else if self.selected_document >= self.total_docs {
-                self.selected_document = self.total_docs.saturating_sub(1);
-                // Also adjust scroll offset if needed
-                if self.doc_scroll_offset > self.selected_document {
-                    self.doc_scroll_offset = self.selected_document;
-                }
+        // BUG FIX: Validate selected_document after refresh
+        // If document count decreased, selected_document might be out of bounds
+        if self.total_docs == 0 {
+            self.selected_document = 0;
+            self.doc_scroll_offset = 0;
+        } else if self.selected_document >= self.total_docs {
+            self.selected_document = self.total_docs.saturating_sub(1);
+            // Also adjust scroll offset if needed
+            if self.doc_scroll_offset > self.selected_document {
+                self.doc_scroll_offset = self.selected_document;
             }
         }
         Ok(())
@@ -1340,8 +1374,7 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection > 0 {
-                    self.switch_collection_async(self.selected_collection - 1)
-                        .await;
+                    self.switch_collection(self.selected_collection - 1);
                 }
             }
             Pane::Documents => {
@@ -1349,7 +1382,7 @@ impl App {
                     self.selected_document -= 1;
                     if self.selected_document < self.doc_scroll_offset {
                         self.doc_scroll_offset = self.selected_document;
-                        self.reload_documents_async().await;
+                        self.reload_documents();
                     }
                 }
             }
@@ -1366,8 +1399,7 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection + 1 < self.collections.len() {
-                    self.switch_collection_async(self.selected_collection + 1)
-                        .await;
+                    self.switch_collection(self.selected_collection + 1);
                 }
             }
             Pane::Documents => {
@@ -1376,7 +1408,7 @@ impl App {
                     let visible_end = self.doc_scroll_offset + self.page_size;
                     if self.selected_document >= visible_end {
                         self.doc_scroll_offset += 1;
-                        self.reload_documents_async().await;
+                        self.reload_documents();
                     }
                 }
             }
@@ -1393,7 +1425,7 @@ impl App {
             Pane::Collections => {
                 let target = self.selected_collection.saturating_sub(SCROLL_STEP);
                 if target != self.selected_collection {
-                    self.switch_collection_async(target).await;
+                    self.switch_collection(target);
                 }
             }
             Pane::Documents => {
@@ -1401,7 +1433,7 @@ impl App {
                 self.doc_scroll_offset = self.doc_scroll_offset.saturating_sub(self.page_size);
                 self.selected_document = self.selected_document.saturating_sub(self.page_size);
                 if old_offset != self.doc_scroll_offset {
-                    self.reload_documents_async().await;
+                    self.reload_documents();
                 }
             }
             Pane::Detail => {
@@ -1417,7 +1449,7 @@ impl App {
                 let max = self.collections.len().saturating_sub(1);
                 let target = (self.selected_collection + SCROLL_STEP).min(max);
                 if target != self.selected_collection {
-                    self.switch_collection_async(target).await;
+                    self.switch_collection(target);
                 }
             }
             Pane::Documents => {
@@ -1427,7 +1459,7 @@ impl App {
                 self.selected_document = (self.selected_document + self.page_size)
                     .min(self.total_docs.saturating_sub(1));
                 if old_offset != self.doc_scroll_offset {
-                    self.reload_documents_async().await;
+                    self.reload_documents();
                 }
             }
             Pane::Detail => {
@@ -1442,14 +1474,14 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 if self.selected_collection != 0 {
-                    self.switch_collection_async(0).await;
+                    self.switch_collection(0);
                 }
             }
             Pane::Documents => {
                 if self.doc_scroll_offset != 0 || self.selected_document != 0 {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
-                    self.reload_documents_async().await;
+                    self.reload_documents();
                 }
             }
             Pane::Detail => {
@@ -1467,7 +1499,7 @@ impl App {
                 }
                 let last = self.collections.len() - 1;
                 if self.selected_collection != last {
-                    self.switch_collection_async(last).await;
+                    self.switch_collection(last);
                 }
             }
             Pane::Documents => {
@@ -1477,7 +1509,7 @@ impl App {
                 let last = self.total_docs - 1;
                 self.selected_document = last;
                 self.doc_scroll_offset = last.saturating_sub(self.page_size.saturating_sub(1));
-                self.reload_documents_async().await;
+                self.reload_documents();
             }
             Pane::Detail => {
                 // Scroll to end - use total lines as scroll position
@@ -1620,7 +1652,7 @@ impl App {
         {
             // Navigate to collection
             if let Some(idx) = self.collections.iter().position(|c| c.name == result.name) {
-                self.switch_collection_async(idx).await;
+                self.switch_collection(idx);
                 self.active_pane = Pane::Documents;
             }
             self.close_modal();
@@ -2148,7 +2180,7 @@ impl App {
         self.close_modal();
 
         // Refresh documents with filter
-        self.reload_documents_async().await;
+        self.reload_documents();
     }
 
     // === Async Filter ===
@@ -2208,6 +2240,7 @@ impl App {
                 self.filter_state.error = None;
 
                 // Van eredmény - frissítsd a dokumentum listát és zárd be
+                self.tasks.cancel(Slot::Documents);
                 self.documents = docs;
                 self.selected_document = 0;
                 self.doc_scroll_offset = 0;
@@ -2447,6 +2480,59 @@ fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// One page of `find`: `limit` documents after `skip`, optionally sorted
+/// The document list's page to load: everything the shown rows depend on
+#[derive(Debug, Clone, PartialEq)]
+struct DocumentsRequest {
+    collection: String,
+    filter: Option<Value>,
+    sort: Option<Value>,
+    skip: usize,
+    limit: usize,
+}
+
+/// A loaded page of the document list
+struct DocumentsPage {
+    documents: Vec<Value>,
+    /// Matching documents (all of the collection without a filter)
+    total: usize,
+    /// Without a filter: the collection's count and index names
+    details: Option<(usize, Vec<String>)>,
+}
+
+/// Load a page of the document list and its counts
+async fn fetch_documents(
+    db: &DbWrapper,
+    request: &DocumentsRequest,
+) -> anyhow::Result<DocumentsPage> {
+    let query = request.filter.clone().unwrap_or(serde_json::json!({}));
+    let documents = find_page(
+        db,
+        &request.collection,
+        &query,
+        request.skip,
+        request.limit,
+        request.sort.as_ref(),
+    )
+    .await?;
+    if let Some(filter) = &request.filter {
+        // When filter is active, count matching documents
+        let total = count_matching(db, &request.collection, filter).await?;
+        Ok(DocumentsPage {
+            documents,
+            total,
+            details: None,
+        })
+    } else {
+        // No filter - get total collection count
+        let (doc_count, index_names) = db.load_collection_details(&request.collection).await?;
+        Ok(DocumentsPage {
+            documents,
+            total: doc_count,
+            details: Some((doc_count, index_names)),
+        })
+    }
+}
+
 async fn find_page(
     db: &DbWrapper,
     collection: &str,
@@ -2568,12 +2654,20 @@ mod tests {
         app.active_pane = Pane::Documents;
         assert_eq!(doc_ids(&app), (0..9).collect::<Vec<_>>());
 
-        // Page 2 starts right after the last row of page 1
+        // Page 2 loads in the background: until it arrives the rows are
+        // page 1's, so nothing is selected (`d`/`e` must not act on them)
         app.page_down_async().await;
+        assert!(app.documents_loading());
+        assert_eq!(doc_ids(&app), (0..9).collect::<Vec<_>>());
+        assert_eq!(app.get_selected_document(), None);
+        app.settle().await;
+        // Page 2 starts right after the last row of page 1
         assert_eq!(doc_ids(&app), (9..18).collect::<Vec<_>>());
+        assert_eq!(app.get_selected_document().unwrap()["_id"], 9);
 
         // End: the true last document is selected and loaded
         app.go_to_end_async().await;
+        app.settle().await;
         assert_eq!(doc_ids(&app), (91..100).collect::<Vec<_>>());
         assert_eq!(app.get_selected_document().unwrap()["_id"], 99);
         assert_eq!(app.get_pagination_info(), (12, 12));
@@ -2687,6 +2781,48 @@ mod tests {
         check(&mut app, "search", "c07").await;
     }
 
+    /// Esc while a page loads stops it; the old page's rows are not left
+    /// under the new position
+    #[tokio::test]
+    async fn test_esc_stops_a_document_load() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(100))]);
+        let mut app = app_with_server(&server).await;
+        app.page_size = 9;
+        app.refresh_documents_async().await.unwrap();
+        app.active_pane = Pane::Documents;
+
+        app.page_down_async().await;
+        assert!(app.tasks.is_busy());
+        let esc = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        crate::handlers::handle_key(&mut app, esc).await;
+        app.settle().await;
+
+        assert!(!app.tasks.is_busy());
+        assert!(app.documents.is_empty());
+        assert_eq!(app.get_selected_document(), None);
+        assert_eq!(app.status_message.as_deref(), Some(t().tasks_cancelled()));
+    }
+
+    /// A page that arrives after the view changed without a new load (here:
+    /// a filter set directly) is not shown
+    #[tokio::test]
+    async fn test_a_page_for_another_view_is_dropped() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(100))]);
+        let mut app = app_with_server(&server).await;
+        app.page_size = 9;
+        app.refresh_documents_async().await.unwrap();
+
+        app.doc_scroll_offset = 9;
+        app.reload_documents();
+        app.active_filter = Some(serde_json::json!({"_id": 1}));
+        app.settle().await;
+
+        assert_eq!(doc_ids(&app), (0..9).collect::<Vec<_>>());
+    }
+
     // === Failed refresh ===
 
     /// A failed document refresh must not leave the previous collection's
@@ -2700,6 +2836,7 @@ mod tests {
 
         *server.failing_find.lock().unwrap() = Some("b".to_string());
         app.select_down_async().await;
+        app.settle().await;
 
         assert_eq!(app.current_collection_name(), Some("b"));
         assert!(app.documents.is_empty());

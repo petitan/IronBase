@@ -68,7 +68,7 @@ Options:
 | `g` / `Home` | Lista elejére |
 | `G` / `End` | Lista végére |
 | `Enter` | Kiválaszt |
-| `Esc` | Vissza / Bezár |
+| `Esc` | Vissza / Bezár; oldalbetöltés közben: a betöltés megszakítása |
 
 ### Funkciók
 

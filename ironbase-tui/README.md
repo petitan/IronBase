@@ -68,7 +68,7 @@ Options:
 | `g` / `Home` | Go to top |
 | `G` / `End` | Go to bottom |
 | `Enter` | Select |
-| `Esc` | Back / Close |
+| `Esc` | Back / Close; while a page loads: stop the load |
 
 ### Functions
 
