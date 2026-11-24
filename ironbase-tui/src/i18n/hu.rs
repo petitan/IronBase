@@ -1056,4 +1056,340 @@ impl Messages for Hu {
     fn stale_indexes(&self, count: usize) -> String {
         format!("{count} elavult index – [a] Elemzés")
     }
+
+    fn confirm_discard_title(&self) -> &'static str {
+        "Elvetés megerősítése"
+    }
+    fn confirm_discard(&self) -> &'static str {
+        "Biztosan elveted a nem mentett változtatásokat?"
+    }
+    fn confirm_delete_script_title(&self) -> &'static str {
+        "Törlés megerősítése"
+    }
+    fn confirm_delete_script(&self) -> &'static str {
+        "Biztosan törlöd ezt a scriptet?"
+    }
+    fn scripts_title(&self) -> &'static str {
+        "IronRhai scriptek"
+    }
+    fn key_edit(&self) -> &'static str {
+        "Szerkesztés"
+    }
+    fn key_history(&self) -> &'static str {
+        "Előzmények"
+    }
+    fn key_inline(&self) -> &'static str {
+        "Azonnali"
+    }
+    fn key_back(&self) -> &'static str {
+        "Vissza"
+    }
+    fn key_save_run(&self) -> &'static str {
+        "Mentés/futtatás"
+    }
+    fn key_focus(&self) -> &'static str {
+        "Fókusz"
+    }
+    fn key_view(&self) -> &'static str {
+        "Megtekintés"
+    }
+    fn no_scripts(&self) -> &'static str {
+        "Nincsenek scriptek. Új script: [n]."
+    }
+    fn run_count(&self, count: u64) -> String {
+        format!("{count:>5} futás")
+    }
+    fn no_description_parens(&self) -> &'static str {
+        "(nincs leírás)"
+    }
+    fn never(&self) -> &'static str {
+        "soha"
+    }
+    fn label_description(&self) -> &'static str {
+        "Leírás"
+    }
+    fn label_last_run(&self) -> &'static str {
+        "Utolsó futás"
+    }
+    fn script_editor_new_title(&self) -> &'static str {
+        "IronRhai – új script"
+    }
+    fn script_editor_inline_title(&self) -> &'static str {
+        "IronRhai – azonnali"
+    }
+    fn script_editor_title(&self) -> &'static str {
+        "IronRhai-szerkesztő"
+    }
+    fn label_tags(&self) -> &'static str {
+        "Tagek"
+    }
+    fn label_code(&self) -> &'static str {
+        "Kód"
+    }
+    fn label_params_json(&self) -> &'static str {
+        "Paraméterek (JSON)"
+    }
+    fn script_logs(&self, count: usize, first: &str) -> String {
+        format!(" | Naplók: [{count}] {first}")
+    }
+    fn result_error(&self) -> &'static str {
+        "HIBA"
+    }
+    fn script_result_placeholder(&self) -> &'static str {
+        "Eredmény: (^S: futtatás)"
+    }
+    fn script_history_title(&self, name: &str) -> String {
+        format!("IronRhai-előzmények: {name}")
+    }
+    fn no_version_history(&self) -> &'static str {
+        "Nincsenek korábbi verziók."
+    }
+    fn current_marker(&self) -> &'static str {
+        "(aktuális)"
+    }
+    fn code_preview_title(&self) -> &'static str {
+        "Kód előnézete"
+    }
+
+    fn rag_title(&self) -> &'static str {
+        "RAG és embedding"
+    }
+    fn tab_import(&self) -> &'static str {
+        "Importálás"
+    }
+    fn tab_models(&self) -> &'static str {
+        "Modellek"
+    }
+    fn tab_jobs(&self) -> &'static str {
+        "Jobok"
+    }
+    fn label_query(&self) -> &'static str {
+        "Lekérdezés"
+    }
+    fn label_limit(&self) -> &'static str {
+        "Korlát"
+    }
+    fn rag_results_title(&self, count: usize, loading: bool, trimmed: bool) -> String {
+        if loading {
+            " Találatok (betöltés...) ".to_string()
+        } else if trimmed {
+            format!(" Találatok ({count}, rövidítve) ")
+        } else {
+            format!(" Találatok ({count}) ")
+        }
+    }
+    fn no_rag_results(&self) -> &'static str {
+        "Nincs találat. Írd be a lekérdezést, és nyomd meg az Entert."
+    }
+    fn key_fields(&self) -> &'static str {
+        "Mezők"
+    }
+    fn key_import(&self) -> &'static str {
+        "Importálás"
+    }
+    fn label_title_optional(&self) -> &'static str {
+        "Cím (nem kötelező)"
+    }
+    fn title_placeholder(&self) -> &'static str {
+        "A dokumentum címe..."
+    }
+    fn content_title(&self, chars: usize) -> String {
+        format!(" Tartalom ({chars} karakter) ")
+    }
+    fn content_placeholder(&self) -> &'static str {
+        "Illeszd be vagy írd ide a tartalmat..."
+    }
+    fn label_chunk_size(&self) -> &'static str {
+        "Darabméret"
+    }
+    fn label_overlap(&self) -> &'static str {
+        "Átfedés"
+    }
+    fn key_stats(&self) -> &'static str {
+        "Statisztika"
+    }
+    fn rag_collections_title(&self, count: usize) -> String {
+        format!(" RAG-kollekciók ({count}) ")
+    }
+    fn no_rag_collections(&self) -> &'static str {
+        "Nincs RAG-kollekció. Új: [c]."
+    }
+    fn key_toggle(&self) -> &'static str {
+        "Váltás"
+    }
+    fn label_collection_name(&self) -> &'static str {
+        "Kollekciónév"
+    }
+    fn label_embedding_field(&self) -> &'static str {
+        "Embedding-mező"
+    }
+    fn label_text_field(&self) -> &'static str {
+        "Szövegmező"
+    }
+    fn label_provider_space(&self) -> &'static str {
+        "Szolgáltató [Space]"
+    }
+    fn label_language_space(&self) -> &'static str {
+        "Nyelv [Space]"
+    }
+    fn key_enable_auto_embed(&self) -> &'static str {
+        "Automatikus beágyazás"
+    }
+    fn key_cache_stats(&self) -> &'static str {
+        "Gyorsítótár-statisztika"
+    }
+    fn key_clear_cache(&self) -> &'static str {
+        "Gyorsítótár ürítése"
+    }
+    fn key_test_embed(&self) -> &'static str {
+        "Próbabeágyazás"
+    }
+    fn embedding_models_title(&self, count: usize) -> String {
+        format!(" Embedding-modellek ({count}) ")
+    }
+    fn loading_models(&self) -> &'static str {
+        "Modellek betöltése..."
+    }
+    fn auto_embed_title(&self) -> &'static str {
+        "Automatikus beágyazás"
+    }
+    fn cache_title(&self) -> &'static str {
+        "Gyorsítótár"
+    }
+    fn key_embed(&self) -> &'static str {
+        "Beágyazás"
+    }
+    fn text_to_embed_title(&self) -> &'static str {
+        "Beágyazandó szöveg"
+    }
+    fn type_text_here(&self) -> &'static str {
+        "Írd ide a szöveget..."
+    }
+    fn no_result_yet(&self) -> &'static str {
+        "Még nincs eredmény"
+    }
+    fn key_cancel_job(&self) -> &'static str {
+        "Job megszakítása"
+    }
+    fn jobs_title(&self, count: usize) -> String {
+        format!(" Jobok ({count}) ")
+    }
+    fn no_jobs(&self) -> &'static str {
+        "Nincs job. Frissítés: [r]."
+    }
+    fn import_result(
+        &self,
+        doc_id: &str,
+        created: usize,
+        replaced: u64,
+        language_ignored: bool,
+    ) -> String {
+        {
+            let mut text = format!("Importálva: „{doc_id}”, {created} darab létrehozva");
+            if replaced > 0 {
+                text.push_str(&format!(", {replaced} lecserélve"));
+            }
+            if language_ignored {
+                text.push_str(
+                    " (a nyelv figyelmen kívül maradt: a kollekció a sajátját tartja meg)",
+                );
+            }
+            text
+        }
+    }
+    fn rag_collection_row(
+        &self,
+        name: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+        provider: Option<&str>,
+    ) -> String {
+        {
+            let provider = provider.unwrap_or("nincs RAG-konfiguráció");
+            format!("{name} | {chunks} darab | {documents} dokumentum | {provider}")
+        }
+    }
+    fn model_row(&self, provider: &str, model: &str, dimension: usize, available: bool) -> String {
+        {
+            let status = if available { "OK" } else { "nem elérhető" };
+            format!("{provider} | {model} | dim:{dimension} | {status}")
+        }
+    }
+    fn not_loaded(&self) -> &'static str {
+        "Nincs betöltve"
+    }
+    fn auto_embed_off(&self) -> &'static str {
+        "Kikapcsolva"
+    }
+    fn auto_embed_status(
+        &self,
+        enabled: bool,
+        source: &str,
+        target: &str,
+        provider: &str,
+        reembed_pending: bool,
+        provider_removed: bool,
+    ) -> String {
+        {
+            let state = if enabled {
+                "Bekapcsolva"
+            } else {
+                "Beállítva, kikapcsolva"
+            };
+            let mut text = format!("{state}: {source} -> {target} ({provider})");
+            if reembed_pending {
+                text.push_str(" | újrabeágyazás folyamatban");
+            }
+            if provider_removed {
+                text.push_str(" | a szolgáltató megszűnt: kapcsold be újra");
+            }
+            text
+        }
+    }
+    fn cache_not_loaded(&self) -> &'static str {
+        "Betöltés: [c]"
+    }
+    fn cache_disabled_on_server(&self) -> &'static str {
+        "A szerveren kikapcsolva"
+    }
+    fn cache_stats(
+        &self,
+        entries: usize,
+        max_entries: usize,
+        hit_rate: f64,
+        hits: u64,
+        misses: u64,
+    ) -> String {
+        format!("{entries}/{max_entries} bejegyzés | {hit_rate:.1}% találati arány ({hits} találat, {misses} hiány)")
+    }
+    fn embed_result(&self, provider: &str, model: &str, dimension: usize, preview: &str) -> String {
+        format!("Szolgáltató: {provider} ({model}) | Dim: {dimension} | [{preview}]")
+    }
+    fn job_pending(&self) -> &'static str {
+        "várakozik"
+    }
+    fn job_running(&self, progress: f64) -> String {
+        format!("fut {progress:.0}%")
+    }
+    fn job_completed(&self) -> &'static str {
+        "kész"
+    }
+    fn job_failed(&self, error: &str) -> String {
+        format!("sikertelen: {error}")
+    }
+    fn job_cancelled(&self) -> &'static str {
+        "megszakítva"
+    }
+    fn job_backfill(&self, collection: &str) -> String {
+        format!("visszamenőleges beágyazás: {collection}")
+    }
+    fn job_import(&self, collection: &str, doc_id: &str) -> String {
+        format!("importálás: {collection} / {doc_id}")
+    }
+    fn job_compact(&self) -> &'static str {
+        "tömörítés"
+    }
+    fn script_name_line(&self, name: &str) -> String {
+        format!("Script: „{name}”")
+    }
 }

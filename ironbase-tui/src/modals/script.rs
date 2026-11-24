@@ -2,6 +2,7 @@
 
 use super::{centered_rect, render_modal_frame};
 use crate::app::{ScriptConfirmAction, ScriptFocus, ScriptMode, ScriptState};
+use crate::i18n::t;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -40,13 +41,10 @@ fn render_confirm_dialog(
     frame.render_widget(Clear, dialog_area);
 
     let (title, message) = match action {
-        ScriptConfirmAction::DiscardChanges => (
-            "Elvetés megerősítése",
-            "Biztosan elveted a nem mentett változtatásokat?",
-        ),
+        ScriptConfirmAction::DiscardChanges => (t().confirm_discard_title(), t().confirm_discard()),
         ScriptConfirmAction::DeleteScript => (
-            "Törlés megerősítése",
-            "Biztosan törölni akarod ezt a scriptet?",
+            t().confirm_delete_script_title(),
+            t().confirm_delete_script(),
         ),
     };
 
@@ -64,7 +62,7 @@ fn render_confirm_dialog(
         state
             .scripts
             .get(state.selected_script)
-            .map(|s| format!("\n\nScript: \"{}\"", s.name))
+            .map(|s| format!("\n\n{}", t().script_name_line(&s.name)))
             .unwrap_or_default()
     } else {
         String::new()
@@ -76,9 +74,9 @@ fn render_confirm_dialog(
         Line::from(""),
         Line::from(vec![
             Span::styled("[Y]", Style::default().fg(theme.success).bold()),
-            Span::raw(" Igen  "),
+            Span::raw(format!(" {}  ", t().yes())),
             Span::styled("[N/Enter/Esc]", Style::default().fg(theme.error).bold()),
-            Span::raw(" Nem"),
+            Span::raw(format!(" {}", t().no())),
         ]),
     ])
     .alignment(Alignment::Center)
@@ -100,7 +98,7 @@ fn render_loading_overlay(frame: &mut Frame, area: Rect, theme: &Theme) {
     let inner = block.inner(spinner_area);
     frame.render_widget(block, spinner_area);
 
-    let loading = Paragraph::new("Betöltés...")
+    let loading = Paragraph::new(t().loading())
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme.accent));
     frame.render_widget(loading, inner);
@@ -108,7 +106,7 @@ fn render_loading_overlay(frame: &mut Frame, area: Rect, theme: &Theme) {
 
 /// Browse mode - script list
 fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "IronRhai Scriptek", theme, 80, 70);
+    let inner = render_modal_frame(frame, area, t().scripts_title(), theme, 80, 70);
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // Help
@@ -120,28 +118,28 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar  "),
+        Span::raw(format!(" {}  ", t().key_close())),
         Span::styled("[n]", Style::default().fg(theme.accent)),
-        Span::raw(" Uj  "),
+        Span::raw(format!(" {}  ", t().key_new())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Szerk  "),
+        Span::raw(format!(" {}  ", t().key_edit())),
         Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::raw(" Torol  "),
+        Span::raw(format!(" {}  ", t().cmd_delete())),
         Span::styled("[^S]", Style::default().fg(theme.accent)),
-        Span::raw(" Futtat  "),
+        Span::raw(format!(" {}  ", t().key_run())),
         Span::styled("[h]", Style::default().fg(theme.accent)),
-        Span::raw(" Elozmeny  "),
+        Span::raw(format!(" {}  ", t().key_history())),
         Span::styled("[i]", Style::default().fg(theme.accent)),
-        Span::raw(" Azonnali  "),
+        Span::raw(format!(" {}  ", t().key_inline())),
         Span::styled("[r]", Style::default().fg(theme.accent)),
-        Span::raw(" Frissit"),
+        Span::raw(format!(" {}", t().cmd_refresh())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Script list
     if state.scripts.is_empty() {
-        let empty = Paragraph::new("Nincsenek scriptek. Nyomj [n]-t uj script letrehozasahoz.")
+        let empty = Paragraph::new(t().no_scripts())
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
@@ -196,7 +194,7 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
                     Style::default().fg(theme.secondary),
                 ),
                 Span::styled(
-                    format!("{:>5} futtas", script.execution_count),
+                    t().run_count(script.execution_count),
                     Style::default().fg(theme.muted),
                 ),
             ]);
@@ -209,15 +207,24 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
     // Selected script info
     if let Some(script) = state.scripts.get(state.selected_script) {
-        let desc = script.description.as_deref().unwrap_or("(nincs leiras)");
-        let last_run = script.last_run_at.as_deref().unwrap_or("soha");
+        let desc = script
+            .description
+            .as_deref()
+            .unwrap_or(t().no_description_parens());
+        let last_run = script.last_run_at.as_deref().unwrap_or(t().never());
         let info = Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Leiras: ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("{}: ", t().label_description()),
+                    Style::default().fg(theme.muted),
+                ),
                 Span::raw(desc),
             ]),
             Line::from(vec![
-                Span::styled("Utolso futtas: ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("{}: ", t().label_last_run()),
+                    Style::default().fg(theme.muted),
+                ),
                 Span::raw(last_run),
             ]),
         ]);
@@ -228,9 +235,9 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 /// Editor mode - edit/new/inline script
 fn render_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
     let title = match state.mode {
-        ScriptMode::New => "IronRhai - Uj script",
-        ScriptMode::Inline => "IronRhai - Azonnali",
-        _ => "IronRhai Szerkeszto",
+        ScriptMode::New => t().script_editor_new_title(),
+        ScriptMode::Inline => t().script_editor_inline_title(),
+        _ => t().script_editor_title(),
     };
     let inner = render_modal_frame(frame, area, title, theme, 85, 80);
 
@@ -247,13 +254,13 @@ fn render_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Vissza  "),
+        Span::raw(format!(" {}  ", t().key_back())),
         Span::styled("[^S]", Style::default().fg(theme.accent)),
-        Span::raw(" Ment/Futtat  "),
+        Span::raw(format!(" {}  ", t().key_save_run())),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Fokusz  "),
+        Span::raw(format!(" {}  ", t().key_focus())),
         Span::styled("[h]", Style::default().fg(theme.accent)),
-        Span::raw(" Elozmeny"),
+        Span::raw(format!(" {}", t().key_history())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -291,7 +298,7 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     state.name.render_labeled(
         frame,
         chunks[0],
-        Span::styled("Nev: ", name_style),
+        Span::styled(format!("{}: ", t().label_name()), name_style),
         name_style,
         state.focus == ScriptFocus::Name,
     );
@@ -305,7 +312,7 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     state.description.render_labeled(
         frame,
         chunks[1],
-        Span::styled("Leiras: ", desc_style),
+        Span::styled(format!("{}: ", t().label_description()), desc_style),
         desc_style,
         state.focus == ScriptFocus::Description,
     );
@@ -316,7 +323,7 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     } else {
         Style::default().fg(theme.fg)
     };
-    let mut tag_spans: Vec<Span> = vec![Span::raw("Tagek: ")];
+    let mut tag_spans: Vec<Span> = vec![Span::raw(format!("{}: ", t().label_tags()))];
     for (i, tag) in state.tags.iter().enumerate() {
         let is_selected = state.focus == ScriptFocus::Tags && i == state.selected_tag;
         tag_spans.push(Span::styled(
@@ -361,7 +368,7 @@ fn render_code_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme:
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(" Kod ")
+        .title(format!(" {} ", t().label_code()))
         .title_style(Style::default().fg(border_color));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -505,7 +512,7 @@ fn render_params(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
     state.params_input.render_labeled(
         frame,
         area,
-        Span::styled("Parameterek (JSON): ", style),
+        Span::styled(format!("{}: ", t().label_params_json()), style),
         style,
         is_focused,
     );
@@ -533,10 +540,9 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
         let log_count = result.logs.len();
         let log_preview = if !result.logs.is_empty() {
-            format!(
-                " | Logok: [{}] {}",
+            t().script_logs(
                 log_count,
-                result.logs.first().unwrap_or(&String::new())
+                result.logs.first().map(String::as_str).unwrap_or(""),
             )
         } else {
             String::new()
@@ -545,7 +551,11 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
         let text = Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    if result.success { "OK" } else { "HIBA" },
+                    if result.success {
+                        "OK"
+                    } else {
+                        t().result_error()
+                    },
                     result_style.add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -566,8 +576,8 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
         ]);
         frame.render_widget(text, area);
     } else {
-        let placeholder = Paragraph::new("Eredmeny: (nyomj ^S-t a futtatashoz)")
-            .style(Style::default().fg(theme.muted));
+        let placeholder =
+            Paragraph::new(t().script_result_placeholder()).style(Style::default().fg(theme.muted));
         frame.render_widget(placeholder, area);
     }
 }
@@ -575,7 +585,10 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
     let text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -592,11 +605,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
             ),
             Span::raw(" | "),
             Span::styled(
-                format!(
-                    "Sor: {} Oszlop: {}",
-                    state.editor.cursor().0 + 1,
-                    state.editor.cursor().1 + 1
-                ),
+                t().cursor_position(state.editor.cursor().0 + 1, state.editor.cursor().1 + 1),
                 Style::default().fg(theme.muted),
             ),
         ])
@@ -608,7 +617,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
 /// History mode - version list
 fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
-    let title = format!("IronRhai Elozmeny: {}", state.name.value());
+    let title = t().script_history_title(state.name.value());
     let inner = render_modal_frame(frame, area, &title, theme, 80, 70);
 
     let chunks = Layout::vertical([
@@ -621,18 +630,18 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Vissza  "),
+        Span::raw(format!(" {}  ", t().key_back())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Megtekint  "),
+        Span::raw(format!(" {}  ", t().key_view())),
         Span::styled("[r]", Style::default().fg(theme.accent)),
-        Span::raw(" Visszaallas"),
+        Span::raw(format!(" {}", t().rollback_button())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
     // Version list
     if state.versions.is_empty() {
-        let empty = Paragraph::new("Nincs verzio tortenet.")
+        let empty = Paragraph::new(t().no_version_history())
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty, chunks[1]);
@@ -643,7 +652,11 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
         for (idx, ver) in state.versions.iter().enumerate().take(visible_height) {
             let is_selected = idx == state.selected_version;
             let prefix = if is_selected { "> " } else { "  " };
-            let current_marker = if idx == 0 { " (aktualis)" } else { "" };
+            let current_marker = if idx == 0 {
+                format!(" {}", t().current_marker())
+            } else {
+                String::new()
+            };
 
             let desc = ver.description.as_deref().unwrap_or("");
             let line = Line::from(vec![
@@ -696,7 +709,7 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
                 ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_style(Style::default().fg(theme.muted))
-                    .title(" Kod elonezet ")
+                    .title(format!(" {} ", t().code_preview_title()))
                     .title_style(Style::default().fg(theme.muted)),
             )
             .style(Style::default().bg(theme.bg));

@@ -452,6 +452,128 @@ pub trait Messages: Sync + sealed::Sealed {
     fn label_sparse(&self) -> &'static str;
     fn sparse_hint(&self) -> &'static str;
     fn stale_indexes(&self, count: usize) -> String;
+
+    // Script modal
+    fn confirm_discard_title(&self) -> &'static str;
+    fn confirm_discard(&self) -> &'static str;
+    fn confirm_delete_script_title(&self) -> &'static str;
+    fn confirm_delete_script(&self) -> &'static str;
+    fn scripts_title(&self) -> &'static str;
+    fn key_edit(&self) -> &'static str;
+    fn key_history(&self) -> &'static str;
+    fn key_inline(&self) -> &'static str;
+    fn key_back(&self) -> &'static str;
+    fn key_save_run(&self) -> &'static str;
+    fn key_focus(&self) -> &'static str;
+    fn key_view(&self) -> &'static str;
+    fn no_scripts(&self) -> &'static str;
+    fn run_count(&self, count: u64) -> String;
+    fn no_description_parens(&self) -> &'static str;
+    fn never(&self) -> &'static str;
+    fn label_description(&self) -> &'static str;
+    fn label_last_run(&self) -> &'static str;
+    fn script_editor_new_title(&self) -> &'static str;
+    fn script_editor_inline_title(&self) -> &'static str;
+    fn script_editor_title(&self) -> &'static str;
+    fn label_tags(&self) -> &'static str;
+    fn label_code(&self) -> &'static str;
+    fn label_params_json(&self) -> &'static str;
+    fn script_logs(&self, count: usize, first: &str) -> String;
+    fn result_error(&self) -> &'static str;
+    fn script_result_placeholder(&self) -> &'static str;
+    fn script_history_title(&self, name: &str) -> String;
+    fn no_version_history(&self) -> &'static str;
+    fn current_marker(&self) -> &'static str;
+    fn code_preview_title(&self) -> &'static str;
+    /// The script a confirmation is about
+    fn script_name_line(&self, name: &str) -> String;
+
+    // RAG modal
+    fn rag_title(&self) -> &'static str;
+    fn tab_import(&self) -> &'static str;
+    fn tab_models(&self) -> &'static str;
+    fn tab_jobs(&self) -> &'static str;
+    fn label_query(&self) -> &'static str;
+    fn label_limit(&self) -> &'static str;
+    fn rag_results_title(&self, count: usize, loading: bool, trimmed: bool) -> String;
+    fn no_rag_results(&self) -> &'static str;
+    fn key_fields(&self) -> &'static str;
+    fn key_import(&self) -> &'static str;
+    fn label_title_optional(&self) -> &'static str;
+    fn title_placeholder(&self) -> &'static str;
+    fn content_title(&self, chars: usize) -> String;
+    fn content_placeholder(&self) -> &'static str;
+    fn label_chunk_size(&self) -> &'static str;
+    fn label_overlap(&self) -> &'static str;
+    fn key_stats(&self) -> &'static str;
+    fn rag_collections_title(&self, count: usize) -> String;
+    fn no_rag_collections(&self) -> &'static str;
+    fn key_toggle(&self) -> &'static str;
+    fn label_collection_name(&self) -> &'static str;
+    fn label_embedding_field(&self) -> &'static str;
+    fn label_text_field(&self) -> &'static str;
+    fn label_provider_space(&self) -> &'static str;
+    fn label_language_space(&self) -> &'static str;
+    fn key_enable_auto_embed(&self) -> &'static str;
+    fn key_cache_stats(&self) -> &'static str;
+    fn key_clear_cache(&self) -> &'static str;
+    fn key_test_embed(&self) -> &'static str;
+    fn embedding_models_title(&self, count: usize) -> String;
+    fn loading_models(&self) -> &'static str;
+    fn auto_embed_title(&self) -> &'static str;
+    fn cache_title(&self) -> &'static str;
+    fn key_embed(&self) -> &'static str;
+    fn text_to_embed_title(&self) -> &'static str;
+    fn type_text_here(&self) -> &'static str;
+    fn no_result_yet(&self) -> &'static str;
+    fn key_cancel_job(&self) -> &'static str;
+    fn jobs_title(&self, count: usize) -> String;
+    fn no_jobs(&self) -> &'static str;
+    fn import_result(
+        &self,
+        doc_id: &str,
+        created: usize,
+        replaced: u64,
+        language_ignored: bool,
+    ) -> String;
+    fn rag_collection_row(
+        &self,
+        name: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+        provider: Option<&str>,
+    ) -> String;
+    fn model_row(&self, provider: &str, model: &str, dimension: usize, available: bool) -> String;
+    fn not_loaded(&self) -> &'static str;
+    fn auto_embed_off(&self) -> &'static str;
+    fn auto_embed_status(
+        &self,
+        enabled: bool,
+        source: &str,
+        target: &str,
+        provider: &str,
+        reembed_pending: bool,
+        provider_removed: bool,
+    ) -> String;
+    fn cache_not_loaded(&self) -> &'static str;
+    fn cache_disabled_on_server(&self) -> &'static str;
+    fn cache_stats(
+        &self,
+        entries: usize,
+        max_entries: usize,
+        hit_rate: f64,
+        hits: u64,
+        misses: u64,
+    ) -> String;
+    fn embed_result(&self, provider: &str, model: &str, dimension: usize, preview: &str) -> String;
+    fn job_pending(&self) -> &'static str;
+    fn job_running(&self, progress: f64) -> String;
+    fn job_completed(&self) -> &'static str;
+    fn job_failed(&self, error: &str) -> String;
+    fn job_cancelled(&self) -> &'static str;
+    fn job_backfill(&self, collection: &str) -> String;
+    fn job_import(&self, collection: &str, doc_id: &str) -> String;
+    fn job_compact(&self) -> &'static str;
 }
 
 /// A group of MCP tools in the server info
@@ -941,5 +1063,124 @@ mod tests {
             hu.existing_indexes_title(true),
             " Meglévő indexek (elemzés...) "
         );
+    }
+
+    /// The script and RAG texts are translated; the English ones read as the
+    /// RAG modal's did before (it was English only)
+    #[test]
+    fn test_script_rag_texts_differ_between_the_languages() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 71] = [
+            |m| m.confirm_discard_title(),
+            |m| m.confirm_discard(),
+            |m| m.confirm_delete_script_title(),
+            |m| m.confirm_delete_script(),
+            |m| m.scripts_title(),
+            |m| m.key_edit(),
+            |m| m.key_history(),
+            |m| m.key_inline(),
+            |m| m.key_back(),
+            |m| m.key_save_run(),
+            |m| m.key_focus(),
+            |m| m.key_view(),
+            |m| m.no_scripts(),
+            |m| m.no_description_parens(),
+            |m| m.never(),
+            |m| m.label_description(),
+            |m| m.label_last_run(),
+            |m| m.script_editor_new_title(),
+            |m| m.script_editor_inline_title(),
+            |m| m.script_editor_title(),
+            |m| m.label_tags(),
+            |m| m.label_code(),
+            |m| m.label_params_json(),
+            |m| m.result_error(),
+            |m| m.script_result_placeholder(),
+            |m| m.no_version_history(),
+            |m| m.current_marker(),
+            |m| m.code_preview_title(),
+            |m| m.rag_title(),
+            |m| m.tab_import(),
+            |m| m.tab_models(),
+            |m| m.tab_jobs(),
+            |m| m.label_query(),
+            |m| m.label_limit(),
+            |m| m.no_rag_results(),
+            |m| m.key_fields(),
+            |m| m.key_import(),
+            |m| m.label_title_optional(),
+            |m| m.title_placeholder(),
+            |m| m.content_placeholder(),
+            |m| m.label_chunk_size(),
+            |m| m.label_overlap(),
+            |m| m.key_stats(),
+            |m| m.no_rag_collections(),
+            |m| m.key_toggle(),
+            |m| m.label_collection_name(),
+            |m| m.label_embedding_field(),
+            |m| m.label_text_field(),
+            |m| m.label_provider_space(),
+            |m| m.label_language_space(),
+            |m| m.key_enable_auto_embed(),
+            |m| m.key_cache_stats(),
+            |m| m.key_clear_cache(),
+            |m| m.key_test_embed(),
+            |m| m.loading_models(),
+            |m| m.auto_embed_title(),
+            |m| m.cache_title(),
+            |m| m.key_embed(),
+            |m| m.text_to_embed_title(),
+            |m| m.type_text_here(),
+            |m| m.no_result_yet(),
+            |m| m.key_cancel_job(),
+            |m| m.no_jobs(),
+            |m| m.not_loaded(),
+            |m| m.auto_embed_off(),
+            |m| m.cache_not_loaded(),
+            |m| m.cache_disabled_on_server(),
+            |m| m.job_pending(),
+            |m| m.job_completed(),
+            |m| m.job_cancelled(),
+            |m| m.job_compact(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        assert_eq!(
+            en.import_result("d1", 3, 1, false),
+            "Imported \"d1\": 3 chunks created, 1 replaced"
+        );
+        assert_eq!(
+            en.import_result("d1", 1, 0, false),
+            "Imported \"d1\": 1 chunk created"
+        );
+        assert_eq!(
+            en.rag_collection_row("users", &6, &4, Some("length")),
+            "users | 6 chunks | 4 docs | length"
+        );
+        assert_eq!(
+            hu.rag_collection_row("users", &6, &4, None),
+            "users | 6 darab | 4 dokumentum | nincs RAG-konfiguráció"
+        );
+        assert_eq!(
+            en.model_row("vllm", "m", 2, false),
+            "vllm | m | dim:2 | N/A"
+        );
+        assert_eq!(
+            en.cache_stats(1, 100, 50.0, 1, 1),
+            "1/100 entries | 50.0% hit rate (1 hits, 1 misses)"
+        );
+        assert_eq!(
+            en.auto_embed_status(true, "content", "embedding", "vllm", true, true),
+            "Enabled: content -> embedding (vllm) | re-embed pending | provider removed: enable again"
+        );
+        assert_eq!(en.job_running(25.0), "running 25%");
+        assert_eq!(en.job_backfill("users"), "backfill users");
+        assert_eq!(
+            en.rag_results_title(1, false, true),
+            " Results (1, trimmed) "
+        );
+        assert_eq!(en.run_count(1), "    1 run ");
+        assert_eq!(hu.run_count(12), "   12 futás");
     }
 }

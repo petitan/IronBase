@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the script and RAG modals in both languages (tuti-tui 0.3.490, mcp-server 1.0.678 — version only, for the release tag)
+
+The IronRhai script modal was Hungarian without accents („Uj script”, „Utolso futtas”, „Kod elonezet”), the RAG &
+embedding modal English only. Both take their titles, tabs, key hints, labels and messages from the language layer
+(`i18n::Messages`) now, including the RAG modal's rows built by helpers: the import result, the RAG collection and
+model rows, the auto-embed and cache status, the test embedding and the job rows.
+
+- English counts use the singular for one („1 chunk created”, „1 run”).
+- Tests: every new text differs between the two languages; the English texts are checked to read as the RAG modal
+  did before; the handler and RAG helper tests expect the Hungarian texts (the tests run in Hungarian).
+- Left for the next PRs: the ACL modal and the key handlers' messages; the actions menu and the help are generated
+  from the key map.
+
 ### Changed — Tuti TUI: the API key, listener, vector search and index modals in both languages (tuti-tui 0.3.489, mcp-server 1.0.677 — version only, for the release tag)
 
 The API key, listener and vector search modals were English only, the index modal Hungarian without accents
