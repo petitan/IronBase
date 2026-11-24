@@ -321,13 +321,16 @@ async fn test_index_list_drop_flow() {
     assert_eq!(app.modal(), Some(Modal::Actions));
     press(&mut app, KeyCode::Char('x')).await;
     assert_eq!(app.modal(), Some(Modal::Index));
-    assert_eq!(app.index_state.indexes, vec!["users_id", "users_age"]);
+    assert_eq!(
+        app.index_state_mut().unwrap().indexes,
+        vec!["users_id", "users_age"]
+    );
     server.clear_calls();
 
     // The primary `<collection>_id` index: no confirm, no call
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Index));
-    assert!(app.index_state.error.is_some());
+    assert!(app.index_state_mut().unwrap().error.is_some());
     assert!(server.calls().is_empty());
 
     // Another index: confirm; Esc and Enter (default Cancel) return to the index modal
@@ -350,11 +353,17 @@ async fn test_index_list_drop_flow() {
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_age"})]
     );
-    assert_eq!(app.index_state.error, None);
+    assert_eq!(app.index_state_mut().unwrap().error, None);
     assert_eq!(
-        app.index_state.message.as_deref(),
+        app.index_state_mut().unwrap().message.as_deref(),
         Some("Index törölve: users_age")
     );
+
+    // Closing drops the modal's state; the collections pane keeps the
+    // reloaded index list
+    press(&mut app, KeyCode::Esc).await;
+    assert!(app.index_state().is_none());
+    assert_eq!(app.get_current_indexes(), ["users_id", "users_age"]);
 }
 
 // === Confirmed actions: the call uses the names captured when the confirm opened ===
@@ -376,15 +385,28 @@ async fn test_vector_index_drop_executes_with_captured_names() {
     assert_eq!(app.modal(), Some(Modal::VectorSearch));
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.vector_state.active_tab, VectorTab::ListIndexes);
+    assert_eq!(
+        app.vector_state_mut().unwrap().active_tab,
+        VectorTab::ListIndexes
+    );
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     // The modal state changing under the dialog must not change the target
-    app.vector_state.collection = "other".to_string();
-    app.vector_state.indexes.clear();
+    let Some(crate::app::OpenModal::Confirm {
+        previous: Some(previous),
+        ..
+    }) = &mut app.open_modal
+    else {
+        panic!("the dialog keeps the vector modal");
+    };
+    let crate::app::OpenModal::Vector(state) = previous.as_mut() else {
+        panic!("not the vector modal");
+    };
+    state.collection = "other".to_string();
+    state.indexes.clear();
 
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.modal(), Some(Modal::VectorSearch));
@@ -392,9 +414,9 @@ async fn test_vector_index_drop_executes_with_captured_names() {
         server.calls_to("index_drop"),
         vec![json!({"collection": "users", "index_name": "users_emb_vec"})]
     );
-    assert_eq!(app.vector_state.error, None);
+    assert_eq!(app.vector_state_mut().unwrap().error, None);
     assert_eq!(
-        app.vector_state.message.as_deref(),
+        app.vector_state_mut().unwrap().message.as_deref(),
         Some(t().index_dropped("users_emb_vec").as_str())
     );
 }
@@ -1343,7 +1365,10 @@ async fn test_vector_index_list_shows_dim_and_metric() {
     shift(&mut app, 'V').await;
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.vector_state.active_tab, VectorTab::ListIndexes);
+    assert_eq!(
+        app.vector_state_mut().unwrap().active_tab,
+        VectorTab::ListIndexes
+    );
 
     let screen = render_to_string(&app, 140, 45);
     let line = line_with(&screen, "users_vec_emb");
@@ -1492,7 +1517,7 @@ async fn open_index_create_form(app: &mut App, field: &str) {
     press(app, KeyCode::Char('x')).await;
     assert_eq!(app.modal(), Some(Modal::Index));
     press(app, KeyCode::Char('n')).await;
-    assert!(app.index_state.is_creating);
+    assert!(app.index_state_mut().unwrap().is_creating);
     type_text(app, field).await;
 }
 
@@ -1513,9 +1538,9 @@ async fn test_index_create_reports_the_server_index_name() {
     open_index_create_form(&mut app, "n").await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.index_state.error, None);
+    assert_eq!(app.index_state_mut().unwrap().error, None);
     assert_eq!(
-        app.index_state.message.as_deref(),
+        app.index_state_mut().unwrap().message.as_deref(),
         Some("Index: n létrehozva (users_n)")
     );
     assert_eq!(
@@ -1542,8 +1567,13 @@ async fn test_index_create_rejects_a_response_of_another_tool() {
     open_index_create_form(&mut app, "n").await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.index_state.message, None);
-    let error = app.index_state.error.clone().unwrap_or_default();
+    assert_eq!(app.index_state_mut().unwrap().message, None);
+    let error = app
+        .index_state_mut()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
     assert!(error.contains("index_create"), "{error}");
 }
 
@@ -1555,15 +1585,18 @@ async fn test_vector_index_create_reports_name_or_rejects_bad_response() {
 
     shift(&mut app, 'V').await;
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.vector_state.active_tab, VectorTab::CreateIndex);
+    assert_eq!(
+        app.vector_state_mut().unwrap().active_tab,
+        VectorTab::CreateIndex
+    );
     type_text(&mut app, "emb").await;
-    app.vector_state.dimension = 3;
+    app.vector_state_mut().unwrap().dimension = 3;
 
     // A response without `index_name`: an error, not "Index '' created!"
     server.respond("index_create", wire(r#"{"success":true}"#));
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.vector_state.message, None);
-    assert!(app.vector_state.error.is_some());
+    assert_eq!(app.vector_state_mut().unwrap().message, None);
+    assert!(app.vector_state_mut().unwrap().error.is_some());
 
     // golden "vector defaults" shape, from the built-in answer
     let server = two_collections();
@@ -1571,11 +1604,11 @@ async fn test_vector_index_create_reports_name_or_rejects_bad_response() {
     shift(&mut app, 'V').await;
     press(&mut app, KeyCode::Tab).await;
     type_text(&mut app, "emb").await;
-    app.vector_state.dimension = 3;
+    app.vector_state_mut().unwrap().dimension = 3;
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.vector_state.error, None);
+    assert_eq!(app.vector_state_mut().unwrap().error, None);
     assert_eq!(
-        app.vector_state.message.as_deref(),
+        app.vector_state_mut().unwrap().message.as_deref(),
         Some("A(z) „users_vec_emb” index létrehozva")
     );
     assert_eq!(
@@ -1604,9 +1637,9 @@ async fn test_index_analyze_and_collection_create_drop_use_built_ins() {
         server.calls_to("index_stats_refresh"),
         vec![json!({"collection": "users"})]
     );
-    assert_eq!(app.index_state.error, None);
+    assert_eq!(app.index_state_mut().unwrap().error, None);
     assert_eq!(
-        app.index_state.message.as_deref(),
+        app.index_state_mut().unwrap().message.as_deref(),
         Some(t().index_statistics_refreshed())
     );
     press(&mut app, KeyCode::Esc).await;
@@ -1985,7 +2018,7 @@ async fn test_rag_search_rejects_a_malformed_response() {
 async fn open_vector_search(app: &mut App) {
     shift(app, 'V').await;
     assert_eq!(app.modal(), Some(Modal::VectorSearch));
-    app.vector_state.search_field = "emb".into();
+    app.vector_state_mut().unwrap().search_field = "emb".into();
     type_text(app, "[1.0, 0.0]").await;
 }
 
@@ -1996,9 +2029,18 @@ async fn test_vector_search_shows_scores_in_order() {
     open_vector_search(&mut app).await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.vector_state.error, None);
-    assert_eq!(app.vector_state.message.as_deref(), Some("3 találat"));
-    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(app.vector_state_mut().unwrap().error, None);
+    assert_eq!(
+        app.vector_state_mut().unwrap().message.as_deref(),
+        Some("3 találat")
+    );
+    let scores: Vec<Option<f64>> = app
+        .vector_state_mut()
+        .unwrap()
+        .results
+        .iter()
+        .map(|r| r.score)
+        .collect();
     assert_eq!(scores, [Some(1.0), Some(0.6), Some(0.0)]);
     let screen = render_to_string(&app, 140, 45);
     assert!(line_with(&screen, "id:2").contains("0.6000"), "{screen}");
@@ -2018,9 +2060,15 @@ async fn test_vector_search_parses_the_projected_score_first_shape() {
     open_vector_search(&mut app).await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.vector_state.results.len(), 2);
-    assert_eq!(app.vector_state.results[0].score, Some(0.9999931454658508));
-    assert_eq!(app.vector_state.results[1].document["_id"], 1);
+    assert_eq!(app.vector_state_mut().unwrap().results.len(), 2);
+    assert_eq!(
+        app.vector_state_mut().unwrap().results[0].score,
+        Some(0.9999931454658508)
+    );
+    assert_eq!(
+        app.vector_state_mut().unwrap().results[1].document["_id"],
+        1
+    );
 }
 
 #[tokio::test]
@@ -2038,10 +2086,19 @@ async fn test_vector_search_shows_an_unavailable_score() {
     open_vector_search(&mut app).await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.vector_state.error, None);
-    let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
+    assert_eq!(app.vector_state_mut().unwrap().error, None);
+    let scores: Vec<Option<f64>> = app
+        .vector_state_mut()
+        .unwrap()
+        .results
+        .iter()
+        .map(|r| r.score)
+        .collect();
     assert_eq!(scores, [None, Some(0.9778023958206177), None]);
-    assert_eq!(app.vector_state.results[0].document["_score"], "own");
+    assert_eq!(
+        app.vector_state_mut().unwrap().results[0].document["_score"],
+        "own"
+    );
     let screen = render_to_string(&app, 140, 45);
     assert!(line_with(&screen, "id:2").contains("n/a"), "{screen}");
     assert!(line_with(&screen, "id:3").contains("0.9778"), "{screen}");
@@ -2053,14 +2110,15 @@ async fn test_vector_search_filter_is_applied_to_typed_hits() {
     let server = search_docs();
     let mut app = app_with_server(&server).await;
     open_vector_search(&mut app).await;
-    app.vector_state.k = 1;
-    app.vector_state.filter_input = r#"{"even": false}"#.into();
+    app.vector_state_mut().unwrap().k = 1;
+    app.vector_state_mut().unwrap().filter_input = r#"{"even": false}"#.into();
     press(&mut app, KeyCode::Enter).await;
 
     // A wider pool is asked for, then filtered and cut to `k`
     assert_eq!(server.calls_to("vector_search")[0]["limit"], 5);
     let ids: Vec<_> = app
-        .vector_state
+        .vector_state()
+        .unwrap()
         .results
         .iter()
         .map(|r| r.document["_id"].clone())
@@ -2068,9 +2126,14 @@ async fn test_vector_search_filter_is_applied_to_typed_hits() {
     assert_eq!(ids, [json!(1)]);
 
     // An operator filter is refused, not silently ignored
-    app.vector_state.filter_input = r#"{"emb": {"$exists": true}}"#.into();
+    app.vector_state_mut().unwrap().filter_input = r#"{"emb": {"$exists": true}}"#.into();
     press(&mut app, KeyCode::Enter).await;
-    let error = app.vector_state.error.clone().unwrap_or_default();
+    let error = app
+        .vector_state_mut()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
     assert!(error.contains("only equality matches"), "{error}");
 }
 
@@ -2576,24 +2639,34 @@ async fn test_export_path_is_edited_at_the_cursor() {
 async fn test_index_fields_are_edited_at_the_cursor() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.index_state = crate::state::index::IndexState::new("users".to_string(), vec![]);
-    app.index_state.start_create();
-    app.index_state.toggle_compound();
-    app.set_modal(Modal::Index);
+    app.open_modal = Some(crate::app::OpenModal::Index(
+        crate::state::index::IndexState::new("users".to_string(), vec![]),
+    ));
+    app.index_state_mut().unwrap().start_create();
+    app.index_state_mut().unwrap().toggle_compound();
 
     type_text(&mut app, "city").await;
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "country,").await;
 
-    assert_eq!(app.index_state.field_input.value(), "country,city");
-    assert_eq!(app.index_state.get_fields(), vec!["country", "city"]);
+    assert_eq!(
+        app.index_state_mut().unwrap().field_input.value(),
+        "country,city"
+    );
+    assert_eq!(
+        app.index_state_mut().unwrap().get_fields(),
+        vec!["country", "city"]
+    );
     press_with(&mut app, KeyCode::Char('k'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.index_state.get_fields(), vec!["country"]);
+    assert_eq!(app.index_state_mut().unwrap().get_fields(), vec!["country"]);
     // Off the field (Tab), space toggles the checkboxes and types nothing
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Char(' ')).await;
-    assert!(!app.index_state.is_compound);
-    assert_eq!(app.index_state.field_input.value(), "country,");
+    assert!(!app.index_state_mut().unwrap().is_compound);
+    assert_eq!(
+        app.index_state_mut().unwrap().field_input.value(),
+        "country,"
+    );
 }
 
 /// Ctrl+J / Ctrl+K stay the result keys of the fulltext modal (not the
@@ -2702,16 +2775,23 @@ async fn test_listener_id_is_edited_at_the_cursor() {
 async fn test_vector_input_is_edited_at_the_cursor() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.vector_state = crate::state::vector::VectorSearchState::new("users".to_string());
-    app.set_modal(Modal::VectorSearch);
+    app.open_modal = Some(crate::app::OpenModal::Vector(
+        crate::state::vector::VectorSearchState::new("users".to_string()),
+    ));
 
     type_text(&mut app, "[1,3]").await;
     press(&mut app, KeyCode::Left).await;
     press(&mut app, KeyCode::Left).await;
     type_text(&mut app, "2,").await;
 
-    assert_eq!(app.vector_state.vector_input.value(), "[1,2,3]");
-    assert_eq!(app.vector_state.parse_vector(), Ok(vec![1.0, 2.0, 3.0]));
+    assert_eq!(
+        app.vector_state_mut().unwrap().vector_input.value(),
+        "[1,2,3]"
+    );
+    assert_eq!(
+        app.vector_state_mut().unwrap().parse_vector(),
+        Ok(vec![1.0, 2.0, 3.0])
+    );
 }
 
 /// The script name, tag and params fields edit at the cursor: Home and the

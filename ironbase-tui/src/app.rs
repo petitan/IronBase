@@ -137,8 +137,8 @@ pub struct App {
     // Search state
     pub search: SearchState,
 
-    // Index management state
-    pub index_state: IndexState,
+    /// The selected collection's index names, shown in the collections pane
+    pub collection_indexes: Vec<String>,
 
     // Visual filter state
     pub filter_state: FilterState,
@@ -150,9 +150,6 @@ pub struct App {
     pub server_info_scroll: usize,
 
     // Update modal state
-
-    // Vector search state
-    pub vector_state: VectorSearchState,
 
     // RAG & Embedding state
     pub rag_state: RagState,
@@ -195,11 +192,10 @@ impl App {
             active_sort: None,
             detail_scroll: 0,
             search: SearchState::new(),
-            index_state: IndexState::default(),
+            collection_indexes: Vec::new(),
             filter_state: FilterState::default(),
             script_state: ScriptState::default(),
             server_info_scroll: 0,
-            vector_state: VectorSearchState::default(),
             rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
             config,
@@ -263,7 +259,7 @@ impl App {
 
     /// Get cached indexes for current collection (for sync render)
     pub fn get_current_indexes(&self) -> &[String] {
-        &self.index_state.indexes
+        &self.collection_indexes
     }
 
     /// Check if a collection is selected
@@ -439,6 +435,8 @@ impl App {
     modal_state!(database_state, database_state_mut, Database, DatabaseState);
     modal_state!(insert_state, insert_state_mut, Insert, InsertState);
     modal_state!(query_state, query_state_mut, Query, QueryState);
+    modal_state!(index_state, index_state_mut, Index, IndexState);
+    modal_state!(vector_state, vector_state_mut, Vector, VectorSearchState);
     modal_state!(
         api_key_state,
         api_key_state_mut,
@@ -493,36 +491,29 @@ impl App {
 
     /// Open drop confirmation for the selected index (index modal)
     pub fn open_drop_index_confirm(&mut self) {
-        let Some(index_name) = self
-            .index_state
-            .indexes
-            .get(self.index_state.selected_index)
-            .cloned()
-        else {
+        let state = open_state!(self, Index);
+        let Some(index_name) = state.indexes.get(state.selected_index).cloned() else {
             return;
         };
 
-        if self.index_state.is_primary_index(&index_name) {
-            self.index_state.error = Some(t().primary_index_not_droppable(&index_name));
+        if state.is_primary_index(&index_name) {
+            state.error = Some(t().primary_index_not_droppable(&index_name));
             return;
         }
 
-        let collection = self.index_state.collection.clone();
+        let collection = state.collection.clone();
         self.open_confirm(ConfirmState::drop_index(collection, index_name));
     }
 
     /// Open drop confirmation for the selected vector index (vector modal)
     pub fn open_drop_vector_index_confirm(&mut self) {
-        let Some(index) = self
-            .vector_state
-            .indexes
-            .get(self.vector_state.selected_index)
-        else {
+        let state = open_state!(self, Vector);
+        let Some(index) = state.indexes.get(state.selected_index) else {
             return;
         };
 
         let index_name = index.name.clone();
-        let collection = self.vector_state.collection.clone();
+        let collection = state.collection.clone();
         self.open_confirm(ConfirmState::drop_vector_index(collection, index_name));
     }
 
@@ -678,13 +669,12 @@ impl App {
         };
 
         // Initialize with empty, will be loaded async
-        self.index_state = IndexState::new(coll_name, vec![]);
-        self.set_modal(Modal::Index);
+        self.open_modal = Some(OpenModal::Index(IndexState::new(coll_name, vec![])));
     }
 
     /// Load indexes for current collection (call after opening index modal)
     pub async fn load_indexes_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
         if collection.is_empty() {
             return;
         }
@@ -695,11 +685,12 @@ impl App {
 
         match db.index_entries(&collection).await {
             Ok(entries) => {
-                self.index_state.indexes = entries.iter().map(|e| e.name.clone()).collect();
-                self.index_state.index_entries = entries;
+                open_state!(self, Index).indexes = entries.iter().map(|e| e.name.clone()).collect();
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
+                open_state!(self, Index).index_entries = entries;
             }
             Err(e) => {
-                self.index_state.message = Some(t().failed(Op::LoadIndexes, &e));
+                open_state!(self, Index).message = Some(t().failed(Op::LoadIndexes, &e));
             }
         }
     }
@@ -1318,8 +1309,7 @@ impl App {
                     coll.index_count = Some(index_names.len());
                 }
 
-                // Update index_state for UI display
-                self.index_state.indexes = index_names;
+                self.collection_indexes = index_names;
             }
 
             // BUG FIX: Validate selected_document after refresh
@@ -1704,20 +1694,22 @@ impl App {
             };
             match db.call::<IndexDrop>(&args).await {
                 Ok(dropped) => {
-                    self.vector_state.message = Some(t().index_dropped(&dropped.dropped));
+                    open_state!(self, Vector).message = Some(t().index_dropped(&dropped.dropped));
 
                     // Refresh index list
                     if let Ok(indexes) = db.vector_indexes(collection).await {
-                        self.vector_state.update_indexes(indexes);
-                        if self.vector_state.selected_index >= self.vector_state.indexes.len()
-                            && !self.vector_state.indexes.is_empty()
+                        open_state!(self, Vector).update_indexes(indexes);
+                        if open_state!(self, Vector).selected_index
+                            >= open_state!(self, Vector).indexes.len()
+                            && !open_state!(self, Vector).indexes.is_empty()
                         {
-                            self.vector_state.selected_index = self.vector_state.indexes.len() - 1;
+                            open_state!(self, Vector).selected_index =
+                                open_state!(self, Vector).indexes.len() - 1;
                         }
                     }
                 }
                 Err(e) => {
-                    self.vector_state.error = Some(format!("{}", e));
+                    open_state!(self, Vector).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1915,17 +1907,17 @@ impl App {
 
     /// Create a new index (async) - supports both single and compound indexes
     pub async fn execute_create_index_async(&mut self) {
-        let fields = self.index_state.get_fields();
+        let fields = open_state!(self, Index).get_fields();
 
         if fields.is_empty() {
-            self.index_state.error = Some(t().field_name_required().to_string());
+            open_state!(self, Index).error = Some(t().field_name_required().to_string());
             return;
         }
 
-        let collection = self.index_state.collection.clone();
-        let unique = self.index_state.unique;
-        let sparse = self.index_state.sparse;
-        let is_compound = self.index_state.is_compound;
+        let collection = open_state!(self, Index).collection.clone();
+        let unique = open_state!(self, Index).unique;
+        let sparse = open_state!(self, Index).sparse;
+        let is_compound = open_state!(self, Index).is_compound;
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -1968,15 +1960,16 @@ impl App {
                 } else {
                     fields.first().cloned().unwrap_or_default()
                 };
-                self.index_state.message =
+                open_state!(self, Index).message =
                     Some(t().index_created(&fields, compound, &flags_str, created.index_name()));
-                self.index_state.cancel_create();
-                self.index_state.indexes = self.get_current_indexes_async().await;
+                open_state!(self, Index).cancel_create();
+                open_state!(self, Index).indexes = self.get_current_indexes_async().await;
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
                 // Refresh collection list to update index_count
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().failed(Op::Create, &e));
+                open_state!(self, Index).error = Some(t().failed(Op::Create, &e));
             }
         }
     }
@@ -1994,27 +1987,31 @@ impl App {
         };
         match db.call::<IndexDrop>(&args).await {
             Ok(dropped) => {
-                self.index_state.message = Some(t().index_dropped(&dropped.dropped));
-                self.index_state.error = None;
-                self.index_state.indexes = self.get_current_indexes_async().await;
+                open_state!(self, Index).message = Some(t().index_dropped(&dropped.dropped));
+                open_state!(self, Index).error = None;
+                open_state!(self, Index).indexes = self.get_current_indexes_async().await;
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
                 // Adjust selection after deletion
-                if self.index_state.indexes.is_empty() {
-                    self.index_state.selected_index = 0;
-                } else if self.index_state.selected_index >= self.index_state.indexes.len() {
-                    self.index_state.selected_index = self.index_state.indexes.len() - 1;
+                if open_state!(self, Index).indexes.is_empty() {
+                    open_state!(self, Index).selected_index = 0;
+                } else if open_state!(self, Index).selected_index
+                    >= open_state!(self, Index).indexes.len()
+                {
+                    open_state!(self, Index).selected_index =
+                        open_state!(self, Index).indexes.len() - 1;
                 }
                 // Refresh collection list to update index_count
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().failed(Op::Delete, &e));
+                open_state!(self, Index).error = Some(t().failed(Op::Delete, &e));
             }
         }
     }
 
     /// Analyze indexes - refresh statistics (async)
     pub async fn execute_analyze_index_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -2022,8 +2019,8 @@ impl App {
         };
 
         // Set analyzing state
-        self.index_state.is_analyzing = true;
-        self.index_state.message = Some(t().analyzing_indexes().to_string());
+        open_state!(self, Index).is_analyzing = true;
+        open_state!(self, Index).message = Some(t().analyzing_indexes().to_string());
 
         // Refresh statistics
         let args = IndexListParams {
@@ -2035,33 +2032,33 @@ impl App {
                 // Load updated statistics
                 match db.btree_index_statistics(&collection).await {
                     Ok(stats) => {
-                        self.index_state.update_statistics(stats);
-                        self.index_state.message =
+                        open_state!(self, Index).update_statistics(stats);
+                        open_state!(self, Index).message =
                             Some(t().index_statistics_refreshed().to_string());
                     }
                     Err(e) => {
-                        self.index_state.is_analyzing = false;
-                        self.index_state.error = Some(t().failed(Op::LoadStatistics, &e));
+                        open_state!(self, Index).is_analyzing = false;
+                        open_state!(self, Index).error = Some(t().failed(Op::LoadStatistics, &e));
                     }
                 }
             }
             Err(e) => {
-                self.index_state.is_analyzing = false;
-                self.index_state.error = Some(t().failed(Op::Analyze, &e));
+                open_state!(self, Index).is_analyzing = false;
+                open_state!(self, Index).error = Some(t().failed(Op::Analyze, &e));
             }
         }
     }
 
     /// Load index statistics (async) - call when opening index modal
     pub async fn load_index_statistics_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
 
         let Some(db) = &self.db else {
             return;
         };
 
         if let Ok(stats) = db.btree_index_statistics(&collection).await {
-            self.index_state.update_statistics(stats);
+            open_state!(self, Index).update_statistics(stats);
         }
     }
 
@@ -2889,12 +2886,11 @@ mod tests {
     #[test]
     fn test_drop_index_needs_confirm_and_returns_to_index_modal() {
         let mut app = App::new(Config::default());
-        app.index_state = IndexState::new(
+        app.open_modal = Some(crate::app::OpenModal::Index(IndexState::new(
             "users".to_string(),
             vec!["users_id".to_string(), "users_age".to_string()],
-        );
-        app.index_state.selected_index = 1;
-        app.set_modal(Modal::Index);
+        )));
+        app.index_state_mut().unwrap().selected_index = 1;
 
         app.open_drop_index_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
@@ -2910,19 +2906,21 @@ mod tests {
         // Cancel: back in the index modal, state intact
         app.close_confirm();
         assert_eq!(app.modal(), Some(Modal::Index));
-        assert_eq!(app.index_state.selected_index, 1);
-        assert_eq!(app.index_state.indexes.len(), 2);
+        assert_eq!(app.index_state_mut().unwrap().selected_index, 1);
+        assert_eq!(app.index_state_mut().unwrap().indexes.len(), 2);
     }
 
     #[test]
     fn test_primary_id_index_drop_is_refused() {
         let mut app = App::new(Config::default());
-        app.index_state = IndexState::new("users".to_string(), vec!["users_id".to_string()]);
-        app.set_modal(Modal::Index);
+        app.open_modal = Some(crate::app::OpenModal::Index(IndexState::new(
+            "users".to_string(),
+            vec!["users_id".to_string()],
+        )));
 
         app.open_drop_index_confirm();
         assert_eq!(app.modal(), Some(Modal::Index));
-        assert!(app.index_state.error.is_some());
+        assert!(app.index_state_mut().unwrap().error.is_some());
     }
 
     #[test]

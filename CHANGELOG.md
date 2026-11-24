@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the index and vector modals' state lives with the open modal (tuti-tui 0.3.501, mcp-server 1.0.689 — version only, for the release tag)
+
+The index and vector search modals move into `OpenModal` (`Index`, `Vector`); a confirm dialog opened from them
+(index drop) keeps their state under it. The index modal's list was also the collections pane's index list; that
+list is now its own `App` field (`collection_indexes`), refreshed with the collection and whenever the index modal
+reloads its list, so opening the index modal no longer blanks it until the list loads.
+
 ### Changed — Tuti TUI: the confirm dialog keeps the modal it was opened from (tuti-tui 0.3.500, mcp-server 1.0.688 — version only, for the release tag)
 
 The confirm dialog moves into `OpenModal` (`Confirm { state, previous }`): opened over a modal, it holds that modal

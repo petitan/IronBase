@@ -86,7 +86,11 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                     modals::insert::render(frame, frame.area(), state, &theme);
                 }
             }
-            Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
+            Modal::Index => {
+                if let Some(state) = app.index_state() {
+                    modals::index::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::Query => {
                 if let Some(state) = app.query_state() {
                     modals::query::render(frame, frame.area(), state, &theme);
@@ -153,7 +157,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::VectorSearch => {
-                modals::vector::render(frame, frame.area(), &app.vector_state, &theme);
+                if let Some(state) = app.vector_state() {
+                    modals::vector::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Rag => {
                 modals::rag::render(frame, frame.area(), &app.rag_state, &theme);

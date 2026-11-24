@@ -1,7 +1,8 @@
 //! Key handlers: vector
 
-use crate::app::{App, Modal, VectorSearchState};
+use crate::app::{App, OpenModal, VectorSearchState};
 use crate::i18n::t;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{IndexCreateArgs, VectorIndexCreateParams, VectorSearchParams};
@@ -25,17 +26,18 @@ pub(crate) async fn handle_vector_open(app: &mut App) {
     }
 
     // Initialize vector state
-    app.vector_state = VectorSearchState::new(collection.clone());
-    app.set_modal(Modal::VectorSearch);
+    app.open_modal = Some(OpenModal::Vector(VectorSearchState::new(
+        collection.clone(),
+    )));
 
     // Load vector indexes for this collection
     if let Some(ref db) = app.db {
         if let Ok(indexes) = db.vector_indexes(&collection).await {
-            app.vector_state.update_indexes(indexes);
+            open_state!(app, Vector).update_indexes(indexes);
 
             // Pre-fill search field if we have an index
-            if let Some(first_idx) = app.vector_state.indexes.first() {
-                app.vector_state.search_field = first_idx.field.clone();
+            if let Some(first_idx) = open_state!(app, Vector).indexes.first() {
+                open_state!(app, Vector).search_field = first_idx.field.clone();
             }
         }
     }
@@ -50,12 +52,12 @@ pub(crate) async fn handle_vector_key_async(app: &mut App, key: KeyCode, modifie
         (KeyCode::Esc, _) => app.close_modal(),
 
         // Tab navigation
-        (KeyCode::Tab, KeyModifiers::NONE) => app.vector_state.next_tab(),
-        (KeyCode::BackTab, _) => app.vector_state.prev_tab(),
+        (KeyCode::Tab, KeyModifiers::NONE) => open_state!(app, Vector).next_tab(),
+        (KeyCode::BackTab, _) => open_state!(app, Vector).prev_tab(),
 
         _ => {
             // Tab-specific handling
-            match app.vector_state.active_tab {
+            match open_state!(app, Vector).active_tab {
                 VectorTab::Search => handle_vector_search_key(app, key, modifiers).await,
                 VectorTab::CreateIndex => handle_vector_create_key(app, key, modifiers).await,
                 VectorTab::ListIndexes => handle_vector_list_key(app, key).await,
@@ -70,34 +72,34 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
         // Execute search
         (KeyCode::Enter, _) => {
             // Parse vector
-            let vector = match app.vector_state.parse_vector() {
+            let vector = match open_state!(app, Vector).parse_vector() {
                 Ok(v) => v,
                 Err(e) => {
-                    app.vector_state.error = Some(e);
+                    open_state!(app, Vector).error = Some(e);
                     return;
                 }
             };
 
             // Parse optional filter
-            let filter = match app.vector_state.parse_filter() {
+            let filter = match open_state!(app, Vector).parse_filter() {
                 Ok(f) => f,
                 Err(e) => {
-                    app.vector_state.error = Some(e);
+                    open_state!(app, Vector).error = Some(e);
                     return;
                 }
             };
 
-            let collection = app.vector_state.collection.clone();
-            let field = app.vector_state.search_field.clone();
-            let k = app.vector_state.k;
+            let collection = open_state!(app, Vector).collection.clone();
+            let field = open_state!(app, Vector).search_field.clone();
+            let k = open_state!(app, Vector).k;
 
             if field.is_empty() {
-                app.vector_state.error = Some(t().field_name_required().to_string());
+                open_state!(app, Vector).error = Some(t().field_name_required().to_string());
                 return;
             }
 
-            app.vector_state.is_loading = true;
-            app.vector_state.error = None;
+            open_state!(app, Vector).is_loading = true;
+            open_state!(app, Vector).error = None;
 
             if let Some(ref db) = app.db {
                 let args = VectorSearchParams {
@@ -115,26 +117,25 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
 
                 match result {
                     Ok(results) => {
-                        app.vector_state.update_results(results);
-                        app.vector_state.message =
-                            Some(t().match_count(app.vector_state.results.len()));
+                        open_state!(app, Vector).update_results(results);
+                        open_state!(app, Vector).message =
+                            Some(t().match_count(open_state!(app, Vector).results.len()));
                     }
                     Err(e) => {
-                        app.vector_state.is_loading = false;
-                        app.vector_state.error = Some(format!("{}", e));
+                        open_state!(app, Vector).is_loading = false;
+                        open_state!(app, Vector).error = Some(format!("{}", e));
                     }
                 }
             }
         }
 
         // Navigation in results
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.vector_state.result_up(),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.vector_state.result_down(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => open_state!(app, Vector).result_up(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => open_state!(app, Vector).result_down(),
 
         // Text input for vector
         _ => {
-            app.vector_state
-                .handle_text_input(Input::Key(key, modifiers));
+            open_state!(app, Vector).handle_text_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -144,23 +145,27 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
     match (key, modifiers) {
         // Create index
         (KeyCode::Enter, _) => {
-            let collection = app.vector_state.collection.clone();
-            let field = app.vector_state.new_field.value().trim().to_string();
-            let dimension = app.vector_state.dimension;
-            let metric = app.vector_state.metric.as_str().to_string();
+            let collection = open_state!(app, Vector).collection.clone();
+            let field = open_state!(app, Vector)
+                .new_field
+                .value()
+                .trim()
+                .to_string();
+            let dimension = open_state!(app, Vector).dimension;
+            let metric = open_state!(app, Vector).metric.as_str().to_string();
 
             if field.is_empty() {
-                app.vector_state.error = Some(t().field_name_required().to_string());
+                open_state!(app, Vector).error = Some(t().field_name_required().to_string());
                 return;
             }
 
             if dimension == 0 {
-                app.vector_state.error = Some(t().dimension_positive().to_string());
+                open_state!(app, Vector).error = Some(t().dimension_positive().to_string());
                 return;
             }
 
-            app.vector_state.is_loading = true;
-            app.vector_state.error = None;
+            open_state!(app, Vector).is_loading = true;
+            open_state!(app, Vector).error = None;
 
             if let Some(ref db) = app.db {
                 let args = IndexCreateArgs::Vector(VectorIndexCreateParams::new(
@@ -172,48 +177,47 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
                 match db.call::<IndexCreate>(&args).await {
                     Ok(created) => {
                         // After clearing the form, which also clears the message
-                        app.vector_state.clear_create_form();
-                        app.vector_state.message =
+                        open_state!(app, Vector).clear_create_form();
+                        open_state!(app, Vector).message =
                             Some(t().vector_index_created(created.index_name()));
 
                         // Refresh index list
                         if let Ok(indexes) = db.vector_indexes(&collection).await {
-                            app.vector_state.update_indexes(indexes);
+                            open_state!(app, Vector).update_indexes(indexes);
                         }
                     }
                     Err(e) => {
-                        app.vector_state.is_loading = false;
-                        app.vector_state.error = Some(format!("{}", e));
+                        open_state!(app, Vector).is_loading = false;
+                        open_state!(app, Vector).error = Some(format!("{}", e));
                     }
                 }
             }
         }
 
         // Next form field
-        (KeyCode::Tab, KeyModifiers::NONE) => app.vector_state.next_create_field(),
+        (KeyCode::Tab, KeyModifiers::NONE) => open_state!(app, Vector).next_create_field(),
 
         // Toggle metric
-        (KeyCode::Char(' '), _) if app.vector_state.create_form_field == 2 => {
-            app.vector_state.toggle_metric();
+        (KeyCode::Char(' '), _) if open_state!(app, Vector).create_form_field == 2 => {
+            open_state!(app, Vector).toggle_metric();
         }
 
         // Field name input
-        _ if app.vector_state.create_form_field == 0 => {
-            app.vector_state
-                .handle_text_input(Input::Key(key, modifiers));
+        _ if open_state!(app, Vector).create_form_field == 0 => {
+            open_state!(app, Vector).handle_text_input(Input::Key(key, modifiers));
         }
 
         // Dimension (digits only)
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
-            if app.vector_state.create_form_field == 1 =>
+            if open_state!(app, Vector).create_form_field == 1 =>
         {
-            app.vector_state.dimension =
-                crate::widgets::push_digits(app.vector_state.dimension, &c.to_string());
-            app.vector_state.error = None;
+            open_state!(app, Vector).dimension =
+                crate::widgets::push_digits(open_state!(app, Vector).dimension, &c.to_string());
+            open_state!(app, Vector).error = None;
         }
-        (KeyCode::Backspace, _) if app.vector_state.create_form_field == 1 => {
-            app.vector_state.dimension /= 10;
-            app.vector_state.error = None;
+        (KeyCode::Backspace, _) if open_state!(app, Vector).create_form_field == 1 => {
+            open_state!(app, Vector).dimension /= 10;
+            open_state!(app, Vector).error = None;
         }
 
         _ => {}
@@ -224,8 +228,8 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
 pub(crate) async fn handle_vector_list_key(app: &mut App, key: KeyCode) {
     match key {
         // Navigation
-        KeyCode::Up | KeyCode::Char('k') => app.vector_state.index_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.vector_state.index_down(),
+        KeyCode::Up | KeyCode::Char('k') => open_state!(app, Vector).index_up(),
+        KeyCode::Down | KeyCode::Char('j') => open_state!(app, Vector).index_down(),
 
         // Delete index (with confirmation)
         KeyCode::Char('d') | KeyCode::Delete => app.open_drop_vector_index_confirm(),

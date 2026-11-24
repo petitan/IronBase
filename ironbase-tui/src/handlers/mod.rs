@@ -77,7 +77,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Some(Modal::Insert) => app
             .insert_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
-        Some(Modal::Index) => app.index_state.handle_input(input),
+        Some(Modal::Index) => app
+            .index_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Query) => app
             .query_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
@@ -105,7 +107,11 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Some(Modal::Listener) => app
             .listener_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
-        Some(Modal::VectorSearch) => app.vector_state.handle_text_input(input),
+        Some(Modal::VectorSearch) => app
+            .vector_state_mut()
+            .map_or(InputOutcome::Ignored, |state| {
+                state.handle_text_input(input)
+            }),
         Some(Modal::Rag) => app.rag_state.handle_text_input(input),
         Some(
             Modal::Actions
