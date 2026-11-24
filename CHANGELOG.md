@@ -7,69 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — Tuti TUI: the RAG modal's state lives with the open modal (tuti-tui 0.3.503, mcp-server 1.0.691 — version only, for the release tag)
-
-The RAG / embedding modal moves into `OpenModal` (`Rag`); its confirm dialogs (auto-embed disable, cache clear, job
-cancel) keep its state under them. No change of behavior. With this every modal that has state of its own lives in
-`OpenModal`; `OpenModal::Plain` is left for the ones without (help, actions menu, error details) and for the search
-and filter modals, whose state is view state kept in `App`.
-
-### Changed — Tuti TUI: the script modal's state lives with the open modal (tuti-tui 0.3.502, mcp-server 1.0.690 — version only, for the release tag)
-
-The script modal moves into `OpenModal` (`Script`); the rollback confirm dialog keeps its state under it. No change
-of behavior. The filter builder's state stays in `App` on purpose: its conditions outlive the modal (reopening it
-shows them again; switching collection clears them), so it is view state, like the search's.
-
-### Changed — Tuti TUI: the index and vector modals' state lives with the open modal (tuti-tui 0.3.501, mcp-server 1.0.689 — version only, for the release tag)
-
-The index and vector search modals move into `OpenModal` (`Index`, `Vector`); a confirm dialog opened from them
-(index drop) keeps their state under it. The index modal's list was also the collections pane's index list; that
-list is now its own `App` field (`collection_indexes`), refreshed with the collection and whenever the index modal
-reloads its list, so opening the index modal no longer blanks it until the list loads.
-
-### Changed — Tuti TUI: the confirm dialog keeps the modal it was opened from (tuti-tui 0.3.500, mcp-server 1.0.688 — version only, for the release tag)
-
-The confirm dialog moves into `OpenModal` (`Confirm { state, previous }`): opened over a modal, it holds that modal
-as it was and gives it back when it closes. It used to reopen the modal by kind only (`ConfirmState::return_to`, now
-removed), which works only while that modal's state lives in `App`; the index, vector, script and RAG modals, which
-open confirm dialogs, can now move into `OpenModal` too. No change of behavior.
-
-### Changed — Tuti TUI: the API key, ACL and listener modals' state lives with the open modal (tuti-tui 0.3.499, mcp-server 1.0.687 — version only, for the release tag)
-
-The three admin modals move into `OpenModal` (`ApiKey`, `Acl`, `Listener`), with no change of behavior: their state
-is created when they open (the actions build it before loading the list) and dropped when they close. `OpenModal` no
-longer derives `Clone` (nothing cloned it, and these states hold no clonable data).
-
-### Changed — Tuti TUI: the insert/edit and query builder modals' state lives with the open modal (tuti-tui 0.3.498, mcp-server 1.0.686 — version only, for the release tag)
-
-The insert/edit document and the query builder modals move into `OpenModal` (`Insert`, `Query`), with no change of
-behavior. One macro reaches an open modal's state for code that also uses `App`'s other fields
-(`state::open_state!(app, Variant)`, borrowing only `open_modal`); it replaces the per-handler macros of the previous
-step.
-
-### Changed — Tuti TUI: the export, full-text and database modals' state lives with the open modal (tuti-tui 0.3.497, mcp-server 1.0.685 — version only, for the release tag)
-
-The next three modals move into `OpenModal` (`Export`, `Fulltext`, `Database`), with no change of behavior: their
-state is created when they open and dropped when they close.
-
-- `App` gives each moved modal's state as `export_state()` / `export_state_mut()` (and so on, from one
-  `modal_state!` macro); the key handlers reach it through the `open_modal` field (a `state!` macro per handler),
-  so `app.db` stays usable next to it without cloning.
-- The export takes its collection and format as arguments instead of reading them from a field mid-export.
-
-### Changed — Tuti TUI: a modal's state lives with the open modal (first step of phase 4) (tuti-tui 0.3.496, mcp-server 1.0.684 — version only, for the release tag)
+### Changed — Tuti TUI: a modal's state lives with the open modal (phase 4: `OpenModal`) (tuti-tui 0.3.503, mcp-server 1.0.691 — version only, for the release tag)
 
 `App` kept every modal's state in a field of its own (17 of them), alive whether the modal was open or not, next to
 `modal: Option<Modal>` that said which one was open. Now the open modal is one value, `OpenModal`, that owns its
-state: it is created when the modal opens and dropped when it closes (`App::modal()` gives its kind,
-`open_modal()` / `open_modal_mut()` the value, `set_modal(kind)` opens a modal whose state still lives in `App`).
+state: it is created when the modal opens and dropped when it closes. No change of behavior, except where noted.
 
-- Moved first: the new collection, server info and update check modals (`OpenModal::NewCollection`, `ServerInfo`,
-  `Update`); the others follow one by one, `OpenModal::Plain(kind)` carries them meanwhile.
-- A late answer for a closed modal (the server info or the update check arriving after Esc) no longer writes into
-  a hidden state: there is none.
-- Tests: reopening starts empty, a late answer changes nothing; the existing tests pass with `app.modal()` for the
-  kind.
+- **Moved:** new collection, server info, update check, export, full-text, database, insert/edit, query builder,
+  API keys, ACL, listeners, index, vector search, script and RAG. `OpenModal::Plain(kind)` is left for the modals
+  without state of their own (help, actions menu, error details) and for search and filter: their state is view
+  state kept in `App` on purpose (the search's `n`/`N` keep stepping after it closes; the filter's conditions
+  come back when it reopens and are cleared on a collection switch).
+- **Access:** `App::modal()` gives the open modal's kind, `open_modal()` / `open_modal_mut()` the value, and
+  `export_state()` / `export_state_mut()` and so on each modal's state (one `modal_state!` macro). Code that also
+  uses `App`'s other fields reaches the state with `state::open_state!(app, Variant)`, which borrows only
+  `open_modal`, so `app.db` stays usable next to it.
+- **Confirm dialog:** `OpenModal::Confirm { state, previous }` holds the modal it was opened from, as it was, and
+  gives it back when it closes. It used to reopen the modal by kind only (`ConfirmState::return_to`, removed).
+- **Collections pane index list:** it was the index modal's list too; it is now its own field
+  (`App::collection_indexes`), refreshed with the collection and whenever the index modal reloads its list, so
+  opening the index modal no longer blanks it until the list loads.
+- **Late answers:** a server info or update check result arriving after the modal closed no longer writes into a
+  hidden state: there is none.
+- The export takes its collection and format as arguments instead of reading them from a field mid-export;
+  `OpenModal` does not derive `Clone` (nothing cloned it).
+- Tests: reopening starts empty; a late answer changes nothing; the confirm dialog gives back the modal under it
+  as it was; closing the admin modals drops their state; the collections pane keeps the index list after the index
+  modal closes. The confirmed-action tests change the modal state under the open dialog to check that the call
+  uses the names captured when it opened.
 
 ### Added — Tuti TUI: the selection shows without color, and `NO_COLOR` (tuti-tui 0.3.495, mcp-server 1.0.683 — version only, for the release tag)
 
