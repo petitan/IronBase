@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::db::DbWrapper;
+use crate::i18n::{t, Op};
 use crate::modals;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -34,7 +35,7 @@ async fn refresh_api_keys(app: &mut App, admin_key: &str) {
                 .success
                 .take()
                 .or(app.api_key_state.error.take());
-            let reload = format!("reloading the API key list failed: {}", e);
+            let reload = t().failed(Op::ReloadList, &e);
             app.api_key_state.set_error(match outcome {
                 Some(outcome) => format!("{} ({})", outcome, reload),
                 None => reload,
@@ -72,8 +73,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                 if let Some(ref key) = app.api_key_state.new_key {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         if clipboard.set_text(key.clone()).is_ok() {
-                            app.api_key_state
-                                .set_success("Key copied to clipboard!".to_string());
+                            app.api_key_state.set_success(t().key_copied().to_string());
                         }
                     }
                 }
@@ -87,8 +87,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
             KeyCode::Enter => {
                 let name = app.api_key_state.input.value().trim().to_string();
                 if name.is_empty() {
-                    app.api_key_state
-                        .set_error("Name cannot be empty".to_string());
+                    app.api_key_state.set_error(t().name_required().to_string());
                     return;
                 }
 
@@ -158,12 +157,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                         }
                                     }
                                 }
-                                let msg = match saved_path {
-                                    Some(path) => {
-                                        format!("API key '{}' created! Saved to {}", name, path)
-                                    }
-                                    None => format!("API key '{}' created!", name),
-                                };
+                                let msg = t().api_key_created(&name, saved_path.as_deref());
                                 app.api_key_state.set_success(msg);
                                 app.api_key_state.mode = ApiKeyModalMode::List;
                                 app.api_key_state.input.clear();
@@ -172,8 +166,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                 refresh_api_keys(app, admin_key).await;
                             }
                             Err(e) => {
-                                app.api_key_state
-                                    .set_error(format!("Failed to create: {}", e));
+                                app.api_key_state.set_error(t().failed(Op::Create, &e));
                             }
                         }
                     }
@@ -214,13 +207,11 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
 
                             match result {
                                 Ok(true) => {
-                                    let action = match app.api_key_state.confirm_action {
-                                        Some(ConfirmAction::Revoke) => "revoked",
-                                        Some(ConfirmAction::Delete) => "deleted",
-                                        None => "modified",
+                                    let message = match app.api_key_state.confirm_action {
+                                        Some(ConfirmAction::Delete) => t().api_key_deleted(&name),
+                                        _ => t().api_key_revoked(&name),
                                     };
-                                    app.api_key_state
-                                        .set_success(format!("Key '{}' {}!", name, action));
+                                    app.api_key_state.set_success(message);
                                     app.api_key_state.mode = ApiKeyModalMode::List;
                                     app.api_key_state.confirm_action = None;
 
@@ -228,11 +219,11 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                     refresh_api_keys(app, admin_key).await;
                                 }
                                 Ok(false) => {
-                                    app.api_key_state.set_error("Key not found".to_string());
+                                    app.api_key_state.set_error(t().key_not_found().to_string());
                                     app.api_key_state.cancel();
                                 }
                                 Err(e) => {
-                                    app.api_key_state.set_error(format!("Failed: {}", e));
+                                    app.api_key_state.set_error(t().failed(Op::Update, &e));
                                     app.api_key_state.cancel();
                                 }
                             }

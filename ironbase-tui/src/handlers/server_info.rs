@@ -1,6 +1,7 @@
 //! Key handlers: server_info
 
 use crate::app::App;
+use crate::i18n::t;
 use crossterm::event::KeyCode;
 use ironbase_mcp_types::params::NoParams;
 use ironbase_mcp_types::tools::DbStats;
@@ -53,16 +54,16 @@ pub(crate) async fn handle_server_info_open(app: &mut App) {
                 app.update_server_info(stats, tools, prompts);
             }
             (Err(e), _, _) => {
-                app.set_server_info_error(format!("db_stats hiba: {}", e));
+                app.set_server_info_error(format!("db_stats: {}", t().error(&e)));
             }
             (_, Err(e), _) => {
-                app.set_server_info_error(format!("tools_list hiba: {}", e));
+                app.set_server_info_error(format!("tools/list: {}", t().error(&e)));
             }
             (_, _, Err(e)) => {
-                app.set_server_info_error(format!("prompts_list hiba: {}", e));
+                app.set_server_info_error(format!("prompts/list: {}", t().error(&e)));
             }
         }
     } else {
-        app.set_server_info_error("Nincs adatbazis kapcsolat".to_string());
+        app.set_server_info_error(t().no_connection().to_string());
     }
 }

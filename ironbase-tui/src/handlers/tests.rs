@@ -897,7 +897,7 @@ async fn test_shift_p_reports_acl_get_error_and_does_not_open() {
 
     assert_eq!(app.modal, None);
     let error = app.error_message.clone().unwrap_or_default();
-    assert!(error.contains("ACL betoltese sikertelen"), "{}", error);
+    assert!(error.contains("Az ACL betöltése sikertelen"), "{}", error);
     assert!(error.contains("permission denied"), "{}", error);
 }
 
@@ -915,7 +915,7 @@ async fn test_shift_p_needs_localhost() {
     assert_eq!(app.modal, None);
     assert_eq!(
         app.error_message.as_deref(),
-        Some("ACL editing requires localhost connection")
+        Some("Az ACL szerkesztéséhez localhost-kapcsolat kell")
     );
     assert!(server.calls().is_empty());
 }
@@ -957,7 +957,7 @@ async fn test_database_switch_reports_success() {
     assert_eq!(app.error_message, None);
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Adatbazis megnyitva: /data/New.mlite")
+        Some("Adatbázis megnyitva: /data/New.mlite")
     );
 }
 
@@ -977,15 +977,19 @@ async fn test_database_switch_keeps_collection_list_error_visible() {
     assert_eq!(app.modal, None);
     assert_eq!(server.calls_to("db_open").len(), 1);
     let error = app.error_message.clone().unwrap_or_default();
-    assert!(error.contains("Kollekcio betoltes hiba"), "{}", error);
+    assert!(
+        error.contains("A kollekciók betöltése sikertelen"),
+        "{}",
+        error
+    );
     assert!(error.contains("list failed"), "{}", error);
     // The success status must not replace the error
     assert_eq!(app.status_message, None);
     // The status bar shows the error (cut short by the key hints at this
     // width; `e` opens the full text)
     let screen = render_to_string(&app, 120, 36);
-    assert!(screen.contains("Hiba: Koll"), "{}", screen);
-    assert!(!screen.contains("Adatbazis megnyitva"), "{}", screen);
+    assert!(screen.contains("Hiba: A kol"), "{}", screen);
+    assert!(!screen.contains("Adatbázis megnyitva"), "{}", screen);
 }
 
 // === Typing ===
@@ -1533,7 +1537,7 @@ async fn test_vector_index_create_reports_name_or_rejects_bad_response() {
     assert_eq!(app.vector_state.error, None);
     assert_eq!(
         app.vector_state.message.as_deref(),
-        Some("Index 'users_vec_emb' created!")
+        Some("A(z) „users_vec_emb” index létrehozva")
     );
     assert_eq!(
         server.calls_to("index_create"),
@@ -1942,7 +1946,7 @@ async fn test_vector_search_shows_scores_in_order() {
     press(&mut app, KeyCode::Enter).await;
 
     assert_eq!(app.vector_state.error, None);
-    assert_eq!(app.vector_state.message.as_deref(), Some("Found 3 results"));
+    assert_eq!(app.vector_state.message.as_deref(), Some("3 találat"));
     let scores: Vec<Option<f64>> = app.vector_state.results.iter().map(|r| r.score).collect();
     assert_eq!(scores, [Some(1.0), Some(0.6), Some(0.0)]);
     let screen = render_to_string(&app, 140, 45);
@@ -2076,7 +2080,7 @@ async fn test_rag_collections_tab_shows_the_nested_stats() {
     press(&mut app, KeyCode::Enter).await;
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("users: 6 chunks, 4 source docs")
+        Some("users: 6 darab, 4 forrásdokumentum")
     );
 }
 
@@ -2164,7 +2168,7 @@ async fn test_rag_create_reports_existing_indexes() {
     );
     assert_eq!(
         app.rag_state.message.as_deref(),
-        Some("RAG collection 'kb' ready: vector index already existed, 0 fulltext index(es) created (768 dims, ollama)")
+        Some("A(z) „kb” RAG-kollekció kész: vektorindex már létezett, 0 fulltext index létrehozva (768 dimenzió, ollama)")
     );
 }
 
@@ -2195,7 +2199,7 @@ async fn test_acl_delete_reports_a_missing_acl() {
     server.clear_calls();
     app.acl_state.start_delete();
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.acl_state.error.as_deref(), Some("ACL not found"));
+    assert_eq!(app.acl_state.error.as_deref(), Some("Az ACL nem található"));
     // The stale row is reloaded
     assert_eq!(server.calls_to("acl_list").len(), 1);
 }
@@ -2248,7 +2252,7 @@ async fn test_listener_create_reports_replace_and_restart() {
     );
     assert_eq!(
         app.listener_state.success.as_deref(),
-        Some("Listener 'web' replaced. Restart server for changes to take effect")
+        Some("A(z) „web” listener lecserélve. Restart server for changes to take effect")
     );
     assert_eq!(server.calls_to("listener_list").len(), 2);
 }
@@ -2283,8 +2287,8 @@ async fn test_listener_disable_reports_a_failed_reload() {
         app.listener_state
             .error
             .as_deref()
-            .is_some_and(|e| e.starts_with("'web': Listener disabled.")
-                && e.contains("reloading the listeners failed")
+            .is_some_and(|e| e.starts_with("„web”: Listener disabled.")
+                && e.contains("A lista újratöltése sikertelen")
                 && e.contains("gone")),
         "{:?}",
         app.listener_state.error
@@ -2368,7 +2372,7 @@ async fn test_api_key_revoke_reports_a_failed_list_reload() {
     );
     // The revoke happened; the stale list is not silently kept as current
     let error = app.api_key_state.error.clone().unwrap_or_default();
-    assert!(error.contains("Key 'ci' revoked!"), "{}", error);
+    assert!(error.contains("A(z) „ci” kulcs visszavonva"), "{}", error);
     assert!(error.contains("list failed"), "{}", error);
 }
 
@@ -2397,7 +2401,10 @@ async fn test_api_key_revoke_of_a_missing_key_says_so() {
 
     press(&mut app, KeyCode::Char('y')).await;
 
-    assert_eq!(app.api_key_state.error.as_deref(), Some("Key not found"));
+    assert_eq!(
+        app.api_key_state.error.as_deref(),
+        Some("A kulcs nem található")
+    );
     assert_eq!(app.api_key_state.mode, ApiKeyModalMode::List);
     assert!(server.calls_to("admin_apikey_list").is_empty());
 }

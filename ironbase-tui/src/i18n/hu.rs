@@ -148,6 +148,16 @@ impl Messages for Hu {
             Op::File => "Fájlművelet",
             Op::Write => "Írás",
             Op::Flush => "Lemezre írás",
+            Op::LoadApiKeys => "Az API-kulcsok betöltése",
+            Op::LoadAcl => "Az ACL betöltése",
+            Op::LoadListeners => "A listenerek betöltése",
+            Op::LoadModels => "A modellek betöltése",
+            Op::LoadAutoEmbedStatus => "Az automatikus beágyazás állapotának betöltése",
+            Op::LoadFulltextIndexes => "A fulltext indexek lekérdezése",
+            Op::LoadCollections => "A kollekciók betöltése",
+            Op::ReloadList => "A lista újratöltése",
+            Op::Connect => "Csatlakozás",
+            Op::CheckUpdate => "A frissítés ellenőrzése",
         };
         format!("{op} sikertelen: {error}")
     }
@@ -1473,5 +1483,161 @@ impl Messages for Hu {
     }
     fn add_a_rule(&self) -> &'static str {
         "Adj hozzá legalább egy szabályt"
+    }
+
+    fn select_collection_first(&self) -> &'static str {
+        "Előbb válassz egy kollekciót!"
+    }
+    fn acl_needs_localhost(&self) -> &'static str {
+        "Az ACL szerkesztéséhez localhost-kapcsolat kell"
+    }
+    fn refreshing(&self) -> &'static str {
+        "Frissítés..."
+    }
+    fn refreshed(&self) -> &'static str {
+        "Frissítve"
+    }
+    fn filter_cleared(&self) -> &'static str {
+        "Szűrő törölve"
+    }
+    fn acl_deleted(&self, collection: &str) -> String {
+        format!("A(z) „{collection}” kollekció ACL-je törölve")
+    }
+    fn acl_not_found(&self) -> &'static str {
+        "Az ACL nem található"
+    }
+    fn acl_saved(&self, collection: &str, rules: usize) -> String {
+        format!("A(z) „{collection}” kollekció ACL-je elmentve ({rules} szabály)")
+    }
+    fn key_copied(&self) -> &'static str {
+        "A kulcs a vágólapra került"
+    }
+    fn api_key_created(&self, name: &str, saved_to: Option<&str>) -> String {
+        match saved_to {
+            Some(path) => format!("A(z) „{name}” API-kulcs létrehozva, mentve ide: {path}"),
+            None => format!("A(z) „{name}” API-kulcs létrehozva"),
+        }
+    }
+    fn api_key_revoked(&self, name: &str) -> String {
+        format!("A(z) „{name}” kulcs visszavonva")
+    }
+    fn api_key_deleted(&self, name: &str) -> String {
+        format!("A(z) „{name}” kulcs törölve")
+    }
+    fn key_not_found(&self) -> &'static str {
+        "A kulcs nem található"
+    }
+    fn path_required(&self) -> &'static str {
+        "Az útvonal nem lehet üres"
+    }
+    fn database_opened(&self, path: &str) -> String {
+        format!("Adatbázis megnyitva: {path}")
+    }
+    fn database_created(&self, path: &str) -> String {
+        format!("Adatbázis létrehozva: {path}")
+    }
+    fn opened_ok(&self) -> &'static str {
+        "Sikeresen megnyitva"
+    }
+    fn created_ok(&self) -> &'static str {
+        "Sikeresen létrehozva"
+    }
+    fn file_missing_use_create(&self) -> &'static str {
+        "A fájl nem létezik – használd a „Létrehozás” módot."
+    }
+    fn file_exists_use_open(&self) -> &'static str {
+        "A fájl már létezik – használd a „Megnyitás” módot."
+    }
+    fn no_connection(&self) -> &'static str {
+        "Nincs aktív kapcsolat"
+    }
+    fn value_required(&self) -> &'static str {
+        "Érték megadása kötelező"
+    }
+    fn id_required(&self) -> &'static str {
+        "Az azonosító nem lehet üres"
+    }
+    fn bind_required(&self) -> &'static str {
+        "A kötési cím nem lehet üres"
+    }
+    fn listener_created(&self, id: &str, replaced: bool, note: &str) -> String {
+        {
+            let action = if replaced {
+                "lecserélve"
+            } else {
+                "hozzáadva"
+            };
+            format!("A(z) „{id}” listener {action}. {note}")
+        }
+    }
+    fn listener_not_found(&self) -> &'static str {
+        "A listener nem található"
+    }
+    fn query_empty(&self) -> &'static str {
+        "Üres a lekérdezés"
+    }
+    fn content_empty(&self) -> &'static str {
+        "Üres a tartalom"
+    }
+    fn collection_name_required(&self) -> &'static str {
+        "Kollekciónév megadása kötelező"
+    }
+    fn stats_refreshed(&self) -> &'static str {
+        "Statisztika frissítve"
+    }
+    fn text_empty(&self) -> &'static str {
+        "Üres a szöveg"
+    }
+    fn auto_embed_enabled(&self) -> &'static str {
+        "Automatikus beágyazás bekapcsolva"
+    }
+    fn job_suffix(&self, job_id: &str) -> String {
+        format!(" (job: {job_id})")
+    }
+    fn warning_suffix(&self, warning: &str) -> String {
+        format!(" Figyelmeztetés: {warning}")
+    }
+    fn cache_stats_loaded(&self) -> &'static str {
+        "Gyorsítótár-statisztika betöltve"
+    }
+    fn jobs_refreshed(&self) -> &'static str {
+        "Jobok frissítve"
+    }
+    fn rag_collection_ready(
+        &self,
+        collection: &str,
+        vector_created: bool,
+        fulltext_created: usize,
+        dimension: usize,
+        provider: &str,
+    ) -> String {
+        {
+            let vector = if vector_created {
+                "létrehozva"
+            } else {
+                "már létezett"
+            };
+            format!("A(z) „{collection}” RAG-kollekció kész: vektorindex {vector}, {fulltext_created} fulltext index létrehozva ({dimension} dimenzió, {provider})")
+        }
+    }
+    fn dimension_positive(&self) -> &'static str {
+        "A dimenziónak 0-nál nagyobbnak kell lennie"
+    }
+    fn version_loaded_readonly(&self, version: u32) -> String {
+        format!("A v{version} verzió betöltve (csak olvasható)")
+    }
+    fn unknown(&self) -> &'static str {
+        "ismeretlen"
+    }
+    fn vector_index_created(&self, name: &str) -> String {
+        format!("A(z) „{name}” index létrehozva")
+    }
+    fn rag_stats_line(
+        &self,
+        collection: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+    ) -> String {
+        format!("{collection}: {chunks} darab, {documents} forrásdokumentum")
     }
 }

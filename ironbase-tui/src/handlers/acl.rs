@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::db::DbWrapper;
+use crate::i18n::{t, Op};
 use crate::modals;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -28,7 +29,7 @@ async fn refresh_acls(app: &mut App) {
         Ok(acls) => app.acl_state.set_acls(acls),
         Err(e) => {
             let outcome = app.acl_state.success.take().or(app.acl_state.error.take());
-            let reload = format!("reloading the ACL list failed: {}", e);
+            let reload = t().failed(Op::ReloadList, &e);
             app.acl_state.set_error(match outcome {
                 Some(outcome) => format!("{} ({})", outcome, reload),
                 None => reload,
@@ -89,19 +90,18 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode, modifiers:
                         // `success` is always true: `deleted` says whether it existed
                         match db.call::<AclDelete>(&args).await.map(|r| r.deleted) {
                             Ok(true) => {
-                                app.acl_state
-                                    .set_success(format!("ACL for '{}' deleted!", collection));
+                                app.acl_state.set_success(t().acl_deleted(&collection));
                                 app.acl_state.mode = AclModalMode::List;
                                 refresh_acls(app).await;
                             }
                             Ok(false) => {
                                 // Someone else deleted it: the row is stale
-                                app.acl_state.set_error("ACL not found".to_string());
+                                app.acl_state.set_error(t().acl_not_found().to_string());
                                 app.acl_state.cancel_delete();
                                 refresh_acls(app).await;
                             }
                             Err(e) => {
-                                app.acl_state.set_error(format!("Failed: {}", e));
+                                app.acl_state.set_error(t().failed(Op::Delete, &e));
                                 app.acl_state.cancel_delete();
                             }
                         }
@@ -187,17 +187,15 @@ pub(crate) async fn handle_acl_key_async(app: &mut App, key: KeyCode, modifiers:
                     };
                     match db.call::<AclSet>(&args).await {
                         Ok(response) => {
-                            app.acl_state.set_success(format!(
-                                "ACL for '{}' saved ({} rules)",
-                                collection, response.rules_count
-                            ));
+                            app.acl_state
+                                .set_success(t().acl_saved(&collection, response.rules_count));
                             app.acl_state.mode = AclModalMode::List;
                             app.acl_state.edit_rules.clear();
                             app.acl_state.edit_collection.clear();
                             refresh_acls(app).await;
                         }
                         Err(e) => {
-                            app.acl_state.set_error(format!("Failed: {}", e));
+                            app.acl_state.set_error(t().failed(Op::Save, &e));
                             app.acl_state.cancel_save();
                         }
                     }

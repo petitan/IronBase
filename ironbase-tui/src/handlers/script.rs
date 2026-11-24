@@ -1,6 +1,7 @@
 //! Key handlers: script
 
 use crate::app::App;
+use crate::i18n::t;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -170,7 +171,7 @@ pub(crate) async fn handle_script_history_key(app: &mut App, key: KeyCode) {
                 app.script_state.mode = crate::app::ScriptMode::Edit;
                 app.script_state.focus = crate::app::ScriptFocus::Editor;
                 app.script_state.message =
-                    Some(format!("Verzió v{} betöltve (readonly)", version.version));
+                    Some(t().version_loaded_readonly(version.version));
                 app.script_state.dirty = true; // Mark as dirty so user knows it's not the current version
             }
         }

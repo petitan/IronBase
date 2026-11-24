@@ -603,6 +603,62 @@ pub trait Messages: Sync + sealed::Sealed {
     fn principal_value_empty(&self) -> &'static str;
     fn select_a_permission(&self) -> &'static str;
     fn add_a_rule(&self) -> &'static str;
+
+    // Key handlers
+    fn select_collection_first(&self) -> &'static str;
+    fn acl_needs_localhost(&self) -> &'static str;
+    fn refreshing(&self) -> &'static str;
+    fn refreshed(&self) -> &'static str;
+    fn filter_cleared(&self) -> &'static str;
+    fn acl_deleted(&self, collection: &str) -> String;
+    fn acl_not_found(&self) -> &'static str;
+    fn acl_saved(&self, collection: &str, rules: usize) -> String;
+    fn key_copied(&self) -> &'static str;
+    fn api_key_created(&self, name: &str, saved_to: Option<&str>) -> String;
+    fn api_key_revoked(&self, name: &str) -> String;
+    fn api_key_deleted(&self, name: &str) -> String;
+    fn key_not_found(&self) -> &'static str;
+    fn path_required(&self) -> &'static str;
+    fn database_opened(&self, path: &str) -> String;
+    fn database_created(&self, path: &str) -> String;
+    fn opened_ok(&self) -> &'static str;
+    fn created_ok(&self) -> &'static str;
+    fn file_missing_use_create(&self) -> &'static str;
+    fn file_exists_use_open(&self) -> &'static str;
+    fn no_connection(&self) -> &'static str;
+    fn value_required(&self) -> &'static str;
+    fn id_required(&self) -> &'static str;
+    fn bind_required(&self) -> &'static str;
+    fn listener_created(&self, id: &str, replaced: bool, note: &str) -> String;
+    fn listener_not_found(&self) -> &'static str;
+    fn query_empty(&self) -> &'static str;
+    fn content_empty(&self) -> &'static str;
+    fn collection_name_required(&self) -> &'static str;
+    fn stats_refreshed(&self) -> &'static str;
+    fn text_empty(&self) -> &'static str;
+    fn auto_embed_enabled(&self) -> &'static str;
+    fn job_suffix(&self, job_id: &str) -> String;
+    fn warning_suffix(&self, warning: &str) -> String;
+    fn cache_stats_loaded(&self) -> &'static str;
+    fn jobs_refreshed(&self) -> &'static str;
+    fn rag_collection_ready(
+        &self,
+        collection: &str,
+        vector_created: bool,
+        fulltext_created: usize,
+        dimension: usize,
+        provider: &str,
+    ) -> String;
+    fn dimension_positive(&self) -> &'static str;
+    fn version_loaded_readonly(&self, version: u32) -> String;
+    fn unknown(&self) -> &'static str;
+    fn vector_index_created(&self, name: &str) -> String;
+    fn rag_stats_line(
+        &self,
+        collection: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+    ) -> String;
 }
 
 /// A group of MCP tools in the server info
@@ -661,6 +717,16 @@ pub enum Op {
     File,
     Write,
     Flush,
+    LoadApiKeys,
+    LoadAcl,
+    LoadListeners,
+    LoadModels,
+    LoadAutoEmbedStatus,
+    LoadFulltextIndexes,
+    LoadCollections,
+    ReloadList,
+    Connect,
+    CheckUpdate,
 }
 
 #[cfg(test)]
@@ -756,6 +822,16 @@ mod tests {
             Op::File,
             Op::Write,
             Op::Flush,
+            Op::LoadApiKeys,
+            Op::LoadAcl,
+            Op::LoadListeners,
+            Op::LoadModels,
+            Op::LoadAutoEmbedStatus,
+            Op::LoadFulltextIndexes,
+            Op::LoadCollections,
+            Op::ReloadList,
+            Op::Connect,
+            Op::CheckUpdate,
         ];
         let mut seen = std::collections::HashSet::new();
         for op in ops {
@@ -1255,5 +1331,62 @@ mod tests {
         assert_eq!(en.rule_count(2), "2 rules");
         assert_eq!(hu.rule_count(1), "1 szabály");
         assert_eq!(hu.acl_editor_title("users"), "ACL-szerkesztő: users");
+    }
+
+    /// The key handlers' messages are translated (they mixed English and
+    /// Hungarian without accents)
+    #[test]
+    fn test_handler_texts_differ_between_the_languages() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 28] = [
+            |m| m.select_collection_first(),
+            |m| m.acl_needs_localhost(),
+            |m| m.refreshing(),
+            |m| m.refreshed(),
+            |m| m.filter_cleared(),
+            |m| m.acl_not_found(),
+            |m| m.key_copied(),
+            |m| m.key_not_found(),
+            |m| m.path_required(),
+            |m| m.opened_ok(),
+            |m| m.created_ok(),
+            |m| m.file_missing_use_create(),
+            |m| m.file_exists_use_open(),
+            |m| m.no_connection(),
+            |m| m.value_required(),
+            |m| m.id_required(),
+            |m| m.bind_required(),
+            |m| m.listener_not_found(),
+            |m| m.query_empty(),
+            |m| m.content_empty(),
+            |m| m.collection_name_required(),
+            |m| m.stats_refreshed(),
+            |m| m.text_empty(),
+            |m| m.auto_embed_enabled(),
+            |m| m.cache_stats_loaded(),
+            |m| m.jobs_refreshed(),
+            |m| m.dimension_positive(),
+            |m| m.unknown(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        assert_eq!(en.acl_saved("users", 1), "ACL for \"users\" saved (1 rule)");
+        assert_eq!(
+            hu.api_key_created("ci", Some("/k.txt")),
+            "A(z) „ci” API-kulcs létrehozva, mentve ide: /k.txt"
+        );
+        assert_eq!(
+            en.listener_created("web", true, "Restart."),
+            "Listener \"web\" replaced. Restart."
+        );
+        assert_eq!(
+            en.rag_collection_ready("kb", false, 1, 768, "ollama"),
+            "RAG collection \"kb\" ready: vector index already existed, 1 fulltext index created (768 dims, ollama)"
+        );
+        assert_eq!(
+            hu.failed(Op::LoadAcl, &"x"),
+            "Az ACL betöltése sikertelen: x"
+        );
     }
 }
