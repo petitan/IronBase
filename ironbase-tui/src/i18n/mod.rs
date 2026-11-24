@@ -10,6 +10,7 @@
 mod en;
 mod hu;
 
+use crate::keymap::{Action, Section};
 use crate::state::filter::{FilterOperator, SortDirection};
 use crate::state::query::QueryTemplate;
 use serde::{Deserialize, Serialize};
@@ -652,6 +653,12 @@ pub trait Messages: Sync + sealed::Sealed {
     fn dimension_positive(&self) -> &'static str;
     fn version_loaded_readonly(&self, version: u32) -> String;
     fn unknown(&self) -> &'static str;
+    // Key map (help, actions menu)
+    fn action_label(&self, action: Action) -> &'static str;
+    fn section_title(&self, section: Section) -> &'static str;
+    fn help_title(&self) -> &'static str;
+    fn actions_title(&self) -> &'static str;
+    fn help_menu_note(&self) -> &'static str;
     fn vector_index_created(&self, name: &str) -> String;
     fn rag_stats_line(
         &self,
@@ -1388,5 +1395,28 @@ mod tests {
             hu.failed(Op::LoadAcl, &"x"),
             "Az ACL betöltése sikertelen: x"
         );
+    }
+
+    /// Every action and section of the key map has a text in both languages
+    #[test]
+    fn test_key_map_texts_differ_between_the_languages() {
+        use crate::keymap::{ACTIONS_MENU, MAIN};
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let actions = MAIN
+            .iter()
+            .map(|binding| binding.action)
+            .chain(ACTIONS_MENU.iter().map(|(_, action)| *action));
+        for action in actions {
+            assert_ne!(
+                hu.action_label(action),
+                en.action_label(action),
+                "{action:?}"
+            );
+        }
+        for section in [Section::Navigation, Section::General, Section::Documents] {
+            assert_ne!(hu.section_title(section), en.section_title(section));
+        }
+        assert_ne!(hu.help_title(), en.help_title());
+        assert_ne!(hu.actions_title(), en.actions_title());
     }
 }

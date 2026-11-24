@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod handlers;
 pub mod i18n;
+pub mod keymap;
 pub mod logging;
 pub mod mcp;
 pub mod modals;

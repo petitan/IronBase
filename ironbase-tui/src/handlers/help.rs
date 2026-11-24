@@ -12,7 +12,7 @@ pub(crate) fn handle_help_key(app: &mut App, key: KeyCode) {
             app.close_modal();
         }
         KeyCode::Down | KeyCode::Char('j')
-            if app.help_scroll < modals::help::HELP_LINES.saturating_sub(10) =>
+            if app.help_scroll < modals::help::help_line_count().saturating_sub(10) =>
         {
             app.help_scroll += 1;
         }
@@ -21,7 +21,7 @@ pub(crate) fn handle_help_key(app: &mut App, key: KeyCode) {
         }
         KeyCode::PageDown => {
             app.help_scroll =
-                (app.help_scroll + 5).min(modals::help::HELP_LINES.saturating_sub(10));
+                (app.help_scroll + 5).min(modals::help::help_line_count().saturating_sub(10));
         }
         KeyCode::PageUp => {
             app.help_scroll = app.help_scroll.saturating_sub(5);
@@ -30,7 +30,7 @@ pub(crate) fn handle_help_key(app: &mut App, key: KeyCode) {
             app.help_scroll = 0;
         }
         KeyCode::End | KeyCode::Char('G') => {
-            app.help_scroll = modals::help::HELP_LINES.saturating_sub(10);
+            app.help_scroll = modals::help::help_line_count().saturating_sub(10);
         }
         _ => {}
     }

@@ -1,6 +1,7 @@
 //! Hungarian texts
 
 use super::{Messages, Op, ToolCategory};
+use crate::keymap::{Action, Section};
 use crate::state::filter::{FilterOperator, SortDirection};
 use crate::state::query::QueryTemplate;
 use std::fmt::Display;
@@ -1639,5 +1640,66 @@ impl Messages for Hu {
         documents: &dyn Display,
     ) -> String {
         format!("{collection}: {chunks} darab, {documents} forrásdokumentum")
+    }
+
+    fn action_label(&self, action: Action) -> &'static str {
+        match action {
+            Action::Quit => "Kilépés",
+            Action::NextPane => "Következő panel",
+            Action::PrevPane => "Előző panel",
+            Action::Up => "Fel a listában",
+            Action::Down => "Le a listában",
+            Action::PageUp => "Előző oldal",
+            Action::PageDown => "Következő oldal",
+            Action::GoToStart => "A lista elejére",
+            Action::GoToEnd => "A lista végére",
+            Action::ClearFilter => "Szűrő törlése (ha van)",
+            Action::OpenSearch => "Keresés",
+            Action::OpenActions => "Műveletek menü",
+            Action::OpenHelp => "Súgó",
+            Action::ServerInfo => "Szerverinfó",
+            Action::UpdateCheck => "Frissítés ellenőrzése",
+            Action::Rag => "RAG és embedding",
+            Action::Filter => "Vizuális szűrő",
+            Action::Fulltext => "Fulltext keresés",
+            Action::VectorSearch => "Vektorkeresés és -indexek",
+            Action::AclRules => "ACL-szabályok",
+            Action::Listeners => "Listenerek",
+            Action::ApiKeys => "API-kulcsok",
+            Action::ErrorDetails => "A hiba részletei (ha van hiba)",
+            Action::RefreshCollections => "Kollekciólista frissítése",
+            Action::Refresh => "Adatok újratöltése",
+            Action::NextTheme => "Témaváltás",
+            Action::InsertDocument => "Dokumentum beszúrása",
+            Action::EditDocument => "Dokumentum szerkesztése",
+            Action::DeleteDocument => "Dokumentum törlése",
+            Action::CopyDocument => "Dokumentum másolása a vágólapra",
+            Action::NextMatch => "Következő találat (Részletek)",
+            Action::PrevMatch => "Előző találat (Részletek)",
+            Action::DeleteCollection => "Kollekció törlése",
+            Action::EditAcl => "A kollekció ACL-jének szerkesztése",
+            Action::NewCollection => "Kollekció létrehozása",
+            Action::Indexes => "Indexkezelés",
+            Action::Query => "Lekérdezés (JSON)",
+            Action::Export => "Kollekció exportálása",
+            Action::Scripts => "IronRhai scriptek",
+            Action::OpenDatabase => "Adatbázis megnyitása/létrehozása",
+        }
+    }
+    fn section_title(&self, section: Section) -> &'static str {
+        match section {
+            Section::Navigation => "Navigáció",
+            Section::General => "Funkciók",
+            Section::Documents => "Kollekciók és dokumentumok",
+        }
+    }
+    fn help_title(&self) -> &'static str {
+        "Súgó [j/k: görgetés]"
+    }
+    fn actions_title(&self) -> &'static str {
+        "Műveletek"
+    }
+    fn help_menu_note(&self) -> &'static str {
+        "A műveletek menü (a) és az ablakok saját billentyűit az ablak alján lévő sor mutatja."
     }
 }
