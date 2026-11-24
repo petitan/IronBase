@@ -1,6 +1,7 @@
 //! Index management modal - create/delete indexes with statistics
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::state::index::{IndexState, IndexStatistics};
 use crate::theme::Theme;
 use ratatui::prelude::*;
@@ -8,7 +9,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 /// Render the index management modal
 pub fn render(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Index kezeles", theme, 70, 80);
+    let inner = render_modal_frame(frame, area, t().index_title(), theme, 70, 80);
 
     // Split into sections
     let chunks = Layout::vertical([
@@ -23,15 +24,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) 
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Nav  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::raw(" Torol  "),
+        Span::raw(format!(" {}  ", t().cmd_delete())),
         Span::styled("[a]", Style::default().fg(theme.accent)),
-        Span::raw(" Analyze  "),
+        Span::raw(format!(" {}  ", t().key_analyze())),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" Uj  "),
+        Span::raw(format!(" {}  ", t().key_new())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Bezar"),
+        Span::raw(format!(" {}", t().key_close())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -50,11 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) 
 }
 
 fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) {
-    let title = if state.is_analyzing {
-        " Meglevo indexek (analyzing...) "
-    } else {
-        " Meglevo indexek "
-    };
+    let title = t().existing_indexes_title(state.is_analyzing);
 
     let block = Block::default()
         .title(title)
@@ -71,7 +68,7 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
 
     if state.indexes.is_empty() {
         let empty =
-            Paragraph::new("Nincs index (csak _id)").style(Style::default().fg(theme.muted));
+            Paragraph::new(t().no_indexes_only_id()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -145,7 +142,7 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
 /// Render statistics for the selected index
 fn render_statistics(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) {
     let block = Block::default()
-        .title(" Index statisztikak ")
+        .title(format!(" {} ", t().index_statistics_title()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
@@ -156,12 +153,11 @@ fn render_statistics(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
     if let Some(stats) = state.selected_statistics() {
         render_stats_content(frame, inner, stats, theme);
     } else if state.indexes.is_empty() {
-        let msg =
-            Paragraph::new("Nincs kivalasztott index").style(Style::default().fg(theme.muted));
+        let msg = Paragraph::new(t().no_index_selected()).style(Style::default().fg(theme.muted));
         frame.render_widget(msg, inner);
     } else {
-        let msg = Paragraph::new("Statisztikak betoltese: [a] Analyze")
-            .style(Style::default().fg(theme.muted));
+        let msg =
+            Paragraph::new(t().load_statistics_hint()).style(Style::default().fg(theme.muted));
         frame.render_widget(msg, inner);
     }
 }
@@ -179,30 +175,34 @@ fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, 
 
     let staleness_text = match stats.staleness_hint() {
         "green" => "OK",
-        "yellow" => "Partial",
-        "red" => "Stale",
+        "yellow" => t().staleness_partial(),
+        "red" => t().staleness_stale(),
         _ => "?",
     };
 
     let row1 = Line::from(vec![
-        Span::raw(" Keys: "),
+        Span::raw(format!(" {}: ", t().label_keys())),
         Span::styled(
             format!("{}", stats.num_keys),
             Style::default().fg(theme.accent),
         ),
-        Span::raw("  Distinct: "),
+        Span::raw(format!("  {}: ", t().label_distinct())),
         Span::styled(
             format!("{}", stats.distinct_count),
             Style::default().fg(theme.accent),
         ),
-        Span::raw("  Status: "),
+        Span::raw(format!("  {}: ", t().label_status())),
         Span::styled(staleness_text, Style::default().fg(staleness_color)),
     ]);
     frame.render_widget(Paragraph::new(row1), chunks[0]);
 
     // Row 2: Histogram and MCV status
-    let histogram_status = if stats.has_histogram { "Yes" } else { "No" };
-    let mcv_status = if stats.has_mcv { "Yes" } else { "No" };
+    let histogram_status = if stats.has_histogram {
+        t().yes()
+    } else {
+        t().no()
+    };
+    let mcv_status = if stats.has_mcv { t().yes() } else { t().no() };
 
     let histogram_color = if stats.has_histogram {
         theme.accent
@@ -216,11 +216,11 @@ fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, 
     };
 
     let row2 = Line::from(vec![
-        Span::raw(" Histogram: "),
+        Span::raw(format!(" {}: ", t().label_histogram())),
         Span::styled(histogram_status, Style::default().fg(histogram_color)),
         Span::raw("  MCV: "),
         Span::styled(mcv_status, Style::default().fg(mcv_color)),
-        Span::raw("  Field: "),
+        Span::raw(format!("  {}: ", t().label_field())),
         Span::styled(&stats.field, Style::default().fg(theme.fg)),
     ]);
     frame.render_widget(Paragraph::new(row2), chunks[1]);
@@ -228,7 +228,7 @@ fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, 
 
 fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) {
     let block = Block::default()
-        .title(" Uj index letrehozasa ")
+        .title(format!(" {} ", t().create_index_title()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(if state.is_creating {
@@ -257,9 +257,9 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
     };
 
     let field_label = if state.is_compound {
-        " Mezok (vesszovel): "
+        format!(" {}: ", t().label_fields_comma())
     } else {
-        " Mezo neve: "
+        format!(" {}: ", t().label_field_name())
     };
     state.field_input.render_labeled(
         frame,
@@ -278,11 +278,11 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
 
     let compound_checkbox = if state.is_compound { "[X]" } else { "[ ]" };
     let compound_line = Line::from(vec![
-        Span::raw(" Compound: "),
+        Span::raw(format!(" {}: ", t().label_compound())),
         Span::styled(compound_checkbox, compound_style),
         Span::styled(
             if state.is_compound {
-                format!(" [{} mezo]", state.compound_fields.len())
+                t().compound_field_count(state.compound_fields.len())
             } else {
                 String::new()
             },
@@ -300,7 +300,7 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
 
     let unique_checkbox = if state.unique { "[X]" } else { "[ ]" };
     let unique_line = Line::from(vec![
-        Span::raw(" Unique: "),
+        Span::raw(format!(" {}: ", t().label_unique())),
         Span::styled(unique_checkbox, unique_style),
     ]);
     frame.render_widget(Paragraph::new(unique_line), form_chunks[2]);
@@ -314,16 +314,24 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
 
     let sparse_checkbox = if state.sparse { "[X]" } else { "[ ]" };
     let sparse_line = Line::from(vec![
-        Span::raw(" Sparse: "),
+        Span::raw(format!(" {}: ", t().label_sparse())),
         Span::styled(sparse_checkbox, sparse_style),
-        Span::styled(" (csak letezo mezok)", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {}", t().sparse_hint()),
+            Style::default().fg(theme.muted),
+        ),
     ]);
     frame.render_widget(Paragraph::new(sparse_line), form_chunks[3]);
 
     // Create hint
     if state.is_creating {
-        let hint = Paragraph::new(" [Enter] Letrehoz  [Tab] Kovetkezo  [Esc] Megse")
-            .style(Style::default().fg(theme.muted));
+        let hint = Paragraph::new(format!(
+            " [Enter] {}  [Tab] {}  [Esc] {}",
+            t().key_create(),
+            t().key_next(),
+            t().key_cancel()
+        ))
+        .style(Style::default().fg(theme.muted));
         frame.render_widget(hint, form_chunks[4]);
     }
 }
@@ -331,7 +339,10 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
 fn render_status(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) {
     let status_text = if let Some(ref err) = state.error {
         Line::from(vec![
-            Span::styled("Hiba: ", Style::default().fg(theme.error)),
+            Span::styled(
+                format!("{}: ", t().label_error()),
+                Style::default().fg(theme.error),
+            ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
@@ -345,17 +356,17 @@ fn render_status(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Them
         if stale_count > 0 {
             Line::from(vec![
                 Span::styled(
-                    format!("Kollekcio: {}  ", state.collection),
+                    format!("{}  ", t().collection_label(&state.collection)),
                     Style::default().fg(theme.muted),
                 ),
                 Span::styled(
-                    format!("{} stale index - [a] Analyze", stale_count),
+                    t().stale_indexes(stale_count),
                     Style::default().fg(Color::Yellow),
                 ),
             ])
         } else {
             Line::from(vec![Span::styled(
-                format!("Kollekcio: {}", state.collection),
+                t().collection_label(&state.collection),
                 Style::default().fg(theme.muted),
             )])
         }

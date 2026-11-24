@@ -821,4 +821,239 @@ impl Messages for Hu {
             ToolCategory::Other => "Egyéb",
         }
     }
+
+    fn no(&self) -> &'static str {
+        "Nem"
+    }
+    fn key_new(&self) -> &'static str {
+        "Új"
+    }
+    fn key_tabs(&self) -> &'static str {
+        "Fülek"
+    }
+    fn key_next_field(&self) -> &'static str {
+        "Következő mező"
+    }
+    fn label_status(&self) -> &'static str {
+        "Állapot"
+    }
+    fn label_field_name(&self) -> &'static str {
+        "Mezőnév"
+    }
+    fn status_active(&self) -> &'static str {
+        "Aktív"
+    }
+    fn api_keys_title(&self) -> &'static str {
+        "API-kulcsok"
+    }
+    fn key_revoke(&self) -> &'static str {
+        "Visszavonás"
+    }
+    fn admin_needs_localhost(&self) -> &'static str {
+        "(Az adminműveletekhez localhost-kapcsolat kell)"
+    }
+    fn admin_needs_key(&self) -> &'static str {
+        "(Az adminműveletekhez állítsd be az IRONBASE_ADMIN_KEY-t)"
+    }
+    fn new_key_label(&self) -> &'static str {
+        "Új kulcs"
+    }
+    fn new_key_warning(&self) -> &'static str {
+        "(másold most, többé nem jelenik meg!)"
+    }
+    fn no_api_keys(&self) -> &'static str {
+        "Nincs API-kulcs"
+    }
+    fn label_key(&self) -> &'static str {
+        "Kulcs"
+    }
+    fn status_revoked(&self) -> &'static str {
+        "Visszavonva"
+    }
+    fn enter_new_key_name(&self) -> &'static str {
+        "Add meg az új API-kulcs nevét:"
+    }
+    fn confirm_revoke_key(&self, name: &str) -> String {
+        format!("Biztosan visszavonod a(z) „{name}” API-kulcsot?")
+    }
+    fn confirm_delete_key(&self, name: &str) -> String {
+        format!("Biztosan TÖRLÖD a(z) „{name}” API-kulcsot?")
+    }
+    fn listeners_title(&self) -> &'static str {
+        "Listenerek"
+    }
+    fn key_enable(&self) -> &'static str {
+        "Engedélyezés"
+    }
+    fn key_disable(&self) -> &'static str {
+        "Letiltás"
+    }
+    fn restart_needed(&self) -> &'static str {
+        "A változások a szerver újraindítása után lépnek életbe"
+    }
+    fn no_listeners(&self) -> &'static str {
+        "Nincs beállított listener"
+    }
+    fn label_bind(&self) -> &'static str {
+        "Cím"
+    }
+    fn status_disabled(&self) -> &'static str {
+        "Letiltva"
+    }
+    fn enter_listener_details(&self) -> &'static str {
+        "Add meg a listener adatait (Tab: mezőváltás):"
+    }
+    fn label_bind_address(&self) -> &'static str {
+        "Kötési cím"
+    }
+    fn checkbox_enabled(&self) -> &'static str {
+        "[x] Engedélyezve"
+    }
+    fn checkbox_disabled(&self) -> &'static str {
+        "[ ] Letiltva"
+    }
+    fn space_to_toggle(&self) -> &'static str {
+        "(Space: váltás)"
+    }
+    fn confirm_delete_listener(&self, id: &str) -> String {
+        format!("Biztosan TÖRLÖD a(z) „{id}” listenert?")
+    }
+    fn confirm_enable_listener(&self, id: &str) -> String {
+        format!("Biztosan engedélyezed a(z) „{id}” listenert?")
+    }
+    fn confirm_disable_listener(&self, id: &str) -> String {
+        format!("Biztosan letiltod a(z) „{id}” listenert?")
+    }
+    fn listener_read_only(&self) -> &'static str {
+        "Csak olvasható: a listenerek kezeléséhez localhost-kapcsolat kell"
+    }
+    fn vector_search_title(&self) -> &'static str {
+        "Vektorkeresés"
+    }
+    fn tab_create_index(&self) -> &'static str {
+        "Index létrehozása"
+    }
+    fn tab_list_indexes(&self) -> &'static str {
+        "Indexlista"
+    }
+    fn label_k_limit(&self) -> &'static str {
+        "K (korlát)"
+    }
+    fn label_vector_json(&self) -> &'static str {
+        "Vektor (JSON-tömb)"
+    }
+    fn label_filter_optional(&self) -> &'static str {
+        "Szűrő (nem kötelező, JSON)"
+    }
+    fn vector_results_title(&self, count: usize, loading: bool) -> String {
+        if loading {
+            " Találatok (betöltés...) ".to_string()
+        } else {
+            format!(" Találatok ({count}) ")
+        }
+    }
+    fn no_vector_results(&self) -> &'static str {
+        "Nincs találat. Add meg a vektort, és nyomd meg az Entert."
+    }
+    fn key_toggle_metric(&self) -> &'static str {
+        "Metrikaváltás"
+    }
+    fn label_dimension(&self) -> &'static str {
+        "Dimenzió (0 = automatikus)"
+    }
+    fn label_distance_metric(&self) -> &'static str {
+        "Távolságmetrika [Space: váltás]"
+    }
+    fn metric_cosine(&self) -> &'static str {
+        "Koszinusz (embeddingekhez ajánlott)"
+    }
+    fn metric_euclidean(&self) -> &'static str {
+        "Euklideszi (L2-távolság)"
+    }
+    fn metric_dot_product(&self) -> &'static str {
+        "Skaláris szorzat (normalizált vektorokhoz)"
+    }
+    fn dimension_tip(&self) -> &'static str {
+        "Tipp: a szokásos embeddingek dimenziója 384, 768 vagy 1536."
+    }
+    fn vector_indexes_title(&self, count: usize) -> String {
+        format!(" Vektorindexek ({count}) ")
+    }
+    fn no_vector_indexes(&self) -> &'static str {
+        "Nincs vektorindex. Az „Index létrehozása” fülön hozhatsz létre egyet."
+    }
+    fn vector_index_row(
+        &self,
+        name: &str,
+        field: &str,
+        dimension: usize,
+        metric: &str,
+        vectors: usize,
+    ) -> String {
+        format!("{name} | {field} | dim:{dimension} | {metric} | {vectors} vektor")
+    }
+    fn index_title(&self) -> &'static str {
+        "Indexkezelés"
+    }
+    fn key_analyze(&self) -> &'static str {
+        "Elemzés"
+    }
+    fn existing_indexes_title(&self, analyzing: bool) -> String {
+        if analyzing {
+            " Meglévő indexek (elemzés...) ".to_string()
+        } else {
+            " Meglévő indexek ".to_string()
+        }
+    }
+    fn no_indexes_only_id(&self) -> &'static str {
+        "Nincs index (csak _id)"
+    }
+    fn index_statistics_title(&self) -> &'static str {
+        "Indexstatisztika"
+    }
+    fn no_index_selected(&self) -> &'static str {
+        "Nincs kiválasztott index"
+    }
+    fn load_statistics_hint(&self) -> &'static str {
+        "Statisztika betöltése: [a] Elemzés"
+    }
+    fn staleness_partial(&self) -> &'static str {
+        "Részleges"
+    }
+    fn staleness_stale(&self) -> &'static str {
+        "Elavult"
+    }
+    fn label_keys(&self) -> &'static str {
+        "Kulcsok"
+    }
+    fn label_distinct(&self) -> &'static str {
+        "Különböző"
+    }
+    fn label_histogram(&self) -> &'static str {
+        "Hisztogram"
+    }
+    fn create_index_title(&self) -> &'static str {
+        "Új index létrehozása"
+    }
+    fn label_fields_comma(&self) -> &'static str {
+        "Mezők (vesszővel)"
+    }
+    fn label_compound(&self) -> &'static str {
+        "Összetett"
+    }
+    fn compound_field_count(&self, count: usize) -> String {
+        format!(" [{count} mező]")
+    }
+    fn label_unique(&self) -> &'static str {
+        "Egyedi"
+    }
+    fn label_sparse(&self) -> &'static str {
+        "Ritka"
+    }
+    fn sparse_hint(&self) -> &'static str {
+        "(csak a mezőt tartalmazó dokumentumok)"
+    }
+    fn stale_indexes(&self, count: usize) -> String {
+        format!("{count} elavult index – [a] Elemzés")
+    }
 }

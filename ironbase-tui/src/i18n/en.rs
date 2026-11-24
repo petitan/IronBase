@@ -843,4 +843,248 @@ impl Messages for En {
             ToolCategory::Other => "Other",
         }
     }
+
+    fn no(&self) -> &'static str {
+        "No"
+    }
+    fn key_new(&self) -> &'static str {
+        "New"
+    }
+    fn key_tabs(&self) -> &'static str {
+        "Tabs"
+    }
+    fn key_next_field(&self) -> &'static str {
+        "Next field"
+    }
+    fn label_status(&self) -> &'static str {
+        "Status"
+    }
+    fn label_field_name(&self) -> &'static str {
+        "Field name"
+    }
+    fn status_active(&self) -> &'static str {
+        "Active"
+    }
+    fn api_keys_title(&self) -> &'static str {
+        "API keys"
+    }
+    fn key_revoke(&self) -> &'static str {
+        "Revoke"
+    }
+    fn admin_needs_localhost(&self) -> &'static str {
+        "(Admin operations need a localhost connection)"
+    }
+    fn admin_needs_key(&self) -> &'static str {
+        "(Set IRONBASE_ADMIN_KEY for admin operations)"
+    }
+    fn new_key_label(&self) -> &'static str {
+        "New key"
+    }
+    fn new_key_warning(&self) -> &'static str {
+        "(copy it now, it won't be shown again!)"
+    }
+    fn no_api_keys(&self) -> &'static str {
+        "No API keys"
+    }
+    fn label_key(&self) -> &'static str {
+        "Key"
+    }
+    fn status_revoked(&self) -> &'static str {
+        "Revoked"
+    }
+    fn enter_new_key_name(&self) -> &'static str {
+        "Enter a name for the new API key:"
+    }
+    fn confirm_revoke_key(&self, name: &str) -> String {
+        format!("Revoke the API key \"{name}\"?")
+    }
+    fn confirm_delete_key(&self, name: &str) -> String {
+        format!("DELETE the API key \"{name}\"?")
+    }
+    fn listeners_title(&self) -> &'static str {
+        "Listeners"
+    }
+    fn key_enable(&self) -> &'static str {
+        "Enable"
+    }
+    fn key_disable(&self) -> &'static str {
+        "Disable"
+    }
+    fn restart_needed(&self) -> &'static str {
+        "Changes take effect after a server restart"
+    }
+    fn no_listeners(&self) -> &'static str {
+        "No listeners configured"
+    }
+    fn label_bind(&self) -> &'static str {
+        "Bind"
+    }
+    fn status_disabled(&self) -> &'static str {
+        "Disabled"
+    }
+    fn enter_listener_details(&self) -> &'static str {
+        "Enter the listener details (Tab: next field):"
+    }
+    fn label_bind_address(&self) -> &'static str {
+        "Bind address"
+    }
+    fn checkbox_enabled(&self) -> &'static str {
+        "[x] Enabled"
+    }
+    fn checkbox_disabled(&self) -> &'static str {
+        "[ ] Disabled"
+    }
+    fn space_to_toggle(&self) -> &'static str {
+        "(Space: toggle)"
+    }
+    fn confirm_delete_listener(&self, id: &str) -> String {
+        format!("DELETE the listener \"{id}\"?")
+    }
+    fn confirm_enable_listener(&self, id: &str) -> String {
+        format!("Enable the listener \"{id}\"?")
+    }
+    fn confirm_disable_listener(&self, id: &str) -> String {
+        format!("Disable the listener \"{id}\"?")
+    }
+    fn listener_read_only(&self) -> &'static str {
+        "Read-only: managing listeners needs a localhost connection"
+    }
+    fn vector_search_title(&self) -> &'static str {
+        "Vector search"
+    }
+    fn tab_create_index(&self) -> &'static str {
+        "Create index"
+    }
+    fn tab_list_indexes(&self) -> &'static str {
+        "Index list"
+    }
+    fn label_k_limit(&self) -> &'static str {
+        "K (limit)"
+    }
+    fn label_vector_json(&self) -> &'static str {
+        "Vector (JSON array)"
+    }
+    fn label_filter_optional(&self) -> &'static str {
+        "Filter (optional JSON)"
+    }
+    fn vector_results_title(&self, count: usize, loading: bool) -> String {
+        if loading {
+            " Results (loading...) ".to_string()
+        } else {
+            format!(" Results ({count}) ")
+        }
+    }
+    fn no_vector_results(&self) -> &'static str {
+        "No results. Enter a vector and press Enter to search."
+    }
+    fn key_toggle_metric(&self) -> &'static str {
+        "Toggle metric"
+    }
+    fn label_dimension(&self) -> &'static str {
+        "Dimension (0 = auto)"
+    }
+    fn label_distance_metric(&self) -> &'static str {
+        "Distance metric [Space: change]"
+    }
+    fn metric_cosine(&self) -> &'static str {
+        "Cosine (recommended for embeddings)"
+    }
+    fn metric_euclidean(&self) -> &'static str {
+        "Euclidean (L2 distance)"
+    }
+    fn metric_dot_product(&self) -> &'static str {
+        "Dot product (for normalized vectors)"
+    }
+    fn dimension_tip(&self) -> &'static str {
+        "Tip: common embeddings have 384, 768 or 1536 dimensions."
+    }
+    fn vector_indexes_title(&self, count: usize) -> String {
+        format!(" Vector indexes ({count}) ")
+    }
+    fn no_vector_indexes(&self) -> &'static str {
+        "No vector indexes. Create one on the \"Create index\" tab."
+    }
+    fn vector_index_row(
+        &self,
+        name: &str,
+        field: &str,
+        dimension: usize,
+        metric: &str,
+        vectors: usize,
+    ) -> String {
+        {
+            let label = if vectors == 1 { "vector" } else { "vectors" };
+            format!("{name} | {field} | dim:{dimension} | {metric} | {vectors} {label}")
+        }
+    }
+    fn index_title(&self) -> &'static str {
+        "Index management"
+    }
+    fn key_analyze(&self) -> &'static str {
+        "Analyze"
+    }
+    fn existing_indexes_title(&self, analyzing: bool) -> String {
+        if analyzing {
+            " Existing indexes (analyzing...) ".to_string()
+        } else {
+            " Existing indexes ".to_string()
+        }
+    }
+    fn no_indexes_only_id(&self) -> &'static str {
+        "No index (only _id)"
+    }
+    fn index_statistics_title(&self) -> &'static str {
+        "Index statistics"
+    }
+    fn no_index_selected(&self) -> &'static str {
+        "No index selected"
+    }
+    fn load_statistics_hint(&self) -> &'static str {
+        "Load the statistics: [a] Analyze"
+    }
+    fn staleness_partial(&self) -> &'static str {
+        "Partial"
+    }
+    fn staleness_stale(&self) -> &'static str {
+        "Stale"
+    }
+    fn label_keys(&self) -> &'static str {
+        "Keys"
+    }
+    fn label_distinct(&self) -> &'static str {
+        "Distinct"
+    }
+    fn label_histogram(&self) -> &'static str {
+        "Histogram"
+    }
+    fn create_index_title(&self) -> &'static str {
+        "Create a new index"
+    }
+    fn label_fields_comma(&self) -> &'static str {
+        "Fields (comma separated)"
+    }
+    fn label_compound(&self) -> &'static str {
+        "Compound"
+    }
+    fn compound_field_count(&self, count: usize) -> String {
+        match count {
+            1 => " [1 field]".to_string(),
+            _ => format!(" [{count} fields]"),
+        }
+    }
+    fn label_unique(&self) -> &'static str {
+        "Unique"
+    }
+    fn label_sparse(&self) -> &'static str {
+        "Sparse"
+    }
+    fn sparse_hint(&self) -> &'static str {
+        "(only the documents that have the field)"
+    }
+    fn stale_indexes(&self, count: usize) -> String {
+        match count {
+            1 => "1 stale index – [a] Analyze".to_string(),
+            _ => format!("{count} stale indexes – [a] Analyze"),
+        }
+    }
 }
