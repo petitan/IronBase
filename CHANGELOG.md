@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the API key, ACL and listener modals' state lives with the open modal (tuti-tui 0.3.499, mcp-server 1.0.687 — version only, for the release tag)
+
+The three admin modals move into `OpenModal` (`ApiKey`, `Acl`, `Listener`), with no change of behavior: their state
+is created when they open (the actions build it before loading the list) and dropped when they close. `OpenModal` no
+longer derives `Clone` (nothing cloned it, and these states hold no clonable data).
+
 ### Changed — Tuti TUI: the insert/edit and query builder modals' state lives with the open modal (tuti-tui 0.3.498, mcp-server 1.0.686 — version only, for the release tag)
 
 The insert/edit document and the query builder modals move into `OpenModal` (`Insert`, `Query`), with no change of

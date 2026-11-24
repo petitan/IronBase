@@ -63,7 +63,7 @@ pub enum Modal {
 // is the largest modal state's either way; boxing each variant would add an
 // indirection to every access for nothing
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum OpenModal {
     Plain(Modal),
     NewCollection(crate::state::NewCollectionState),
@@ -74,6 +74,9 @@ pub enum OpenModal {
     Database(crate::state::DatabaseState),
     Insert(crate::state::InsertState),
     Query(crate::state::QueryState),
+    ApiKey(crate::modals::api_key::ApiKeyState),
+    Acl(crate::modals::acl::AclState),
+    Listener(crate::modals::listener::ListenerState),
 }
 
 impl OpenModal {
@@ -88,6 +91,9 @@ impl OpenModal {
             OpenModal::Database(_) => Modal::Database,
             OpenModal::Insert(_) => Modal::Insert,
             OpenModal::Query(_) => Modal::Query,
+            OpenModal::ApiKey(_) => Modal::ApiKey,
+            OpenModal::Acl(_) => Modal::Acl,
+            OpenModal::Listener(_) => Modal::Listener,
         }
     }
 }

@@ -154,15 +154,6 @@ pub struct App {
 
     // Update modal state
 
-    // API Key modal state
-    pub api_key_state: crate::modals::api_key::ApiKeyState,
-
-    // ACL modal state
-    pub acl_state: crate::modals::acl::AclState,
-
-    // Listener modal state
-    pub listener_state: crate::modals::listener::ListenerState,
-
     // Vector search state
     pub vector_state: VectorSearchState,
 
@@ -212,9 +203,6 @@ impl App {
             filter_state: FilterState::default(),
             script_state: ScriptState::default(),
             server_info_scroll: 0,
-            api_key_state: crate::modals::api_key::ApiKeyState::new(),
-            acl_state: crate::modals::acl::AclState::new(),
-            listener_state: crate::modals::listener::ListenerState::new(),
             vector_state: VectorSearchState::default(),
             rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
@@ -455,6 +443,19 @@ impl App {
     modal_state!(database_state, database_state_mut, Database, DatabaseState);
     modal_state!(insert_state, insert_state_mut, Insert, InsertState);
     modal_state!(query_state, query_state_mut, Query, QueryState);
+    modal_state!(
+        api_key_state,
+        api_key_state_mut,
+        ApiKey,
+        crate::modals::api_key::ApiKeyState
+    );
+    modal_state!(acl_state, acl_state_mut, Acl, crate::modals::acl::AclState);
+    modal_state!(
+        listener_state,
+        listener_state_mut,
+        Listener,
+        crate::modals::listener::ListenerState
+    );
 
     /// Open a modal whose state lives in `App` (the others have their own
     /// `open_*`, which creates their state)

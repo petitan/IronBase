@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::db::DbWrapper;
 use crate::i18n::{t, Op};
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{ListenerAddParams, ListenerIdParams, NoParams};
@@ -21,9 +22,9 @@ pub(crate) async fn load_listeners(db: &DbWrapper) -> anyhow::Result<Vec<Listene
 async fn refresh_listeners(app: &mut App) {
     let Some(ref db) = app.db else { return };
     match load_listeners(db).await {
-        Ok(listeners) => app.listener_state.set_listeners(listeners),
+        Ok(listeners) => open_state!(app, Listener).set_listeners(listeners),
         Err(e) => {
-            let state = &mut app.listener_state;
+            let state = &mut open_state!(app, Listener);
             let outcome = state.success.take().or(state.error.take());
             let reload = t().failed(Op::ReloadList, &e);
             state.set_error(match outcome {
@@ -42,53 +43,56 @@ pub(crate) async fn handle_listener_key_async(
 ) {
     use crate::modals::listener::{AddField, ListenerAction, ListenerModalMode};
 
-    match app.listener_state.mode {
+    match open_state!(app, Listener).mode {
         ListenerModalMode::List => match key {
             KeyCode::Esc => {
                 app.close_modal();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.listener_state.select_next();
+                open_state!(app, Listener).select_next();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.listener_state.select_prev();
+                open_state!(app, Listener).select_prev();
             }
-            KeyCode::Char('n') if app.listener_state.is_localhost => {
-                app.listener_state.start_add();
+            KeyCode::Char('n') if open_state!(app, Listener).is_localhost => {
+                open_state!(app, Listener).start_add();
             }
-            KeyCode::Char('e') if app.listener_state.is_localhost => {
-                app.listener_state.start_enable();
+            KeyCode::Char('e') if open_state!(app, Listener).is_localhost => {
+                open_state!(app, Listener).start_enable();
             }
-            KeyCode::Char('x') if app.listener_state.is_localhost => {
-                app.listener_state.start_disable();
+            KeyCode::Char('x') if open_state!(app, Listener).is_localhost => {
+                open_state!(app, Listener).start_disable();
             }
-            KeyCode::Char('d') if app.listener_state.is_localhost => {
-                app.listener_state.start_delete();
+            KeyCode::Char('d') if open_state!(app, Listener).is_localhost => {
+                open_state!(app, Listener).start_delete();
             }
             _ => {}
         },
         ListenerModalMode::Add => match key {
             KeyCode::Esc => {
-                app.listener_state.cancel();
+                open_state!(app, Listener).cancel();
             }
             KeyCode::Tab => {
-                app.listener_state.next_add_field();
+                open_state!(app, Listener).next_add_field();
             }
-            KeyCode::Char(' ') if app.listener_state.add_field == AddField::Tls => {
-                app.listener_state.toggle_tls();
+            KeyCode::Char(' ') if open_state!(app, Listener).add_field == AddField::Tls => {
+                open_state!(app, Listener).toggle_tls();
             }
             KeyCode::Enter => {
-                let id = app.listener_state.add_id.value().trim().to_string();
-                let bind = app.listener_state.add_bind.value().trim().to_string();
-                let tls = app.listener_state.add_tls;
+                let id = open_state!(app, Listener).add_id.value().trim().to_string();
+                let bind = open_state!(app, Listener)
+                    .add_bind
+                    .value()
+                    .trim()
+                    .to_string();
+                let tls = open_state!(app, Listener).add_tls;
 
                 if id.is_empty() {
-                    app.listener_state.set_error(t().id_required().to_string());
+                    open_state!(app, Listener).set_error(t().id_required().to_string());
                     return;
                 }
                 if bind.is_empty() {
-                    app.listener_state
-                        .set_error(t().bind_required().to_string());
+                    open_state!(app, Listener).set_error(t().bind_required().to_string());
                     return;
                 }
 
@@ -106,38 +110,38 @@ pub(crate) async fn handle_listener_key_async(
                             // Replacing an existing listener is not "added"; the
                             // server applies either on its next start
                             let replaced = matches!(response.action, Created::Updated);
-                            app.listener_state.set_success(t().listener_created(
+                            open_state!(app, Listener).set_success(t().listener_created(
                                 &id,
                                 replaced,
                                 &response.note,
                             ));
-                            app.listener_state.mode = ListenerModalMode::List;
-                            app.listener_state.add_id.clear();
-                            app.listener_state.add_bind.clear();
+                            open_state!(app, Listener).mode = ListenerModalMode::List;
+                            open_state!(app, Listener).add_id.clear();
+                            open_state!(app, Listener).add_bind.clear();
                             refresh_listeners(app).await;
                         }
                         Err(e) => {
-                            app.listener_state.set_error(t().failed(Op::Create, &e));
+                            open_state!(app, Listener).set_error(t().failed(Op::Create, &e));
                         }
                     }
                 }
             }
             _ => {
-                app.listener_state.handle_input(Input::Key(key, modifiers));
+                open_state!(app, Listener).handle_input(Input::Key(key, modifiers));
             }
         },
         ListenerModalMode::Confirm => match key {
             KeyCode::Esc | KeyCode::Char('n') => {
-                app.listener_state.cancel();
+                open_state!(app, Listener).cancel();
             }
             KeyCode::Char('y') => {
-                if let Some(listener) = app.listener_state.get_selected() {
+                if let Some(listener) = open_state!(app, Listener).get_selected() {
                     let id = listener.id.clone();
 
                     if let Some(ref db) = app.db {
                         let args = ListenerIdParams { id: id.clone() };
                         // (found, the server's note)
-                        let result = match app.listener_state.confirm_action {
+                        let result = match open_state!(app, Listener).confirm_action {
                             Some(ListenerAction::Delete) => db
                                 .call::<ListenerDelete>(&args)
                                 .await
@@ -157,21 +161,21 @@ pub(crate) async fn handle_listener_key_async(
                             Ok((true, note)) => {
                                 // The note says what changed and that it waits
                                 // for a restart
-                                app.listener_state
+                                open_state!(app, Listener)
                                     .set_success(format!("„{}”: {}", id, note));
-                                app.listener_state.mode = ListenerModalMode::List;
-                                app.listener_state.confirm_action = None;
+                                open_state!(app, Listener).mode = ListenerModalMode::List;
+                                open_state!(app, Listener).confirm_action = None;
                                 refresh_listeners(app).await;
                             }
                             Ok((false, _)) => {
-                                app.listener_state
+                                open_state!(app, Listener)
                                     .set_error(t().listener_not_found().to_string());
-                                app.listener_state.cancel();
+                                open_state!(app, Listener).cancel();
                                 refresh_listeners(app).await;
                             }
                             Err(e) => {
-                                app.listener_state.set_error(t().failed(Op::Update, &e));
-                                app.listener_state.cancel();
+                                open_state!(app, Listener).set_error(t().failed(Op::Update, &e));
+                                open_state!(app, Listener).cancel();
                             }
                         }
                     }

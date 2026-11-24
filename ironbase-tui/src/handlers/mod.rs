@@ -93,12 +93,18 @@ pub fn handle_paste(app: &mut App, text: &str) {
         Some(Modal::Database) => app
             .database_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
-        Some(Modal::ApiKey) => app.api_key_state.handle_input(input),
+        Some(Modal::ApiKey) => app
+            .api_key_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Fulltext) => app
             .fulltext_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
-        Some(Modal::Acl) => app.acl_state.handle_principal_input(input),
-        Some(Modal::Listener) => app.listener_state.handle_input(input),
+        Some(Modal::Acl) => app.acl_state_mut().map_or(InputOutcome::Ignored, |state| {
+            state.handle_principal_input(input)
+        }),
+        Some(Modal::Listener) => app
+            .listener_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::VectorSearch) => app.vector_state.handle_text_input(input),
         Some(Modal::Rag) => app.rag_state.handle_text_input(input),
         Some(

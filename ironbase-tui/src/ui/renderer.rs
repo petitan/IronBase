@@ -129,7 +129,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::ApiKey => {
-                modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
+                if let Some(state) = app.api_key_state() {
+                    modals::api_key::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Fulltext => {
                 if let Some(state) = app.fulltext_state() {
@@ -137,10 +139,14 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::Acl => {
-                modals::acl::render(frame, frame.area(), &app.acl_state, &theme);
+                if let Some(state) = app.acl_state() {
+                    modals::acl::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Listener => {
-                modals::listener::render(frame, frame.area(), &app.listener_state, &theme);
+                if let Some(state) = app.listener_state() {
+                    modals::listener::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::VectorSearch => {
                 modals::vector::render(frame, frame.area(), &app.vector_state, &theme);

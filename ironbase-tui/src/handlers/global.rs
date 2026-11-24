@@ -6,10 +6,11 @@ use super::rag::handle_rag_open;
 use super::server_info::handle_server_info_open;
 use super::update::handle_update_open;
 use super::vector::handle_vector_open;
-use crate::app::{App, Modal};
+use crate::app::{App, Modal, OpenModal};
 use crate::i18n::{t, Op};
 use crate::keymap::{self, Action};
 use crate::modals;
+use crate::state::open_state;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Handle the main screen's keys: the key map (`crate::keymap::MAIN`) names
@@ -124,11 +125,10 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
                                 app.set_error(message);
                             } else {
                                 let rules = info.map(|info| info.rules).unwrap_or_default();
-                                app.acl_state = modals::acl::AclState::new();
-                                app.acl_state.is_localhost = true;
-                                app.acl_state.start_edit(coll);
-                                app.acl_state.load_edit_rules(&rules);
-                                app.set_modal(Modal::Acl);
+                                app.open_modal = Some(OpenModal::Acl(modals::acl::AclState::new()));
+                                open_state!(app, Acl).is_localhost = true;
+                                open_state!(app, Acl).start_edit(coll);
+                                open_state!(app, Acl).load_edit_rules(&rules);
                             }
                         }
                         Err(e) => app.set_error(t().failed(Op::LoadAcl, &e)),
@@ -160,22 +160,21 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
 
         // API Key management (Shift+K)
         Action::ApiKeys => {
-            app.api_key_state = modals::api_key::ApiKeyState::new();
-            app.api_key_state.is_localhost = app.connection_type.is_localhost();
-            app.set_modal(Modal::ApiKey);
+            app.open_modal = Some(OpenModal::ApiKey(modals::api_key::ApiKeyState::new()));
+            open_state!(app, ApiKey).is_localhost = app.connection_type.is_localhost();
             // Load API keys if admin key is available and can_admin
-            if app.api_key_state.can_admin() {
-                if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+            if open_state!(app, ApiKey).can_admin() {
+                if let Some(ref admin_key) = open_state!(app, ApiKey).admin_key.clone() {
                     if let Some(ref db) = app.db {
-                        app.api_key_state.loading = true;
+                        open_state!(app, ApiKey).loading = true;
                         match super::api_key::load_api_keys(db, admin_key).await {
                             Ok(keys) => {
-                                app.api_key_state.set_keys(keys);
-                                app.api_key_state.loading = false;
+                                open_state!(app, ApiKey).set_keys(keys);
+                                open_state!(app, ApiKey).loading = false;
                             }
                             Err(e) => {
-                                app.api_key_state.set_error(t().failed(Op::LoadApiKeys, &e));
-                                app.api_key_state.loading = false;
+                                open_state!(app, ApiKey).set_error(t().failed(Op::LoadApiKeys, &e));
+                                open_state!(app, ApiKey).loading = false;
                             }
                         }
                     }
@@ -185,20 +184,19 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
 
         // ACL management (Shift+A)
         Action::AclRules => {
-            app.acl_state = modals::acl::AclState::new();
-            app.acl_state.is_localhost = app.connection_type.is_localhost();
-            app.set_modal(Modal::Acl);
+            app.open_modal = Some(OpenModal::Acl(modals::acl::AclState::new()));
+            open_state!(app, Acl).is_localhost = app.connection_type.is_localhost();
             // Load ACL rules
             if let Some(ref db) = app.db {
-                app.acl_state.loading = true;
+                open_state!(app, Acl).loading = true;
                 match super::acl::load_acls(db).await {
                     Ok(acls) => {
-                        app.acl_state.set_acls(acls);
-                        app.acl_state.loading = false;
+                        open_state!(app, Acl).set_acls(acls);
+                        open_state!(app, Acl).loading = false;
                     }
                     Err(e) => {
-                        app.acl_state.set_error(t().failed(Op::LoadAcl, &e));
-                        app.acl_state.loading = false;
+                        open_state!(app, Acl).set_error(t().failed(Op::LoadAcl, &e));
+                        open_state!(app, Acl).loading = false;
                     }
                 }
             }
@@ -206,21 +204,19 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
 
         // Listener management (Shift+L)
         Action::Listeners => {
-            app.listener_state = modals::listener::ListenerState::new();
-            app.listener_state.is_localhost = app.connection_type.is_localhost();
-            app.set_modal(Modal::Listener);
+            app.open_modal = Some(OpenModal::Listener(modals::listener::ListenerState::new()));
+            open_state!(app, Listener).is_localhost = app.connection_type.is_localhost();
             // Load listeners
             if let Some(ref db) = app.db {
-                app.listener_state.loading = true;
+                open_state!(app, Listener).loading = true;
                 match super::listener::load_listeners(db).await {
                     Ok(listeners) => {
-                        app.listener_state.set_listeners(listeners);
-                        app.listener_state.loading = false;
+                        open_state!(app, Listener).set_listeners(listeners);
+                        open_state!(app, Listener).loading = false;
                     }
                     Err(e) => {
-                        app.listener_state
-                            .set_error(t().failed(Op::LoadListeners, &e));
-                        app.listener_state.loading = false;
+                        open_state!(app, Listener).set_error(t().failed(Op::LoadListeners, &e));
+                        open_state!(app, Listener).loading = false;
                     }
                 }
             }

@@ -4,6 +4,7 @@ use crate::app::App;
 use crate::db::DbWrapper;
 use crate::i18n::{t, Op};
 use crate::modals;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminKeyParams};
@@ -28,15 +29,14 @@ pub(crate) async fn load_api_keys(
 async fn refresh_api_keys(app: &mut App, admin_key: &str) {
     let Some(ref db) = app.db else { return };
     match load_api_keys(db, admin_key).await {
-        Ok(keys) => app.api_key_state.set_keys(keys),
+        Ok(keys) => open_state!(app, ApiKey).set_keys(keys),
         Err(e) => {
-            let outcome = app
-                .api_key_state
+            let outcome = open_state!(app, ApiKey)
                 .success
                 .take()
-                .or(app.api_key_state.error.take());
+                .or(open_state!(app, ApiKey).error.take());
             let reload = t().failed(Op::ReloadList, &e);
-            app.api_key_state.set_error(match outcome {
+            open_state!(app, ApiKey).set_error(match outcome {
                 Some(outcome) => format!("{} ({})", outcome, reload),
                 None => reload,
             });
@@ -48,32 +48,32 @@ async fn refresh_api_keys(app: &mut App, admin_key: &str) {
 pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     use crate::modals::api_key::{ApiKeyModalMode, ConfirmAction};
 
-    match app.api_key_state.mode {
+    match open_state!(app, ApiKey).mode {
         ApiKeyModalMode::List => match key {
             KeyCode::Esc => {
                 app.close_modal();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.api_key_state.select_next();
+                open_state!(app, ApiKey).select_next();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.api_key_state.select_prev();
+                open_state!(app, ApiKey).select_prev();
             }
-            KeyCode::Char('n') if app.api_key_state.has_admin_key() => {
-                app.api_key_state.start_create();
+            KeyCode::Char('n') if open_state!(app, ApiKey).has_admin_key() => {
+                open_state!(app, ApiKey).start_create();
             }
-            KeyCode::Char('r') if app.api_key_state.has_admin_key() => {
-                app.api_key_state.start_revoke();
+            KeyCode::Char('r') if open_state!(app, ApiKey).has_admin_key() => {
+                open_state!(app, ApiKey).start_revoke();
             }
-            KeyCode::Char('d') if app.api_key_state.has_admin_key() => {
-                app.api_key_state.start_delete();
+            KeyCode::Char('d') if open_state!(app, ApiKey).has_admin_key() => {
+                open_state!(app, ApiKey).start_delete();
             }
             KeyCode::Char('c') => {
                 // Copy new key to clipboard (if available)
-                if let Some(ref key) = app.api_key_state.new_key {
+                if let Some(ref key) = open_state!(app, ApiKey).new_key {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         if clipboard.set_text(key.clone()).is_ok() {
-                            app.api_key_state.set_success(t().key_copied().to_string());
+                            open_state!(app, ApiKey).set_success(t().key_copied().to_string());
                         }
                     }
                 }
@@ -82,16 +82,16 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
         },
         ApiKeyModalMode::Create => match key {
             KeyCode::Esc => {
-                app.api_key_state.cancel();
+                open_state!(app, ApiKey).cancel();
             }
             KeyCode::Enter => {
-                let name = app.api_key_state.input.value().trim().to_string();
+                let name = open_state!(app, ApiKey).input.value().trim().to_string();
                 if name.is_empty() {
-                    app.api_key_state.set_error(t().name_required().to_string());
+                    open_state!(app, ApiKey).set_error(t().name_required().to_string());
                     return;
                 }
 
-                if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+                if let Some(ref admin_key) = open_state!(app, ApiKey).admin_key.clone() {
                     if let Some(ref db) = app.db {
                         let args = AdminApiKeyCreateParams {
                             name: name.clone(),
@@ -103,7 +103,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                 let mut saved_path: Option<String> = None;
                                 // The TUI holds the new key from here: masked in the log
                                 crate::logging::register_secret(key);
-                                app.api_key_state.new_key = Some(key.to_string());
+                                open_state!(app, ApiKey).new_key = Some(key.to_string());
                                 // Save key to config directory for easy copying
                                 if let Some(config_dir) = dirs::config_dir() {
                                     let tui_dir = config_dir.join("ironbase-tui");
@@ -158,40 +158,40 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                     }
                                 }
                                 let msg = t().api_key_created(&name, saved_path.as_deref());
-                                app.api_key_state.set_success(msg);
-                                app.api_key_state.mode = ApiKeyModalMode::List;
-                                app.api_key_state.input.clear();
+                                open_state!(app, ApiKey).set_success(msg);
+                                open_state!(app, ApiKey).mode = ApiKeyModalMode::List;
+                                open_state!(app, ApiKey).input.clear();
 
                                 // Refresh the keys list
                                 refresh_api_keys(app, admin_key).await;
                             }
                             Err(e) => {
-                                app.api_key_state.set_error(t().failed(Op::Create, &e));
+                                open_state!(app, ApiKey).set_error(t().failed(Op::Create, &e));
                             }
                         }
                     }
                 }
             }
             _ => {
-                app.api_key_state.handle_input(Input::Key(key, modifiers));
+                open_state!(app, ApiKey).handle_input(Input::Key(key, modifiers));
             }
         },
         ApiKeyModalMode::Confirm => match key {
             KeyCode::Esc | KeyCode::Char('n') => {
-                app.api_key_state.cancel();
+                open_state!(app, ApiKey).cancel();
             }
             KeyCode::Char('y') => {
-                if let Some(selected) = app.api_key_state.get_selected() {
+                if let Some(selected) = open_state!(app, ApiKey).get_selected() {
                     let id = selected.id;
                     let name = selected.name.clone();
 
-                    if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+                    if let Some(ref admin_key) = open_state!(app, ApiKey).admin_key.clone() {
                         if let Some(ref db) = app.db {
                             let args = AdminApiKeyIdParams {
                                 id,
                                 admin_key: Some(admin_key.clone()),
                             };
-                            let result = match app.api_key_state.confirm_action {
+                            let result = match open_state!(app, ApiKey).confirm_action {
                                 Some(ConfirmAction::Revoke) => {
                                     db.call::<AdminApikeyRevoke>(&args).await
                                 }
@@ -199,7 +199,7 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
                                     db.call::<AdminApikeyDelete>(&args).await
                                 }
                                 None => {
-                                    app.api_key_state.cancel();
+                                    open_state!(app, ApiKey).cancel();
                                     return;
                                 }
                             }
@@ -207,24 +207,25 @@ pub(crate) async fn handle_api_key_key_async(app: &mut App, key: KeyCode, modifi
 
                             match result {
                                 Ok(true) => {
-                                    let message = match app.api_key_state.confirm_action {
+                                    let message = match open_state!(app, ApiKey).confirm_action {
                                         Some(ConfirmAction::Delete) => t().api_key_deleted(&name),
                                         _ => t().api_key_revoked(&name),
                                     };
-                                    app.api_key_state.set_success(message);
-                                    app.api_key_state.mode = ApiKeyModalMode::List;
-                                    app.api_key_state.confirm_action = None;
+                                    open_state!(app, ApiKey).set_success(message);
+                                    open_state!(app, ApiKey).mode = ApiKeyModalMode::List;
+                                    open_state!(app, ApiKey).confirm_action = None;
 
                                     // Refresh the keys list
                                     refresh_api_keys(app, admin_key).await;
                                 }
                                 Ok(false) => {
-                                    app.api_key_state.set_error(t().key_not_found().to_string());
-                                    app.api_key_state.cancel();
+                                    open_state!(app, ApiKey)
+                                        .set_error(t().key_not_found().to_string());
+                                    open_state!(app, ApiKey).cancel();
                                 }
                                 Err(e) => {
-                                    app.api_key_state.set_error(t().failed(Op::Update, &e));
-                                    app.api_key_state.cancel();
+                                    open_state!(app, ApiKey).set_error(t().failed(Op::Update, &e));
+                                    open_state!(app, ApiKey).cancel();
                                 }
                             }
                         }

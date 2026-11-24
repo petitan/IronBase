@@ -877,9 +877,9 @@ async fn test_shift_p_loads_stored_rules_into_editor() {
         server.calls_to("acl_get"),
         vec![json!({"collection": "users"})]
     );
-    assert_eq!(app.acl_state.edit_collection, "users");
-    assert_eq!(app.acl_state.edit_rules.len(), 1);
-    let rule = &app.acl_state.edit_rules[0];
+    assert_eq!(app.acl_state_mut().unwrap().edit_collection, "users");
+    assert_eq!(app.acl_state_mut().unwrap().edit_rules.len(), 1);
+    let rule = &app.acl_state_mut().unwrap().edit_rules[0];
     assert_eq!(rule.principal_value, "abc");
     assert!(rule.read && !rule.write && !rule.admin);
     let screen = render_to_string(&app, 120, 36);
@@ -2245,12 +2245,15 @@ async fn test_acl_delete_reports_a_missing_acl() {
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'A').await;
     assert_eq!(app.modal(), Some(Modal::Acl));
-    assert_eq!(app.acl_state.acls.len(), 1);
+    assert_eq!(app.acl_state_mut().unwrap().acls.len(), 1);
 
     server.clear_calls();
-    app.acl_state.start_delete();
+    app.acl_state_mut().unwrap().start_delete();
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.acl_state.error.as_deref(), Some("Az ACL nem található"));
+    assert_eq!(
+        app.acl_state_mut().unwrap().error.as_deref(),
+        Some("Az ACL nem található")
+    );
     // The stale row is reloaded
     assert_eq!(server.calls_to("acl_list").len(), 1);
 }
@@ -2268,8 +2271,8 @@ async fn test_shift_p_without_a_stored_acl_opens_an_empty_editor() {
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'P').await;
     assert_eq!(app.modal(), Some(Modal::Acl));
-    assert_eq!(app.acl_state.edit_collection, "users");
-    assert!(app.acl_state.edit_rules.is_empty());
+    assert_eq!(app.acl_state_mut().unwrap().edit_collection, "users");
+    assert!(app.acl_state_mut().unwrap().edit_rules.is_empty());
 }
 
 /// A listener created over an existing one is reported as replaced, with the
@@ -2290,19 +2293,25 @@ async fn test_listener_create_reports_replace_and_restart() {
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'L').await;
     assert_eq!(app.modal(), Some(Modal::Listener));
-    assert_eq!(app.listener_state.listeners.len(), 1);
-    assert_eq!(app.listener_state.listeners[0].bind, "127.0.0.1:9090");
+    assert_eq!(app.listener_state_mut().unwrap().listeners.len(), 1);
+    assert_eq!(
+        app.listener_state_mut().unwrap().listeners[0].bind,
+        "127.0.0.1:9090"
+    );
 
-    app.listener_state.mode = crate::modals::listener::ListenerModalMode::Add;
-    app.listener_state.add_id.set_value("web");
-    app.listener_state.add_bind.set_value("127.0.0.1:9091");
+    app.listener_state_mut().unwrap().mode = crate::modals::listener::ListenerModalMode::Add;
+    app.listener_state_mut().unwrap().add_id.set_value("web");
+    app.listener_state_mut()
+        .unwrap()
+        .add_bind
+        .set_value("127.0.0.1:9091");
     press(&mut app, KeyCode::Enter).await;
     assert_eq!(
         server.calls_to("listener_create"),
         vec![json!({"id": "web", "bind": "127.0.0.1:9091", "tls": false})]
     );
     assert_eq!(
-        app.listener_state.success.as_deref(),
+        app.listener_state_mut().unwrap().success.as_deref(),
         Some("A(z) „web” listener lecserélve. Restart server for changes to take effect")
     );
     assert_eq!(server.calls_to("listener_list").len(), 2);
@@ -2327,22 +2336,24 @@ async fn test_listener_disable_reports_a_failed_reload() {
     app.connection_type = ConnectionType::Localhost;
     shift(&mut app, 'L').await;
     server.fail("listener_list", "gone");
-    app.listener_state.mode = crate::modals::listener::ListenerModalMode::Confirm;
-    app.listener_state.confirm_action = Some(crate::modals::listener::ListenerAction::Disable);
+    app.listener_state_mut().unwrap().mode = crate::modals::listener::ListenerModalMode::Confirm;
+    app.listener_state_mut().unwrap().confirm_action =
+        Some(crate::modals::listener::ListenerAction::Disable);
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(
         server.calls_to("listener_disable"),
         vec![json!({"id": "web"})]
     );
     assert!(
-        app.listener_state
+        app.listener_state_mut()
+            .unwrap()
             .error
             .as_deref()
             .is_some_and(|e| e.starts_with("„web”: Listener disabled.")
                 && e.contains("A lista újratöltése sikertelen")
                 && e.contains("gone")),
         "{:?}",
-        app.listener_state.error
+        app.listener_state_mut().unwrap().error
     );
 }
 
@@ -2402,18 +2413,20 @@ async fn test_api_key_revoke_reports_a_failed_list_reload() {
     );
     server.fail("admin_apikey_list", "list failed");
     let mut app = app_with_server(&server).await;
-    app.set_modal(Modal::ApiKey);
-    app.api_key_state.admin_key = Some("adm".to_string());
-    app.api_key_state.is_localhost = true;
-    app.api_key_state.set_keys(vec![ApiKeyInfo {
+    app.open_modal = Some(crate::app::OpenModal::ApiKey(
+        crate::modals::api_key::ApiKeyState::new(),
+    ));
+    app.api_key_state_mut().unwrap().admin_key = Some("adm".to_string());
+    app.api_key_state_mut().unwrap().is_localhost = true;
+    app.api_key_state_mut().unwrap().set_keys(vec![ApiKeyInfo {
         id: 7,
         name: "ci".to_string(),
         key_preview: "ib_abc...wxyz".to_string(),
         created_at: "2026-11-15T10:00:00Z".to_string(),
         enabled: true,
     }]);
-    app.api_key_state.mode = ApiKeyModalMode::Confirm;
-    app.api_key_state.confirm_action = Some(ConfirmAction::Revoke);
+    app.api_key_state_mut().unwrap().mode = ApiKeyModalMode::Confirm;
+    app.api_key_state_mut().unwrap().confirm_action = Some(ConfirmAction::Revoke);
 
     press(&mut app, KeyCode::Char('y')).await;
 
@@ -2422,7 +2435,12 @@ async fn test_api_key_revoke_reports_a_failed_list_reload() {
         vec![json!({"id": 7, "admin_key": "adm"})]
     );
     // The revoke happened; the stale list is not silently kept as current
-    let error = app.api_key_state.error.clone().unwrap_or_default();
+    let error = app
+        .api_key_state_mut()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
     assert!(error.contains("A(z) „ci” kulcs visszavonva"), "{}", error);
     assert!(error.contains("list failed"), "{}", error);
 }
@@ -2437,26 +2455,28 @@ async fn test_api_key_revoke_of_a_missing_key_says_so() {
         json!({"success": false, "id": 7, "error": "API key not found"}),
     );
     let mut app = app_with_server(&server).await;
-    app.set_modal(Modal::ApiKey);
-    app.api_key_state.admin_key = Some("adm".to_string());
-    app.api_key_state.is_localhost = true;
-    app.api_key_state.set_keys(vec![ApiKeyInfo {
+    app.open_modal = Some(crate::app::OpenModal::ApiKey(
+        crate::modals::api_key::ApiKeyState::new(),
+    ));
+    app.api_key_state_mut().unwrap().admin_key = Some("adm".to_string());
+    app.api_key_state_mut().unwrap().is_localhost = true;
+    app.api_key_state_mut().unwrap().set_keys(vec![ApiKeyInfo {
         id: 7,
         name: "ci".to_string(),
         key_preview: "***".to_string(),
         created_at: String::new(),
         enabled: true,
     }]);
-    app.api_key_state.mode = ApiKeyModalMode::Confirm;
-    app.api_key_state.confirm_action = Some(ConfirmAction::Revoke);
+    app.api_key_state_mut().unwrap().mode = ApiKeyModalMode::Confirm;
+    app.api_key_state_mut().unwrap().confirm_action = Some(ConfirmAction::Revoke);
 
     press(&mut app, KeyCode::Char('y')).await;
 
     assert_eq!(
-        app.api_key_state.error.as_deref(),
+        app.api_key_state_mut().unwrap().error.as_deref(),
         Some("A kulcs nem található")
     );
-    assert_eq!(app.api_key_state.mode, ApiKeyModalMode::List);
+    assert_eq!(app.api_key_state_mut().unwrap().mode, ApiKeyModalMode::List);
     assert!(server.calls_to("admin_apikey_list").is_empty());
 }
 
@@ -2606,14 +2626,16 @@ async fn test_api_key_name_is_edited_at_the_cursor() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.set_modal(Modal::ApiKey);
-    app.api_key_state.mode = ApiKeyModalMode::Create;
+    app.open_modal = Some(crate::app::OpenModal::ApiKey(
+        crate::modals::api_key::ApiKeyState::new(),
+    ));
+    app.api_key_state_mut().unwrap().mode = ApiKeyModalMode::Create;
 
     type_text(&mut app, "runner").await;
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "ci-").await;
 
-    assert_eq!(app.api_key_state.input.value(), "ci-runner");
+    assert_eq!(app.api_key_state_mut().unwrap().input.value(), "ci-runner");
 }
 
 /// The ACL principal value takes the readline keys; the rule follows it
@@ -2623,21 +2645,32 @@ async fn test_acl_principal_value_takes_readline_keys() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.set_modal(Modal::Acl);
-    app.acl_state.mode = AclModalMode::Edit;
-    app.acl_state.start_add_rule();
-    app.acl_state.edit_field = EditField::PrincipalValue;
-    assert_eq!(app.acl_state.principal_input.value(), "internal");
+    app.open_modal = Some(crate::app::OpenModal::Acl(
+        crate::modals::acl::AclState::new(),
+    ));
+    app.acl_state_mut().unwrap().mode = AclModalMode::Edit;
+    app.acl_state_mut().unwrap().start_add_rule();
+    app.acl_state_mut().unwrap().edit_field = EditField::PrincipalValue;
+    assert_eq!(
+        app.acl_state_mut().unwrap().principal_input.value(),
+        "internal"
+    );
 
     // Ctrl+U used to type a "u" after "internal"
     press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
     type_text(&mut app, "localhost").await;
 
-    assert_eq!(app.acl_state.current_rule.principal_value, "localhost");
+    assert_eq!(
+        app.acl_state_mut().unwrap().current_rule.principal_value,
+        "localhost"
+    );
     // A new rule starts from the default value again
-    app.acl_state.confirm_add_rule();
-    app.acl_state.start_add_rule();
-    assert_eq!(app.acl_state.principal_input.value(), "internal");
+    app.acl_state_mut().unwrap().confirm_add_rule();
+    app.acl_state_mut().unwrap().start_add_rule();
+    assert_eq!(
+        app.acl_state_mut().unwrap().principal_input.value(),
+        "internal"
+    );
 }
 
 /// The listener id is edited at the cursor
@@ -2647,15 +2680,20 @@ async fn test_listener_id_is_edited_at_the_cursor() {
 
     let server = two_collections();
     let mut app = app_with_server(&server).await;
-    app.set_modal(Modal::Listener);
-    app.listener_state.mode = ListenerModalMode::Add;
-    app.listener_state.add_field = AddField::Id;
+    app.open_modal = Some(crate::app::OpenModal::Listener(
+        crate::modals::listener::ListenerState::new(),
+    ));
+    app.listener_state_mut().unwrap().mode = ListenerModalMode::Add;
+    app.listener_state_mut().unwrap().add_field = AddField::Id;
 
     type_text(&mut app, "web").await;
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "public-").await;
 
-    assert_eq!(app.listener_state.add_id.value(), "public-web");
+    assert_eq!(
+        app.listener_state_mut().unwrap().add_id.value(),
+        "public-web"
+    );
 }
 
 /// The query vector is edited at the cursor: a long vector no longer has to
@@ -2888,4 +2926,30 @@ async fn test_paste_into_a_number_field() {
         press(&mut app, KeyCode::Char('9')).await;
     }
     assert_eq!(app.rag_state.import_chunk_size, usize::MAX);
+}
+
+/// The API key, ACL and listener modals own their state: closing one drops
+/// it, so a reopened modal starts from a fresh state (no stale error)
+#[tokio::test]
+async fn test_admin_modals_state_lives_with_the_open_modal() {
+    let server = two_collections();
+    server.fail("acl_list", "acl failed");
+    server.fail("listener_list", "listener failed");
+    let mut app = app_with_server(&server).await;
+
+    crate::handlers::global::run_action(&mut app, crate::keymap::Action::AclRules).await;
+    assert!(app.acl_state().unwrap().error.is_some());
+    app.close_modal();
+    assert!(app.acl_state().is_none());
+
+    crate::handlers::global::run_action(&mut app, crate::keymap::Action::Listeners).await;
+    assert!(app.listener_state().unwrap().error.is_some());
+    assert!(app.acl_state().is_none());
+    app.close_modal();
+    assert!(app.listener_state().is_none());
+
+    crate::handlers::global::run_action(&mut app, crate::keymap::Action::ApiKeys).await;
+    assert!(app.api_key_state().unwrap().error.is_none());
+    app.close_modal();
+    assert!(app.api_key_state().is_none());
 }
