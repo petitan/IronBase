@@ -254,6 +254,10 @@ theme = "Claude"
 language = "hu"
 ```
 
+Mind a négy téma minden szövegszíne legalább WCAG AA kontrasztú (4,5:1) a háttérhez képest. Ha a `NO_COLOR`
+környezeti változó be van állítva (bármilyen nem üres értékre, lásd https://no-color.org), a TUI színek nélkül
+rajzol; a kijelölt sor `▶` jelet, a kiválasztott gomb vagy lehetőség `[zárójelet]` kap.
+
 ## Naplózás
 
 A TUI csak fájlba naplóz (a terminálra soha): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) vagy `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). A `--log-file <path>` felülírja a helyet.

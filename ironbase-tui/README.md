@@ -254,6 +254,10 @@ theme = "Claude"
 language = "en"
 ```
 
+All four themes keep every text color at WCAG AA contrast (4.5:1) against their background. With the
+`NO_COLOR` environment variable set (to any non-empty value, see https://no-color.org) the TUI draws without
+colors; the selected row keeps its `▶` mark and the chosen button or option its `[brackets]`.
+
 ## Logging
 
 The TUI logs to a file only (never to the terminal): `~/.local/state/ironbase-tui/tuti-tui.log` (Linux), `~/Library/Application Support/ironbase-tui/tuti-tui.log` (macOS) or `%LOCALAPPDATA%\ironbase-tui\tuti-tui.log` (Windows). `--log-file <path>` overrides the location.

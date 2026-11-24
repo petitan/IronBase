@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::i18n::t;
 use crate::state::Modal;
 use crate::theme::Theme;
+use crate::widgets::choice;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -234,9 +235,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme
 
     let buttons = Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!(" {} ", state.cancel_text), cancel_style),
+        Span::styled(
+            choice(&state.cancel_text, state.selected == ConfirmOption::Cancel),
+            cancel_style,
+        ),
         Span::raw("    "),
-        Span::styled(format!(" {} ", state.confirm_text), confirm_style),
+        Span::styled(
+            choice(
+                &state.confirm_text,
+                state.selected == ConfirmOption::Confirm,
+            ),
+            confirm_style,
+        ),
         Span::raw("  "),
     ]);
 

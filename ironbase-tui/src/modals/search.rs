@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::app::{App, SearchMode};
 use crate::i18n::t;
 use crate::theme::Theme;
+use crate::widgets::marked;
 use ratatui::prelude::*;
 use ratatui::widgets::{List, ListItem, Paragraph};
 
@@ -124,12 +125,9 @@ fn render_collection_results(frame: &mut Frame, area: Rect, app: &App, theme: &T
                 Style::default().fg(theme.fg)
             };
 
-            let text = format!(
-                "  {}",
-                t().collection_with_count(&result.name, result.doc_count)
-            );
+            let text = t().collection_with_count(&result.name, result.doc_count);
 
-            ListItem::new(text).style(style)
+            ListItem::new(marked(is_selected, text)).style(style)
         })
         .collect();
 

@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::app::{DatabaseMode, DatabaseState};
 use crate::i18n::t;
 use crate::theme::Theme;
+use crate::widgets::choice;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -51,9 +52,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
 
     let mode_line = Line::from(vec![
         Span::raw(format!(" {}: ", t().label_mode())),
-        Span::styled(format!(" {} ", t().mode_open()), open_style),
+        Span::styled(
+            choice(t().mode_open(), state.mode == DatabaseMode::Open),
+            open_style,
+        ),
         Span::raw("  "),
-        Span::styled(format!(" {} ", t().mode_create()), create_style),
+        Span::styled(
+            choice(t().mode_create(), state.mode == DatabaseMode::Create),
+            create_style,
+        ),
     ]);
     frame.render_widget(Paragraph::new(mode_line), chunks[1]);
 

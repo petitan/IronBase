@@ -4,6 +4,7 @@ use super::render_modal_frame;
 use crate::i18n::t;
 use crate::state::index::{IndexState, IndexStatistics};
 use crate::theme::Theme;
+use crate::widgets::{marked, selection_mark};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
@@ -112,11 +113,11 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
             };
 
             // Format: "  [B+] index_name field_detail ●  "
-            let text = format!("  {} {}{}{}", kind_label, idx, detail, staleness_icon);
+            let text = format!("{} {}{}{}", kind_label, idx, detail, staleness_icon);
 
             // Color the staleness icon
             if is_selected {
-                ListItem::new(text).style(style)
+                ListItem::new(marked(is_selected, text)).style(style)
             } else {
                 let staleness_color = match stats.map(|s| s.staleness_hint()) {
                     Some("green") => theme.accent,
@@ -126,7 +127,8 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
                 };
 
                 // Create spans for proper coloring
-                let base_text = format!("  {} {}{}", kind_label, idx, detail);
+                let base_text =
+                    format!("{}{} {}{}", selection_mark(false), kind_label, idx, detail);
                 ListItem::new(Line::from(vec![
                     Span::styled(base_text, style),
                     Span::styled(staleness_icon, Style::default().fg(staleness_color)),

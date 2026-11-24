@@ -4,6 +4,7 @@ use crate::app::App;
 use crate::base64_detect::sanitize_base64_values;
 use crate::i18n::t;
 use crate::theme::Theme;
+use crate::widgets::selection_mark;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::collections::HashSet;
@@ -106,7 +107,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
                 .map(format_value)
                 .unwrap_or_else(|| "?".to_string());
 
-            let mut cells = vec![Cell::from(truncate_str(&id_val, id_width))];
+            // The selected row's mark in front of its _id: the selection shows
+            // without color too
+            let mut cells = vec![Cell::from(format!(
+                "{}{}",
+                selection_mark(idx == local_selected),
+                truncate_str(&id_val, id_width.saturating_sub(2))
+            ))];
 
             // Data columns
             for col in &columns {

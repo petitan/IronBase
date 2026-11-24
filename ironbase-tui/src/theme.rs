@@ -120,6 +120,38 @@ impl Theme {
         }
     }
 
+    /// No colors at all: every color is the terminal's own (`Color::Reset`),
+    /// for `NO_COLOR` (https://no-color.org); the selection still shows
+    /// through its mark (`widgets::selection_mark`, `widgets::choice`)
+    pub fn monochrome() -> Self {
+        Self {
+            bg: Color::Reset,
+            fg: Color::Reset,
+            accent: Color::Reset,
+            secondary: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            muted: Color::Reset,
+            header_bg: Color::Reset,
+        }
+    }
+
+    /// The theme to draw with: `name`, or no colors when `NO_COLOR` is set
+    /// to a non-empty value
+    pub fn for_terminal(name: ThemeName) -> Self {
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        Self::resolve(name, no_color)
+    }
+
+    fn resolve(name: ThemeName, no_color: bool) -> Self {
+        if no_color {
+            Self::monochrome()
+        } else {
+            Self::from_name(name)
+        }
+    }
+
     /// Get theme by name
     pub fn from_name(name: ThemeName) -> Self {
         match name {
@@ -194,6 +226,19 @@ mod tests {
                 "{name:?} header"
             );
         }
+    }
+
+    /// `NO_COLOR` draws without colors, whatever the theme
+    #[test]
+    fn test_no_color_draws_without_colors() {
+        let theme = Theme::resolve(ThemeName::Ocean, true);
+        for color in [theme.bg, theme.fg, theme.accent, theme.muted, theme.error] {
+            assert_eq!(color, Color::Reset);
+        }
+        assert_eq!(
+            Theme::resolve(ThemeName::Ocean, false).bg,
+            Theme::ocean().bg
+        );
     }
 
     #[test]
