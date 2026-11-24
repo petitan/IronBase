@@ -1,48 +1,57 @@
 //! Key handlers: global
 
+use super::database::handle_database_open;
 use super::fulltext::handle_fulltext_open;
 use super::rag::handle_rag_open;
 use super::server_info::handle_server_info_open;
 use super::update::handle_update_open;
 use super::vector::handle_vector_open;
-use crate::app::{App, Modal, Pane};
+use crate::app::{App, Modal};
 use crate::i18n::{t, Op};
+use crate::keymap::{self, Action};
 use crate::modals;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-/// Handle global keys with async support
+/// Handle the main screen's keys: the key map (`crate::keymap::MAIN`) names
+/// the action, `run_action` does it
 pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match (key, modifiers) {
-        // Quit
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
+    let ctx = keymap::Context {
+        pane: app.active_pane,
+        has_error: app.error_message.is_some(),
+        has_filter: app.active_filter.is_some(),
+        has_matches: !app.search.doc_matches.is_empty(),
+    };
+    if let Some(action) = keymap::resolve(key, modifiers, &ctx) {
+        run_action(app, action).await;
+    }
+}
+
+/// Do an action of the main screen or the actions menu
+pub(crate) async fn run_action(app: &mut App, action: Action) {
+    match action {
+        Action::Quit => {
             app.should_quit = true;
         }
 
         // Pane navigation
-        (KeyCode::Tab, KeyModifiers::NONE) => app.next_pane(),
-        (KeyCode::BackTab, _) => app.prev_pane(),
+        Action::NextPane => app.next_pane(),
+        Action::PrevPane => app.prev_pane(),
 
         // List navigation - Arrow keys
-        (KeyCode::Up, _) => app.select_up_async().await,
-        (KeyCode::Down, _) => app.select_down_async().await,
-        (KeyCode::PageUp, _) => app.page_up_async().await,
-        (KeyCode::PageDown, _) => app.page_down_async().await,
-        (KeyCode::Home, _) => app.go_to_start_async().await,
-        (KeyCode::End, _) => app.go_to_end_async().await,
-
-        // List navigation - Vim keys
-        (KeyCode::Char('k'), _) => app.select_up_async().await,
-        (KeyCode::Char('j'), _) => app.select_down_async().await,
-        (KeyCode::Char('g'), _) => app.go_to_start_async().await,
-        (KeyCode::Char('G'), _) => app.go_to_end_async().await,
+        Action::Up => app.select_up_async().await,
+        Action::Down => app.select_down_async().await,
+        Action::PageUp => app.page_up_async().await,
+        Action::PageDown => app.page_down_async().await,
+        Action::GoToStart => app.go_to_start_async().await,
+        Action::GoToEnd => app.go_to_end_async().await,
 
         // Modals
-        (KeyCode::Char('/'), _) => app.open_search(),
-        (KeyCode::Char('a'), _) => app.open_actions(),
-        (KeyCode::Char('?'), _) => app.open_help(),
-        (KeyCode::Char('I'), _) => handle_server_info_open(app).await,
-        (KeyCode::Char('U'), _) => handle_update_open(app).await,
-        (KeyCode::Char('R'), _) => {
+        Action::OpenSearch => app.open_search(),
+        Action::OpenActions => app.open_actions(),
+        Action::OpenHelp => app.open_help(),
+        Action::ServerInfo => handle_server_info_open(app).await,
+        Action::UpdateCheck => handle_update_open(app).await,
+        Action::RefreshCollections => {
             // Refresh collections (Shift+R)
             app.set_status(t().refreshing());
             match app.refresh_collections_async().await {
@@ -50,38 +59,34 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                 Err(e) => app.set_error(t().failed(Op::Refresh, &e)),
             }
         }
-        (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
-        (KeyCode::Char('F'), KeyModifiers::SHIFT) => handle_fulltext_open(app).await,
-        (KeyCode::Char('V'), KeyModifiers::SHIFT) => handle_vector_open(app).await,
-        (KeyCode::Char('E'), KeyModifiers::SHIFT) => handle_rag_open(app).await,
+        Action::Filter => app.open_filter_modal_async().await,
+        Action::Fulltext => handle_fulltext_open(app).await,
+        Action::VectorSearch => handle_vector_open(app).await,
+        Action::Rag => handle_rag_open(app).await,
 
         // Error detail modal (if error present, 'e' opens error details)
-        (KeyCode::Char('e'), _) if app.error_message.is_some() => {
+        Action::ErrorDetails => {
             app.error_scroll = 0;
             app.modal = Some(Modal::ErrorDetail);
         }
 
         // Edit (Detail pane, Documents pane) - only if no error message
-        (KeyCode::Char('e'), _)
-            if app.active_pane == Pane::Detail || app.active_pane == Pane::Documents =>
-        {
+        Action::EditDocument => {
             app.open_edit();
         }
 
         // Delete document (Detail pane, Documents pane)
-        (KeyCode::Char('d'), _)
-            if app.active_pane == Pane::Detail || app.active_pane == Pane::Documents =>
-        {
+        Action::DeleteDocument => {
             app.open_delete_confirm();
         }
 
         // Delete collection (Collections pane - Shift+D)
-        (KeyCode::Char('D'), KeyModifiers::SHIFT) if app.active_pane == Pane::Collections => {
+        Action::DeleteCollection => {
             app.open_delete_collection_confirm();
         }
 
         // Set ACL/Permission for collection (Collections pane - Shift+P)
-        (KeyCode::Char('P'), KeyModifiers::SHIFT) if app.active_pane == Pane::Collections => {
+        Action::EditAcl => {
             if !app.connection_type.is_localhost() {
                 app.set_error(t().acl_needs_localhost());
             } else {
@@ -133,36 +138,28 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         }
 
         // Insert (Collections, Documents pane)
-        (KeyCode::Char('i'), _)
-            if app.active_pane == Pane::Collections || app.active_pane == Pane::Documents =>
-        {
+        Action::InsertDocument => {
             app.open_insert();
         }
 
         // Copy to clipboard (Detail or Documents pane)
-        (KeyCode::Char('y'), _)
-            if app.active_pane == Pane::Detail || app.active_pane == Pane::Documents =>
-        {
+        Action::CopyDocument => {
             app.copy_document_to_clipboard();
         }
 
         // Search navigation (Detail pane - n/N for next/prev match)
-        (KeyCode::Char('n'), _)
-            if app.active_pane == Pane::Detail && !app.search.doc_matches.is_empty() =>
-        {
+        Action::NextMatch => {
             app.goto_next_match();
         }
-        (KeyCode::Char('N'), KeyModifiers::SHIFT)
-            if app.active_pane == Pane::Detail && !app.search.doc_matches.is_empty() =>
-        {
+        Action::PrevMatch => {
             app.goto_prev_match();
         }
 
         // Theme
-        (KeyCode::Char('t'), _) => app.next_theme(),
+        Action::NextTheme => app.next_theme(),
 
         // API Key management (Shift+K)
-        (KeyCode::Char('K'), KeyModifiers::SHIFT) => {
+        Action::ApiKeys => {
             app.api_key_state = modals::api_key::ApiKeyState::new();
             app.api_key_state.is_localhost = app.connection_type.is_localhost();
             app.modal = Some(Modal::ApiKey);
@@ -187,7 +184,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         }
 
         // ACL management (Shift+A)
-        (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
+        Action::AclRules => {
             app.acl_state = modals::acl::AclState::new();
             app.acl_state.is_localhost = app.connection_type.is_localhost();
             app.modal = Some(Modal::Acl);
@@ -208,7 +205,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         }
 
         // Listener management (Shift+L)
-        (KeyCode::Char('L'), KeyModifiers::SHIFT) => {
+        Action::Listeners => {
             app.listener_state = modals::listener::ListenerState::new();
             app.listener_state.is_localhost = app.connection_type.is_localhost();
             app.modal = Some(Modal::Listener);
@@ -232,7 +229,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         // Refresh (r) - reload collections and documents
         // BUG FIX: refresh_collections_async already calls refresh_documents_inner,
         // so we don't need to call refresh_documents_async again
-        (KeyCode::Char('r'), _) => {
+        Action::Refresh => {
             app.set_status(t().refreshing());
             match app.refresh_collections_async().await {
                 Ok(_) => app.set_status(t().refreshed()),
@@ -241,7 +238,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         }
 
         // Clear filter (Escape in Documents pane when filter is active)
-        (KeyCode::Esc, _) if app.active_filter.is_some() => {
+        Action::ClearFilter => {
             app.active_filter = None;
             app.active_sort = None;
             app.doc_scroll_offset = 0;
@@ -252,6 +249,19 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
             }
         }
 
-        _ => {}
+        // The actions menu's own actions
+        Action::NewCollection => app.open_new_collection(),
+        Action::Indexes => {
+            app.open_index_modal();
+            app.load_indexes_async().await;
+            app.load_index_statistics_async().await;
+        }
+        Action::Query => app.open_query_modal(),
+        Action::Export => app.open_export_modal(),
+        Action::Scripts => {
+            app.open_script_modal();
+            app.load_scripts_async().await;
+        }
+        Action::OpenDatabase => handle_database_open(app),
     }
 }

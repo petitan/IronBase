@@ -1,6 +1,7 @@
 //! English texts
 
 use super::{Messages, Op, ToolCategory};
+use crate::keymap::{Action, Section};
 use crate::state::filter::{FilterOperator, SortDirection};
 use crate::state::query::QueryTemplate;
 use std::fmt::Display;
@@ -1694,5 +1695,66 @@ impl Messages for En {
         documents: &dyn Display,
     ) -> String {
         format!("{collection}: {chunks} chunks, {documents} source docs")
+    }
+
+    fn action_label(&self, action: Action) -> &'static str {
+        match action {
+            Action::Quit => "Quit",
+            Action::NextPane => "Next pane",
+            Action::PrevPane => "Previous pane",
+            Action::Up => "Up in the list",
+            Action::Down => "Down in the list",
+            Action::PageUp => "Previous page",
+            Action::PageDown => "Next page",
+            Action::GoToStart => "To the start of the list",
+            Action::GoToEnd => "To the end of the list",
+            Action::ClearFilter => "Clear the filter (if any)",
+            Action::OpenSearch => "Search",
+            Action::OpenActions => "Actions menu",
+            Action::OpenHelp => "Help",
+            Action::ServerInfo => "Server info",
+            Action::UpdateCheck => "Check for updates",
+            Action::Rag => "RAG & embedding",
+            Action::Filter => "Visual filter",
+            Action::Fulltext => "Full-text search",
+            Action::VectorSearch => "Vector search and indexes",
+            Action::AclRules => "ACL rules",
+            Action::Listeners => "Listeners",
+            Action::ApiKeys => "API keys",
+            Action::ErrorDetails => "Error details (if there is an error)",
+            Action::RefreshCollections => "Refresh the collection list",
+            Action::Refresh => "Reload the data",
+            Action::NextTheme => "Next theme",
+            Action::InsertDocument => "Insert a document",
+            Action::EditDocument => "Edit the document",
+            Action::DeleteDocument => "Delete the document",
+            Action::CopyDocument => "Copy the document to the clipboard",
+            Action::NextMatch => "Next match (Details)",
+            Action::PrevMatch => "Previous match (Details)",
+            Action::DeleteCollection => "Drop the collection",
+            Action::EditAcl => "Edit the collection's ACL",
+            Action::NewCollection => "Create a collection",
+            Action::Indexes => "Index management",
+            Action::Query => "Query (JSON)",
+            Action::Export => "Export the collection",
+            Action::Scripts => "IronRhai scripts",
+            Action::OpenDatabase => "Open/create a database",
+        }
+    }
+    fn section_title(&self, section: Section) -> &'static str {
+        match section {
+            Section::Navigation => "Navigation",
+            Section::General => "Functions",
+            Section::Documents => "Collections and documents",
+        }
+    }
+    fn help_title(&self) -> &'static str {
+        "Help [j/k: scroll]"
+    }
+    fn actions_title(&self) -> &'static str {
+        "Actions"
+    }
+    fn help_menu_note(&self) -> &'static str {
+        "The actions menu (a) and each window show their own keys in their bottom line."
     }
 }

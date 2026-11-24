@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: one key map for the main screen, the help and the actions menu (tuti-tui 0.3.493, mcp-server 1.0.681 — version only, for the release tag)
+
+The main screen's keys were a hand-written `match` in the key handler, the help a separate hand-written list and the
+actions menu a third one; they had drifted (the help listed `Enter` as „select”, which the main screen never handled,
+and was Hungarian without accents). Now `crate::keymap` holds one table per place — `MAIN` for the main screen,
+`ACTIONS_MENU` for the menu — with the action and its help section; the key handler resolves a key through it, the
+help and the actions menu are generated from it, and the action texts come from the language layer.
+
+- **A capital letter works with CapsLock:** a letter is matched by the character it produces, not by the Shift flag
+  (`F`, `V`, `E`, `D`, `P`, `K`, `A`, `L`, `N` needed the Shift flag before, and did nothing with CapsLock on).
+- A key shared by two actions is tried in order, the first one that applies wins (`e`: the error details while
+  there is an error, else edit), so the behavior is unchanged; a test checks that no binding hides another.
+- The actions menu and the main screen run the same `run_action`, so a menu entry does what its key does.
+- The help lists the main screen's keys by section and points to each window's own key line; the windows' keys
+  stay in their bottom line (the help's copies of the API key window's keys are gone).
+- Tests: CapsLock letters, the fall-through of shared keys, Ctrl+C, unique menu keys, every binding in the help,
+  every action translated; the existing handler tests pass unchanged.
+
 ### Changed — Tuti TUI: the key handlers' messages in both languages (tuti-tui 0.3.492, mcp-server 1.0.680 — version only, for the release tag)
 
 The key handlers set their status, error and success messages from fixed strings that mixed English („Refresh

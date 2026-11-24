@@ -1,204 +1,77 @@
-//! Help modal - keyboard shortcuts reference
+//! Help modal: the main screen's keys, generated from the key map
+//! (`crate::keymap::MAIN`), so the help cannot drift from what the keys do
 
 use super::render_modal_frame;
+use crate::i18n::t;
+use crate::keymap::{self, Section, MAIN};
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-/// Total number of help lines (for scroll bounds)
-pub const HELP_LINES: usize = 53;
+const SECTIONS: [Section; 3] = [Section::Navigation, Section::General, Section::Documents];
+
+/// The help's lines: each section's title and its bindings, then a note
+/// on the windows' own keys
+fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for section in SECTIONS {
+        lines.push(Line::from(Span::styled(
+            t().section_title(section),
+            Style::default().fg(theme.accent).bold(),
+        )));
+        lines.push(Line::from(""));
+        for binding in MAIN.iter().filter(|binding| binding.section == section) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<14}", keymap::keys_label(binding.keys)),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::raw(t().action_label(binding.action)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        t().help_menu_note(),
+        Style::default().fg(theme.muted),
+    )));
+    lines
+}
+
+/// The number of help lines (for the scroll bounds)
+pub fn help_line_count() -> usize {
+    help_lines(&Theme::from_name(crate::theme::ThemeName::Claude)).len()
+}
 
 /// Render the help modal
 pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Sugo [j/k gorgetes]", theme, 60, 70);
-
-    let help_text = vec![
-        Line::from(Span::styled(
-            "Navigacio",
-            Style::default().fg(theme.accent).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Tab       ", Style::default().fg(theme.accent)),
-            Span::raw("Kovetkezo panel"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+Tab ", Style::default().fg(theme.accent)),
-            Span::raw("Elozo panel"),
-        ]),
-        Line::from(vec![
-            Span::styled("↑/↓ j/k   ", Style::default().fg(theme.accent)),
-            Span::raw("Listaban mozgas"),
-        ]),
-        Line::from(vec![
-            Span::styled("PgUp/PgDn ", Style::default().fg(theme.accent)),
-            Span::raw("Lapozas"),
-        ]),
-        Line::from(vec![
-            Span::styled("Home/g    ", Style::default().fg(theme.accent)),
-            Span::raw("Lista elejere"),
-        ]),
-        Line::from(vec![
-            Span::styled("End/G     ", Style::default().fg(theme.accent)),
-            Span::raw("Lista vegere"),
-        ]),
-        Line::from(vec![
-            Span::styled("Enter     ", Style::default().fg(theme.accent)),
-            Span::raw("Kivalaszt"),
-        ]),
-        Line::from(vec![
-            Span::styled("Esc       ", Style::default().fg(theme.accent)),
-            Span::raw("Vissza / Bezar"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Funkciok",
-            Style::default().fg(theme.accent).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("/         ", Style::default().fg(theme.accent)),
-            Span::raw("Kereses megnyitasa"),
-        ]),
-        Line::from(vec![
-            Span::styled("a         ", Style::default().fg(theme.accent)),
-            Span::raw("Akciok menu"),
-        ]),
-        Line::from(vec![
-            Span::styled("?         ", Style::default().fg(theme.accent)),
-            Span::raw("Sugo be/ki"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+I   ", Style::default().fg(theme.accent)),
-            Span::raw("Szerver informaciok"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+U   ", Style::default().fg(theme.accent)),
-            Span::raw("Frissites ellenorzes"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+E   ", Style::default().fg(theme.accent)),
-            Span::raw("RAG & Embedding"),
-        ]),
-        Line::from(vec![
-            Span::styled("f         ", Style::default().fg(theme.accent)),
-            Span::raw("Vizualis szuro"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+F   ", Style::default().fg(theme.accent)),
-            Span::raw("Fulltext kereses"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+V   ", Style::default().fg(theme.accent)),
-            Span::raw("Vektor kereses / indexek"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+A   ", Style::default().fg(theme.accent)),
-            Span::raw("ACL szabalyok"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+L   ", Style::default().fg(theme.accent)),
-            Span::raw("Listenerek"),
-        ]),
-        Line::from(vec![
-            Span::styled("e         ", Style::default().fg(theme.accent)),
-            Span::raw("Hiba reszletei (ha van hiba)"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+R   ", Style::default().fg(theme.accent)),
-            Span::raw("Kollekcio lista frissites"),
-        ]),
-        Line::from(vec![
-            Span::styled("r         ", Style::default().fg(theme.accent)),
-            Span::raw("Adatok ujratoltese"),
-        ]),
-        Line::from(vec![
-            Span::styled("t         ", Style::default().fg(theme.accent)),
-            Span::raw("Tema valtas"),
-        ]),
-        Line::from(vec![
-            Span::styled("q         ", Style::default().fg(theme.accent)),
-            Span::raw("Kilepes"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Kollekciok panel",
-            Style::default().fg(theme.accent).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("i         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum beszurasa"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+D   ", Style::default().fg(theme.accent)),
-            Span::raw("Kollekcio torlese"),
-        ]),
-        Line::from(vec![
-            Span::styled("Shift+P   ", Style::default().fg(theme.accent)),
-            Span::raw("Kollekcio ACL szerkesztese"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Dokumentumok / Detail panel",
-            Style::default().fg(theme.accent).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("e         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum szerkesztese"),
-        ]),
-        Line::from(vec![
-            Span::styled("d         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum torlese"),
-        ]),
-        Line::from(vec![
-            Span::styled("y         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum masolasa vagolapra"),
-        ]),
-        Line::from(vec![
-            Span::styled("i         ", Style::default().fg(theme.accent)),
-            Span::raw("Dokumentum beszurasa (Dokumentumok)"),
-        ]),
-        Line::from(vec![
-            Span::styled("n/N       ", Style::default().fg(theme.accent)),
-            Span::raw("Kovetkezo/elozo talalat (Detail)"),
-        ]),
-        Line::from(vec![
-            Span::styled("a, x      ", Style::default().fg(theme.accent)),
-            Span::raw("Index kezeles (akciok menu)"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "API Key kezeles",
-            Style::default().fg(theme.accent).bold(),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Shift+K   ", Style::default().fg(theme.accent)),
-            Span::raw("API Key modal megnyitasa"),
-        ]),
-        Line::from(vec![
-            Span::styled("  n       ", Style::default().fg(theme.accent)),
-            Span::raw("Uj kulcs letrehozasa"),
-        ]),
-        Line::from(vec![
-            Span::styled("  r       ", Style::default().fg(theme.accent)),
-            Span::raw("Kulcs visszavonasa"),
-        ]),
-        Line::from(vec![
-            Span::styled("  d       ", Style::default().fg(theme.accent)),
-            Span::raw("Kulcs torlese"),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::raw(
-            "Uj kulcs: <config_dir>/ironbase-tui/new_key.txt",
-        )]),
-    ];
-
-    let help = Paragraph::new(help_text)
+    let inner = render_modal_frame(frame, area, t().help_title(), theme, 60, 70);
+    let help = Paragraph::new(help_lines(theme))
         .style(Style::default().fg(theme.fg))
+        .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((scroll as u16, 0));
-
     frame.render_widget(help, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every binding of the main screen is in the help, in its section
+    #[test]
+    fn test_help_lists_every_main_binding() {
+        let lines: Vec<String> = help_lines(&Theme::from_name(crate::theme::ThemeName::Claude))
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        for binding in MAIN {
+            let label = t().action_label(binding.action);
+            assert!(
+                lines.iter().any(|line| line.contains(label)
+                    && line.starts_with(&keymap::keys_label(binding.keys))),
+                "{label}"
+            );
+        }
+        assert_eq!(help_line_count(), lines.len());
+    }
 }
