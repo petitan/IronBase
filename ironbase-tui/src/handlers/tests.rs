@@ -879,7 +879,7 @@ async fn test_shift_p_refuses_uneditable_rule() {
     assert_eq!(app.modal, None);
     let error = app.error_message.clone().unwrap_or_default();
     assert!(
-        error.contains("contains rules this editor cannot edit yet"),
+        error.contains("amelyet ez a szerkesztő még nem tud szerkeszteni"),
         "{}",
         error
     );

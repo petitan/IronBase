@@ -1,6 +1,7 @@
 //! ACL (Access Control List) management modal
 
 use super::render_modal_frame;
+use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::{Input, InputOutcome, TextInput};
 use ironbase_mcp_types::responses::{
@@ -79,11 +80,7 @@ impl CollectionAclInfo {
         if self.uneditable.is_empty() {
             return None;
         }
-        Some(format!(
-            "ACL for '{}' contains rules this editor cannot edit yet: {}",
-            self.collection,
-            self.uneditable.join("; ")
-        ))
+        Some(t().acl_uneditable(&self.collection, &self.uneditable.join("; ")))
     }
 }
 
@@ -503,11 +500,11 @@ impl AclState {
     /// Confirm add rule to list
     pub fn confirm_add_rule(&mut self) {
         if self.current_rule.principal_value.is_empty() {
-            self.error = Some("Principal value cannot be empty".to_string());
+            self.error = Some(t().principal_value_empty().to_string());
             return;
         }
         if !self.current_rule.read && !self.current_rule.write && !self.current_rule.admin {
-            self.error = Some("Select at least one permission".to_string());
+            self.error = Some(t().select_a_permission().to_string());
             return;
         }
         self.edit_rules.push(self.current_rule.clone());
@@ -578,7 +575,7 @@ impl AclState {
     /// Start save confirmation
     pub fn start_save(&mut self) {
         if self.edit_rules.is_empty() {
-            self.error = Some("Add at least one rule".to_string());
+            self.error = Some(t().add_a_rule().to_string());
             return;
         }
         self.mode = AclModalMode::ConfirmSave;
@@ -637,9 +634,9 @@ fn parse_permissions(s: &str) -> (bool, bool, bool) {
 pub fn render(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme) {
     let title = match state.mode {
         AclModalMode::Edit | AclModalMode::ConfirmSave => {
-            format!("ACL Editor: {}", state.edit_collection)
+            t().acl_editor_title(&state.edit_collection)
         }
-        _ => "ACL Rules".to_string(),
+        _ => t().acl_rules_title().to_string(),
     };
 
     let (width, height) = match state.mode {
@@ -669,23 +666,23 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &AclState, theme: &The
     // Help text
     let mut help_spans = vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Nav  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" View  "),
+        Span::raw(format!(" {}  ", t().key_view())),
     ];
 
     if state.is_localhost {
         help_spans.extend([
             Span::styled("[e]", Style::default().fg(theme.accent)),
-            Span::raw(" Edit  "),
+            Span::raw(format!(" {}  ", t().key_edit())),
             Span::styled("[d]", Style::default().fg(theme.accent)),
-            Span::raw(" Delete  "),
+            Span::raw(format!(" {}  ", t().cmd_delete())),
         ]);
     }
 
     help_spans.extend([
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(format!(" {}", t().key_close())),
     ]);
 
     let help = Paragraph::new(Line::from(help_spans)).style(Style::default().fg(theme.muted));
@@ -700,7 +697,7 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &AclState, theme: &The
 
 fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme) {
     let block = Block::default()
-        .title(" Collections ")
+        .title(format!(" {} ", t().label_collections()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
@@ -709,14 +706,13 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
     frame.render_widget(block, area);
 
     if state.loading {
-        let loading = Paragraph::new("Loading...").style(Style::default().fg(theme.muted));
+        let loading = Paragraph::new(t().loading()).style(Style::default().fg(theme.muted));
         frame.render_widget(loading, inner);
         return;
     }
 
     if state.acls.is_empty() {
-        let empty = Paragraph::new("No ACL rules. Press [a] on a collection to add ACL.")
-            .style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_acl_rules()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -726,13 +722,16 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            format!("{:<24}", "Collection"),
+            format!("{:<24}", t().label_collection()),
             Style::default().fg(theme.muted),
         ),
         Span::raw("  "),
-        Span::styled(format!("{:<12}", "Rules"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<12}", t().label_rules()),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
-        Span::styled("Type", Style::default().fg(theme.muted)),
+        Span::styled(t().label_type(), Style::default().fg(theme.muted)),
     ]));
     frame.render_widget(header, header_chunks[0]);
 
@@ -743,7 +742,11 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
         .enumerate()
         .map(|(i, acl)| {
             let is_selected = i == state.selected;
-            let type_str = if acl.is_builtin { "builtin" } else { "custom" };
+            let type_str = if acl.is_builtin {
+                t().acl_builtin()
+            } else {
+                t().acl_custom()
+            };
             let type_color = if acl.is_builtin {
                 theme.muted
             } else {
@@ -753,7 +756,7 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
             let line = Line::from(vec![
                 Span::raw(format!("{:<24}", truncate(&acl.collection, 24))),
                 Span::raw("  "),
-                Span::raw(format!("{:<12}", format!("{} rules", acl.rules.len()))),
+                Span::raw(format!("{:<12}", t().rule_count(acl.rules.len()))),
                 Span::raw("  "),
                 Span::styled(type_str, Style::default().fg(type_color)),
             ]);
@@ -788,9 +791,9 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Nav  "),
+        Span::raw(format!(" {}  ", t().key_navigate())),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Back"),
+        Span::raw(format!(" {}", t().key_back())),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -806,7 +809,7 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
     frame.render_widget(block, chunks[1]);
 
     if acl.rules.is_empty() {
-        let empty = Paragraph::new("No rules defined").style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_rules_defined()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
     } else {
         // Header
@@ -815,11 +818,11 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
 
         let header = Paragraph::new(Line::from(vec![
             Span::styled(
-                format!("{:<28}", "Principal"),
+                format!("{:<28}", t().label_principal()),
                 Style::default().fg(theme.muted),
             ),
             Span::raw("  "),
-            Span::styled("Permissions", Style::default().fg(theme.muted)),
+            Span::styled(t().label_permissions(), Style::default().fg(theme.muted)),
         ]));
         frame.render_widget(header, header_chunks[0]);
 
@@ -867,26 +870,26 @@ fn render_edit_mode(frame: &mut Frame, area: Rect, state: &AclState, theme: &The
     let help_text = if state.is_adding_rule {
         Line::from(vec![
             Span::styled("[Tab]", Style::default().fg(theme.accent)),
-            Span::raw(" Next  "),
+            Span::raw(format!(" {}  ", t().key_next())),
             Span::styled("[Space]", Style::default().fg(theme.accent)),
-            Span::raw(" Toggle  "),
+            Span::raw(format!(" {}  ", t().key_toggle())),
             Span::styled("[Enter]", Style::default().fg(theme.accent)),
-            Span::raw(" Add  "),
+            Span::raw(format!(" {}  ", t().key_add())),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::raw(" Cancel"),
+            Span::raw(format!(" {}", t().key_cancel())),
         ])
     } else {
         Line::from(vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
-            Span::raw(" Nav  "),
+            Span::raw(format!(" {}  ", t().key_navigate())),
             Span::styled("[n]", Style::default().fg(theme.accent)),
-            Span::raw(" New  "),
+            Span::raw(format!(" {}  ", t().key_new())),
             Span::styled("[d]", Style::default().fg(theme.accent)),
-            Span::raw(" Del  "),
+            Span::raw(format!(" {}  ", t().cmd_delete())),
             Span::styled("[Enter]", Style::default().fg(theme.accent)),
-            Span::raw(" Save  "),
+            Span::raw(format!(" {}  ", t().key_save())),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
-            Span::raw(" Cancel"),
+            Span::raw(format!(" {}", t().key_cancel())),
         ])
     };
     let help = Paragraph::new(help_text).style(Style::default().fg(theme.muted));
@@ -904,7 +907,7 @@ fn render_edit_mode(frame: &mut Frame, area: Rect, state: &AclState, theme: &The
 
 fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme) {
     let block = Block::default()
-        .title(format!(" Rules ({}) ", state.edit_rules.len()))
+        .title(t().rules_title(state.edit_rules.len()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(if state.is_adding_rule {
@@ -917,8 +920,7 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
     frame.render_widget(block, area);
 
     if state.edit_rules.is_empty() {
-        let empty = Paragraph::new("No rules yet. Press [n] to add.")
-            .style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new(t().no_rules_yet()).style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -928,11 +930,11 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            format!("{:<28}", "Principal"),
+            format!("{:<28}", t().label_principal()),
             Style::default().fg(theme.muted),
         ),
         Span::raw("  "),
-        Span::styled("Permissions", Style::default().fg(theme.muted)),
+        Span::styled(t().label_permissions(), Style::default().fg(theme.muted)),
     ]));
     frame.render_widget(header, list_chunks[0]);
 
@@ -968,7 +970,7 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
 
 fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme) {
     let block = Block::default()
-        .title(" Add Rule ")
+        .title(format!(" {} ", t().add_rule_title()))
         .title_style(Style::default().fg(theme.fg))
         .borders(Borders::ALL)
         .border_style(if state.is_adding_rule {
@@ -1005,12 +1007,15 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     };
     let type_line = Line::from(vec![
         Span::raw(type_indicator),
-        Span::styled(" Type: ", type_style),
+        Span::styled(format!(" {}: ", t().label_type()), type_style),
         Span::styled(
             format!("< {} >", state.current_rule.principal_type.as_str()),
             type_style,
         ),
-        Span::styled("  (←/→ to change)", Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("  {}", t().change_hint()),
+            Style::default().fg(theme.muted),
+        ),
     ]);
     frame.render_widget(Paragraph::new(type_line), form_chunks[0]);
 
@@ -1027,7 +1032,7 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     };
     let label = Line::from(vec![
         Span::raw(value_indicator),
-        Span::styled(" Value: ", value_style),
+        Span::styled(format!(" {}: ", t().label_value()), value_style),
     ]);
     state.principal_input.render_labeled(
         frame,
@@ -1061,7 +1066,13 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
         " "
     };
     frame.render_widget(
-        Paragraph::new(format!("{} {} Read", read_indicator, read_check)).style(read_style),
+        Paragraph::new(format!(
+            "{} {} {}",
+            read_indicator,
+            read_check,
+            t().perm_read()
+        ))
+        .style(read_style),
         perm_chunks[0],
     );
 
@@ -1081,7 +1092,13 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
         " "
     };
     frame.render_widget(
-        Paragraph::new(format!("{} {} Write", write_indicator, write_check)).style(write_style),
+        Paragraph::new(format!(
+            "{} {} {}",
+            write_indicator,
+            write_check,
+            t().perm_write()
+        ))
+        .style(write_style),
         perm_chunks[1],
     );
 
@@ -1101,7 +1118,13 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
         " "
     };
     frame.render_widget(
-        Paragraph::new(format!("{} {} Admin", admin_indicator, admin_check)).style(admin_style),
+        Paragraph::new(format!(
+            "{} {} {}",
+            admin_indicator,
+            admin_check,
+            t().perm_admin()
+        ))
+        .style(admin_style),
         perm_chunks[2],
     );
 }
@@ -1119,19 +1142,16 @@ fn render_confirm_delete_mode(frame: &mut Frame, area: Rect, state: &AclState, t
         .map(|a| a.collection.as_str())
         .unwrap_or("?");
 
-    let message = Paragraph::new(format!(
-        "Are you sure you want to DELETE the ACL for '{}'?\nThis will revert to default permissions.",
-        collection
-    ))
-    .style(Style::default().fg(theme.warning))
-    .wrap(ratatui::widgets::Wrap { trim: true });
+    let message = Paragraph::new(t().confirm_delete_acl(collection))
+        .style(Style::default().fg(theme.warning))
+        .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(message, chunks[0]);
 
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[y]", Style::default().fg(theme.error)),
-        Span::raw(" Yes  "),
+        Span::raw(format!(" {}  ", t().yes())),
         Span::styled("[n/Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" No"),
+        Span::raw(format!(" {}", t().no())),
     ]));
     frame.render_widget(buttons, chunks[1]);
 }
@@ -1144,20 +1164,17 @@ fn render_confirm_save_mode(frame: &mut Frame, area: Rect, state: &AclState, the
     ])
     .split(area);
 
-    let message = Paragraph::new(format!(
-        "Save ACL for '{}'?\n\n{} rule(s) will be applied.",
-        state.edit_collection,
-        state.edit_rules.len()
-    ))
-    .style(Style::default().fg(theme.fg))
-    .wrap(ratatui::widgets::Wrap { trim: true });
+    let message =
+        Paragraph::new(t().confirm_save_acl(&state.edit_collection, state.edit_rules.len()))
+            .style(Style::default().fg(theme.fg))
+            .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(message, chunks[0]);
 
     let buttons = Paragraph::new(Line::from(vec![
         Span::styled("[y]", Style::default().fg(theme.success)),
-        Span::raw(" Save  "),
+        Span::raw(format!(" {}  ", t().key_save())),
         Span::styled("[n/Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Cancel"),
+        Span::raw(format!(" {}", t().key_cancel())),
     ]));
     frame.render_widget(buttons, chunks[1]);
 }
@@ -1168,8 +1185,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme)
     } else if let Some(ref success) = state.success {
         Paragraph::new(success.as_str()).style(Style::default().fg(theme.success))
     } else if !state.is_localhost {
-        Paragraph::new("Read-only: ACL editing requires localhost connection")
-            .style(Style::default().fg(theme.warning))
+        Paragraph::new(t().acl_read_only()).style(Style::default().fg(theme.warning))
     } else {
         Paragraph::new("").style(Style::default().fg(theme.muted))
     };
@@ -1354,7 +1370,7 @@ mod tests {
             }
         ]));
         let message = info.uneditable_message().unwrap();
-        assert!(message.contains("contains rules this editor cannot edit yet"));
+        assert!(message.contains("amelyet ez a szerkesztő még nem tud szerkeszteni"));
         assert!(message.contains("anyone"));
 
         let mut state = AclState::new();

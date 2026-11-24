@@ -574,6 +574,35 @@ pub trait Messages: Sync + sealed::Sealed {
     fn job_backfill(&self, collection: &str) -> String;
     fn job_import(&self, collection: &str, doc_id: &str) -> String;
     fn job_compact(&self) -> &'static str;
+
+    // ACL modal
+    fn acl_editor_title(&self, collection: &str) -> String;
+    fn acl_rules_title(&self) -> &'static str;
+    fn key_add(&self) -> &'static str;
+    fn no_acl_rules(&self) -> &'static str;
+    fn label_collection(&self) -> &'static str;
+    fn label_rules(&self) -> &'static str;
+    fn label_type(&self) -> &'static str;
+    fn acl_builtin(&self) -> &'static str;
+    fn acl_custom(&self) -> &'static str;
+    fn rule_count(&self, count: usize) -> String;
+    fn no_rules_defined(&self) -> &'static str;
+    fn label_principal(&self) -> &'static str;
+    fn label_permissions(&self) -> &'static str;
+    fn rules_title(&self, count: usize) -> String;
+    fn no_rules_yet(&self) -> &'static str;
+    fn add_rule_title(&self) -> &'static str;
+    fn change_hint(&self) -> &'static str;
+    fn perm_read(&self) -> &'static str;
+    fn perm_write(&self) -> &'static str;
+    fn perm_admin(&self) -> &'static str;
+    fn confirm_delete_acl(&self, collection: &str) -> String;
+    fn confirm_save_acl(&self, collection: &str, rules: usize) -> String;
+    fn acl_read_only(&self) -> &'static str;
+    fn acl_uneditable(&self, collection: &str, reasons: &str) -> String;
+    fn principal_value_empty(&self) -> &'static str;
+    fn select_a_permission(&self) -> &'static str;
+    fn add_a_rule(&self) -> &'static str;
 }
 
 /// A group of MCP tools in the server info
@@ -1182,5 +1211,49 @@ mod tests {
         );
         assert_eq!(en.run_count(1), "    1 run ");
         assert_eq!(hu.run_count(12), "   12 futás");
+    }
+
+    /// The ACL modal's texts are translated (it was English only); the
+    /// principal types and permission names stay, they are the server's
+    #[test]
+    fn test_acl_texts_differ_between_the_languages() {
+        let (hu, en): (&dyn Messages, &dyn Messages) = (&Hu, &En);
+        let fixed: [fn(&dyn Messages) -> &'static str; 21] = [
+            |m| m.acl_rules_title(),
+            |m| m.key_add(),
+            |m| m.no_acl_rules(),
+            |m| m.label_collection(),
+            |m| m.label_rules(),
+            |m| m.label_type(),
+            |m| m.acl_builtin(),
+            |m| m.acl_custom(),
+            |m| m.no_rules_defined(),
+            |m| m.label_principal(),
+            |m| m.label_permissions(),
+            |m| m.no_rules_yet(),
+            |m| m.add_rule_title(),
+            |m| m.change_hint(),
+            |m| m.perm_read(),
+            |m| m.perm_write(),
+            |m| m.perm_admin(),
+            |m| m.acl_read_only(),
+            |m| m.principal_value_empty(),
+            |m| m.select_a_permission(),
+            |m| m.add_a_rule(),
+        ];
+        for text in fixed {
+            assert_ne!(text(hu), text(en));
+        }
+        assert_eq!(
+            en.acl_uneditable("users", "principal anyone"),
+            "The ACL for \"users\" contains rules this editor cannot edit yet: principal anyone"
+        );
+        assert_eq!(
+            en.confirm_save_acl("users", 1),
+            "Save the ACL for \"users\"?\n\n1 rule will be applied."
+        );
+        assert_eq!(en.rule_count(2), "2 rules");
+        assert_eq!(hu.rule_count(1), "1 szabály");
+        assert_eq!(hu.acl_editor_title("users"), "ACL-szerkesztő: users");
     }
 }

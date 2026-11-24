@@ -1425,4 +1425,100 @@ impl Messages for En {
     fn script_name_line(&self, name: &str) -> String {
         format!("Script: \"{name}\"")
     }
+
+    fn acl_editor_title(&self, collection: &str) -> String {
+        format!("ACL editor: {collection}")
+    }
+    fn acl_rules_title(&self) -> &'static str {
+        "ACL rules"
+    }
+    fn key_add(&self) -> &'static str {
+        "Add"
+    }
+    fn no_acl_rules(&self) -> &'static str {
+        "No ACL rules. Press [a] on a collection to add ACL."
+    }
+    fn label_collection(&self) -> &'static str {
+        "Collection"
+    }
+    fn label_rules(&self) -> &'static str {
+        "Rules"
+    }
+    fn label_type(&self) -> &'static str {
+        "Type"
+    }
+    fn acl_builtin(&self) -> &'static str {
+        "builtin"
+    }
+    fn acl_custom(&self) -> &'static str {
+        "custom"
+    }
+    fn rule_count(&self, count: usize) -> String {
+        match count {
+            1 => "1 rule".to_string(),
+            _ => format!("{count} rules"),
+        }
+    }
+    fn no_rules_defined(&self) -> &'static str {
+        "No rules defined"
+    }
+    fn label_principal(&self) -> &'static str {
+        "Principal"
+    }
+    fn label_permissions(&self) -> &'static str {
+        "Permissions"
+    }
+    fn rules_title(&self, count: usize) -> String {
+        format!(" Rules ({count}) ")
+    }
+    fn no_rules_yet(&self) -> &'static str {
+        "No rules yet. Press [n] to add."
+    }
+    fn add_rule_title(&self) -> &'static str {
+        "Add rule"
+    }
+    fn change_hint(&self) -> &'static str {
+        "(←/→ to change)"
+    }
+    fn perm_read(&self) -> &'static str {
+        "Read"
+    }
+    fn perm_write(&self) -> &'static str {
+        "Write"
+    }
+    fn perm_admin(&self) -> &'static str {
+        "Admin"
+    }
+    fn confirm_delete_acl(&self, collection: &str) -> String {
+        format!(
+            "DELETE the ACL for \"{collection}\"?\nThis will revert to the default permissions."
+        )
+    }
+    fn confirm_save_acl(&self, collection: &str, rules: usize) -> String {
+        {
+            let rules = if rules == 1 {
+                "1 rule".to_string()
+            } else {
+                format!("{rules} rules")
+            };
+            format!("Save the ACL for \"{collection}\"?\n\n{rules} will be applied.")
+        }
+    }
+    fn acl_read_only(&self) -> &'static str {
+        "Read-only: editing the ACL needs a localhost connection"
+    }
+    fn acl_uneditable(&self, collection: &str, reasons: &str) -> String {
+        format!(
+            "The ACL for \"{collection}\" contains rules this editor cannot edit yet: {reasons}"
+        )
+    }
+    fn principal_value_empty(&self) -> &'static str {
+        "The principal value cannot be empty"
+    }
+    fn select_a_permission(&self) -> &'static str {
+        "Select at least one permission"
+    }
+    fn add_a_rule(&self) -> &'static str {
+        "Add at least one rule"
+    }
 }
