@@ -1501,6 +1501,12 @@ impl Messages for Hu {
     fn filter_cleared(&self) -> &'static str {
         "Szűrő törölve"
     }
+    fn tasks_cancelled(&self) -> &'static str {
+        "Betöltés megszakítva – r: újratöltés"
+    }
+    fn loading_in_background(&self) -> &'static str {
+        "Betöltés… (Esc: megszakítás)"
+    }
     fn acl_deleted(&self, collection: &str) -> String {
         format!("A(z) „{collection}” kollekció ACL-je törölve")
     }
@@ -1654,6 +1660,7 @@ impl Messages for Hu {
             Action::GoToStart => "A lista elejére",
             Action::GoToEnd => "A lista végére",
             Action::ClearFilter => "Szűrő törlése (ha van)",
+            Action::CancelTasks => "Futó betöltés megszakítása",
             Action::OpenSearch => "Keresés",
             Action::OpenActions => "Műveletek menü",
             Action::OpenHelp => "Súgó",

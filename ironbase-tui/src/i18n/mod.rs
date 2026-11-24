@@ -611,6 +611,10 @@ pub trait Messages: Sync + sealed::Sealed {
     fn refreshing(&self) -> &'static str;
     fn refreshed(&self) -> &'static str;
     fn filter_cleared(&self) -> &'static str;
+    /// Esc stopped the background loads
+    fn tasks_cancelled(&self) -> &'static str;
+    /// A background load runs (status bar)
+    fn loading_in_background(&self) -> &'static str;
     fn acl_deleted(&self, collection: &str) -> String;
     fn acl_not_found(&self) -> &'static str;
     fn acl_saved(&self, collection: &str, rules: usize) -> String;

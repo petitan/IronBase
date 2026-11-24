@@ -294,6 +294,11 @@ pub fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             Style::default().fg(theme.muted),
         ));
         spans.push(Span::raw(" |"));
+    } else if app.tasks.is_busy() {
+        spans.push(Span::styled(
+            format!(" {} |", t().loading_in_background()),
+            Style::default().fg(theme.warning),
+        ));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             format!(" {} |", msg),

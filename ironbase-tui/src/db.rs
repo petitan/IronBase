@@ -52,7 +52,8 @@ pub struct FieldInfo {
     pub name: String,
 }
 
-/// Wrapper around MCP client for TUI operations
+/// Wrapper around MCP client for TUI operations (a clone shares the connection)
+#[derive(Clone)]
 pub struct DbWrapper {
     client: McpClient,
 }

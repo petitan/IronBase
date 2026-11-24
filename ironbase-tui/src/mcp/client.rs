@@ -31,7 +31,8 @@ fn log_outcome<T>(what: &str, tool: &str, started: Instant, result: &McpResult<T
 /// not know this client (it restarted and lost its sessions)
 const NOT_INITIALIZED: i64 = -32002;
 
-/// MCP Client for IronBase operations
+/// MCP Client for IronBase operations (a clone shares the transport)
+#[derive(Clone)]
 pub struct McpClient {
     transport: Arc<dyn Transport>,
     initialized: bool,

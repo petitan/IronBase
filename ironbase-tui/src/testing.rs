@@ -548,19 +548,18 @@ pub(crate) async fn app_with_server(server: &Arc<FakeServer>) -> App {
     app
 }
 
-/// Key press without modifiers
-pub(crate) fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-/// Send one key (no modifiers) through the real handler entry
+/// Send one key (no modifiers) through the real handler entry, then let
+/// the background work it started finish (the next key of a test sees its
+/// result, like a user who waits for the screen)
 pub(crate) async fn press(app: &mut App, code: KeyCode) {
-    crate::handlers::handle_key(app, key(code)).await;
+    press_with(app, code, KeyModifiers::NONE).await;
 }
 
-/// Send one key with modifiers through the real handler entry
+/// Send one key with modifiers through the real handler entry, then let the
+/// background work it started finish
 pub(crate) async fn press_with(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     crate::handlers::handle_key(app, KeyEvent::new(code, modifiers)).await;
+    app.settle().await;
 }
 
 /// Type `text` the way a terminal reports it: one `Char` key per character,

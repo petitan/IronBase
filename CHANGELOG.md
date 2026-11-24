@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the document list loads in the background (phase 5, first step) (tuti-tui 0.3.504, mcp-server 1.0.692 — version only, for the release tag)
+
+Every network call blocked the screen until it returned: paging through a large or slow collection froze the TUI
+for each page. The event loop now reads keys, background results and a 100 ms tick together (crossterm
+`EventStream` + `tokio::select!`), and the document list's page loads run as background tasks.
+
+- **`runtime::Tasks`:** a task does its calls with a clone of the client (`DbWrapper` / `McpClient` are `Clone`,
+  sharing the connection) and returns an update that the loop applies to the `App`. One task per slot: a newer load
+  replaces (aborts) the older, and a superseded task's late answer is dropped. A page whose view changed meanwhile
+  (collection, filter, sort, position or page size) is not shown either.
+- **Moved to the background:** the document page on collection switch, `↑`/`↓`, page up/down, start/end and on
+  resize (`App::reload_documents`). Refreshes whose result their caller reports (`r`, Esc clearing the filter, the
+  collection list) still wait, and supersede a running background load.
+- **No action on the old page:** while a page loads, its rows are the previous page's, so nothing is selected (no
+  row mark, empty detail pane, `e`/`d`/`y` find no document): a delete can never hit the row that was there before.
+- **Esc stops a running load** (before clearing the filter); the list is then cleared (its rows would not match the
+  position) and the status bar says how to reload. The status bar shows that a load runs.
+- Tests: a newer task replaces the older, a cancelled task changes nothing, nothing is selected while a page loads,
+  Esc stops a load, a page for another view is dropped; the key helpers of the tests wait for the background work a
+  key started, like a user who waits for the screen.
+
 ### Changed — Tuti TUI: a modal's state lives with the open modal (phase 4: `OpenModal`) (tuti-tui 0.3.503, mcp-server 1.0.691 — version only, for the release tag)
 
 `App` kept every modal's state in a field of its own (17 of them), alive whether the modal was open or not, next to

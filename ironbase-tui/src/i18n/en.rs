@@ -1548,6 +1548,12 @@ impl Messages for En {
     fn filter_cleared(&self) -> &'static str {
         "Filter cleared"
     }
+    fn tasks_cancelled(&self) -> &'static str {
+        "Loading stopped – r: reload"
+    }
+    fn loading_in_background(&self) -> &'static str {
+        "Loading… (Esc: stop)"
+    }
     fn acl_deleted(&self, collection: &str) -> String {
         format!("ACL for \"{collection}\" deleted")
     }
@@ -1709,6 +1715,7 @@ impl Messages for En {
             Action::GoToStart => "To the start of the list",
             Action::GoToEnd => "To the end of the list",
             Action::ClearFilter => "Clear the filter (if any)",
+            Action::CancelTasks => "Stop the running load",
             Action::OpenSearch => "Search",
             Action::OpenActions => "Actions menu",
             Action::OpenHelp => "Help",

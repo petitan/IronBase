@@ -21,6 +21,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         has_error: app.error_message.is_some(),
         has_filter: app.active_filter.is_some(),
         has_matches: !app.search.doc_matches.is_empty(),
+        busy: app.tasks.is_busy(),
     };
     if let Some(action) = keymap::resolve(key, modifiers, &ctx) {
         run_action(app, action).await;
@@ -232,6 +233,9 @@ pub(crate) async fn run_action(app: &mut App, action: Action) {
                 Err(e) => app.set_error(t().failed(Op::Refresh, &e)),
             }
         }
+
+        // Stop the background loads (Esc while one runs)
+        Action::CancelTasks => app.cancel_tasks(),
 
         // Clear filter (Escape in Documents pane when filter is active)
         Action::ClearFilter => {
