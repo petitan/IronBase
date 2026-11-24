@@ -2,6 +2,7 @@
 
 use crate::app::{App, OpenModal, VectorSearchState};
 use crate::i18n::t;
+use crate::runtime::{Slot, Update};
 use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -98,35 +99,42 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
                 return;
             }
 
+            let Some(db) = app.db.clone() else {
+                return;
+            };
             open_state!(app, Vector).is_loading = true;
             open_state!(app, Vector).error = None;
 
-            if let Some(ref db) = app.db {
-                let args = VectorSearchParams {
-                    collection,
-                    field,
-                    vector,
-                    limit: k,
-                    projection: None,
-                };
+            let args = VectorSearchParams {
+                collection,
+                field,
+                vector,
+                limit: k,
+                projection: None,
+            };
+            // In the background: the screen keeps drawing
+            app.tasks.spawn(Slot::Modal, async move {
                 let result = if let Some(f) = filter {
                     db.vector_search_filter(&args, &f).await
                 } else {
                     db.call::<VectorSearch>(&args).await.map(|r| r.results)
                 };
-
-                match result {
-                    Ok(results) => {
-                        open_state!(app, Vector).update_results(results);
-                        open_state!(app, Vector).message =
-                            Some(t().match_count(open_state!(app, Vector).results.len()));
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.vector_state_mut() else {
+                        return;
+                    };
+                    match result {
+                        Ok(results) => {
+                            state.update_results(results);
+                            state.message = Some(t().match_count(state.results.len()));
+                        }
+                        Err(e) => {
+                            state.is_loading = false;
+                            state.error = Some(format!("{}", e));
+                        }
                     }
-                    Err(e) => {
-                        open_state!(app, Vector).is_loading = false;
-                        open_state!(app, Vector).error = Some(format!("{}", e));
-                    }
-                }
-            }
+                }) as Update
+            });
         }
 
         // Navigation in results

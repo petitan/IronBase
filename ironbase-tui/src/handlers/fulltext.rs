@@ -2,6 +2,7 @@
 
 use crate::app::{App, FulltextState, OpenModal};
 use crate::i18n::{t, Op};
+use crate::runtime::{Slot, Update};
 use crate::state::fulltext::FULLTEXT_LIMIT;
 use crate::state::open_state;
 use crate::widgets::Input;
@@ -67,48 +68,51 @@ pub(crate) async fn handle_fulltext_key_async(
             open_state!(app, Fulltext).select_down()
         }
         KeyCode::Enter => {
-            // Execute fulltext search
-            if open_state!(app, Fulltext).query.is_empty() {
+            // Execute fulltext search (in the background: the screen keeps drawing)
+            let state = open_state!(app, Fulltext);
+            if state.query.is_empty() {
                 return;
             }
-
-            open_state!(app, Fulltext).loading = true;
-
-            if let Some(ref db) = app.db {
-                let collection = open_state!(app, Fulltext).collection.clone();
-                let field = open_state!(app, Fulltext).field.clone();
-                let query = open_state!(app, Fulltext).query.value().to_string();
-
-                let args = FulltextSearchParams {
-                    collection,
-                    field,
-                    fields: None,
-                    query,
-                    limit: Some(FULLTEXT_LIMIT),
-                    skip: None,
-                    min_score: None,
-                    projection: None,
-                    mode: None,
-                    match_scope: None,
-                    filter: None,
-                    highlight: false,
-                    highlight_context: None,
-                    highlight_max_snippets: None,
-                };
-                match db.call::<FulltextSearch>(&args).await {
-                    Ok(response) => {
-                        open_state!(app, Fulltext).results = response.results;
-                        open_state!(app, Fulltext).selected_result = 0;
-                        open_state!(app, Fulltext).error = None;
+            let Some(db) = app.db.clone() else {
+                return;
+            };
+            state.loading = true;
+            let args = FulltextSearchParams {
+                collection: state.collection.clone(),
+                field: state.field.clone(),
+                fields: None,
+                query: state.query.value().to_string(),
+                limit: Some(FULLTEXT_LIMIT),
+                skip: None,
+                min_score: None,
+                projection: None,
+                mode: None,
+                match_scope: None,
+                filter: None,
+                highlight: false,
+                highlight_context: None,
+                highlight_max_snippets: None,
+            };
+            app.tasks.spawn(Slot::Modal, async move {
+                let result = db.call::<FulltextSearch>(&args).await;
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.fulltext_state_mut() else {
+                        return;
+                    };
+                    state.loading = false;
+                    match result {
+                        Ok(response) => {
+                            state.results = response.results;
+                            state.selected_result = 0;
+                            state.error = None;
+                        }
+                        Err(e) => {
+                            state.error = Some(format!("{}", e));
+                            state.results.clear();
+                        }
                     }
-                    Err(e) => {
-                        open_state!(app, Fulltext).error = Some(format!("{}", e));
-                        open_state!(app, Fulltext).results.clear();
-                    }
-                }
-            }
-
-            open_state!(app, Fulltext).loading = false;
+                }) as Update
+            });
         }
         _ => {
             open_state!(app, Fulltext).handle_input(Input::Key(key, modifiers));

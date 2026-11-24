@@ -24,6 +24,8 @@ pub type Update = Box<dyn FnOnce(&mut App) + Send>;
 pub enum Slot {
     /// The document list's page and counts
     Documents,
+    /// A request of the open modal (a search); closing the modal stops it
+    Modal,
 }
 
 /// A finished task's update, tagged with its task
