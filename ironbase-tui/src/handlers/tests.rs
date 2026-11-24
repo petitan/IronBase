@@ -1150,6 +1150,18 @@ async fn test_main_screen_and_every_modal_render_at_all_sizes() {
     }
 }
 
+/// A modal opened by kind closes with Esc (its key handler finds its state)
+#[tokio::test]
+async fn test_every_modal_opened_by_kind_closes_with_esc() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    for modal in ALL_MODALS {
+        app.set_modal(modal);
+        press(&mut app, KeyCode::Esc).await;
+        assert_eq!(app.modal(), None, "{:?}", modal);
+    }
+}
+
 /// Modals opened the way the user opens them (state initialised by the
 /// real open path), at every size
 #[tokio::test]

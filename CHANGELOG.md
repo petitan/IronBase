@@ -31,9 +31,12 @@ state: it is created when the modal opens and dropped when it closes. No change 
   hidden state: there is none.
 - The export takes its collection and format as arguments instead of reading them from a field mid-export;
   `OpenModal` does not derive `Clone` (nothing cloned it).
+- `set_modal(kind)` opens a modal with an empty state of its own (`OpenModal::new_default`), so no modal can be open
+  without the state its keys and screen need (it would show nothing and not close); `close_confirm` leaves any
+  other open modal alone.
 - Tests: reopening starts empty; a late answer changes nothing; the confirm dialog gives back the modal under it
   as it was; closing the admin modals drops their state; the collections pane keeps the index list after the index
-  modal closes. The confirmed-action tests change the modal state under the open dialog to check that the call
+  modal closes; every modal opened by kind renders at every size and closes with Esc. The confirmed-action tests change the modal state under the open dialog to check that the call
   uses the names captured when it opened.
 
 ### Added — Tuti TUI: the selection shows without color, and `NO_COLOR` (tuti-tui 0.3.495, mcp-server 1.0.683 — version only, for the release tag)

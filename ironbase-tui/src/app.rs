@@ -445,10 +445,11 @@ impl App {
         crate::modals::listener::ListenerState
     );
 
-    /// Open a modal whose state lives in `App` (the others have their own
-    /// `open_*`, which creates their state)
+    /// Open a modal of `kind` with an empty state: for the modals without
+    /// state of their own (the others have their own `open_*`, which fills it
+    /// in). Never a modal without the state its keys and screen need.
     pub fn set_modal(&mut self, kind: Modal) {
-        self.open_modal = Some(OpenModal::Plain(kind));
+        self.open_modal = Some(OpenModal::new_default(kind));
     }
 
     // === Delete Document ===
@@ -569,8 +570,11 @@ impl App {
     /// Close the confirm dialog and return to the modal it was opened from,
     /// as it was (or to the panes)
     pub fn close_confirm(&mut self) {
-        if let Some(OpenModal::Confirm { previous, .. }) = self.open_modal.take() {
-            self.open_modal = previous.map(|modal| *modal);
+        // Only the confirm dialog: another open modal stays as it is
+        if matches!(self.open_modal, Some(OpenModal::Confirm { .. })) {
+            if let Some(OpenModal::Confirm { previous, .. }) = self.open_modal.take() {
+                self.open_modal = previous.map(|modal| *modal);
+            }
         }
     }
 
@@ -3005,6 +3009,22 @@ mod tests {
         // A confirm with nothing under it closes to the panes
         app.close_modal();
         app.open_confirm(ConfirmState::clear_embed_cache());
+        app.close_confirm();
+        assert_eq!(app.modal(), None);
+    }
+
+    /// Closing a confirm dialog leaves any other open modal alone, and a
+    /// modal opened by kind has the state its keys need
+    #[test]
+    fn test_modal_by_kind_has_state_and_close_confirm_keeps_others() {
+        let mut app = App::new(Config::default());
+        app.set_modal(Modal::Index);
+        assert!(app.index_state().is_some());
+        app.close_confirm();
+        assert_eq!(app.modal(), Some(Modal::Index));
+
+        app.set_modal(Modal::Confirm);
+        assert!(app.confirm_state().is_some());
         app.close_confirm();
         assert_eq!(app.modal(), None);
     }
