@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the full-text, vector and RAG searches run in the background (tuti-tui 0.3.506, mcp-server 1.0.694 — version only, for the release tag)
+
+The three searches blocked the screen until the server answered (a RAG search embeds the query first, which can
+take seconds). They now run as background tasks (`runtime::Slot::Modal`): the modal keeps drawing its loading state,
+a new search replaces a running one, and closing the modal stops its search (`App::close_modal`), so a modal
+reopened before the answer came does not get the old search's results.
+
+- Test: a search of a modal closed and reopened before its answer leaves the new modal empty (fails without the
+  stop on close); a search waited for shows its results.
+
 ### Fixed — a cancelled request stops on the server, and a cancelled stdio request no longer garbles the next (tuti-tui 0.3.505, mcp-server 1.0.693)
 
 - **MCP server: `notifications/cancelled` with a numeric `requestId`.** MCP's `RequestId` is a string or a number,

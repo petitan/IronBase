@@ -1758,6 +1758,40 @@ async fn test_fulltext_fields_come_from_the_index_field_not_its_name() {
     );
 }
 
+/// A search runs in the background: the modal draws meanwhile, and a modal
+/// closed before the answer came does not get it when reopened
+#[tokio::test]
+async fn test_a_search_of_a_closed_modal_is_dropped() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    server.respond(
+        "index_list",
+        fulltext_index_list(&[("users_bio_fts", "bio")]),
+    );
+    server.respond("fulltext_search", fulltext_hits(1));
+    shift(&mut app, 'F').await;
+    type_text(&mut app, "rust").await;
+
+    // Enter without waiting: the search runs, the modal shows it loading
+    let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, enter).await;
+    assert!(app.fulltext_state().unwrap().loading);
+    assert!(app.tasks.is_busy());
+
+    // Closed and reopened before the answer: the new modal stays empty
+    let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, esc).await;
+    shift(&mut app, 'F').await;
+    app.settle().await;
+    assert!(app.fulltext_state().unwrap().results.is_empty());
+    assert!(!app.fulltext_state().unwrap().loading);
+
+    // Waited for, the answer is shown
+    type_text(&mut app, "rust").await;
+    press(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.fulltext_state().unwrap().results.len(), 1);
+}
+
 #[tokio::test]
 async fn test_fulltext_open_shows_why_the_index_listing_failed() {
     let server = two_collections();

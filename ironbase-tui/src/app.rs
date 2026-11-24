@@ -413,6 +413,8 @@ impl App {
 
     /// Close current modal
     pub fn close_modal(&mut self) {
+        // The modal's own request has no one to show its answer to
+        self.tasks.cancel(Slot::Modal);
         self.open_modal = None;
     }
 

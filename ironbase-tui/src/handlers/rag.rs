@@ -2,6 +2,7 @@
 
 use crate::app::{App, OpenModal, RagState};
 use crate::i18n::{t, Op};
+use crate::runtime::{Slot, Update};
 use crate::state::open_state;
 use crate::widgets::{push_digits, Input};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -123,24 +124,32 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
                 debug: false,
             };
 
+            let Some(db) = app.db.clone() else {
+                return;
+            };
             open_state!(app, Rag).is_loading = true;
             open_state!(app, Rag).error = None;
 
-            if let Some(ref db) = app.db {
+            // In the background: the screen keeps drawing
+            app.tasks.spawn(Slot::Modal, async move {
                 let response = db.call::<Search>(&args).await.map_err(|e| e.to_string());
-                let state = open_state!(app, Rag);
-                let result = response.and_then(|response| state.set_search_response(response));
-                state.is_loading = false;
-                match result {
-                    Ok(()) => state.message = Some(state.search_summary()),
-                    Err(e) => {
-                        // The previous search's results and summary are stale
-                        state.clear_search_response();
-                        state.message = None;
-                        state.error = Some(e);
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.rag_state_mut() else {
+                        return;
+                    };
+                    let result = response.and_then(|response| state.set_search_response(response));
+                    state.is_loading = false;
+                    match result {
+                        Ok(()) => state.message = Some(state.search_summary()),
+                        Err(e) => {
+                            // The previous search's results and summary are stale
+                            state.clear_search_response();
+                            state.message = None;
+                            state.error = Some(e);
+                        }
                     }
-                }
-            }
+                }) as Update
+            });
         }
 
         // Switch focus between query and limit
