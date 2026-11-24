@@ -23,8 +23,21 @@ pub enum Key {
 impl Key {
     pub fn matches(self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         match self {
-            Key::Ctrl(c) => modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char(c),
+            // Exactly Ctrl: Ctrl+Alt+C is not Ctrl+C
+            Key::Ctrl(c) => modifiers == KeyModifiers::CONTROL && code == KeyCode::Char(c),
+            // A capital letter with or without the Shift flag (CapsLock), but
+            // not with Ctrl or Alt; a lowercase one with any modifier
+            Key::Char(c) if c.is_ascii_uppercase() => {
+                code == KeyCode::Char(c) && (modifiers - KeyModifiers::SHIFT).is_empty()
+            }
             Key::Char(c) => code == KeyCode::Char(c),
+            // Plain Tab only: Shift+Tab can come as Tab with the Shift flag
+            // (the kitty keyboard protocol), and is Back Tab then
+            Key::Code(KeyCode::Tab) => code == KeyCode::Tab && modifiers.is_empty(),
+            Key::Code(KeyCode::BackTab) => {
+                code == KeyCode::BackTab
+                    || (code == KeyCode::Tab && modifiers.contains(KeyModifiers::SHIFT))
+            }
             Key::Code(expected) => code == expected,
         }
     }
@@ -294,6 +307,42 @@ mod tests {
         assert_eq!(
             resolve(KeyCode::Esc, KeyModifiers::NONE, &c),
             Some(Action::ClearFilter)
+        );
+    }
+
+    /// The modifiers are as strict as before: capital letters only with or
+    /// without Shift, Ctrl+C exactly, Tab plain; Tab with Shift is Back Tab
+    #[test]
+    fn test_modifiers_are_matched_as_before() {
+        let c = ctx(Pane::Collections);
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(resolve(KeyCode::Char('F'), ctrl_shift, &c), None);
+        assert_eq!(resolve(KeyCode::Char('K'), KeyModifiers::ALT, &c), None);
+        assert_eq!(
+            resolve(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                &c
+            ),
+            None
+        );
+        assert_eq!(resolve(KeyCode::Tab, KeyModifiers::CONTROL, &c), None);
+        assert_eq!(
+            resolve(KeyCode::Tab, KeyModifiers::NONE, &c),
+            Some(Action::NextPane)
+        );
+        assert_eq!(
+            resolve(KeyCode::Tab, KeyModifiers::SHIFT, &c),
+            Some(Action::PrevPane)
+        );
+        assert_eq!(
+            resolve(KeyCode::BackTab, KeyModifiers::SHIFT, &c),
+            Some(Action::PrevPane)
+        );
+        // A lowercase key keeps working with any modifier, as before
+        assert_eq!(
+            resolve(KeyCode::Char('j'), KeyModifiers::CONTROL, &c),
+            Some(Action::Down)
         );
     }
 

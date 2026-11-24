@@ -17,6 +17,8 @@ help and the actions menu are generated from it, and the action texts come from 
 
 - **A capital letter works with CapsLock:** a letter is matched by the character it produces, not by the Shift flag
   (`F`, `V`, `E`, `D`, `P`, `K`, `A`, `L`, `N` needed the Shift flag before, and did nothing with CapsLock on).
+  The other modifiers are as strict as before (a capital letter with Ctrl or Alt does nothing, Ctrl+C is exactly
+  Ctrl); Tab with the Shift flag — how the kitty keyboard protocol may send Shift+Tab — goes back a pane.
 - A key shared by two actions is tried in order, the first one that applies wins (`e`: the error details while
   there is an error, else edit), so the behavior is unchanged; a test checks that no binding hides another.
 - The actions menu and the main screen run the same `run_action`, so a menu entry does what its key does.
