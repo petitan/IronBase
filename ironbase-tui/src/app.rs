@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::i18n::{t, Op};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
+use crate::state::open_state;
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
     AutoEmbedDisableParams, CollectionCreateParams, CollectionDropParams, CountParams,
@@ -139,14 +140,8 @@ pub struct App {
     // Confirm dialog state
     pub confirm: ConfirmState,
 
-    // Insert dialog state
-    pub insert: InsertState,
-
     // Index management state
     pub index_state: IndexState,
-
-    // Query builder state
-    pub query_state: QueryState,
 
     // Visual filter state
     pub filter_state: FilterState,
@@ -213,9 +208,7 @@ impl App {
             detail_scroll: 0,
             search: SearchState::new(),
             confirm: ConfirmState::default(),
-            insert: InsertState::default(),
             index_state: IndexState::default(),
-            query_state: QueryState::default(),
             filter_state: FilterState::default(),
             script_state: ScriptState::default(),
             server_info_scroll: 0,
@@ -460,6 +453,8 @@ impl App {
     modal_state!(export_state, export_state_mut, Export, ExportState);
     modal_state!(fulltext_state, fulltext_state_mut, Fulltext, FulltextState);
     modal_state!(database_state, database_state_mut, Database, DatabaseState);
+    modal_state!(insert_state, insert_state_mut, Insert, InsertState);
+    modal_state!(query_state, query_state_mut, Query, QueryState);
 
     /// Open a modal whose state lives in `App` (the others have their own
     /// `open_*`, which creates their state)
@@ -607,8 +602,9 @@ impl App {
             None
         };
 
-        self.insert = InsertState::with_template(coll_name, template);
-        self.set_modal(Modal::Insert);
+        self.open_modal = Some(OpenModal::Insert(InsertState::with_template(
+            coll_name, template,
+        )));
     }
 
     /// Create empty template from existing document (keep structure, clear values)
@@ -653,8 +649,7 @@ impl App {
             return;
         };
 
-        self.insert = InsertState::edit(coll_name, &doc);
-        self.set_modal(Modal::Insert);
+        self.open_modal = Some(OpenModal::Insert(InsertState::edit(coll_name, &doc)));
     }
 
     // === Index Management ===
@@ -705,8 +700,7 @@ impl App {
             return;
         };
 
-        self.query_state = QueryState::new(coll_name);
-        self.set_modal(Modal::Query);
+        self.open_modal = Some(OpenModal::Query(QueryState::new(coll_name)));
     }
 
     /// Open visual filter modal with schema loading (async)
@@ -1832,35 +1826,35 @@ impl App {
 
     /// Execute the insert/edit operation (async)
     pub async fn execute_insert_async(&mut self) {
-        let doc = match self.insert.parse_json() {
+        let doc = match open_state!(self, Insert).parse_json() {
             Ok(doc) => doc,
             Err(e) => {
-                self.insert.error = Some(t().invalid_json(&e));
+                open_state!(self, Insert).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
         if !doc.is_object() {
-            self.insert.error = Some(t().document_must_be_object().to_string());
+            open_state!(self, Insert).error = Some(t().document_must_be_object().to_string());
             return;
         }
 
-        let collection = self.insert.collection.clone();
+        let collection = open_state!(self, Insert).collection.clone();
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
             return;
         };
 
-        if self.insert.is_edit_mode() {
-            let Some(ref doc_id) = self.insert.original_doc_id else {
-                self.insert.error = Some(t().document_id_missing().to_string());
+        if open_state!(self, Insert).is_edit_mode() {
+            let Some(ref doc_id) = open_state!(self, Insert).original_doc_id else {
+                open_state!(self, Insert).error = Some(t().document_id_missing().to_string());
                 return;
             };
 
             let args = UpdateOneParams {
                 collection,
                 filter: serde_json::json!({"_id": doc_id}),
-                update: self.insert.edit_update(&doc),
+                update: open_state!(self, Insert).edit_update(&doc),
                 upsert: false,
             };
             match db.call::<UpdateOne>(&args).await {
@@ -1879,7 +1873,7 @@ impl App {
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(t().failed(Op::Update, &e));
+                    open_state!(self, Insert).error = Some(t().failed(Op::Update, &e));
                 }
             }
         } else {
@@ -1894,7 +1888,7 @@ impl App {
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(t().failed(Op::Insert, &e));
+                    open_state!(self, Insert).error = Some(t().failed(Op::Insert, &e));
                 }
             }
         }
@@ -2060,15 +2054,15 @@ impl App {
     pub async fn execute_query_async(&mut self) {
         const QUERY_LIMIT: usize = 1000;
 
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
-        let collection = self.query_state.collection.clone();
+        let collection = open_state!(self, Query).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -2079,10 +2073,10 @@ impl App {
             Ok(docs) => {
                 let count = docs.len();
                 // Store total_count (may be more than returned if limit hit)
-                self.query_state.total_count = count;
-                self.query_state.result_index = 0;
-                self.query_state.results = Some(docs);
-                self.query_state.error = None;
+                open_state!(self, Query).total_count = count;
+                open_state!(self, Query).result_index = 0;
+                open_state!(self, Query).results = Some(docs);
+                open_state!(self, Query).error = None;
                 if count >= QUERY_LIMIT {
                     self.set_status(t().query_found(count, Some(QUERY_LIMIT)));
                 } else {
@@ -2090,22 +2084,22 @@ impl App {
                 }
             }
             Err(e) => {
-                self.query_state.error = Some(t().failed(Op::Query, &e));
+                open_state!(self, Query).error = Some(t().failed(Op::Query, &e));
             }
         }
     }
 
     /// Execute query explain (async) - shows query plan
     pub async fn execute_explain_async(&mut self) {
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
-        let collection = self.query_state.collection.clone();
+        let collection = open_state!(self, Query).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -2119,23 +2113,23 @@ impl App {
             .and_then(|response| Ok(response.summary()?));
         match explained {
             Ok(plan) => {
-                self.query_state.explain_result = Some(plan);
-                self.query_state.show_explain = true;
-                self.query_state.error = None;
+                open_state!(self, Query).explain_result = Some(plan);
+                open_state!(self, Query).show_explain = true;
+                open_state!(self, Query).error = None;
                 self.set_status(t().query_plan_loaded());
             }
             Err(e) => {
-                self.query_state.error = Some(t().failed(Op::Explain, &e));
+                open_state!(self, Query).error = Some(t().failed(Op::Explain, &e));
             }
         }
     }
 
     /// Apply the current query as a filter and close modal
     pub async fn apply_query_as_filter(&mut self) {
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };

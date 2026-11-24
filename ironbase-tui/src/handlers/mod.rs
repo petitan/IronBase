@@ -74,9 +74,13 @@ pub fn handle_paste(app: &mut App, text: &str) {
     let input = Input::Paste(text);
     match app.modal() {
         Some(Modal::Search) => app.search.handle_input(input),
-        Some(Modal::Insert) => app.insert.handle_input(input),
+        Some(Modal::Insert) => app
+            .insert_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Index) => app.index_state.handle_input(input),
-        Some(Modal::Query) => app.query_state.handle_input(input),
+        Some(Modal::Query) => app
+            .query_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Export) => app
             .export_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),

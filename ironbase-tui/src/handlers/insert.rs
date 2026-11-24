@@ -1,6 +1,7 @@
 //! Key handlers: insert
 
 use crate::app::App;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -13,7 +14,7 @@ pub(crate) async fn handle_insert_key_async(app: &mut App, key: KeyCode, modifie
         }
         // The editor takes the rest
         _ => {
-            app.insert.handle_input(Input::Key(key, modifiers));
+            open_state!(app, Insert).handle_input(Input::Key(key, modifiers));
         }
     }
 }

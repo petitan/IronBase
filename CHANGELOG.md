@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the insert/edit and query builder modals' state lives with the open modal (tuti-tui 0.3.498, mcp-server 1.0.686 — version only, for the release tag)
+
+The insert/edit document and the query builder modals move into `OpenModal` (`Insert`, `Query`), with no change of
+behavior. One macro reaches an open modal's state for code that also uses `App`'s other fields
+(`state::open_state!(app, Variant)`, borrowing only `open_modal`); it replaces the per-handler macros of the previous
+step.
+
 ### Changed — Tuti TUI: the export, full-text and database modals' state lives with the open modal (tuti-tui 0.3.497, mcp-server 1.0.685 — version only, for the release tag)
 
 The next three modals move into `OpenModal` (`Export`, `Fulltext`, `Database`), with no change of behavior: their

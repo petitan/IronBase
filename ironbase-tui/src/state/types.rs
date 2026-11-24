@@ -72,6 +72,8 @@ pub enum OpenModal {
     Export(crate::state::ExportState),
     Fulltext(crate::state::FulltextState),
     Database(crate::state::DatabaseState),
+    Insert(crate::state::InsertState),
+    Query(crate::state::QueryState),
 }
 
 impl OpenModal {
@@ -84,9 +86,24 @@ impl OpenModal {
             OpenModal::Export(_) => Modal::Export,
             OpenModal::Fulltext(_) => Modal::Fulltext,
             OpenModal::Database(_) => Modal::Database,
+            OpenModal::Insert(_) => Modal::Insert,
+            OpenModal::Query(_) => Modal::Query,
         }
     }
 }
+
+/// The open `$variant` modal's state, borrowing only `$app.open_modal` (so
+/// `$app.db` and the other fields stay usable next to it); the caller returns
+/// when that modal is not open
+macro_rules! open_state {
+    ($app:expr, $variant:ident) => {
+        match &mut $app.open_modal {
+            Some($crate::state::OpenModal::$variant(state)) => state,
+            _ => return,
+        }
+    };
+}
+pub(crate) use open_state;
 
 /// Connection type for permission checks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

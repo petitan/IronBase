@@ -1362,7 +1362,7 @@ async fn open_edit_of_first_user(app: &mut App) {
     }
     press(app, KeyCode::Char('e')).await;
     assert_eq!(app.modal(), Some(Modal::Insert));
-    assert!(app.insert.is_edit_mode());
+    assert!(app.insert_state_mut().unwrap().is_edit_mode());
 }
 
 #[tokio::test]
@@ -1372,7 +1372,8 @@ async fn test_edit_reports_updated_unchanged_and_not_found() {
 
     // A real change (built-in update_one)
     open_edit_of_first_user(&mut app).await;
-    app.insert
+    app.insert_state_mut()
+        .unwrap()
         .editor
         .set_text(r#"{"_id": 0, "n": 100, "even": true}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
@@ -1415,7 +1416,10 @@ async fn test_edit_unsets_removed_fields() {
 
     // The first user is {"_id": 0, "n": 0, "even": true}: remove `even`
     open_edit_of_first_user(&mut app).await;
-    app.insert.editor.set_text(r#"{"_id": 0, "n": 0}"#);
+    app.insert_state_mut()
+        .unwrap()
+        .editor
+        .set_text(r#"{"_id": 0, "n": 0}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
     assert_eq!(
         server.calls_to("update_one"),
@@ -1469,7 +1473,10 @@ async fn test_insert_into_fake_server_stores_the_document() {
     let mut app = app_with_server(&server).await;
 
     press(&mut app, KeyCode::Char('i')).await;
-    app.insert.editor.set_text(r#"{"_id": "k-1", "n": 7}"#);
+    app.insert_state_mut()
+        .unwrap()
+        .editor
+        .set_text(r#"{"_id": "k-1", "n": 7}"#);
     press_with(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL).await;
 
     assert_eq!(
@@ -2774,25 +2781,31 @@ async fn test_document_editor_keys() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
     open_edit_of_first_user(&mut app).await;
-    app.insert.editor.set_text("{\"a\": 1x}");
-    app.insert.error = Some("JSON hiba".to_string());
+    app.insert_state_mut()
+        .unwrap()
+        .editor
+        .set_text("{\"a\": 1x}");
+    app.insert_state_mut().unwrap().error = Some("JSON hiba".to_string());
     press(&mut app, KeyCode::End).await;
     press(&mut app, KeyCode::Left).await;
     press(&mut app, KeyCode::Left).await;
     press(&mut app, KeyCode::Delete).await;
-    assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
-    assert_eq!(app.insert.error, None);
+    assert_eq!(app.insert_state_mut().unwrap().editor.text(), "{\"a\": 1}");
+    assert_eq!(app.insert_state_mut().unwrap().error, None);
     press(&mut app, KeyCode::Home).await;
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.insert.editor.text(), "\n{\"a\": 1}");
+    assert_eq!(
+        app.insert_state_mut().unwrap().editor.text(),
+        "\n{\"a\": 1}"
+    );
     press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
     assert_eq!(
-        app.insert.editor.text(),
+        app.insert_state_mut().unwrap().editor.text(),
         "\n{\"a\": 1}",
         "nothing before the cursor on its line"
     );
     press(&mut app, KeyCode::Backspace).await;
-    assert_eq!(app.insert.editor.text(), "{\"a\": 1}");
+    assert_eq!(app.insert_state_mut().unwrap().editor.text(), "{\"a\": 1}");
     assert_eq!(app.modal(), Some(Modal::Insert));
 }
 
@@ -2803,11 +2816,14 @@ async fn test_paste_into_the_document_editor() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
     open_edit_of_first_user(&mut app).await;
-    app.insert.editor.set_text("{}");
-    app.insert.editor.move_to(0, 1);
+    app.insert_state_mut().unwrap().editor.set_text("{}");
+    app.insert_state_mut().unwrap().editor.move_to(0, 1);
     crate::handlers::handle_paste(&mut app, "\r\n  \"a\": 1,\r\n  \"b\": 2\r\n");
-    assert_eq!(app.insert.editor.text(), "{\n  \"a\": 1,\n  \"b\": 2\n}");
-    assert_eq!(app.insert.editor.cursor(), (3, 0));
+    assert_eq!(
+        app.insert_state_mut().unwrap().editor.text(),
+        "{\n  \"a\": 1,\n  \"b\": 2\n}"
+    );
+    assert_eq!(app.insert_state_mut().unwrap().editor.cursor(), (3, 0));
     assert_eq!(app.modal(), Some(Modal::Insert));
     assert!(server.calls_to("update_one").is_empty());
 }
