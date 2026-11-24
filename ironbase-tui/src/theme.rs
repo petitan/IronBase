@@ -66,11 +66,11 @@ impl Theme {
             bg: Color::Rgb(25, 23, 22),           // Dark warm gray
             fg: Color::Rgb(236, 230, 223),        // Warm white
             accent: Color::Rgb(217, 119, 87),     // Claude orange
-            secondary: Color::Rgb(140, 120, 100), // Warm gray
+            secondary: Color::Rgb(146, 127, 108), // Warm gray
             success: Color::Rgb(134, 179, 134),   // Soft green
             warning: Color::Rgb(217, 168, 87),    // Warm yellow
             error: Color::Rgb(204, 102, 102),     // Soft red
-            muted: Color::Rgb(120, 110, 100),     // Muted warm gray
+            muted: Color::Rgb(138, 129, 120),     // Muted warm gray
             header_bg: Color::Rgb(45, 40, 38),    // Header
         }
     }
@@ -81,11 +81,11 @@ impl Theme {
             bg: Color::Rgb(20, 20, 25),
             fg: Color::Rgb(230, 230, 235),
             accent: Color::Rgb(100, 149, 237), // Cornflower blue
-            secondary: Color::Rgb(100, 100, 110),
+            secondary: Color::Rgb(128, 128, 136),
             success: Color::Rgb(80, 200, 120),
             warning: Color::Rgb(255, 193, 7),
             error: Color::Rgb(239, 83, 80),
-            muted: Color::Rgb(100, 100, 100),
+            muted: Color::Rgb(128, 128, 128),
             header_bg: Color::Rgb(30, 32, 38),
         }
     }
@@ -96,11 +96,11 @@ impl Theme {
             bg: Color::Rgb(250, 250, 250),
             fg: Color::Rgb(30, 30, 30),
             accent: Color::Rgb(0, 102, 204),
-            secondary: Color::Rgb(150, 150, 160),
-            success: Color::Rgb(40, 167, 69),
-            warning: Color::Rgb(255, 152, 0),
-            error: Color::Rgb(220, 53, 69),
-            muted: Color::Rgb(140, 140, 140),
+            secondary: Color::Rgb(112, 112, 120),
+            success: Color::Rgb(31, 130, 54),
+            warning: Color::Rgb(163, 97, 0),
+            error: Color::Rgb(211, 51, 66),
+            muted: Color::Rgb(113, 113, 113),
             header_bg: Color::Rgb(240, 240, 245),
         }
     }
@@ -111,11 +111,11 @@ impl Theme {
             bg: Color::Rgb(15, 30, 40),
             fg: Color::Rgb(200, 220, 230),
             accent: Color::Rgb(64, 224, 208), // Turquoise
-            secondary: Color::Rgb(70, 100, 120),
+            secondary: Color::Rgb(114, 137, 152),
             success: Color::Rgb(46, 204, 113),
             warning: Color::Rgb(241, 196, 15),
-            error: Color::Rgb(231, 76, 60),
-            muted: Color::Rgb(80, 100, 120),
+            error: Color::Rgb(232, 83, 68),
+            muted: Color::Rgb(120, 136, 151),
             header_bg: Color::Rgb(20, 40, 55),
         }
     }
@@ -142,6 +142,58 @@ mod tests {
         assert_eq!(theme.next().next(), ThemeName::Light);
         assert_eq!(theme.next().next().next(), ThemeName::Ocean);
         assert_eq!(theme.next().next().next().next(), ThemeName::Claude);
+    }
+
+    /// WCAG relative luminance of an RGB color
+    fn luminance(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("theme colors are RGB: {color:?}")
+        };
+        let channel = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Every text color reads against the background at WCAG AA (4.5:1),
+    /// hints and borders (`muted`, `secondary`) included, and so does a
+    /// selected row (background-colored text on the accent)
+    #[test]
+    fn test_text_colors_have_aa_contrast() {
+        for name in [
+            ThemeName::Claude,
+            ThemeName::Dark,
+            ThemeName::Light,
+            ThemeName::Ocean,
+        ] {
+            let theme = Theme::from_name(name);
+            for (role, color) in [
+                ("fg", theme.fg),
+                ("accent", theme.accent),
+                ("secondary", theme.secondary),
+                ("success", theme.success),
+                ("warning", theme.warning),
+                ("error", theme.error),
+                ("muted", theme.muted),
+            ] {
+                let ratio = contrast(color, theme.bg);
+                assert!(ratio >= 4.5, "{name:?} {role}: {ratio:.2}");
+            }
+            assert!(
+                contrast(theme.fg, theme.header_bg) >= 4.5,
+                "{name:?} header"
+            );
+        }
     }
 
     #[test]
