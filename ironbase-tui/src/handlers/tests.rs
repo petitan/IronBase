@@ -368,6 +368,17 @@ async fn test_index_list_drop_flow() {
 
 // === Confirmed actions: the call uses the names captured when the confirm opened ===
 
+/// The modal an open confirm dialog keeps under it
+fn modal_under_confirm(app: &mut App) -> &mut crate::app::OpenModal {
+    match &mut app.open_modal {
+        Some(crate::app::OpenModal::Confirm {
+            previous: Some(previous),
+            ..
+        }) => previous,
+        _ => panic!("no confirm dialog over a modal"),
+    }
+}
+
 #[tokio::test]
 async fn test_vector_index_drop_executes_with_captured_names() {
     let server = two_collections();
@@ -395,14 +406,7 @@ async fn test_vector_index_drop_executes_with_captured_names() {
     assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
     // The modal state changing under the dialog must not change the target
-    let Some(crate::app::OpenModal::Confirm {
-        previous: Some(previous),
-        ..
-    }) = &mut app.open_modal
-    else {
-        panic!("the dialog keeps the vector modal");
-    };
-    let crate::app::OpenModal::Vector(state) = previous.as_mut() else {
+    let crate::app::OpenModal::Vector(state) = modal_under_confirm(&mut app) else {
         panic!("not the vector modal");
     };
     state.collection = "other".to_string();
@@ -452,18 +456,21 @@ async fn test_script_rollback_executes_with_captured_names() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('s')).await;
     assert_eq!(app.modal(), Some(Modal::Script));
-    assert_eq!(app.script_state.scripts.len(), 1);
+    assert_eq!(app.script_state_mut().unwrap().scripts.len(), 1);
     press(&mut app, KeyCode::Char('h')).await;
-    assert_eq!(app.script_state.mode, ScriptMode::History);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::History);
     press(&mut app, KeyCode::Char('j')).await;
-    assert_eq!(app.script_state.selected_version, 1);
+    assert_eq!(app.script_state_mut().unwrap().selected_version, 1);
     server.clear_calls();
 
     press(&mut app, KeyCode::Char('r')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
-    app.script_state.name.set_value("other");
-    app.script_state.selected_version = 0;
+    let crate::app::OpenModal::Script(state) = modal_under_confirm(&mut app) else {
+        panic!("not the script modal");
+    };
+    state.name.set_value("other");
+    state.selected_version = 0;
 
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.modal(), Some(Modal::Script));
@@ -478,7 +485,7 @@ async fn test_script_rollback_executes_with_captured_names() {
         server.calls_to("script_get").last(),
         Some(&json!({"name": "cleanup"}))
     );
-    assert_eq!(app.script_state.mode, ScriptMode::Edit);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::Edit);
 }
 
 /// Shift+E, then BackTab to the Models tab (Tab is text input on Search)
@@ -824,11 +831,11 @@ async fn test_script_delete_confirm_enter_does_not_confirm() {
 
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(
-        app.script_state.confirm_action,
+        app.script_state_mut().unwrap().confirm_action,
         Some(ScriptConfirmAction::DeleteScript)
     );
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.script_state.confirm_action, None);
+    assert_eq!(app.script_state_mut().unwrap().confirm_action, None);
     assert_eq!(app.modal(), Some(Modal::Script));
     assert!(server.calls().is_empty());
 
@@ -849,27 +856,27 @@ async fn test_script_discard_confirm_enter_does_not_confirm() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('s')).await;
     press(&mut app, KeyCode::Char('n')).await;
-    assert_eq!(app.script_state.mode, ScriptMode::New);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::New);
     type_text(&mut app, "x").await;
-    assert_eq!(app.script_state.name.value(), "x");
-    assert!(app.script_state.dirty);
+    assert_eq!(app.script_state_mut().unwrap().name.value(), "x");
+    assert!(app.script_state_mut().unwrap().dirty);
 
     press(&mut app, KeyCode::Esc).await;
     assert_eq!(
-        app.script_state.confirm_action,
+        app.script_state_mut().unwrap().confirm_action,
         Some(ScriptConfirmAction::DiscardChanges)
     );
     press(&mut app, KeyCode::Enter).await;
-    assert_eq!(app.script_state.confirm_action, None);
-    assert_eq!(app.script_state.mode, ScriptMode::New);
-    assert!(app.script_state.dirty);
-    assert_eq!(app.script_state.name.value(), "x");
+    assert_eq!(app.script_state_mut().unwrap().confirm_action, None);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::New);
+    assert!(app.script_state_mut().unwrap().dirty);
+    assert_eq!(app.script_state_mut().unwrap().name.value(), "x");
 
     // `y` discards
     press(&mut app, KeyCode::Esc).await;
     press(&mut app, KeyCode::Char('y')).await;
-    assert_eq!(app.script_state.mode, ScriptMode::Browse);
-    assert!(!app.script_state.dirty);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::Browse);
+    assert!(!app.script_state_mut().unwrap().dirty);
 }
 
 // === Shift+P: collection ACL editor ===
@@ -2428,11 +2435,15 @@ async fn test_script_run_shows_the_servers_result_logs_and_time() {
         json!({"success": true, "result": 10, "logs": ["hi"], "execution_time_ms": 4242}),
     );
     let mut app = app_with_server(&server).await;
-    app.script_state.editor.set_text("print(\"hi\"); 10");
+    app.open_script_modal();
+    app.script_state_mut()
+        .unwrap()
+        .editor
+        .set_text("print(\"hi\"); 10");
 
     app.run_script_async().await;
 
-    let result = app.script_state.result.clone().unwrap();
+    let result = app.script_state_mut().unwrap().result.clone().unwrap();
     assert!(result.success);
     assert_eq!(result.result, json!(10));
     assert_eq!(result.logs, vec!["hi".to_string()]);
@@ -2453,11 +2464,17 @@ async fn test_script_list_with_a_malformed_entry_is_an_error_not_a_guess() {
         json!({"scripts": [{"name": "cleanup"}], "count": 1}),
     );
     let mut app = app_with_server(&server).await;
+    app.open_script_modal();
 
     app.load_scripts_async().await;
 
-    assert!(app.script_state.scripts.is_empty());
-    let error = app.script_state.error.clone().unwrap_or_default();
+    assert!(app.script_state_mut().unwrap().scripts.is_empty());
+    let error = app
+        .script_state_mut()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
     assert!(
         error.contains(&t().failed(Op::LoadScripts, &"")),
         "{}",
@@ -2804,21 +2821,24 @@ async fn test_script_fields_are_edited_at_the_cursor() {
     press(&mut app, KeyCode::Char('a')).await;
     press(&mut app, KeyCode::Char('s')).await;
     press(&mut app, KeyCode::Char('n')).await;
-    assert_eq!(app.script_state.mode, ScriptMode::New);
+    assert_eq!(app.script_state_mut().unwrap().mode, ScriptMode::New);
 
     type_text(&mut app, "etl").await;
     press(&mut app, KeyCode::Home).await;
     type_text(&mut app, "daily-").await;
-    assert_eq!(app.script_state.name.value(), "daily-etl");
-    assert!(app.script_state.dirty);
+    assert_eq!(app.script_state_mut().unwrap().name.value(), "daily-etl");
+    assert!(app.script_state_mut().unwrap().dirty);
 
     // Params: Ctrl+W deletes the word before the cursor
-    app.script_state.focus = crate::app::ScriptFocus::Params;
+    app.script_state_mut().unwrap().focus = crate::app::ScriptFocus::Params;
     press(&mut app, KeyCode::End).await;
     press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
-    assert_eq!(app.script_state.params_input.value(), "");
+    assert_eq!(app.script_state_mut().unwrap().params_input.value(), "");
     type_text(&mut app, "{\"n\": 1}").await;
-    assert_eq!(app.script_state.params_input.value(), "{\"n\": 1}");
+    assert_eq!(
+        app.script_state_mut().unwrap().params_input.value(),
+        "{\"n\": 1}"
+    );
 }
 
 /// The filter's field and value inputs edit at the cursor; Left / Right still

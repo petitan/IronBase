@@ -79,6 +79,7 @@ pub enum OpenModal {
     Listener(crate::modals::listener::ListenerState),
     Index(crate::state::index::IndexState),
     Vector(crate::state::vector::VectorSearchState),
+    Script(crate::state::script::ScriptState),
     /// A confirm dialog; `previous` is the modal it was opened from, given
     /// back as it was when the dialog closes (`None`: back to the panes)
     Confirm {
@@ -104,6 +105,7 @@ impl OpenModal {
             OpenModal::Listener(_) => Modal::Listener,
             OpenModal::Index(_) => Modal::Index,
             OpenModal::Vector(_) => Modal::VectorSearch,
+            OpenModal::Script(_) => Modal::Script,
             OpenModal::Confirm { .. } => Modal::Confirm,
         }
     }

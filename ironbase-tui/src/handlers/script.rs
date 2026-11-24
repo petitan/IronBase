@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::i18n::t;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -10,15 +11,15 @@ pub(crate) async fn handle_script_key_async(app: &mut App, key: KeyCode, modifie
     use crate::app::{ScriptConfirmAction, ScriptMode};
 
     // Handle confirmation dialog first if active
-    if let Some(action) = app.script_state.confirm_action {
+    if let Some(action) = open_state!(app, Script).confirm_action {
         match key {
             // Only an explicit 'y' confirms; Enter must not mean "yes" (see modals/confirm.rs)
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                app.script_state.confirm_action = None;
+                open_state!(app, Script).confirm_action = None;
                 match action {
                     ScriptConfirmAction::DiscardChanges => {
-                        app.script_state.dirty = false;
-                        app.script_state.reset_to_browse();
+                        open_state!(app, Script).dirty = false;
+                        open_state!(app, Script).reset_to_browse();
                     }
                     ScriptConfirmAction::DeleteScript => {
                         app.delete_script_async().await;
@@ -26,14 +27,14 @@ pub(crate) async fn handle_script_key_async(app: &mut App, key: KeyCode, modifie
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
-                app.script_state.confirm_action = None;
+                open_state!(app, Script).confirm_action = None;
             }
             _ => {}
         }
         return;
     }
 
-    match app.script_state.mode {
+    match open_state!(app, Script).mode {
         ScriptMode::Browse => handle_script_browse_key(app, key, modifiers).await,
         ScriptMode::Edit | ScriptMode::New | ScriptMode::Inline => {
             handle_script_edit_key(app, key, modifiers).await
@@ -47,47 +48,47 @@ pub(crate) async fn handle_script_browse_key(app: &mut App, key: KeyCode, modifi
     match (key, modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_modal(),
         (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE)
-            if app.script_state.selected_script > 0 => {
-                app.script_state.selected_script -= 1;
+            if open_state!(app, Script).selected_script > 0 => {
+                open_state!(app, Script).selected_script -= 1;
             }
         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE)
-            if app.script_state.selected_script + 1 < app.script_state.scripts.len() => {
-                app.script_state.selected_script += 1;
+            if open_state!(app, Script).selected_script + 1 < open_state!(app, Script).scripts.len() => {
+                open_state!(app, Script).selected_script += 1;
             }
         (KeyCode::Enter, _)
             // Open selected script for editing (load full script from MCP)
-            if !app.script_state.scripts.is_empty() => {
+            if !open_state!(app, Script).scripts.is_empty() => {
                 app.load_script_for_edit_async().await;
             }
         (KeyCode::Char('n'), _) => {
             // New script
-            app.script_state.start_new();
+            open_state!(app, Script).start_new();
         }
         (KeyCode::Char('d'), _) | (KeyCode::Delete, _)
             // Delete selected script (with confirmation)
-            if !app.script_state.scripts.is_empty() => {
-                app.script_state.confirm_action =
+            if !open_state!(app, Script).scripts.is_empty() => {
+                open_state!(app, Script).confirm_action =
                     Some(crate::app::ScriptConfirmAction::DeleteScript);
             }
         (KeyCode::Char('s'), KeyModifiers::CONTROL)
             // Run selected script directly from browse (Ctrl+S)
-            if !app.script_state.scripts.is_empty() => {
+            if !open_state!(app, Script).scripts.is_empty() => {
                 // Load the script first, then run
                 app.load_script_for_edit_async().await;
                 app.run_script_async().await;
             }
         (KeyCode::Char('h'), _)
             // Show history for selected script
-            if !app.script_state.scripts.is_empty() => {
+            if !open_state!(app, Script).scripts.is_empty() => {
                 // First load the script to get the name
                 app.load_script_for_edit_async().await;
                 // Then load history
                 app.load_script_history_async().await;
-                app.script_state.enter_history();
+                open_state!(app, Script).enter_history();
             }
         (KeyCode::Char('i'), _) => {
             // Inline mode (ad-hoc script)
-            app.script_state.enter_inline();
+            open_state!(app, Script).enter_inline();
         }
         (KeyCode::Char('r'), _) => {
             // Refresh script list
@@ -104,19 +105,19 @@ pub(crate) async fn handle_script_edit_key(app: &mut App, key: KeyCode, modifier
     match (key, modifiers) {
         // Exit/Back
         (KeyCode::Esc, _) => {
-            if app.script_state.dirty {
+            if open_state!(app, Script).dirty {
                 // Ask for confirmation before discarding changes
-                app.script_state.confirm_action =
+                open_state!(app, Script).confirm_action =
                     Some(crate::app::ScriptConfirmAction::DiscardChanges);
             } else {
-                app.script_state.reset_to_browse();
+                open_state!(app, Script).reset_to_browse();
             }
         }
 
         // Save & Run (Ctrl+S)
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             // Save first (if not inline)
-            if app.script_state.mode != crate::app::ScriptMode::Inline {
+            if open_state!(app, Script).mode != crate::app::ScriptMode::Inline {
                 app.save_script_async().await;
                 app.load_scripts_async().await;
             }
@@ -126,14 +127,14 @@ pub(crate) async fn handle_script_edit_key(app: &mut App, key: KeyCode, modifier
 
         // Tab - cycle focus
         (KeyCode::Tab, KeyModifiers::NONE) => {
-            app.script_state.next_focus();
+            open_state!(app, Script).next_focus();
         }
         (KeyCode::BackTab, _) => {
-            app.script_state.prev_focus();
+            open_state!(app, Script).prev_focus();
         }
 
         // Focus-specific handling
-        _ => match app.script_state.focus {
+        _ => match open_state!(app, Script).focus {
             ScriptFocus::Name => handle_script_name_key(app, key, modifiers),
             ScriptFocus::Description => handle_script_desc_key(app, key, modifiers),
             ScriptFocus::Tags => handle_script_tags_key(app, key, modifiers),
@@ -149,35 +150,32 @@ pub(crate) async fn handle_script_history_key(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc | KeyCode::Char('q') => {
             // Back to edit mode
-            app.script_state.mode = crate::app::ScriptMode::Edit;
-            app.script_state.focus = crate::app::ScriptFocus::Editor;
+            open_state!(app, Script).mode = crate::app::ScriptMode::Edit;
+            open_state!(app, Script).focus = crate::app::ScriptFocus::Editor;
         }
         KeyCode::Up | KeyCode::Char('k')
-            if app.script_state.selected_version > 0 => {
-                app.script_state.selected_version -= 1;
+            if open_state!(app, Script).selected_version > 0 => {
+                open_state!(app, Script).selected_version -= 1;
             }
         KeyCode::Down | KeyCode::Char('j')
-            if app.script_state.selected_version + 1 < app.script_state.versions.len() => {
-                app.script_state.selected_version += 1;
+            if open_state!(app, Script).selected_version + 1 < open_state!(app, Script).versions.len() => {
+                open_state!(app, Script).selected_version += 1;
             }
         KeyCode::Enter => {
             // Load selected version into editor (view mode)
-            if let Some(version) = app
-                .script_state
-                .versions
-                .get(app.script_state.selected_version)
-            {
-                app.script_state.editor = crate::widgets::TextArea::new(&version.code);
-                app.script_state.mode = crate::app::ScriptMode::Edit;
-                app.script_state.focus = crate::app::ScriptFocus::Editor;
-                app.script_state.message =
-                    Some(t().version_loaded_readonly(version.version));
-                app.script_state.dirty = true; // Mark as dirty so user knows it's not the current version
+            let state = open_state!(app, Script);
+            if let Some(version) = state.versions.get(state.selected_version) {
+                let (code, number) = (version.code.clone(), version.version);
+                state.editor = crate::widgets::TextArea::new(&code);
+                state.mode = crate::app::ScriptMode::Edit;
+                state.focus = crate::app::ScriptFocus::Editor;
+                state.message = Some(t().version_loaded_readonly(number));
+                state.dirty = true; // Mark as dirty so user knows it's not the current version
             }
         }
         KeyCode::Char('r')
             // Rollback to selected version (with confirmation)
-            if !app.script_state.versions.is_empty() => {
+            if !open_state!(app, Script).versions.is_empty() => {
                 app.open_rollback_script_confirm();
             }
         _ => {}
@@ -187,10 +185,9 @@ pub(crate) async fn handle_script_history_key(app: &mut App, key: KeyCode) {
 /// Handle name field keys
 pub(crate) fn handle_script_name_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
-        KeyCode::Enter => app.script_state.next_focus(),
+        KeyCode::Enter => open_state!(app, Script).next_focus(),
         _ => {
-            app.script_state
-                .handle_field_input(Input::Key(key, modifiers));
+            open_state!(app, Script).handle_field_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -198,58 +195,57 @@ pub(crate) fn handle_script_name_key(app: &mut App, key: KeyCode, modifiers: Key
 /// Handle description field keys
 pub(crate) fn handle_script_desc_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match key {
-        KeyCode::Enter => app.script_state.next_focus(),
+        KeyCode::Enter => open_state!(app, Script).next_focus(),
         _ => {
-            app.script_state
-                .handle_field_input(Input::Key(key, modifiers));
+            open_state!(app, Script).handle_field_input(Input::Key(key, modifiers));
         }
     }
 }
 
 /// Handle tags field keys (chips editor)
 pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    if app.script_state.tag_input_active {
+    if open_state!(app, Script).tag_input_active {
         // Typing new tag
         match key {
             // Backspace on an empty tag leaves the input
-            KeyCode::Backspace if app.script_state.tag_input.is_empty() => {
-                app.script_state.tag_input_active = false;
+            KeyCode::Backspace if open_state!(app, Script).tag_input.is_empty() => {
+                open_state!(app, Script).tag_input_active = false;
             }
             KeyCode::Enter => {
-                app.script_state.add_tag();
+                open_state!(app, Script).add_tag();
             }
             _ => {
-                app.script_state
-                    .handle_field_input(Input::Key(key, modifiers));
+                open_state!(app, Script).handle_field_input(Input::Key(key, modifiers));
             }
         }
     } else {
         // Navigating tags
         match key {
             KeyCode::Left | KeyCode::Char('h')
-                if app.script_state.selected_tag > 0 => {
-                    app.script_state.selected_tag -= 1;
+                if open_state!(app, Script).selected_tag > 0 => {
+                    open_state!(app, Script).selected_tag -= 1;
                 }
             KeyCode::Right | KeyCode::Char('l')
                 // +1 for the [+] button
-                if app.script_state.selected_tag < app.script_state.tags.len() => {
-                    app.script_state.selected_tag += 1;
+                if open_state!(app, Script).selected_tag < open_state!(app, Script).tags.len() => {
+                    open_state!(app, Script).selected_tag += 1;
                 }
             KeyCode::Enter | KeyCode::Char(' ')
-                if app.script_state.selected_tag == app.script_state.tags.len() => {
+                if open_state!(app, Script).selected_tag == open_state!(app, Script).tags.len() => {
                     // [+] button - start adding new tag
-                    app.script_state.tag_input_active = true;
+                    open_state!(app, Script).tag_input_active = true;
                 }
             KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('x')
                 // Delete selected tag
-                if app.script_state.selected_tag < app.script_state.tags.len() => {
-                    app.script_state.tags.remove(app.script_state.selected_tag);
-                    if app.script_state.selected_tag > 0
-                        && app.script_state.selected_tag >= app.script_state.tags.len()
+                if open_state!(app, Script).selected_tag < open_state!(app, Script).tags.len() => {
+                    let state = open_state!(app, Script);
+                    state.tags.remove(state.selected_tag);
+                    if open_state!(app, Script).selected_tag > 0
+                        && open_state!(app, Script).selected_tag >= open_state!(app, Script).tags.len()
                     {
-                        app.script_state.selected_tag = app.script_state.tags.len();
+                        open_state!(app, Script).selected_tag = open_state!(app, Script).tags.len();
                     }
-                    app.script_state.dirty = true;
+                    open_state!(app, Script).dirty = true;
                 }
             _ => {}
         }
@@ -258,12 +254,10 @@ pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: Key
 
 /// Handle editor (code) keys
 pub(crate) fn handle_script_editor_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    app.script_state
-        .handle_editor_input(Input::Key(key, modifiers));
+    open_state!(app, Script).handle_editor_input(Input::Key(key, modifiers));
 }
 
 /// Handle params field keys
 pub(crate) fn handle_script_params_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    app.script_state
-        .handle_field_input(Input::Key(key, modifiers));
+    open_state!(app, Script).handle_field_input(Input::Key(key, modifiers));
 }

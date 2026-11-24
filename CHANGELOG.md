@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the script modal's state lives with the open modal (tuti-tui 0.3.502, mcp-server 1.0.690 — version only, for the release tag)
+
+The script modal moves into `OpenModal` (`Script`); the rollback confirm dialog keeps its state under it. No change
+of behavior. The filter builder's state stays in `App` on purpose: its conditions outlive the modal (reopening it
+shows them again; switching collection clears them), so it is view state, like the search's.
+
 ### Changed — Tuti TUI: the index and vector modals' state lives with the open modal (tuti-tui 0.3.501, mcp-server 1.0.689 — version only, for the release tag)
 
 The index and vector search modals move into `OpenModal` (`Index`, `Vector`); a confirm dialog opened from them

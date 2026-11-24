@@ -143,9 +143,6 @@ pub struct App {
     // Visual filter state
     pub filter_state: FilterState,
 
-    // IronRhai script editor state
-    pub script_state: ScriptState,
-
     // Server info modal state
     pub server_info_scroll: usize,
 
@@ -194,7 +191,6 @@ impl App {
             search: SearchState::new(),
             collection_indexes: Vec::new(),
             filter_state: FilterState::default(),
-            script_state: ScriptState::default(),
             server_info_scroll: 0,
             rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
@@ -437,6 +433,7 @@ impl App {
     modal_state!(query_state, query_state_mut, Query, QueryState);
     modal_state!(index_state, index_state_mut, Index, IndexState);
     modal_state!(vector_state, vector_state_mut, Vector, VectorSearchState);
+    modal_state!(script_state, script_state_mut, Script, ScriptState);
     modal_state!(
         api_key_state,
         api_key_state_mut,
@@ -519,17 +516,14 @@ impl App {
 
     /// Open rollback confirmation for the selected script version (script history)
     pub fn open_rollback_script_confirm(&mut self) {
-        let Some(version_info) = self
-            .script_state
-            .versions
-            .get(self.script_state.selected_version)
-        else {
-            self.script_state.error = Some(t().no_version_selected().to_string());
+        let state = open_state!(self, Script);
+        let Some(version_info) = state.versions.get(state.selected_version) else {
+            state.error = Some(t().no_version_selected().to_string());
             return;
         };
 
         let version = version_info.version;
-        let name = self.script_state.name.value().to_string();
+        let name = state.name.value().to_string();
         self.open_confirm(ConfirmState::rollback_script(name, version));
     }
 
@@ -771,43 +765,39 @@ impl App {
 
     /// Open script modal (Browse mode)
     pub fn open_script_modal(&mut self) {
-        self.script_state = ScriptState::new();
-        self.set_modal(Modal::Script);
+        self.open_modal = Some(OpenModal::Script(ScriptState::new()));
         // Script list will be loaded in load_scripts_async
     }
 
     /// Load scripts from MCP server
     pub async fn load_scripts_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         match db.call::<ScriptList>(&ScriptListParams::default()).await {
             Ok(response) => {
-                self.script_state.scripts = response.scripts;
-                self.script_state.selected_script = 0;
-                self.script_state.error = None;
+                open_state!(self, Script).scripts = response.scripts;
+                open_state!(self, Script).selected_script = 0;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadScripts, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadScripts, &e));
             }
         }
     }
 
     /// Load a script for editing by name
     pub async fn load_script_for_edit_async(&mut self) {
-        let Some(script_info) = self
-            .script_state
-            .scripts
-            .get(self.script_state.selected_script)
-        else {
+        let state = open_state!(self, Script);
+        let Some(script_info) = state.scripts.get(state.selected_script) else {
             return;
         };
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -816,7 +806,7 @@ impl App {
         };
         match db.call::<ScriptGet>(&args).await {
             Ok(script) => {
-                self.script_state.load_script(
+                open_state!(self, Script).load_script(
                     script_name,
                     script.code,
                     script.description,
@@ -825,61 +815,58 @@ impl App {
                 );
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadScript, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadScript, &e));
             }
         }
     }
 
     /// Save current script to MCP server
     pub async fn save_script_async(&mut self) {
-        if self.script_state.name.value().trim().is_empty() {
-            self.script_state.error = Some(t().script_name_required().to_string());
+        if open_state!(self, Script).name.value().trim().is_empty() {
+            open_state!(self, Script).error = Some(t().script_name_required().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         let args = ScriptSaveParams {
-            name: self.script_state.name.value().to_string(),
-            code: self.script_state.editor.text(),
-            description: Some(self.script_state.description.value().to_string())
+            name: open_state!(self, Script).name.value().to_string(),
+            code: open_state!(self, Script).editor.text(),
+            description: Some(open_state!(self, Script).description.value().to_string())
                 .filter(|description| !description.is_empty()),
-            tags: Some(self.script_state.tags.clone()).filter(|tags| !tags.is_empty()),
+            tags: Some(open_state!(self, Script).tags.clone()).filter(|tags| !tags.is_empty()),
             dependencies: None,
         };
 
         match db.call::<ScriptSave>(&args).await {
             Ok(saved) => {
                 let new_version = saved.version;
-                self.script_state.version = new_version;
-                self.script_state.dirty = false;
-                self.script_state.message = Some(t().script_saved(new_version));
-                self.script_state.error = None;
+                open_state!(self, Script).version = new_version;
+                open_state!(self, Script).dirty = false;
+                open_state!(self, Script).message = Some(t().script_saved(new_version));
+                open_state!(self, Script).error = None;
                 // Reload script list to show new/updated scripts
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Save, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Save, &e));
             }
         }
     }
 
     /// Delete selected script
     pub async fn delete_script_async(&mut self) {
-        let Some(script_info) = self
-            .script_state
-            .scripts
-            .get(self.script_state.selected_script)
-        else {
+        let state = open_state!(self, Script);
+        let Some(script_info) = state.scripts.get(state.selected_script) else {
             return;
         };
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -888,12 +875,12 @@ impl App {
         };
         match db.call::<ScriptDelete>(&args).await {
             Ok(_) => {
-                self.script_state.message = Some(t().script_deleted(&script_name));
+                open_state!(self, Script).message = Some(t().script_deleted(&script_name));
                 // Reload list
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Delete, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Delete, &e));
             }
         }
     }
@@ -901,32 +888,35 @@ impl App {
     /// Run script (saved or inline)
     pub async fn run_script_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         // Parse params
-        let params: Option<serde_json::Value> =
-            if self.script_state.params_input.value().trim().is_empty()
-                || self.script_state.params_input.value().trim() == "{}"
-            {
-                None
-            } else {
-                match serde_json::from_str(self.script_state.params_input.value()) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        self.script_state.error = Some(t().invalid_json_params(&e));
-                        return;
-                    }
+        let params: Option<serde_json::Value> = if open_state!(self, Script)
+            .params_input
+            .value()
+            .trim()
+            .is_empty()
+            || open_state!(self, Script).params_input.value().trim() == "{}"
+        {
+            None
+        } else {
+            match serde_json::from_str(open_state!(self, Script).params_input.value()) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    open_state!(self, Script).error = Some(t().invalid_json_params(&e));
+                    return;
                 }
-            };
+            }
+        };
 
         let start = std::time::Instant::now();
 
         // Always execute current editor content (not saved version)
         // This ensures "what you see is what runs"
         let args = ScriptExecParams {
-            code: self.script_state.editor.text(),
+            code: open_state!(self, Script).editor.text(),
             params,
             max_operations: None,
         };
@@ -936,17 +926,17 @@ impl App {
         // own result, logs and execution time
         match result {
             Ok(response) => {
-                self.script_state.result = Some(ScriptResult {
+                open_state!(self, Script).result = Some(ScriptResult {
                     success: true,
                     result: response.run.result,
                     logs: response.run.logs,
                     error: None,
                     execution_time_ms: response.run.execution_time_ms,
                 });
-                self.script_state.error = None;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.result = Some(ScriptResult {
+                open_state!(self, Script).result = Some(ScriptResult {
                     success: false,
                     result: serde_json::Value::Null,
                     logs: vec![],
@@ -959,14 +949,14 @@ impl App {
 
     /// Load script version history
     pub async fn load_script_history_async(&mut self) {
-        let script_name = self.script_state.name.value().to_string();
+        let script_name = open_state!(self, Script).name.value().to_string();
         if script_name.is_empty() || script_name == "[inline]" {
-            self.script_state.error = Some(t().no_script_selected().to_string());
+            open_state!(self, Script).error = Some(t().no_script_selected().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -976,12 +966,12 @@ impl App {
         };
         match db.call::<ScriptHistory>(&args).await {
             Ok(response) => {
-                self.script_state.versions = response.history;
-                self.script_state.selected_version = 0;
-                self.script_state.error = None;
+                open_state!(self, Script).versions = response.history;
+                open_state!(self, Script).selected_version = 0;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadHistory, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadHistory, &e));
             }
         }
     }
@@ -990,7 +980,7 @@ impl App {
     /// confirm dialog opens
     pub async fn rollback_script_async(&mut self, script_name: &str, target_version: u32) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -1004,12 +994,12 @@ impl App {
             .map(|r| r.new_version)
         {
             Ok(new_version) => {
-                self.script_state.message = Some(t().script_rolled_back(new_version));
+                open_state!(self, Script).message = Some(t().script_rolled_back(new_version));
                 // Reload the script into editor
                 self.load_script_for_edit_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Rollback, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Rollback, &e));
             }
         }
     }
@@ -2926,8 +2916,9 @@ mod tests {
     #[test]
     fn test_rollback_confirm_names_script_and_version() {
         let mut app = App::new(Config::default());
-        app.script_state.name.set_value("cleanup");
-        app.script_state.versions = vec![ScriptVersion {
+        app.open_script_modal();
+        app.script_state_mut().unwrap().name.set_value("cleanup");
+        app.script_state_mut().unwrap().versions = vec![ScriptVersion {
             script_name: "greet".to_string(),
             version: 3,
             code: String::new(),
@@ -2936,7 +2927,6 @@ mod tests {
             dependencies: vec![],
             created_at: String::new(),
         }];
-        app.set_modal(Modal::Script);
 
         app.open_rollback_script_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));

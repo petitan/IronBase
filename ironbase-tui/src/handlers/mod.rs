@@ -91,7 +91,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
             Some(OpenModal::NewCollection(state)) => state.handle_input(input),
             _ => InputOutcome::Ignored,
         },
-        Some(Modal::Script) => app.script_state.handle_input(input),
+        Some(Modal::Script) => app
+            .script_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Database) => app
             .database_state_mut()
             .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),

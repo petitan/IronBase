@@ -113,7 +113,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::Script => {
-                modals::script::render(frame, frame.area(), &app.script_state, &theme);
+                if let Some(state) = app.script_state() {
+                    modals::script::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::ServerInfo => {
                 if let Some(OpenModal::ServerInfo(state)) = app.open_modal() {
