@@ -1,9 +1,10 @@
 //! Key handlers: database
 
-use crate::app::{App, Modal};
+use crate::app::{App, OpenModal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
 use crate::i18n::{t, Op};
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::DbOpenParams;
@@ -13,8 +14,10 @@ use ironbase_mcp_types::tools::DbOpen;
 pub(crate) fn handle_database_open(app: &mut App) {
     let is_http = app.config.transport == TransportMode::Http;
     let current_path = app.db_path.as_ref().map(|p| p.display().to_string());
-    app.database_state = crate::app::DatabaseState::new(current_path.as_deref(), is_http);
-    app.modal = Some(Modal::Database);
+    app.open_modal = Some(OpenModal::Database(crate::app::DatabaseState::new(
+        current_path.as_deref(),
+        is_http,
+    )));
 }
 
 /// Handle database modal keys
@@ -31,22 +34,22 @@ pub(crate) async fn handle_database_key_async(
         }
         KeyCode::Tab => {
             // Toggle between Open and Create mode
-            app.database_state.toggle_mode();
+            open_state!(app, Database).toggle_mode();
         }
         KeyCode::Enter => {
-            let path = app.database_state.path.value().trim().to_string();
+            let path = open_state!(app, Database).path.value().trim().to_string();
             if path.is_empty() {
-                app.database_state.error = Some(t().path_required().to_string());
+                open_state!(app, Database).error = Some(t().path_required().to_string());
                 return;
             }
 
-            let create = app.database_state.mode == DatabaseMode::Create;
+            let create = open_state!(app, Database).mode == DatabaseMode::Create;
 
             // HTTP mode: use db_open MCP tool
-            if app.database_state.is_http_mode {
+            if open_state!(app, Database).is_http_mode {
                 if let Some(ref db) = app.db {
-                    app.database_state.loading = true;
-                    app.database_state.error = None;
+                    open_state!(app, Database).loading = true;
+                    open_state!(app, Database).error = None;
 
                     let args = DbOpenParams {
                         path: path.clone(),
@@ -54,13 +57,13 @@ pub(crate) async fn handle_database_key_async(
                     };
                     match db.call::<DbOpen>(&args).await {
                         Ok(_) => {
-                            app.database_state.loading = false;
+                            open_state!(app, Database).loading = false;
                             let ok = if create {
                                 t().created_ok()
                             } else {
                                 t().opened_ok()
                             };
-                            app.database_state.message = Some(ok.to_string());
+                            open_state!(app, Database).message = Some(ok.to_string());
 
                             // Reset UI state and refresh collections
                             app.reset_for_new_database();
@@ -76,12 +79,12 @@ pub(crate) async fn handle_database_key_async(
                             }
                         }
                         Err(e) => {
-                            app.database_state.loading = false;
-                            app.database_state.error = Some(format!("{}", e));
+                            open_state!(app, Database).loading = false;
+                            open_state!(app, Database).error = Some(format!("{}", e));
                         }
                     }
                 } else {
-                    app.database_state.error = Some(t().no_connection().to_string());
+                    open_state!(app, Database).error = Some(t().no_connection().to_string());
                 }
                 return;
             }
@@ -91,23 +94,25 @@ pub(crate) async fn handle_database_key_async(
             let file_exists = path_buf.exists();
 
             // Validate based on mode
-            match app.database_state.mode {
+            match open_state!(app, Database).mode {
                 DatabaseMode::Open => {
                     if !file_exists {
-                        app.database_state.error = Some(t().file_missing_use_create().to_string());
+                        open_state!(app, Database).error =
+                            Some(t().file_missing_use_create().to_string());
                         return;
                     }
                 }
                 DatabaseMode::Create => {
                     if file_exists {
-                        app.database_state.error = Some(t().file_exists_use_open().to_string());
+                        open_state!(app, Database).error =
+                            Some(t().file_exists_use_open().to_string());
                         return;
                     }
                 }
             }
 
-            app.database_state.loading = true;
-            app.database_state.error = None;
+            open_state!(app, Database).loading = true;
+            open_state!(app, Database).error = None;
 
             let server_path = app.config.get_mcp_server_path();
 
@@ -122,15 +127,15 @@ pub(crate) async fn handle_database_key_async(
                 Ok(db) => {
                     app.db = Some(db);
                     app.db_path = Some(path_buf);
-                    app.database_state.loading = false;
+                    open_state!(app, Database).loading = false;
 
-                    let create = app.database_state.mode == DatabaseMode::Create;
+                    let create = open_state!(app, Database).mode == DatabaseMode::Create;
                     let ok = if create {
                         t().created_ok()
                     } else {
                         t().opened_ok()
                     };
-                    app.database_state.message = Some(ok.to_string());
+                    open_state!(app, Database).message = Some(ok.to_string());
 
                     // Reset UI state and refresh collections
                     app.reset_for_new_database();
@@ -146,13 +151,13 @@ pub(crate) async fn handle_database_key_async(
                     }
                 }
                 Err(e) => {
-                    app.database_state.loading = false;
-                    app.database_state.error = Some(t().failed(Op::Connect, &e));
+                    open_state!(app, Database).loading = false;
+                    open_state!(app, Database).error = Some(t().failed(Op::Connect, &e));
                 }
             }
         }
         _ => {
-            app.database_state.handle_input(Input::Key(key, modifiers));
+            open_state!(app, Database).handle_input(Input::Key(key, modifiers));
         }
     }
 }

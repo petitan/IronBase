@@ -12,10 +12,14 @@ pub(crate) async fn handle_export_key_async(app: &mut App, key: KeyCode, modifie
             app.execute_export_async().await;
         }
         (KeyCode::Tab, _) => {
-            app.export_state.toggle_format();
+            if let Some(state) = app.export_state_mut() {
+                state.toggle_format();
+            }
         }
         _ => {
-            app.export_state.handle_input(Input::Key(key, modifiers));
+            if let Some(state) = app.export_state_mut() {
+                state.handle_input(Input::Key(key, modifiers));
+            }
         }
     }
 }

@@ -30,7 +30,7 @@ mod vector;
 #[cfg(test)]
 mod tests;
 
-use crate::app::{App, Modal};
+use crate::app::{App, Modal, OpenModal};
 use crate::widgets::{Input, InputOutcome};
 use acl::handle_acl_key_async;
 use actions::handle_actions_key_async;
@@ -58,7 +58,7 @@ use vector::handle_vector_key_async;
 
 /// Handle one key press: modal keys first, global keys otherwise
 pub async fn handle_key(app: &mut App, key: KeyEvent) {
-    if app.modal.is_some() {
+    if app.modal().is_some() {
         handle_modal_key_async(app, key.code, key.modifiers).await;
     } else {
         handle_global_key_async(app, key.code, key.modifiers).await;
@@ -72,22 +72,51 @@ pub async fn handle_key(app: &mut App, key: KeyEvent) {
 /// never taken as commands.
 pub fn handle_paste(app: &mut App, text: &str) {
     let input = Input::Paste(text);
-    match app.modal {
+    match app.modal() {
         Some(Modal::Search) => app.search.handle_input(input),
-        Some(Modal::Insert) => app.insert.handle_input(input),
-        Some(Modal::Index) => app.index_state.handle_input(input),
-        Some(Modal::Query) => app.query_state.handle_input(input),
-        Some(Modal::Export) => app.export_state.handle_input(input),
+        Some(Modal::Insert) => app
+            .insert_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Index) => app
+            .index_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Query) => app
+            .query_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Export) => app
+            .export_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
         Some(Modal::Filter) => app.filter_state.handle_field_input(input),
-        Some(Modal::NewCollection) => app.new_collection_state.handle_input(input),
-        Some(Modal::Script) => app.script_state.handle_input(input),
-        Some(Modal::Database) => app.database_state.handle_input(input),
-        Some(Modal::ApiKey) => app.api_key_state.handle_input(input),
-        Some(Modal::Fulltext) => app.fulltext_state.handle_input(input),
-        Some(Modal::Acl) => app.acl_state.handle_principal_input(input),
-        Some(Modal::Listener) => app.listener_state.handle_input(input),
-        Some(Modal::VectorSearch) => app.vector_state.handle_text_input(input),
-        Some(Modal::Rag) => app.rag_state.handle_text_input(input),
+        Some(Modal::NewCollection) => match app.open_modal_mut() {
+            Some(OpenModal::NewCollection(state)) => state.handle_input(input),
+            _ => InputOutcome::Ignored,
+        },
+        Some(Modal::Script) => app
+            .script_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Database) => app
+            .database_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::ApiKey) => app
+            .api_key_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Fulltext) => app
+            .fulltext_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::Acl) => app.acl_state_mut().map_or(InputOutcome::Ignored, |state| {
+            state.handle_principal_input(input)
+        }),
+        Some(Modal::Listener) => app
+            .listener_state_mut()
+            .map_or(InputOutcome::Ignored, |state| state.handle_input(input)),
+        Some(Modal::VectorSearch) => app
+            .vector_state_mut()
+            .map_or(InputOutcome::Ignored, |state| {
+                state.handle_text_input(input)
+            }),
+        Some(Modal::Rag) => app.rag_state_mut().map_or(InputOutcome::Ignored, |state| {
+            state.handle_text_input(input)
+        }),
         Some(
             Modal::Actions
             | Modal::Help
@@ -102,7 +131,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
 
 /// Handle modal keys with async support
 pub(crate) async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
-    match app.modal {
+    match app.modal() {
         Some(Modal::Search) => handle_search_key_async(app, key, modifiers).await,
         Some(Modal::Actions) => handle_actions_key_async(app, key).await,
         Some(Modal::Help) => {

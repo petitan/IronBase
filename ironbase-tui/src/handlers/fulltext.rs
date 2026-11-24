@@ -1,8 +1,9 @@
 //! Key handlers: fulltext
 
-use crate::app::{App, FulltextState, Modal};
+use crate::app::{App, FulltextState, OpenModal};
 use crate::i18n::{t, Op};
 use crate::state::fulltext::FULLTEXT_LIMIT;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::FulltextSearchParams;
@@ -41,8 +42,10 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
         return;
     }
 
-    app.fulltext_state = FulltextState::new(collection.to_string(), indexed_fields);
-    app.modal = Some(Modal::Fulltext);
+    app.open_modal = Some(OpenModal::Fulltext(FulltextState::new(
+        collection.to_string(),
+        indexed_fields,
+    )));
 }
 
 /// Async fulltext key handler
@@ -53,26 +56,28 @@ pub(crate) async fn handle_fulltext_key_async(
 ) {
     match key {
         KeyCode::Esc => app.close_modal(),
-        KeyCode::Tab => app.fulltext_state.next_field(),
+        KeyCode::Tab => open_state!(app, Fulltext).next_field(),
         // Plain j/k belong to the query input; results: arrows or Ctrl+j/k
-        KeyCode::Up => app.fulltext_state.select_up(),
-        KeyCode::Down => app.fulltext_state.select_down(),
-        KeyCode::Char('k') if modifiers == KeyModifiers::CONTROL => app.fulltext_state.select_up(),
+        KeyCode::Up => open_state!(app, Fulltext).select_up(),
+        KeyCode::Down => open_state!(app, Fulltext).select_down(),
+        KeyCode::Char('k') if modifiers == KeyModifiers::CONTROL => {
+            open_state!(app, Fulltext).select_up()
+        }
         KeyCode::Char('j') if modifiers == KeyModifiers::CONTROL => {
-            app.fulltext_state.select_down()
+            open_state!(app, Fulltext).select_down()
         }
         KeyCode::Enter => {
             // Execute fulltext search
-            if app.fulltext_state.query.is_empty() {
+            if open_state!(app, Fulltext).query.is_empty() {
                 return;
             }
 
-            app.fulltext_state.loading = true;
+            open_state!(app, Fulltext).loading = true;
 
             if let Some(ref db) = app.db {
-                let collection = app.fulltext_state.collection.clone();
-                let field = app.fulltext_state.field.clone();
-                let query = app.fulltext_state.query.value().to_string();
+                let collection = open_state!(app, Fulltext).collection.clone();
+                let field = open_state!(app, Fulltext).field.clone();
+                let query = open_state!(app, Fulltext).query.value().to_string();
 
                 let args = FulltextSearchParams {
                     collection,
@@ -92,21 +97,21 @@ pub(crate) async fn handle_fulltext_key_async(
                 };
                 match db.call::<FulltextSearch>(&args).await {
                     Ok(response) => {
-                        app.fulltext_state.results = response.results;
-                        app.fulltext_state.selected_result = 0;
-                        app.fulltext_state.error = None;
+                        open_state!(app, Fulltext).results = response.results;
+                        open_state!(app, Fulltext).selected_result = 0;
+                        open_state!(app, Fulltext).error = None;
                     }
                     Err(e) => {
-                        app.fulltext_state.error = Some(format!("{}", e));
-                        app.fulltext_state.results.clear();
+                        open_state!(app, Fulltext).error = Some(format!("{}", e));
+                        open_state!(app, Fulltext).results.clear();
                     }
                 }
             }
 
-            app.fulltext_state.loading = false;
+            open_state!(app, Fulltext).loading = false;
         }
         _ => {
-            app.fulltext_state.handle_input(Input::Key(key, modifiers));
+            open_state!(app, Fulltext).handle_input(Input::Key(key, modifiers));
         }
     }
 }

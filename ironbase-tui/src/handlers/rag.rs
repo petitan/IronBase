@@ -1,7 +1,8 @@
 //! Key handlers: rag
 
-use crate::app::{App, Modal, RagState};
+use crate::app::{App, OpenModal, RagState};
 use crate::i18n::{t, Op};
+use crate::state::open_state;
 use crate::widgets::{push_digits, Input};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{
@@ -30,22 +31,21 @@ pub(crate) async fn handle_rag_open(app: &mut App) {
         return;
     }
 
-    app.rag_state = RagState::new(collection.clone());
-    app.modal = Some(Modal::Rag);
+    app.open_modal = Some(OpenModal::Rag(RagState::new(collection.clone())));
 
     // Load models + auto-embed status
     if let Some(ref db) = app.db {
         let mut errors = Vec::new();
         match db.call::<EmbedModelsList>(&NoParams {}).await {
-            Ok(models) => app.rag_state.set_models(models.models),
+            Ok(models) => open_state!(app, Rag).set_models(models.models),
             Err(e) => errors.push(t().failed(Op::LoadModels, &e)),
         }
         match load_auto_embed_status(db, &collection).await {
-            Ok(status) => app.rag_state.auto_embed_config = Some(status),
+            Ok(status) => open_state!(app, Rag).auto_embed_config = Some(status),
             Err(e) => errors.push(t().failed(Op::LoadAutoEmbedStatus, &e)),
         }
         if !errors.is_empty() {
-            app.rag_state.error = Some(errors.join("; "));
+            open_state!(app, Rag).error = Some(errors.join("; "));
         }
     }
 }
@@ -68,12 +68,12 @@ pub(crate) async fn handle_rag_key_async(app: &mut App, key: KeyCode, modifiers:
         // Close modal
         (KeyCode::Esc, _) => {
             // If in a sub-mode, go back first
-            if app.rag_state.creating {
-                app.rag_state.creating = false;
+            if open_state!(app, Rag).creating {
+                open_state!(app, Rag).creating = false;
                 return;
             }
-            if app.rag_state.models_mode == 1 {
-                app.rag_state.models_mode = 0;
+            if open_state!(app, Rag).models_mode == 1 {
+                open_state!(app, Rag).models_mode = 0;
                 return;
             }
             app.close_modal();
@@ -81,18 +81,20 @@ pub(crate) async fn handle_rag_key_async(app: &mut App, key: KeyCode, modifiers:
 
         // Tab navigation (only when not in text input sub-modes)
         (KeyCode::Tab, KeyModifiers::NONE)
-            if !app.rag_state.creating
-                && app.rag_state.models_mode == 0
-                && app.rag_state.active_tab != RagTab::Search
-                && app.rag_state.active_tab != RagTab::Import =>
+            if !open_state!(app, Rag).creating
+                && open_state!(app, Rag).models_mode == 0
+                && open_state!(app, Rag).active_tab != RagTab::Search
+                && open_state!(app, Rag).active_tab != RagTab::Import =>
         {
-            app.rag_state.next_tab();
+            open_state!(app, Rag).next_tab();
         }
-        (KeyCode::BackTab, _) if !app.rag_state.creating && app.rag_state.models_mode == 0 => {
-            app.rag_state.prev_tab();
+        (KeyCode::BackTab, _)
+            if !open_state!(app, Rag).creating && open_state!(app, Rag).models_mode == 0 =>
+        {
+            open_state!(app, Rag).prev_tab();
         }
 
-        _ => match app.rag_state.active_tab {
+        _ => match open_state!(app, Rag).active_tab {
             RagTab::Search => handle_rag_search_key(app, key, modifiers).await,
             RagTab::Import => handle_rag_import_key(app, key, modifiers).await,
             RagTab::Collections => handle_rag_collections_key(app, key, modifiers).await,
@@ -106,38 +108,36 @@ pub(crate) async fn handle_rag_key_async(app: &mut App, key: KeyCode, modifiers:
 pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match (key, modifiers) {
         // Execute search
-        (KeyCode::Enter, _) if app.rag_state.search_focus == 0 => {
-            if app.rag_state.search_query.value().trim().is_empty() {
-                app.rag_state.error = Some(t().query_empty().to_string());
+        (KeyCode::Enter, _) if open_state!(app, Rag).search_focus == 0 => {
+            if open_state!(app, Rag).search_query.value().trim().is_empty() {
+                open_state!(app, Rag).error = Some(t().query_empty().to_string());
                 return;
             }
 
             let args = SearchParams {
-                collection: app.rag_state.collection.clone(),
-                query: app.rag_state.search_query.value().to_string(),
+                collection: open_state!(app, Rag).collection.clone(),
+                query: open_state!(app, Rag).search_query.value().to_string(),
                 filter: None,
-                limit: app.rag_state.search_limit,
+                limit: open_state!(app, Rag).search_limit,
                 format: "structured".to_string(),
                 debug: false,
             };
 
-            app.rag_state.is_loading = true;
-            app.rag_state.error = None;
+            open_state!(app, Rag).is_loading = true;
+            open_state!(app, Rag).error = None;
 
             if let Some(ref db) = app.db {
-                let result = db
-                    .call::<Search>(&args)
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|response| app.rag_state.set_search_response(response));
-                app.rag_state.is_loading = false;
+                let response = db.call::<Search>(&args).await.map_err(|e| e.to_string());
+                let state = open_state!(app, Rag);
+                let result = response.and_then(|response| state.set_search_response(response));
+                state.is_loading = false;
                 match result {
-                    Ok(()) => app.rag_state.message = Some(app.rag_state.search_summary()),
+                    Ok(()) => state.message = Some(state.search_summary()),
                     Err(e) => {
                         // The previous search's results and summary are stale
-                        app.rag_state.clear_search_response();
-                        app.rag_state.message = None;
-                        app.rag_state.error = Some(e);
+                        state.clear_search_response();
+                        state.message = None;
+                        state.error = Some(e);
                     }
                 }
             }
@@ -145,36 +145,38 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
 
         // Switch focus between query and limit
         (KeyCode::Tab, KeyModifiers::NONE) => {
-            app.rag_state.search_focus = 1 - app.rag_state.search_focus.min(1);
+            open_state!(app, Rag).search_focus = 1 - open_state!(app, Rag).search_focus.min(1);
         }
 
         // Navigate results (plain j/k belong to the query input)
         (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL)
-            if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
+            if open_state!(app, Rag).search_focus == 0
+                && !open_state!(app, Rag).search_results.is_empty() =>
         {
-            app.rag_state.search_result_up();
+            open_state!(app, Rag).search_result_up();
         }
         (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL)
-            if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
+            if open_state!(app, Rag).search_focus == 0
+                && !open_state!(app, Rag).search_results.is_empty() =>
         {
-            app.rag_state.search_result_down();
+            open_state!(app, Rag).search_result_down();
         }
 
         // Adjust the limit with Up/Down when it has the focus
-        (KeyCode::Up, _) if app.rag_state.search_focus == 1 => {
-            if app.rag_state.search_limit < 100 {
-                app.rag_state.search_limit += 1;
+        (KeyCode::Up, _) if open_state!(app, Rag).search_focus == 1 => {
+            if open_state!(app, Rag).search_limit < 100 {
+                open_state!(app, Rag).search_limit += 1;
             }
         }
-        (KeyCode::Down, _) if app.rag_state.search_focus == 1 => {
-            if app.rag_state.search_limit > 1 {
-                app.rag_state.search_limit -= 1;
+        (KeyCode::Down, _) if open_state!(app, Rag).search_focus == 1 => {
+            if open_state!(app, Rag).search_limit > 1 {
+                open_state!(app, Rag).search_limit -= 1;
             }
         }
 
         // The query input takes the rest
         _ => {
-            app.rag_state.handle_text_input(Input::Key(key, modifiers));
+            open_state!(app, Rag).handle_text_input(Input::Key(key, modifiers));
         }
     }
 }
@@ -184,17 +186,22 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
     match (key, modifiers) {
         // Execute import
         (KeyCode::Enter, _) => {
-            if app.rag_state.import_content.text().trim().is_empty() {
-                app.rag_state.error = Some(t().content_empty().to_string());
+            if open_state!(app, Rag)
+                .import_content
+                .text()
+                .trim()
+                .is_empty()
+            {
+                open_state!(app, Rag).error = Some(t().content_empty().to_string());
                 return;
             }
 
-            let collection = app.rag_state.collection.clone();
-            let content = app.rag_state.import_content.text();
-            let title = if app.rag_state.import_title.is_empty() {
+            let collection = open_state!(app, Rag).collection.clone();
+            let content = open_state!(app, Rag).import_content.text();
+            let title = if open_state!(app, Rag).import_title.is_empty() {
                 None
             } else {
-                Some(app.rag_state.import_title.value().to_string())
+                Some(open_state!(app, Rag).import_title.value().to_string())
             };
             let args = RagDocumentImportParams {
                 collection,
@@ -202,9 +209,9 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
                 title,
                 metadata: None,
                 doc_id: None,
-                chunk_size: app.rag_state.import_chunk_size,
-                overlap: app.rag_state.import_overlap,
-                mode: app.rag_state.import_mode.clone(),
+                chunk_size: open_state!(app, Rag).import_chunk_size,
+                overlap: open_state!(app, Rag).import_overlap,
+                mode: open_state!(app, Rag).import_mode.clone(),
                 provider: None,
                 if_exists: ironbase_mcp_types::defaults::default_if_exists(),
                 language: ironbase_mcp_types::params::default_rag_language(),
@@ -212,68 +219,68 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
                 context_fields: None,
             };
 
-            app.rag_state.is_loading = true;
-            app.rag_state.error = None;
+            open_state!(app, Rag).is_loading = true;
+            open_state!(app, Rag).error = None;
             // A failed import must not leave the previous one's result
-            app.rag_state.import_result = None;
+            open_state!(app, Rag).import_result = None;
 
             if let Some(ref db) = app.db {
                 match db.call::<RagDocumentImport>(&args).await {
                     Ok(result) => {
-                        app.rag_state.is_loading = false;
-                        app.rag_state.message =
+                        open_state!(app, Rag).is_loading = false;
+                        open_state!(app, Rag).message =
                             Some(crate::modals::rag::import_result_text(&result));
-                        app.rag_state.import_result = Some(result);
+                        open_state!(app, Rag).import_result = Some(result);
                     }
                     Err(e) => {
-                        app.rag_state.is_loading = false;
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).is_loading = false;
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
         }
 
         // Toggle mode (when mode field focused)
-        (KeyCode::Char(' '), _) if app.rag_state.import_form_field == 4 => {
-            app.rag_state.toggle_import_mode();
+        (KeyCode::Char(' '), _) if open_state!(app, Rag).import_form_field == 4 => {
+            open_state!(app, Rag).toggle_import_mode();
         }
 
         // Next form field
         (KeyCode::Tab, KeyModifiers::NONE) => {
-            app.rag_state.next_import_field();
+            open_state!(app, Rag).next_import_field();
         }
 
         // The content and the title
-        _ if app.rag_state.import_form_field <= 1 => {
-            app.rag_state.handle_text_input(Input::Key(key, modifiers));
+        _ if open_state!(app, Rag).import_form_field <= 1 => {
+            open_state!(app, Rag).handle_text_input(Input::Key(key, modifiers));
         }
 
         // Text input based on focused field
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
-            match app.rag_state.import_form_field {
+            match open_state!(app, Rag).import_form_field {
                 2 => {
-                    let size = app.rag_state.import_chunk_size;
-                    app.rag_state.import_chunk_size = push_digits(size, &c.to_string());
+                    let size = open_state!(app, Rag).import_chunk_size;
+                    open_state!(app, Rag).import_chunk_size = push_digits(size, &c.to_string());
                 }
                 3 => {
-                    let overlap = app.rag_state.import_overlap;
-                    app.rag_state.import_overlap = push_digits(overlap, &c.to_string());
+                    let overlap = open_state!(app, Rag).import_overlap;
+                    open_state!(app, Rag).import_overlap = push_digits(overlap, &c.to_string());
                 }
                 _ => {}
             }
-            app.rag_state.error = None;
+            open_state!(app, Rag).error = None;
         }
         (KeyCode::Backspace, _) => {
-            match app.rag_state.import_form_field {
+            match open_state!(app, Rag).import_form_field {
                 2 => {
-                    app.rag_state.import_chunk_size /= 10;
+                    open_state!(app, Rag).import_chunk_size /= 10;
                 }
                 3 => {
-                    app.rag_state.import_overlap /= 10;
+                    open_state!(app, Rag).import_overlap /= 10;
                 }
                 _ => {}
             }
-            app.rag_state.error = None;
+            open_state!(app, Rag).error = None;
         }
 
         _ => {}
@@ -287,65 +294,67 @@ pub(crate) async fn handle_rag_collections_key(
     modifiers: KeyModifiers,
 ) {
     // If in create form
-    if app.rag_state.creating {
+    if open_state!(app, Rag).creating {
         match (key, modifiers) {
             (KeyCode::Enter, _) => {
                 // Create collection
-                let name = app
-                    .rag_state
+                let name = open_state!(app, Rag)
                     .create_collection_name
                     .value()
                     .trim()
                     .to_string();
                 if name.is_empty() {
-                    app.rag_state.error = Some(t().collection_name_required().to_string());
+                    open_state!(app, Rag).error = Some(t().collection_name_required().to_string());
                     return;
                 }
 
                 let args = RagCollectionCreateParams {
                     collection: name,
-                    embedding_field: app.rag_state.create_embedding_field.value().to_string(),
-                    text_field: app.rag_state.create_text_field.value().to_string(),
+                    embedding_field: open_state!(app, Rag)
+                        .create_embedding_field
+                        .value()
+                        .to_string(),
+                    text_field: open_state!(app, Rag).create_text_field.value().to_string(),
                     text_fields: None,
                     context_fields: None,
-                    provider: Some(app.rag_state.create_provider.clone()),
-                    language: app.rag_state.create_language.clone(),
+                    provider: Some(open_state!(app, Rag).create_provider.clone()),
+                    language: open_state!(app, Rag).create_language.clone(),
                 };
 
-                app.rag_state.is_loading = true;
-                app.rag_state.error = None;
+                open_state!(app, Rag).is_loading = true;
+                open_state!(app, Rag).error = None;
 
                 if let Some(ref db) = app.db {
                     match db.call::<RagCollectionCreate>(&args).await {
                         Ok(response) => {
-                            app.rag_state.is_loading = false;
-                            app.rag_state.creating = false;
-                            app.rag_state.message = Some(rag_created_message(&response));
+                            open_state!(app, Rag).is_loading = false;
+                            open_state!(app, Rag).creating = false;
+                            open_state!(app, Rag).message = Some(rag_created_message(&response));
                         }
                         Err(e) => {
-                            app.rag_state.is_loading = false;
-                            app.rag_state.error = Some(format!("{}", e));
+                            open_state!(app, Rag).is_loading = false;
+                            open_state!(app, Rag).error = Some(format!("{}", e));
                         }
                     }
                 }
             }
 
             // Toggle provider/language
-            (KeyCode::Char(' '), _) if app.rag_state.create_form_field == 3 => {
-                app.rag_state.toggle_create_provider();
+            (KeyCode::Char(' '), _) if open_state!(app, Rag).create_form_field == 3 => {
+                open_state!(app, Rag).toggle_create_provider();
             }
-            (KeyCode::Char(' '), _) if app.rag_state.create_form_field == 4 => {
-                app.rag_state.toggle_create_language();
+            (KeyCode::Char(' '), _) if open_state!(app, Rag).create_form_field == 4 => {
+                open_state!(app, Rag).toggle_create_language();
             }
 
             // Next field
             (KeyCode::Tab, KeyModifiers::NONE) => {
-                app.rag_state.next_create_field();
+                open_state!(app, Rag).next_create_field();
             }
 
             // The name and field inputs take the rest
             _ => {
-                app.rag_state.handle_text_input(Input::Key(key, modifiers));
+                open_state!(app, Rag).handle_text_input(Input::Key(key, modifiers));
             }
         }
         return;
@@ -355,21 +364,21 @@ pub(crate) async fn handle_rag_collections_key(
     match (key, modifiers) {
         // Create new
         (KeyCode::Char('c'), _) => {
-            app.rag_state.creating = true;
-            app.rag_state.create_form_field = 0;
-            app.rag_state.create_collection_name.clear();
+            open_state!(app, Rag).creating = true;
+            open_state!(app, Rag).create_form_field = 0;
+            open_state!(app, Rag).create_collection_name.clear();
         }
 
         // Navigate
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.rag_state.collection_up(),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.rag_state.collection_down(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => open_state!(app, Rag).collection_up(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => open_state!(app, Rag).collection_down(),
 
         // Stats for selected collection
         (KeyCode::Enter, _) => {
-            let Some(name) = app
-                .rag_state
+            let state = open_state!(app, Rag);
+            let Some(name) = state
                 .rag_collections
-                .get(app.rag_state.selected_collection)
+                .get(state.selected_collection)
                 .map(|c| c.collection.clone())
             else {
                 return;
@@ -377,13 +386,12 @@ pub(crate) async fn handle_rag_collections_key(
             if let Some(ref db) = app.db {
                 match load_rag_stats(db, &name).await {
                     Ok(stats) => {
-                        app.rag_state.message = Some(t().rag_stats_line(
+                        open_state!(app, Rag).message = Some(t().rag_stats_line(
                             &stats.collection,
                             &stats.stats.chunk_count,
                             &stats.stats.source_document_count,
                         ));
-                        if let Some(entry) = app
-                            .rag_state
+                        if let Some(entry) = open_state!(app, Rag)
                             .rag_collections
                             .iter_mut()
                             .find(|c| c.collection == name)
@@ -392,7 +400,7 @@ pub(crate) async fn handle_rag_collections_key(
                         }
                     }
                     Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
@@ -400,23 +408,23 @@ pub(crate) async fn handle_rag_collections_key(
 
         // Refresh
         (KeyCode::Char('r'), _) => {
-            let collection = app.rag_state.collection.clone();
+            let collection = open_state!(app, Rag).collection.clone();
             if let Some(ref db) = app.db {
                 match load_rag_stats(db, &collection).await {
                     Ok(stats) => {
-                        app.rag_state.message = Some(t().stats_refreshed().to_string());
-                        app.rag_state.rag_collections = vec![stats];
-                        app.rag_state.selected_collection = 0;
+                        open_state!(app, Rag).message = Some(t().stats_refreshed().to_string());
+                        open_state!(app, Rag).rag_collections = vec![stats];
+                        open_state!(app, Rag).selected_collection = 0;
                     }
                     Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
         }
 
         // Tab navigation
-        (KeyCode::Tab, KeyModifiers::NONE) => app.rag_state.next_tab(),
+        (KeyCode::Tab, KeyModifiers::NONE) => open_state!(app, Rag).next_tab(),
 
         _ => {}
     }
@@ -425,39 +433,44 @@ pub(crate) async fn handle_rag_collections_key(
 /// Models tab key handler
 pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     // If in test mode
-    if app.rag_state.models_mode == 1 {
+    if open_state!(app, Rag).models_mode == 1 {
         match (key, modifiers) {
             (KeyCode::Enter, _) => {
-                if app.rag_state.embed_test_input.value().trim().is_empty() {
-                    app.rag_state.error = Some(t().text_empty().to_string());
+                if open_state!(app, Rag)
+                    .embed_test_input
+                    .value()
+                    .trim()
+                    .is_empty()
+                {
+                    open_state!(app, Rag).error = Some(t().text_empty().to_string());
                     return;
                 }
 
-                let text = app.rag_state.embed_test_input.value().to_string();
-                app.rag_state.is_loading = true;
-                app.rag_state.error = None;
+                let text = open_state!(app, Rag).embed_test_input.value().to_string();
+                open_state!(app, Rag).is_loading = true;
+                open_state!(app, Rag).error = None;
 
                 if let Some(ref db) = app.db {
                     let args = EmbedTextParams {
                         text,
-                        provider: app.rag_state.selected_provider(),
+                        provider: open_state!(app, Rag).selected_provider(),
                     };
-                    app.rag_state.embed_test_result = None;
+                    open_state!(app, Rag).embed_test_result = None;
                     match db.call::<EmbedText>(&args).await {
                         Ok(result) => {
-                            app.rag_state.is_loading = false;
-                            app.rag_state.embed_test_result = Some(result);
+                            open_state!(app, Rag).is_loading = false;
+                            open_state!(app, Rag).embed_test_result = Some(result);
                         }
                         Err(e) => {
-                            app.rag_state.is_loading = false;
-                            app.rag_state.error = Some(format!("{}", e));
+                            open_state!(app, Rag).is_loading = false;
+                            open_state!(app, Rag).error = Some(format!("{}", e));
                         }
                     }
                 }
             }
 
             _ => {
-                app.rag_state.handle_text_input(Input::Key(key, modifiers));
+                open_state!(app, Rag).handle_text_input(Input::Key(key, modifiers));
             }
         }
         return;
@@ -466,18 +479,18 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
     // Normal mode
     match (key, modifiers) {
         // Navigate models
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.rag_state.model_up(),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.rag_state.model_down(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => open_state!(app, Rag).model_up(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => open_state!(app, Rag).model_down(),
 
         // Enable auto-embed
         (KeyCode::Char('e'), _) => {
-            let collection = app.rag_state.collection.clone();
+            let collection = open_state!(app, Rag).collection.clone();
             if let Some(ref db) = app.db {
                 let args = AutoEmbedEnableParams {
                     collection: collection.clone(),
                     source_field: "content".to_string(),
                     target_field: "embedding".to_string(),
-                    provider: app.rag_state.selected_provider(),
+                    provider: open_state!(app, Rag).selected_provider(),
                     model: None,
                     dimension: None,
                     skip_if_exists: false,
@@ -496,16 +509,17 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                         if let Some(warning) = response.warning {
                             message.push_str(&t().warning_suffix(&warning));
                         }
-                        app.rag_state.message = Some(message);
+                        open_state!(app, Rag).message = Some(message);
                         match load_auto_embed_status(db, &collection).await {
-                            Ok(status) => app.rag_state.auto_embed_config = Some(status),
+                            Ok(status) => open_state!(app, Rag).auto_embed_config = Some(status),
                             Err(e) => {
-                                app.rag_state.error = Some(t().failed(Op::LoadAutoEmbedStatus, &e))
+                                open_state!(app, Rag).error =
+                                    Some(t().failed(Op::LoadAutoEmbedStatus, &e))
                             }
                         }
                     }
                     Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
@@ -519,16 +533,16 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
             if let Some(ref db) = app.db {
                 match db.call::<EmbedCacheStats>(&NoParams {}).await {
                     Ok(stats) => {
-                        app.rag_state.message = Some(match &stats {
+                        open_state!(app, Rag).message = Some(match &stats {
                             EmbedCacheStatsResponse::Enabled { .. } => {
                                 t().cache_stats_loaded().to_string()
                             }
                             EmbedCacheStatsResponse::Disabled { message, .. } => message.clone(),
                         });
-                        app.rag_state.cache_stats = Some(stats);
+                        open_state!(app, Rag).cache_stats = Some(stats);
                     }
                     Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
@@ -539,13 +553,13 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
 
         // Test embed
         (KeyCode::Char('t'), _) => {
-            app.rag_state.models_mode = 1;
-            app.rag_state.embed_test_input.clear();
-            app.rag_state.embed_test_result = None;
+            open_state!(app, Rag).models_mode = 1;
+            open_state!(app, Rag).embed_test_input.clear();
+            open_state!(app, Rag).embed_test_result = None;
         }
 
         // Tab navigation
-        (KeyCode::Tab, KeyModifiers::NONE) => app.rag_state.next_tab(),
+        (KeyCode::Tab, KeyModifiers::NONE) => open_state!(app, Rag).next_tab(),
 
         _ => {}
     }
@@ -555,8 +569,8 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
 pub(crate) async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
     match key {
         // Navigate
-        KeyCode::Up | KeyCode::Char('k') => app.rag_state.job_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.rag_state.job_down(),
+        KeyCode::Up | KeyCode::Char('k') => open_state!(app, Rag).job_up(),
+        KeyCode::Down | KeyCode::Char('j') => open_state!(app, Rag).job_down(),
 
         // Cancel job (with confirmation)
         KeyCode::Char('x') => app.open_cancel_embed_job_confirm(),
@@ -569,18 +583,18 @@ pub(crate) async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
                     .await
                 {
                     Ok(result) => {
-                        app.rag_state.set_jobs(result.jobs);
-                        app.rag_state.message = Some(t().jobs_refreshed().to_string());
+                        open_state!(app, Rag).set_jobs(result.jobs);
+                        open_state!(app, Rag).message = Some(t().jobs_refreshed().to_string());
                     }
                     Err(e) => {
-                        app.rag_state.error = Some(format!("{}", e));
+                        open_state!(app, Rag).error = Some(format!("{}", e));
                     }
                 }
             }
         }
 
         // Tab navigation
-        KeyCode::Tab => app.rag_state.next_tab(),
+        KeyCode::Tab => open_state!(app, Rag).next_tab(),
 
         _ => {}
     }

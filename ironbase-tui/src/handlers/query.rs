@@ -1,19 +1,20 @@
 //! Key handlers: query
 
 use crate::app::App;
+use crate::state::open_state;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Async query key handler
 pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     // Handle template mode separately
-    if app.query_state.show_templates {
+    if open_state!(app, Query).show_templates {
         match key {
-            KeyCode::Esc => app.query_state.show_templates = false,
-            KeyCode::Tab => app.query_state.show_templates = false,
-            KeyCode::Up | KeyCode::Char('k') => app.query_state.template_up(),
-            KeyCode::Down | KeyCode::Char('j') => app.query_state.template_down(),
-            KeyCode::Enter => app.query_state.apply_template(),
+            KeyCode::Esc => open_state!(app, Query).show_templates = false,
+            KeyCode::Tab => open_state!(app, Query).show_templates = false,
+            KeyCode::Up | KeyCode::Char('k') => open_state!(app, Query).template_up(),
+            KeyCode::Down | KeyCode::Char('j') => open_state!(app, Query).template_down(),
+            KeyCode::Enter => open_state!(app, Query).apply_template(),
             _ => {}
         }
         return;
@@ -27,9 +28,9 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
         }
         // Ctrl+E = Explain query OR toggle explain view
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-            if app.query_state.explain_result.is_some() {
+            if open_state!(app, Query).explain_result.is_some() {
                 // Toggle between results and explain view
-                app.query_state.toggle_explain_view();
+                open_state!(app, Query).toggle_explain_view();
             } else {
                 // Execute explain
                 app.execute_explain_async().await;
@@ -37,26 +38,26 @@ pub(crate) async fn handle_query_key_async(app: &mut App, key: KeyCode, modifier
         }
         // Enter = Apply filter (ha van eredmény) VAGY newline (ha nincs)
         (KeyCode::Enter, KeyModifiers::NONE) => {
-            if app.query_state.has_results() {
+            if open_state!(app, Query).has_results() {
                 app.apply_query_as_filter().await;
             } else {
-                app.query_state.handle_input(Input::Key(key, modifiers));
+                open_state!(app, Query).handle_input(Input::Key(key, modifiers));
             }
         }
         // Ctrl+T = Templates
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
-            app.query_state.toggle_templates();
+            open_state!(app, Query).toggle_templates();
         }
         // Ctrl+j/k = Navigate results
         (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-            app.query_state.result_down();
+            open_state!(app, Query).result_down();
         }
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-            app.query_state.result_up();
+            open_state!(app, Query).result_up();
         }
         // The editor takes the rest
         _ => {
-            app.query_state.handle_input(Input::Key(key, modifiers));
+            open_state!(app, Query).handle_input(Input::Key(key, modifiers));
         }
     }
 }

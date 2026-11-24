@@ -2,7 +2,6 @@
 
 use super::render_modal_frame;
 use crate::i18n::t;
-use crate::state::Modal;
 use crate::theme::Theme;
 use crate::widgets::choice;
 use ratatui::prelude::*;
@@ -17,8 +16,6 @@ pub struct ConfirmState {
     pub cancel_text: String,
     pub selected: ConfirmOption,
     pub on_confirm: ConfirmAction,
-    /// Modal to return to after confirm/cancel (None = back to the panes)
-    pub return_to: Option<Modal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,7 +77,6 @@ impl Default for ConfirmState {
                 collection: String::new(),
                 doc_id: serde_json::Value::Null,
             },
-            return_to: None,
         }
     }
 }
@@ -94,7 +90,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::DeleteDocument { collection, doc_id },
-            return_to: None,
         }
     }
 
@@ -106,7 +101,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::DeleteCollection { name },
-            return_to: None,
         }
     }
 
@@ -121,7 +115,6 @@ impl ConfirmState {
                 collection,
                 index_name,
             },
-            return_to: Some(Modal::Index),
         }
     }
 
@@ -136,7 +129,6 @@ impl ConfirmState {
                 collection,
                 index_name,
             },
-            return_to: Some(Modal::VectorSearch),
         }
     }
 
@@ -148,7 +140,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::RollbackScript { name, version },
-            return_to: Some(Modal::Script),
         }
     }
 
@@ -160,7 +151,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::DisableAutoEmbed { collection },
-            return_to: Some(Modal::Rag),
         }
     }
 
@@ -172,7 +162,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::ClearEmbedCache,
-            return_to: Some(Modal::Rag),
         }
     }
 
@@ -184,7 +173,6 @@ impl ConfirmState {
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
             on_confirm: ConfirmAction::CancelEmbedJob { job_id },
-            return_to: Some(Modal::Rag),
         }
     }
 

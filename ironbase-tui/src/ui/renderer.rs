@@ -1,6 +1,6 @@
 //! Main UI renderer
 
-use crate::app::{App, ConnectionType, Modal, Pane};
+use crate::app::{App, ConnectionType, Modal, OpenModal, Pane};
 use crate::i18n::t;
 use crate::modals;
 use crate::panes;
@@ -71,63 +71,102 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
     render_command_bar(frame, layout[2], app, &theme);
 
     // Render modal if active
-    if let Some(modal) = app.modal {
+    if let Some(modal) = app.modal() {
         match modal {
             Modal::Search => modals::search::render(frame, frame.area(), app, &theme),
             Modal::Actions => modals::actions::render(frame, frame.area(), app, &theme),
             Modal::Help => modals::help::render(frame, frame.area(), app.help_scroll, &theme),
-            Modal::Confirm => modals::confirm::render(frame, frame.area(), &app.confirm, &theme),
-            Modal::Insert => modals::insert::render(frame, frame.area(), &app.insert, &theme),
-            Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
-            Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
-            Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
+            Modal::Confirm => {
+                if let Some(state) = app.confirm_state() {
+                    modals::confirm::render(frame, frame.area(), state, &theme);
+                }
+            }
+            Modal::Insert => {
+                if let Some(state) = app.insert_state() {
+                    modals::insert::render(frame, frame.area(), state, &theme);
+                }
+            }
+            Modal::Index => {
+                if let Some(state) = app.index_state() {
+                    modals::index::render(frame, frame.area(), state, &theme);
+                }
+            }
+            Modal::Query => {
+                if let Some(state) = app.query_state() {
+                    modals::query::render(frame, frame.area(), state, &theme);
+                }
+            }
+            Modal::Export => {
+                if let Some(state) = app.export_state() {
+                    modals::export::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
-            Modal::NewCollection => modals::new_collection::render(
-                frame,
-                frame.area(),
-                &app.new_collection_state,
-                &theme,
-            ),
+            Modal::NewCollection => {
+                if let Some(OpenModal::NewCollection(state)) = app.open_modal() {
+                    modals::new_collection::render(frame, frame.area(), state, &theme);
+                }
+            }
             Modal::ErrorDetail => {
                 if let Some(ref err) = app.error_message {
                     modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
                 }
             }
             Modal::Script => {
-                modals::script::render(frame, frame.area(), &app.script_state, &theme);
+                if let Some(state) = app.script_state() {
+                    modals::script::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::ServerInfo => {
-                modals::server_info::render(
-                    frame,
-                    frame.area(),
-                    &app.server_info_state,
-                    app.server_info_scroll,
-                    &theme,
-                );
+                if let Some(OpenModal::ServerInfo(state)) = app.open_modal() {
+                    modals::server_info::render(
+                        frame,
+                        frame.area(),
+                        state,
+                        app.server_info_scroll,
+                        &theme,
+                    );
+                }
             }
             Modal::Update => {
-                modals::update::render(frame, frame.area(), &app.update_state, &theme);
+                if let Some(OpenModal::Update(state)) = app.open_modal() {
+                    modals::update::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Database => {
-                modals::database::render(frame, frame.area(), &app.database_state, &theme);
+                if let Some(state) = app.database_state() {
+                    modals::database::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::ApiKey => {
-                modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
+                if let Some(state) = app.api_key_state() {
+                    modals::api_key::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Fulltext => {
-                modals::fulltext::render(frame, frame.area(), &app.fulltext_state, &theme);
+                if let Some(state) = app.fulltext_state() {
+                    modals::fulltext::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Acl => {
-                modals::acl::render(frame, frame.area(), &app.acl_state, &theme);
+                if let Some(state) = app.acl_state() {
+                    modals::acl::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Listener => {
-                modals::listener::render(frame, frame.area(), &app.listener_state, &theme);
+                if let Some(state) = app.listener_state() {
+                    modals::listener::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::VectorSearch => {
-                modals::vector::render(frame, frame.area(), &app.vector_state, &theme);
+                if let Some(state) = app.vector_state() {
+                    modals::vector::render(frame, frame.area(), state, &theme);
+                }
             }
             Modal::Rag => {
-                modals::rag::render(frame, frame.area(), &app.rag_state, &theme);
+                if let Some(state) = app.rag_state() {
+                    modals::rag::render(frame, frame.area(), state, &theme);
+                }
             }
         }
     }

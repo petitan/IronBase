@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::db::{CollectionInfo, DbWrapper};
 use crate::i18n::{t, Op};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
+use crate::state::open_state;
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
     AutoEmbedDisableParams, CollectionCreateParams, CollectionDropParams, CountParams,
@@ -47,6 +48,7 @@ pub use crate::state::{
     InsertState,
     Modal,
     NewCollectionState,
+    OpenModal,
     Pane,
     // Query
     QueryState,
@@ -76,6 +78,26 @@ const MIN_PAGE_SIZE: usize = 1;
 /// Detail pane scroll step (also used for page jump in collections)
 const SCROLL_STEP: usize = 10;
 
+/// `$get` / `$get_mut`: the open modal's state when the open modal is
+/// `OpenModal::$variant`, else `None`
+macro_rules! modal_state {
+    ($get:ident, $get_mut:ident, $variant:ident, $state:ty) => {
+        pub fn $get(&self) -> Option<&$state> {
+            match &self.open_modal {
+                Some(OpenModal::$variant(state)) => Some(state),
+                _ => None,
+            }
+        }
+
+        pub fn $get_mut(&mut self) -> Option<&mut $state> {
+            match &mut self.open_modal {
+                Some(OpenModal::$variant(state)) => Some(state),
+                _ => None,
+            }
+        }
+    };
+}
+
 /// Main application state
 pub struct App {
     // Quit flag
@@ -83,7 +105,9 @@ pub struct App {
 
     // Focus management
     pub active_pane: Pane,
-    pub modal: Option<Modal>,
+    /// The open modal and its state; handlers reach a modal's state through
+    /// this field (not a method) so `db` stays usable next to it
+    pub(crate) open_modal: Option<OpenModal>,
     pub help_scroll: usize,
 
     // Theme
@@ -113,57 +137,16 @@ pub struct App {
     // Search state
     pub search: SearchState,
 
-    // Confirm dialog state
-    pub confirm: ConfirmState,
-
-    // Insert dialog state
-    pub insert: InsertState,
-
-    // Index management state
-    pub index_state: IndexState,
-
-    // Query builder state
-    pub query_state: QueryState,
+    /// The selected collection's index names, shown in the collections pane
+    pub collection_indexes: Vec<String>,
 
     // Visual filter state
     pub filter_state: FilterState,
 
-    // Export state
-    pub export_state: ExportState,
-
-    // New collection state
-    pub new_collection_state: NewCollectionState,
-
-    // IronRhai script editor state
-    pub script_state: ScriptState,
-
     // Server info modal state
-    pub server_info_state: crate::modals::server_info::ServerInfoState,
     pub server_info_scroll: usize,
 
     // Update modal state
-    pub update_state: crate::modals::update::UpdateState,
-
-    // Database open/create modal state
-    pub database_state: DatabaseState,
-
-    // API Key modal state
-    pub api_key_state: crate::modals::api_key::ApiKeyState,
-
-    // Fulltext search state
-    pub fulltext_state: FulltextState,
-
-    // ACL modal state
-    pub acl_state: crate::modals::acl::AclState,
-
-    // Listener modal state
-    pub listener_state: crate::modals::listener::ListenerState,
-
-    // Vector search state
-    pub vector_state: VectorSearchState,
-
-    // RAG & Embedding state
-    pub rag_state: RagState,
 
     // Connection type (for permission checks)
     pub connection_type: ConnectionType,
@@ -186,7 +169,7 @@ impl App {
         Self {
             should_quit: false,
             active_pane: Pane::Collections,
-            modal: None,
+            open_modal: None,
             help_scroll: 0,
             theme_name,
             theme,
@@ -203,24 +186,9 @@ impl App {
             active_sort: None,
             detail_scroll: 0,
             search: SearchState::new(),
-            confirm: ConfirmState::default(),
-            insert: InsertState::default(),
-            index_state: IndexState::default(),
-            query_state: QueryState::default(),
+            collection_indexes: Vec::new(),
             filter_state: FilterState::default(),
-            export_state: ExportState::default(),
-            new_collection_state: NewCollectionState::default(),
-            script_state: ScriptState::default(),
-            server_info_state: crate::modals::server_info::ServerInfoState::new(),
             server_info_scroll: 0,
-            update_state: crate::modals::update::UpdateState::default(),
-            database_state: DatabaseState::default(),
-            api_key_state: crate::modals::api_key::ApiKeyState::new(),
-            fulltext_state: FulltextState::default(),
-            acl_state: crate::modals::acl::AclState::new(),
-            listener_state: crate::modals::listener::ListenerState::new(),
-            vector_state: VectorSearchState::default(),
-            rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
             config,
             status_message: None,
@@ -283,7 +251,7 @@ impl App {
 
     /// Get cached indexes for current collection (for sync render)
     pub fn get_current_indexes(&self) -> &[String] {
-        &self.index_state.indexes
+        &self.collection_indexes
     }
 
     /// Check if a collection is selected
@@ -332,7 +300,7 @@ impl App {
 
     /// Open search modal - mode depends on active pane
     pub fn open_search(&mut self) {
-        self.modal = Some(Modal::Search);
+        self.set_modal(Modal::Search);
         self.search.input_active = true;
         self.search.query_input.clear();
         self.search.results.clear();
@@ -374,19 +342,20 @@ impl App {
 
     /// Open actions modal
     pub fn open_actions(&mut self) {
-        self.modal = Some(Modal::Actions);
+        self.set_modal(Modal::Actions);
     }
 
     /// Open help modal
     pub fn open_help(&mut self) {
-        self.modal = Some(Modal::Help);
+        self.set_modal(Modal::Help);
     }
 
     /// Open server info modal
     pub fn open_server_info(&mut self) {
         self.server_info_scroll = 0;
-        self.server_info_state = crate::modals::server_info::ServerInfoState::new();
-        self.modal = Some(Modal::ServerInfo);
+        self.open_modal = Some(OpenModal::ServerInfo(
+            crate::modals::server_info::ServerInfoState::new(),
+        ));
     }
 
     /// Update server info state with data from MCP server
@@ -396,18 +365,23 @@ impl App {
         tools: Vec<serde_json::Value>,
         prompts: Vec<serde_json::Value>,
     ) {
-        self.server_info_state.update(db_stats, tools, prompts);
+        if let Some(OpenModal::ServerInfo(state)) = &mut self.open_modal {
+            state.update(db_stats, tools, prompts);
+        }
     }
 
     /// Set server info error
     pub fn set_server_info_error(&mut self, error: String) {
-        self.server_info_state.set_error(error);
+        if let Some(OpenModal::ServerInfo(state)) = &mut self.open_modal {
+            state.set_error(error);
+        }
     }
 
     /// Open update check modal
     pub fn open_update(&mut self, current_version: String) {
-        self.update_state = crate::modals::update::UpdateState::new(current_version);
-        self.modal = Some(Modal::Update);
+        self.open_modal = Some(OpenModal::Update(crate::modals::update::UpdateState::new(
+            current_version,
+        )));
     }
 
     /// Update the update state with GitHub data
@@ -417,18 +391,65 @@ impl App {
         download_url: String,
         release_notes: Option<String>,
     ) {
-        self.update_state
-            .update_from_github(latest_version, download_url, release_notes);
+        if let Some(OpenModal::Update(state)) = &mut self.open_modal {
+            state.update_from_github(latest_version, download_url, release_notes);
+        }
     }
 
     /// Set update check error
     pub fn set_update_error(&mut self, error: String) {
-        self.update_state.set_error(error);
+        if let Some(OpenModal::Update(state)) = &mut self.open_modal {
+            state.set_error(error);
+        }
     }
 
     /// Close current modal
     pub fn close_modal(&mut self) {
-        self.modal = None;
+        self.open_modal = None;
+    }
+
+    /// The open modal's kind
+    pub fn modal(&self) -> Option<Modal> {
+        self.open_modal.as_ref().map(OpenModal::kind)
+    }
+
+    /// The open modal with its state
+    pub fn open_modal(&self) -> Option<&OpenModal> {
+        self.open_modal.as_ref()
+    }
+
+    pub fn open_modal_mut(&mut self) -> Option<&mut OpenModal> {
+        self.open_modal.as_mut()
+    }
+
+    modal_state!(export_state, export_state_mut, Export, ExportState);
+    modal_state!(fulltext_state, fulltext_state_mut, Fulltext, FulltextState);
+    modal_state!(database_state, database_state_mut, Database, DatabaseState);
+    modal_state!(insert_state, insert_state_mut, Insert, InsertState);
+    modal_state!(query_state, query_state_mut, Query, QueryState);
+    modal_state!(index_state, index_state_mut, Index, IndexState);
+    modal_state!(vector_state, vector_state_mut, Vector, VectorSearchState);
+    modal_state!(script_state, script_state_mut, Script, ScriptState);
+    modal_state!(rag_state, rag_state_mut, Rag, RagState);
+    modal_state!(
+        api_key_state,
+        api_key_state_mut,
+        ApiKey,
+        crate::modals::api_key::ApiKeyState
+    );
+    modal_state!(acl_state, acl_state_mut, Acl, crate::modals::acl::AclState);
+    modal_state!(
+        listener_state,
+        listener_state_mut,
+        Listener,
+        crate::modals::listener::ListenerState
+    );
+
+    /// Open a modal of `kind` with an empty state: for the modals without
+    /// state of their own (the others have their own `open_*`, which fills it
+    /// in). Never a modal without the state its keys and screen need.
+    pub fn set_modal(&mut self, kind: Modal) {
+        self.open_modal = Some(OpenModal::new_default(kind));
     }
 
     // === Delete Document ===
@@ -449,8 +470,7 @@ impl App {
         let doc_id = doc.get("_id").cloned().unwrap_or(Value::Null);
         let preview = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string());
 
-        self.confirm = ConfirmState::delete_document(coll_name, doc_id, &preview);
-        self.modal = Some(Modal::Confirm);
+        self.open_confirm(ConfirmState::delete_document(coll_name, doc_id, &preview));
     }
 
     /// Open delete confirmation for selected collection
@@ -461,95 +481,108 @@ impl App {
         };
 
         let doc_count = coll.doc_count.unwrap_or(0);
-        self.confirm = ConfirmState::delete_collection(coll.name, doc_count);
-        self.modal = Some(Modal::Confirm);
+        self.open_confirm(ConfirmState::delete_collection(coll.name, doc_count));
     }
 
     /// Open drop confirmation for the selected index (index modal)
     pub fn open_drop_index_confirm(&mut self) {
-        let Some(index_name) = self
-            .index_state
-            .indexes
-            .get(self.index_state.selected_index)
-            .cloned()
-        else {
+        let state = open_state!(self, Index);
+        let Some(index_name) = state.indexes.get(state.selected_index).cloned() else {
             return;
         };
 
-        if self.index_state.is_primary_index(&index_name) {
-            self.index_state.error = Some(t().primary_index_not_droppable(&index_name));
+        if state.is_primary_index(&index_name) {
+            state.error = Some(t().primary_index_not_droppable(&index_name));
             return;
         }
 
-        let collection = self.index_state.collection.clone();
-        self.confirm = ConfirmState::drop_index(collection, index_name);
-        self.modal = Some(Modal::Confirm);
+        let collection = state.collection.clone();
+        self.open_confirm(ConfirmState::drop_index(collection, index_name));
     }
 
     /// Open drop confirmation for the selected vector index (vector modal)
     pub fn open_drop_vector_index_confirm(&mut self) {
-        let Some(index) = self
-            .vector_state
-            .indexes
-            .get(self.vector_state.selected_index)
-        else {
+        let state = open_state!(self, Vector);
+        let Some(index) = state.indexes.get(state.selected_index) else {
             return;
         };
 
         let index_name = index.name.clone();
-        let collection = self.vector_state.collection.clone();
-        self.confirm = ConfirmState::drop_vector_index(collection, index_name);
-        self.modal = Some(Modal::Confirm);
+        let collection = state.collection.clone();
+        self.open_confirm(ConfirmState::drop_vector_index(collection, index_name));
     }
 
     /// Open rollback confirmation for the selected script version (script history)
     pub fn open_rollback_script_confirm(&mut self) {
-        let Some(version_info) = self
-            .script_state
-            .versions
-            .get(self.script_state.selected_version)
-        else {
-            self.script_state.error = Some(t().no_version_selected().to_string());
+        let state = open_state!(self, Script);
+        let Some(version_info) = state.versions.get(state.selected_version) else {
+            state.error = Some(t().no_version_selected().to_string());
             return;
         };
 
         let version = version_info.version;
-        let name = self.script_state.name.value().to_string();
-        self.confirm = ConfirmState::rollback_script(name, version);
-        self.modal = Some(Modal::Confirm);
+        let name = state.name.value().to_string();
+        self.open_confirm(ConfirmState::rollback_script(name, version));
     }
 
     /// Open confirmation for disabling auto-embed (RAG modal)
     pub fn open_disable_auto_embed_confirm(&mut self) {
-        let collection = self.rag_state.collection.clone();
-        self.confirm = ConfirmState::disable_auto_embed(collection);
-        self.modal = Some(Modal::Confirm);
+        let collection = open_state!(self, Rag).collection.clone();
+        self.open_confirm(ConfirmState::disable_auto_embed(collection));
     }
 
     /// Open confirmation for clearing the embedding cache (RAG modal)
     pub fn open_clear_embed_cache_confirm(&mut self) {
-        self.confirm = ConfirmState::clear_embed_cache();
-        self.modal = Some(Modal::Confirm);
+        self.open_confirm(ConfirmState::clear_embed_cache());
     }
 
     /// Open confirmation for cancelling the selected embed job (RAG modal)
     pub fn open_cancel_embed_job_confirm(&mut self) {
-        let Some(job_id) = self.rag_state.selected_job_id() else {
+        let Some(job_id) = open_state!(self, Rag).selected_job_id() else {
             return;
         };
 
-        self.confirm = ConfirmState::cancel_embed_job(job_id);
-        self.modal = Some(Modal::Confirm);
+        self.open_confirm(ConfirmState::cancel_embed_job(job_id));
     }
 
-    /// Close the confirm dialog and return to the modal it was opened from (if any)
+    /// Open a confirm dialog over the open modal (if any), which it keeps
+    /// and gives back when it closes
+    pub fn open_confirm(&mut self, state: ConfirmState) {
+        let previous = self.open_modal.take().map(Box::new);
+        self.open_modal = Some(OpenModal::Confirm { state, previous });
+    }
+
+    /// The open confirm dialog's state
+    pub fn confirm_state(&self) -> Option<&ConfirmState> {
+        match &self.open_modal {
+            Some(OpenModal::Confirm { state, .. }) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn confirm_state_mut(&mut self) -> Option<&mut ConfirmState> {
+        match &mut self.open_modal {
+            Some(OpenModal::Confirm { state, .. }) => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Close the confirm dialog and return to the modal it was opened from,
+    /// as it was (or to the panes)
     pub fn close_confirm(&mut self) {
-        self.modal = self.confirm.return_to.take();
+        // Only the confirm dialog: another open modal stays as it is
+        if matches!(self.open_modal, Some(OpenModal::Confirm { .. })) {
+            if let Some(OpenModal::Confirm { previous, .. }) = self.open_modal.take() {
+                self.open_modal = previous.map(|modal| *modal);
+            }
+        }
     }
 
     /// Toggle confirm dialog selection
     pub fn confirm_toggle(&mut self) {
-        self.confirm.toggle_selection();
+        if let Some(state) = self.confirm_state_mut() {
+            state.toggle_selection();
+        }
     }
 
     // execute_confirm_action, do_delete_document, execute_insert törölve
@@ -571,8 +604,9 @@ impl App {
             None
         };
 
-        self.insert = InsertState::with_template(coll_name, template);
-        self.modal = Some(Modal::Insert);
+        self.open_modal = Some(OpenModal::Insert(InsertState::with_template(
+            coll_name, template,
+        )));
     }
 
     /// Create empty template from existing document (keep structure, clear values)
@@ -617,8 +651,7 @@ impl App {
             return;
         };
 
-        self.insert = InsertState::edit(coll_name, &doc);
-        self.modal = Some(Modal::Insert);
+        self.open_modal = Some(OpenModal::Insert(InsertState::edit(coll_name, &doc)));
     }
 
     // === Index Management ===
@@ -631,13 +664,12 @@ impl App {
         };
 
         // Initialize with empty, will be loaded async
-        self.index_state = IndexState::new(coll_name, vec![]);
-        self.modal = Some(Modal::Index);
+        self.open_modal = Some(OpenModal::Index(IndexState::new(coll_name, vec![])));
     }
 
     /// Load indexes for current collection (call after opening index modal)
     pub async fn load_indexes_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
         if collection.is_empty() {
             return;
         }
@@ -648,11 +680,12 @@ impl App {
 
         match db.index_entries(&collection).await {
             Ok(entries) => {
-                self.index_state.indexes = entries.iter().map(|e| e.name.clone()).collect();
-                self.index_state.index_entries = entries;
+                open_state!(self, Index).indexes = entries.iter().map(|e| e.name.clone()).collect();
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
+                open_state!(self, Index).index_entries = entries;
             }
             Err(e) => {
-                self.index_state.message = Some(t().failed(Op::LoadIndexes, &e));
+                open_state!(self, Index).message = Some(t().failed(Op::LoadIndexes, &e));
             }
         }
     }
@@ -669,8 +702,7 @@ impl App {
             return;
         };
 
-        self.query_state = QueryState::new(coll_name);
-        self.modal = Some(Modal::Query);
+        self.open_modal = Some(OpenModal::Query(QueryState::new(coll_name)));
     }
 
     /// Open visual filter modal with schema loading (async)
@@ -685,7 +717,7 @@ impl App {
 
         // Preserve existing filters, only reset input fields
         self.filter_state.reset_inputs();
-        self.modal = Some(Modal::Filter);
+        self.set_modal(Modal::Filter);
 
         // Load schema for field suggestions
         if let Some(db) = &self.db {
@@ -713,65 +745,60 @@ impl App {
             return;
         };
 
-        self.export_state = ExportState::new(coll.name.clone(), coll.doc_count.unwrap_or(0));
+        let mut state = ExportState::new(coll.name.clone(), coll.doc_count.unwrap_or(0));
         // The export follows the document list: with an active filter the
         // count is the filtered one
         if self.active_filter.is_some() {
-            self.export_state.doc_count = self.total_docs;
-            self.export_state.filtered = true;
+            state.doc_count = self.total_docs;
+            state.filtered = true;
         }
-        self.modal = Some(Modal::Export);
+        self.open_modal = Some(OpenModal::Export(state));
     }
 
     // === New Collection ===
 
     /// Open new collection modal
     pub fn open_new_collection(&mut self) {
-        self.new_collection_state = NewCollectionState::new();
-        self.modal = Some(Modal::NewCollection);
+        self.open_modal = Some(OpenModal::NewCollection(NewCollectionState::new()));
     }
 
     // === IronRhai Scripts ===
 
     /// Open script modal (Browse mode)
     pub fn open_script_modal(&mut self) {
-        self.script_state = ScriptState::new();
-        self.modal = Some(Modal::Script);
+        self.open_modal = Some(OpenModal::Script(ScriptState::new()));
         // Script list will be loaded in load_scripts_async
     }
 
     /// Load scripts from MCP server
     pub async fn load_scripts_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         match db.call::<ScriptList>(&ScriptListParams::default()).await {
             Ok(response) => {
-                self.script_state.scripts = response.scripts;
-                self.script_state.selected_script = 0;
-                self.script_state.error = None;
+                open_state!(self, Script).scripts = response.scripts;
+                open_state!(self, Script).selected_script = 0;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadScripts, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadScripts, &e));
             }
         }
     }
 
     /// Load a script for editing by name
     pub async fn load_script_for_edit_async(&mut self) {
-        let Some(script_info) = self
-            .script_state
-            .scripts
-            .get(self.script_state.selected_script)
-        else {
+        let state = open_state!(self, Script);
+        let Some(script_info) = state.scripts.get(state.selected_script) else {
             return;
         };
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -780,7 +807,7 @@ impl App {
         };
         match db.call::<ScriptGet>(&args).await {
             Ok(script) => {
-                self.script_state.load_script(
+                open_state!(self, Script).load_script(
                     script_name,
                     script.code,
                     script.description,
@@ -789,61 +816,58 @@ impl App {
                 );
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadScript, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadScript, &e));
             }
         }
     }
 
     /// Save current script to MCP server
     pub async fn save_script_async(&mut self) {
-        if self.script_state.name.value().trim().is_empty() {
-            self.script_state.error = Some(t().script_name_required().to_string());
+        if open_state!(self, Script).name.value().trim().is_empty() {
+            open_state!(self, Script).error = Some(t().script_name_required().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         let args = ScriptSaveParams {
-            name: self.script_state.name.value().to_string(),
-            code: self.script_state.editor.text(),
-            description: Some(self.script_state.description.value().to_string())
+            name: open_state!(self, Script).name.value().to_string(),
+            code: open_state!(self, Script).editor.text(),
+            description: Some(open_state!(self, Script).description.value().to_string())
                 .filter(|description| !description.is_empty()),
-            tags: Some(self.script_state.tags.clone()).filter(|tags| !tags.is_empty()),
+            tags: Some(open_state!(self, Script).tags.clone()).filter(|tags| !tags.is_empty()),
             dependencies: None,
         };
 
         match db.call::<ScriptSave>(&args).await {
             Ok(saved) => {
                 let new_version = saved.version;
-                self.script_state.version = new_version;
-                self.script_state.dirty = false;
-                self.script_state.message = Some(t().script_saved(new_version));
-                self.script_state.error = None;
+                open_state!(self, Script).version = new_version;
+                open_state!(self, Script).dirty = false;
+                open_state!(self, Script).message = Some(t().script_saved(new_version));
+                open_state!(self, Script).error = None;
                 // Reload script list to show new/updated scripts
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Save, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Save, &e));
             }
         }
     }
 
     /// Delete selected script
     pub async fn delete_script_async(&mut self) {
-        let Some(script_info) = self
-            .script_state
-            .scripts
-            .get(self.script_state.selected_script)
-        else {
+        let state = open_state!(self, Script);
+        let Some(script_info) = state.scripts.get(state.selected_script) else {
             return;
         };
         let script_name = script_info.name.clone();
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -852,12 +876,12 @@ impl App {
         };
         match db.call::<ScriptDelete>(&args).await {
             Ok(_) => {
-                self.script_state.message = Some(t().script_deleted(&script_name));
+                open_state!(self, Script).message = Some(t().script_deleted(&script_name));
                 // Reload list
                 self.load_scripts_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Delete, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Delete, &e));
             }
         }
     }
@@ -865,32 +889,35 @@ impl App {
     /// Run script (saved or inline)
     pub async fn run_script_async(&mut self) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
         // Parse params
-        let params: Option<serde_json::Value> =
-            if self.script_state.params_input.value().trim().is_empty()
-                || self.script_state.params_input.value().trim() == "{}"
-            {
-                None
-            } else {
-                match serde_json::from_str(self.script_state.params_input.value()) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        self.script_state.error = Some(t().invalid_json_params(&e));
-                        return;
-                    }
+        let params: Option<serde_json::Value> = if open_state!(self, Script)
+            .params_input
+            .value()
+            .trim()
+            .is_empty()
+            || open_state!(self, Script).params_input.value().trim() == "{}"
+        {
+            None
+        } else {
+            match serde_json::from_str(open_state!(self, Script).params_input.value()) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    open_state!(self, Script).error = Some(t().invalid_json_params(&e));
+                    return;
                 }
-            };
+            }
+        };
 
         let start = std::time::Instant::now();
 
         // Always execute current editor content (not saved version)
         // This ensures "what you see is what runs"
         let args = ScriptExecParams {
-            code: self.script_state.editor.text(),
+            code: open_state!(self, Script).editor.text(),
             params,
             max_operations: None,
         };
@@ -900,17 +927,17 @@ impl App {
         // own result, logs and execution time
         match result {
             Ok(response) => {
-                self.script_state.result = Some(ScriptResult {
+                open_state!(self, Script).result = Some(ScriptResult {
                     success: true,
                     result: response.run.result,
                     logs: response.run.logs,
                     error: None,
                     execution_time_ms: response.run.execution_time_ms,
                 });
-                self.script_state.error = None;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.result = Some(ScriptResult {
+                open_state!(self, Script).result = Some(ScriptResult {
                     success: false,
                     result: serde_json::Value::Null,
                     logs: vec![],
@@ -923,14 +950,14 @@ impl App {
 
     /// Load script version history
     pub async fn load_script_history_async(&mut self) {
-        let script_name = self.script_state.name.value().to_string();
+        let script_name = open_state!(self, Script).name.value().to_string();
         if script_name.is_empty() || script_name == "[inline]" {
-            self.script_state.error = Some(t().no_script_selected().to_string());
+            open_state!(self, Script).error = Some(t().no_script_selected().to_string());
             return;
         }
 
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -940,12 +967,12 @@ impl App {
         };
         match db.call::<ScriptHistory>(&args).await {
             Ok(response) => {
-                self.script_state.versions = response.history;
-                self.script_state.selected_version = 0;
-                self.script_state.error = None;
+                open_state!(self, Script).versions = response.history;
+                open_state!(self, Script).selected_version = 0;
+                open_state!(self, Script).error = None;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::LoadHistory, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::LoadHistory, &e));
             }
         }
     }
@@ -954,7 +981,7 @@ impl App {
     /// confirm dialog opens
     pub async fn rollback_script_async(&mut self, script_name: &str, target_version: u32) {
         let Some(db) = &self.db else {
-            self.script_state.error = Some(t().no_database().to_string());
+            open_state!(self, Script).error = Some(t().no_database().to_string());
             return;
         };
 
@@ -968,27 +995,36 @@ impl App {
             .map(|r| r.new_version)
         {
             Ok(new_version) => {
-                self.script_state.message = Some(t().script_rolled_back(new_version));
+                open_state!(self, Script).message = Some(t().script_rolled_back(new_version));
                 // Reload the script into editor
                 self.load_script_for_edit_async().await;
             }
             Err(e) => {
-                self.script_state.error = Some(t().failed(Op::Rollback, &e));
+                open_state!(self, Script).error = Some(t().failed(Op::Rollback, &e));
             }
+        }
+    }
+
+    fn set_new_collection_error(&mut self, error: String) {
+        if let Some(OpenModal::NewCollection(state)) = &mut self.open_modal {
+            state.error = Some(error);
         }
     }
 
     /// Create new collection (async)
     pub async fn create_collection_async(&mut self) {
-        let name = self.new_collection_state.name.value().trim().to_string();
+        let Some(OpenModal::NewCollection(state)) = &self.open_modal else {
+            return;
+        };
+        let name = state.name.value().trim().to_string();
         if name.is_empty() {
-            self.new_collection_state.error = Some(t().name_required().to_string());
+            self.set_new_collection_error(t().name_required().to_string());
             return;
         }
 
         // Check if collection already exists
         if self.collections.iter().any(|c| c.name == name) {
-            self.new_collection_state.error = Some(t().collection_exists().to_string());
+            self.set_new_collection_error(t().collection_exists().to_string());
             return;
         }
 
@@ -1011,7 +1047,7 @@ impl App {
                 }
             }
             Err(e) => {
-                self.new_collection_state.error = Some(t().failed(Op::Create, &e));
+                self.set_new_collection_error(t().failed(Op::Create, &e));
             }
         }
     }
@@ -1264,8 +1300,7 @@ impl App {
                     coll.index_count = Some(index_names.len());
                 }
 
-                // Update index_state for UI display
-                self.index_state.indexes = index_names;
+                self.collection_indexes = index_names;
             }
 
             // BUG FIX: Validate selected_document after refresh
@@ -1596,13 +1631,14 @@ impl App {
 
     /// Execute the confirmed action (async)
     pub async fn execute_confirm_action_async(&mut self) {
-        if self.confirm.selected != ConfirmOption::Confirm {
-            self.close_confirm();
+        let Some(state) = self.confirm_state() else {
             return;
-        }
-
-        let action = self.confirm.on_confirm.clone();
+        };
+        let action = (state.selected == ConfirmOption::Confirm).then(|| state.on_confirm.clone());
         self.close_confirm();
+        let Some(action) = action else {
+            return;
+        };
 
         match action {
             ConfirmAction::DeleteDocument { collection, doc_id } => {
@@ -1649,20 +1685,22 @@ impl App {
             };
             match db.call::<IndexDrop>(&args).await {
                 Ok(dropped) => {
-                    self.vector_state.message = Some(t().index_dropped(&dropped.dropped));
+                    open_state!(self, Vector).message = Some(t().index_dropped(&dropped.dropped));
 
                     // Refresh index list
                     if let Ok(indexes) = db.vector_indexes(collection).await {
-                        self.vector_state.update_indexes(indexes);
-                        if self.vector_state.selected_index >= self.vector_state.indexes.len()
-                            && !self.vector_state.indexes.is_empty()
+                        open_state!(self, Vector).update_indexes(indexes);
+                        if open_state!(self, Vector).selected_index
+                            >= open_state!(self, Vector).indexes.len()
+                            && !open_state!(self, Vector).indexes.is_empty()
                         {
-                            self.vector_state.selected_index = self.vector_state.indexes.len() - 1;
+                            open_state!(self, Vector).selected_index =
+                                open_state!(self, Vector).indexes.len() - 1;
                         }
                     }
                 }
                 Err(e) => {
-                    self.vector_state.error = Some(format!("{}", e));
+                    open_state!(self, Vector).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1676,11 +1714,11 @@ impl App {
             };
             match db.call::<AutoEmbedDisable>(&args).await {
                 Ok(_) => {
-                    self.rag_state.message = Some(t().auto_embed_disabled().to_string());
-                    self.rag_state.auto_embed_config = None;
+                    open_state!(self, Rag).message = Some(t().auto_embed_disabled().to_string());
+                    open_state!(self, Rag).auto_embed_config = None;
                 }
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1691,15 +1729,15 @@ impl App {
         if let Some(ref db) = self.db {
             match db.call::<EmbedCacheClear>(&NoParams {}).await {
                 Ok(EmbedCacheClearResponse::Cleared { message, .. }) => {
-                    self.rag_state.cache_stats = None;
-                    self.rag_state.message = Some(message);
+                    open_state!(self, Rag).cache_stats = None;
+                    open_state!(self, Rag).message = Some(message);
                 }
                 // No cache on the server: nothing was cleared
                 Ok(EmbedCacheClearResponse::Disabled { message, .. }) => {
-                    self.rag_state.error = Some(message);
+                    open_state!(self, Rag).error = Some(message);
                 }
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1713,12 +1751,12 @@ impl App {
             };
             match db.call::<EmbedJobCancel>(&args).await {
                 Ok(response) if response.success => {
-                    self.rag_state.message = Some(response.message);
+                    open_state!(self, Rag).message = Some(response.message);
                 }
                 // Unknown or already finished: the server says which
-                Ok(response) => self.rag_state.error = Some(response.message),
+                Ok(response) => open_state!(self, Rag).error = Some(response.message),
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                     return;
                 }
             }
@@ -1727,8 +1765,8 @@ impl App {
                 .call::<EmbedJobList>(&JobListParams { active_only: false })
                 .await
             {
-                Ok(result) => self.rag_state.set_jobs(result.jobs),
-                Err(e) => self.rag_state.error = Some(t().failed(Op::LoadJobs, &e)),
+                Ok(result) => open_state!(self, Rag).set_jobs(result.jobs),
+                Err(e) => open_state!(self, Rag).error = Some(t().failed(Op::LoadJobs, &e)),
             }
         }
     }
@@ -1788,35 +1826,35 @@ impl App {
 
     /// Execute the insert/edit operation (async)
     pub async fn execute_insert_async(&mut self) {
-        let doc = match self.insert.parse_json() {
+        let doc = match open_state!(self, Insert).parse_json() {
             Ok(doc) => doc,
             Err(e) => {
-                self.insert.error = Some(t().invalid_json(&e));
+                open_state!(self, Insert).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
         if !doc.is_object() {
-            self.insert.error = Some(t().document_must_be_object().to_string());
+            open_state!(self, Insert).error = Some(t().document_must_be_object().to_string());
             return;
         }
 
-        let collection = self.insert.collection.clone();
+        let collection = open_state!(self, Insert).collection.clone();
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
             return;
         };
 
-        if self.insert.is_edit_mode() {
-            let Some(ref doc_id) = self.insert.original_doc_id else {
-                self.insert.error = Some(t().document_id_missing().to_string());
+        if open_state!(self, Insert).is_edit_mode() {
+            let Some(ref doc_id) = open_state!(self, Insert).original_doc_id else {
+                open_state!(self, Insert).error = Some(t().document_id_missing().to_string());
                 return;
             };
 
             let args = UpdateOneParams {
                 collection,
                 filter: serde_json::json!({"_id": doc_id}),
-                update: self.insert.edit_update(&doc),
+                update: open_state!(self, Insert).edit_update(&doc),
                 upsert: false,
             };
             match db.call::<UpdateOne>(&args).await {
@@ -1835,7 +1873,7 @@ impl App {
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(t().failed(Op::Update, &e));
+                    open_state!(self, Insert).error = Some(t().failed(Op::Update, &e));
                 }
             }
         } else {
@@ -1850,7 +1888,7 @@ impl App {
                     self.reload_collections_async().await;
                 }
                 Err(e) => {
-                    self.insert.error = Some(t().failed(Op::Insert, &e));
+                    open_state!(self, Insert).error = Some(t().failed(Op::Insert, &e));
                 }
             }
         }
@@ -1860,17 +1898,17 @@ impl App {
 
     /// Create a new index (async) - supports both single and compound indexes
     pub async fn execute_create_index_async(&mut self) {
-        let fields = self.index_state.get_fields();
+        let fields = open_state!(self, Index).get_fields();
 
         if fields.is_empty() {
-            self.index_state.error = Some(t().field_name_required().to_string());
+            open_state!(self, Index).error = Some(t().field_name_required().to_string());
             return;
         }
 
-        let collection = self.index_state.collection.clone();
-        let unique = self.index_state.unique;
-        let sparse = self.index_state.sparse;
-        let is_compound = self.index_state.is_compound;
+        let collection = open_state!(self, Index).collection.clone();
+        let unique = open_state!(self, Index).unique;
+        let sparse = open_state!(self, Index).sparse;
+        let is_compound = open_state!(self, Index).is_compound;
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -1913,15 +1951,16 @@ impl App {
                 } else {
                     fields.first().cloned().unwrap_or_default()
                 };
-                self.index_state.message =
+                open_state!(self, Index).message =
                     Some(t().index_created(&fields, compound, &flags_str, created.index_name()));
-                self.index_state.cancel_create();
-                self.index_state.indexes = self.get_current_indexes_async().await;
+                open_state!(self, Index).cancel_create();
+                open_state!(self, Index).indexes = self.get_current_indexes_async().await;
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
                 // Refresh collection list to update index_count
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().failed(Op::Create, &e));
+                open_state!(self, Index).error = Some(t().failed(Op::Create, &e));
             }
         }
     }
@@ -1939,27 +1978,31 @@ impl App {
         };
         match db.call::<IndexDrop>(&args).await {
             Ok(dropped) => {
-                self.index_state.message = Some(t().index_dropped(&dropped.dropped));
-                self.index_state.error = None;
-                self.index_state.indexes = self.get_current_indexes_async().await;
+                open_state!(self, Index).message = Some(t().index_dropped(&dropped.dropped));
+                open_state!(self, Index).error = None;
+                open_state!(self, Index).indexes = self.get_current_indexes_async().await;
+                self.collection_indexes = open_state!(self, Index).indexes.clone();
                 // Adjust selection after deletion
-                if self.index_state.indexes.is_empty() {
-                    self.index_state.selected_index = 0;
-                } else if self.index_state.selected_index >= self.index_state.indexes.len() {
-                    self.index_state.selected_index = self.index_state.indexes.len() - 1;
+                if open_state!(self, Index).indexes.is_empty() {
+                    open_state!(self, Index).selected_index = 0;
+                } else if open_state!(self, Index).selected_index
+                    >= open_state!(self, Index).indexes.len()
+                {
+                    open_state!(self, Index).selected_index =
+                        open_state!(self, Index).indexes.len() - 1;
                 }
                 // Refresh collection list to update index_count
                 self.reload_collections_async().await;
             }
             Err(e) => {
-                self.index_state.error = Some(t().failed(Op::Delete, &e));
+                open_state!(self, Index).error = Some(t().failed(Op::Delete, &e));
             }
         }
     }
 
     /// Analyze indexes - refresh statistics (async)
     pub async fn execute_analyze_index_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -1967,8 +2010,8 @@ impl App {
         };
 
         // Set analyzing state
-        self.index_state.is_analyzing = true;
-        self.index_state.message = Some(t().analyzing_indexes().to_string());
+        open_state!(self, Index).is_analyzing = true;
+        open_state!(self, Index).message = Some(t().analyzing_indexes().to_string());
 
         // Refresh statistics
         let args = IndexListParams {
@@ -1980,33 +2023,33 @@ impl App {
                 // Load updated statistics
                 match db.btree_index_statistics(&collection).await {
                     Ok(stats) => {
-                        self.index_state.update_statistics(stats);
-                        self.index_state.message =
+                        open_state!(self, Index).update_statistics(stats);
+                        open_state!(self, Index).message =
                             Some(t().index_statistics_refreshed().to_string());
                     }
                     Err(e) => {
-                        self.index_state.is_analyzing = false;
-                        self.index_state.error = Some(t().failed(Op::LoadStatistics, &e));
+                        open_state!(self, Index).is_analyzing = false;
+                        open_state!(self, Index).error = Some(t().failed(Op::LoadStatistics, &e));
                     }
                 }
             }
             Err(e) => {
-                self.index_state.is_analyzing = false;
-                self.index_state.error = Some(t().failed(Op::Analyze, &e));
+                open_state!(self, Index).is_analyzing = false;
+                open_state!(self, Index).error = Some(t().failed(Op::Analyze, &e));
             }
         }
     }
 
     /// Load index statistics (async) - call when opening index modal
     pub async fn load_index_statistics_async(&mut self) {
-        let collection = self.index_state.collection.clone();
+        let collection = open_state!(self, Index).collection.clone();
 
         let Some(db) = &self.db else {
             return;
         };
 
         if let Ok(stats) = db.btree_index_statistics(&collection).await {
-            self.index_state.update_statistics(stats);
+            open_state!(self, Index).update_statistics(stats);
         }
     }
 
@@ -2016,15 +2059,15 @@ impl App {
     pub async fn execute_query_async(&mut self) {
         const QUERY_LIMIT: usize = 1000;
 
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
-        let collection = self.query_state.collection.clone();
+        let collection = open_state!(self, Query).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -2035,10 +2078,10 @@ impl App {
             Ok(docs) => {
                 let count = docs.len();
                 // Store total_count (may be more than returned if limit hit)
-                self.query_state.total_count = count;
-                self.query_state.result_index = 0;
-                self.query_state.results = Some(docs);
-                self.query_state.error = None;
+                open_state!(self, Query).total_count = count;
+                open_state!(self, Query).result_index = 0;
+                open_state!(self, Query).results = Some(docs);
+                open_state!(self, Query).error = None;
                 if count >= QUERY_LIMIT {
                     self.set_status(t().query_found(count, Some(QUERY_LIMIT)));
                 } else {
@@ -2046,22 +2089,22 @@ impl App {
                 }
             }
             Err(e) => {
-                self.query_state.error = Some(t().failed(Op::Query, &e));
+                open_state!(self, Query).error = Some(t().failed(Op::Query, &e));
             }
         }
     }
 
     /// Execute query explain (async) - shows query plan
     pub async fn execute_explain_async(&mut self) {
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };
 
-        let collection = self.query_state.collection.clone();
+        let collection = open_state!(self, Query).collection.clone();
 
         let Some(db) = &self.db else {
             self.set_error(t().no_database());
@@ -2075,23 +2118,23 @@ impl App {
             .and_then(|response| Ok(response.summary()?));
         match explained {
             Ok(plan) => {
-                self.query_state.explain_result = Some(plan);
-                self.query_state.show_explain = true;
-                self.query_state.error = None;
+                open_state!(self, Query).explain_result = Some(plan);
+                open_state!(self, Query).show_explain = true;
+                open_state!(self, Query).error = None;
                 self.set_status(t().query_plan_loaded());
             }
             Err(e) => {
-                self.query_state.error = Some(t().failed(Op::Explain, &e));
+                open_state!(self, Query).error = Some(t().failed(Op::Explain, &e));
             }
         }
     }
 
     /// Apply the current query as a filter and close modal
     pub async fn apply_query_as_filter(&mut self) {
-        let query = match self.query_state.parse_query() {
+        let query = match open_state!(self, Query).parse_query() {
             Ok(q) => q,
             Err(e) => {
-                self.query_state.error = Some(t().invalid_json(&e));
+                open_state!(self, Query).error = Some(t().invalid_json(&e));
                 return;
             }
         };
@@ -2191,14 +2234,24 @@ impl App {
     /// goes to a temp file next to the target and is renamed on success, so a
     /// failed export never truncates an existing file.
     pub async fn execute_export_async(&mut self) {
-        if self.export_state.file_path.value().trim().is_empty() {
-            self.export_state.error = Some(t().file_path_required().to_string());
+        let Some(state) = self.export_state() else {
+            return;
+        };
+        let file_path = state.file_path.value().to_string();
+        let (collection, format, filtered) =
+            (state.collection.clone(), state.format, state.filtered);
+        let set_error = |app: &mut Self, error: String| {
+            if let Some(state) = app.export_state_mut() {
+                state.error = Some(error);
+            }
+        };
+        if file_path.trim().is_empty() {
+            set_error(self, t().file_path_required().to_string());
             return;
         }
 
-        let file_path = self.export_state.file_path.value().to_string();
         let Some(tmp_path) = export_temp_path(std::path::Path::new(&file_path)) else {
-            self.export_state.error = Some(t().invalid_path(&file_path));
+            set_error(self, t().invalid_path(&file_path));
             return;
         };
 
@@ -2207,7 +2260,10 @@ impl App {
             return;
         }
 
-        let result = match self.write_export_async(&tmp_path).await {
+        let result = match self
+            .write_export_async(&tmp_path, &collection, format)
+            .await
+        {
             Ok(count) => std::fs::rename(&tmp_path, &file_path)
                 .map(|()| count)
                 .map_err(|e| t().failed(Op::File, &e)),
@@ -2216,28 +2272,32 @@ impl App {
 
         match result {
             Ok(count) => {
-                self.export_state.message =
-                    Some(t().exported(count, self.export_state.filtered, &file_path));
-                self.export_state.error = None;
+                if let Some(state) = self.export_state_mut() {
+                    state.message = Some(t().exported(count, filtered, &file_path));
+                    state.error = None;
+                }
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp_path);
-                self.export_state.error = Some(e);
+                set_error(self, e);
             }
         }
     }
 
     /// Write the export into `path` (the temp file); returns the exported
     /// document count. On error the caller removes the file.
-    async fn write_export_async(&self, path: &std::path::Path) -> Result<usize, String> {
+    async fn write_export_async(
+        &self,
+        path: &std::path::Path,
+        collection: &str,
+        format: crate::modals::export::ExportFormat,
+    ) -> Result<usize, String> {
         use crate::modals::export::ExportFormat;
         use std::fs::File;
         use std::io::{BufWriter, Write};
 
         const BATCH_SIZE: usize = 1000;
 
-        let collection = self.export_state.collection.clone();
-        let format = self.export_state.format;
         // Same filter + sort as the document list
         let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
         let sort = self.active_sort.as_ref();
@@ -2261,7 +2321,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2299,7 +2359,7 @@ impl App {
                 exported
             }
             ExportFormat::Csv => {
-                let sample = match find_page(db, &collection, &query, 0, 100, sort).await {
+                let sample = match find_page(db, collection, &query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
                         return Err(t().failed(Op::Query, &e));
@@ -2330,7 +2390,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, &collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2677,8 +2737,8 @@ mod tests {
         app.collections = vec![CollectionInfo::unloaded("invoices".to_string())];
         app.documents = vec![serde_json::json!({"_id": 7})];
         app.open_delete_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("invoices"));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.confirm_state().unwrap().message.contains("invoices"));
     }
 
     // === Export ===
@@ -2710,8 +2770,8 @@ mod tests {
         app.refresh_documents_async().await.unwrap();
 
         app.open_export_modal();
-        assert_eq!(app.export_state.doc_count, 5);
-        assert!(app.export_state.filtered);
+        assert_eq!(app.export_state().unwrap().doc_count, 5);
+        assert!(app.export_state().unwrap().filtered);
 
         let target = export_target("filtered");
         let dir = target
@@ -2723,13 +2783,15 @@ mod tests {
             .unwrap()
             .to_path_buf();
         std::fs::create_dir_all(dir.join("out.v1")).unwrap();
-        app.export_state
+        app.export_state_mut()
+            .unwrap()
             .file_path
             .set_value(target.to_string_lossy().into_owned());
         app.execute_export_async().await;
-        assert_eq!(app.export_state.error, None);
+        assert_eq!(app.export_state().unwrap().error, None);
         assert!(app
-            .export_state
+            .export_state()
+            .unwrap()
             .message
             .as_deref()
             .unwrap()
@@ -2753,8 +2815,8 @@ mod tests {
         let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
         let mut app = app_with_server(&server).await;
         app.open_export_modal();
-        assert_eq!(app.export_state.doc_count, 10);
-        assert!(!app.export_state.filtered);
+        assert_eq!(app.export_state().unwrap().doc_count, 10);
+        assert!(!app.export_state().unwrap().filtered);
     }
 
     /// A failed export reports the error, keeps the existing target file
@@ -2770,7 +2832,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("docs.json");
         std::fs::write(&target, "precious").unwrap();
-        app.export_state
+        app.export_state_mut()
+            .unwrap()
             .file_path
             .set_value(target.to_string_lossy().into_owned());
 
@@ -2778,12 +2841,13 @@ mod tests {
         app.execute_export_async().await;
 
         assert!(app
-            .export_state
+            .export_state()
+            .unwrap()
             .error
             .as_deref()
             .unwrap()
             .contains("find failed"));
-        assert_eq!(app.export_state.message, None);
+        assert_eq!(app.export_state().unwrap().message, None);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
         assert_eq!(files_in(&dir), ["docs.json"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2813,47 +2877,49 @@ mod tests {
     #[test]
     fn test_drop_index_needs_confirm_and_returns_to_index_modal() {
         let mut app = App::new(Config::default());
-        app.index_state = IndexState::new(
+        app.open_modal = Some(crate::app::OpenModal::Index(IndexState::new(
             "users".to_string(),
             vec!["users_id".to_string(), "users_age".to_string()],
-        );
-        app.index_state.selected_index = 1;
-        app.modal = Some(Modal::Index);
+        )));
+        app.index_state_mut().unwrap().selected_index = 1;
 
         app.open_drop_index_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
-        assert_eq!(app.confirm.selected, ConfirmOption::Cancel);
-        assert!(app.confirm.message.contains("users_age"));
-        assert!(app.confirm.message.contains("users"));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
+        assert!(app.confirm_state().unwrap().message.contains("users_age"));
+        assert!(app.confirm_state().unwrap().message.contains("users"));
         assert!(matches!(
-            &app.confirm.on_confirm,
+            &app.confirm_state().unwrap().on_confirm,
             ConfirmAction::DropIndex { collection, index_name }
                 if collection == "users" && index_name == "users_age"
         ));
 
         // Cancel: back in the index modal, state intact
         app.close_confirm();
-        assert_eq!(app.modal, Some(Modal::Index));
-        assert_eq!(app.index_state.selected_index, 1);
-        assert_eq!(app.index_state.indexes.len(), 2);
+        assert_eq!(app.modal(), Some(Modal::Index));
+        assert_eq!(app.index_state_mut().unwrap().selected_index, 1);
+        assert_eq!(app.index_state_mut().unwrap().indexes.len(), 2);
     }
 
     #[test]
     fn test_primary_id_index_drop_is_refused() {
         let mut app = App::new(Config::default());
-        app.index_state = IndexState::new("users".to_string(), vec!["users_id".to_string()]);
-        app.modal = Some(Modal::Index);
+        app.open_modal = Some(crate::app::OpenModal::Index(IndexState::new(
+            "users".to_string(),
+            vec!["users_id".to_string()],
+        )));
 
         app.open_drop_index_confirm();
-        assert_eq!(app.modal, Some(Modal::Index));
-        assert!(app.index_state.error.is_some());
+        assert_eq!(app.modal(), Some(Modal::Index));
+        assert!(app.index_state_mut().unwrap().error.is_some());
     }
 
     #[test]
     fn test_rollback_confirm_names_script_and_version() {
         let mut app = App::new(Config::default());
-        app.script_state.name.set_value("cleanup");
-        app.script_state.versions = vec![ScriptVersion {
+        app.open_script_modal();
+        app.script_state_mut().unwrap().name.set_value("cleanup");
+        app.script_state_mut().unwrap().versions = vec![ScriptVersion {
             script_name: "greet".to_string(),
             version: 3,
             code: String::new(),
@@ -2862,26 +2928,25 @@ mod tests {
             dependencies: vec![],
             created_at: String::new(),
         }];
-        app.modal = Some(Modal::Script);
 
         app.open_rollback_script_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("cleanup"));
-        assert!(app.confirm.message.contains("v3"));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.confirm_state().unwrap().message.contains("cleanup"));
+        assert!(app.confirm_state().unwrap().message.contains("v3"));
         assert!(matches!(
-            &app.confirm.on_confirm,
+            &app.confirm_state().unwrap().on_confirm,
             ConfirmAction::RollbackScript { name, version } if name == "cleanup" && *version == 3
         ));
 
         app.close_confirm();
-        assert_eq!(app.modal, Some(Modal::Script));
+        assert_eq!(app.modal(), Some(Modal::Script));
     }
 
     #[test]
     fn test_rag_destructive_actions_need_confirm_and_return_to_rag() {
         let mut app = App::new(Config::default());
-        app.rag_state = RagState::new("kb".to_string());
-        app.rag_state.jobs = vec![ironbase_mcp_types::responses::JobInfo {
+        app.open_modal = Some(OpenModal::Rag(RagState::new("kb".to_string())));
+        app.rag_state_mut().unwrap().jobs = vec![ironbase_mcp_types::responses::JobInfo {
             id: "job-1".to_string(),
             job_type: ironbase_mcp_types::responses::JobType::Compact,
             status: ironbase_mcp_types::responses::JobStatus::Pending,
@@ -2891,35 +2956,96 @@ mod tests {
             items_total: None,
         }];
 
-        app.modal = Some(Modal::Rag);
         app.open_disable_auto_embed_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("kb"));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.confirm_state().unwrap().message.contains("kb"));
         app.close_confirm();
-        assert_eq!(app.modal, Some(Modal::Rag));
+        assert_eq!(app.modal(), Some(Modal::Rag));
 
         app.open_clear_embed_cache_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
         assert!(matches!(
-            app.confirm.on_confirm,
+            app.confirm_state().unwrap().on_confirm,
             ConfirmAction::ClearEmbedCache
         ));
         app.close_confirm();
-        assert_eq!(app.modal, Some(Modal::Rag));
+        assert_eq!(app.modal(), Some(Modal::Rag));
 
         app.open_cancel_embed_job_confirm();
-        assert_eq!(app.modal, Some(Modal::Confirm));
-        assert!(app.confirm.message.contains("job-1"));
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.confirm_state().unwrap().message.contains("job-1"));
         app.close_confirm();
-        assert_eq!(app.modal, Some(Modal::Rag));
+        assert_eq!(app.modal(), Some(Modal::Rag));
     }
 
     #[test]
     fn test_document_delete_confirm_closes_to_panes() {
         let mut app = App::new(Config::default());
-        app.confirm = ConfirmState::delete_collection("users".to_string(), 0);
-        app.modal = Some(Modal::Confirm);
+        app.open_confirm(ConfirmState::delete_collection("users".to_string(), 0));
         app.close_confirm();
-        assert_eq!(app.modal, None);
+        assert_eq!(app.modal(), None);
+    }
+
+    /// A modal's state lives with the open modal: closing drops it (reopening
+    /// starts empty) and a late answer for a closed modal changes nothing
+    /// A confirm dialog keeps the modal it was opened from and gives it back
+    /// as it was (it used to reopen the modal by kind only)
+    #[test]
+    fn test_confirm_gives_back_the_modal_it_was_opened_from() {
+        let mut app = App::new(Config::default());
+        let mut state = ExportState::new("users".to_string(), 3);
+        state.file_path.insert_str("-draft");
+        app.open_modal = Some(OpenModal::Export(state));
+
+        app.open_confirm(ConfirmState::clear_embed_cache());
+        assert_eq!(app.modal(), Some(Modal::Confirm));
+        assert!(app.export_state().is_none());
+        app.close_confirm();
+        assert_eq!(
+            app.export_state().unwrap().file_path.value(),
+            "users.json-draft"
+        );
+
+        // A confirm with nothing under it closes to the panes
+        app.close_modal();
+        app.open_confirm(ConfirmState::clear_embed_cache());
+        app.close_confirm();
+        assert_eq!(app.modal(), None);
+    }
+
+    /// Closing a confirm dialog leaves any other open modal alone, and a
+    /// modal opened by kind has the state its keys need
+    #[test]
+    fn test_modal_by_kind_has_state_and_close_confirm_keeps_others() {
+        let mut app = App::new(Config::default());
+        app.set_modal(Modal::Index);
+        assert!(app.index_state().is_some());
+        app.close_confirm();
+        assert_eq!(app.modal(), Some(Modal::Index));
+
+        app.set_modal(Modal::Confirm);
+        assert!(app.confirm_state().is_some());
+        app.close_confirm();
+        assert_eq!(app.modal(), None);
+    }
+
+    #[test]
+    fn test_modal_state_lives_with_the_open_modal() {
+        let mut app = App::new(Config::default());
+        app.open_new_collection();
+        if let Some(OpenModal::NewCollection(state)) = app.open_modal_mut() {
+            state.name.insert_str("draft");
+        }
+        app.close_modal();
+        app.open_new_collection();
+        let Some(OpenModal::NewCollection(state)) = app.open_modal() else {
+            panic!("not open");
+        };
+        assert_eq!(state.name.value(), "");
+
+        app.close_modal();
+        app.set_server_info_error("late".to_string());
+        app.set_update_error("late".to_string());
+        assert_eq!(app.modal(), None);
     }
 }
