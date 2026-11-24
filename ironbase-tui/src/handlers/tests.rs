@@ -494,7 +494,7 @@ async fn open_rag_models_tab(app: &mut App) {
     assert_eq!(app.modal(), Some(Modal::Rag));
     press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
     press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
-    assert_eq!(app.rag_state.active_tab, RagTab::Models);
+    assert_eq!(app.rag_state_mut().unwrap().active_tab, RagTab::Models);
 }
 
 #[tokio::test]
@@ -516,7 +516,10 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
     press(&mut app, KeyCode::Char('d')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
-    app.rag_state.collection = "other".to_string();
+    let crate::app::OpenModal::Rag(state) = modal_under_confirm(&mut app) else {
+        panic!("not the RAG modal");
+    };
+    state.collection = "other".to_string();
 
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.modal(), Some(Modal::Rag));
@@ -525,7 +528,7 @@ async fn test_auto_embed_disable_executes_with_captured_collection() {
         vec![json!({"collection": "users"})]
     );
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some(t().auto_embed_disabled())
     );
 }
@@ -558,7 +561,7 @@ async fn test_embed_cache_clear_executes_after_confirm() {
     assert_eq!(app.modal(), Some(Modal::Rag));
     assert_eq!(server.calls_to("embed_cache_clear").len(), 1);
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some("Cleared 3 cache entries")
     );
 }
@@ -581,10 +584,10 @@ async fn test_embed_cache_clear_without_a_cache_reports_it() {
     press(&mut app, KeyCode::Char('x')).await;
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(
-        app.rag_state.error.as_deref(),
+        app.rag_state_mut().unwrap().error.as_deref(),
         Some("Embedding cache is not enabled")
     );
-    assert_eq!(app.rag_state.message, None);
+    assert_eq!(app.rag_state_mut().unwrap().message, None);
 }
 
 /// A job of the job tools' shape
@@ -641,9 +644,15 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
     let mut app = app_with_server(&server).await;
     shift(&mut app, 'E').await;
     press_with(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
-    assert_eq!(app.rag_state.active_tab, RagTab::Jobs);
+    assert_eq!(app.rag_state_mut().unwrap().active_tab, RagTab::Jobs);
     press(&mut app, KeyCode::Char('r')).await;
-    let ids: Vec<&str> = app.rag_state.jobs.iter().map(|j| j.id.as_str()).collect();
+    let ids: Vec<&str> = app
+        .rag_state_mut()
+        .unwrap()
+        .jobs
+        .iter()
+        .map(|j| j.id.as_str())
+        .collect();
     assert_eq!(ids, ["job_2", "job_1"]);
     press(&mut app, KeyCode::Char('j')).await;
     server.clear_calls();
@@ -651,7 +660,10 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
     press(&mut app, KeyCode::Char('x')).await;
     assert_eq!(app.modal(), Some(Modal::Confirm));
     assert_eq!(app.confirm_state().unwrap().selected, ConfirmOption::Cancel);
-    app.rag_state.selected_job = 0;
+    let crate::app::OpenModal::Rag(state) = modal_under_confirm(&mut app) else {
+        panic!("not the RAG modal");
+    };
+    state.selected_job = 0;
 
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(app.modal(), Some(Modal::Rag));
@@ -660,7 +672,7 @@ async fn test_embed_job_cancel_executes_with_captured_job_id() {
         vec![json!({"job_id": "job_1"})]
     );
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some("Job 'job_1' cancelled")
     );
     // The list is reloaded after the cancel
@@ -722,7 +734,7 @@ async fn test_embed_job_cancel_of_a_finished_job_reports_it() {
     press(&mut app, KeyCode::Char('x')).await;
     press(&mut app, KeyCode::Char('y')).await;
     assert_eq!(
-        app.rag_state.error.as_deref(),
+        app.rag_state_mut().unwrap().error.as_deref(),
         Some("Job 'job_1' is already in terminal state")
     );
 }
@@ -786,12 +798,13 @@ async fn test_rag_open_reports_a_failing_models_list() {
     shift(&mut app, 'E').await;
     assert_eq!(app.modal(), Some(Modal::Rag));
     assert!(
-        app.rag_state
+        app.rag_state_mut()
+            .unwrap()
             .error
             .as_deref()
             .is_some_and(|e| e.contains("Embedding not available")),
         "{:?}",
-        app.rag_state.error
+        app.rag_state_mut().unwrap().error
     );
 }
 
@@ -1880,7 +1893,7 @@ async fn test_fulltext_search_through_the_fake_server() {
 async fn open_rag_search(app: &mut App) {
     shift(app, 'E').await;
     assert_eq!(app.modal(), Some(Modal::Rag));
-    assert_eq!(app.rag_state.active_tab, RagTab::Search);
+    assert_eq!(app.rag_state_mut().unwrap().active_tab, RagTab::Search);
 }
 
 #[tokio::test]
@@ -1896,11 +1909,11 @@ async fn test_rag_search_has_no_dead_mode_or_rrf_k_controls() {
 
     // Tab: query → limit → query
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.rag_state.search_focus, 1);
+    assert_eq!(app.rag_state_mut().unwrap().search_focus, 1);
     press(&mut app, KeyCode::Up).await;
-    assert_eq!(app.rag_state.search_limit, 11);
+    assert_eq!(app.rag_state_mut().unwrap().search_limit, 11);
     press(&mut app, KeyCode::Tab).await;
-    assert_eq!(app.rag_state.search_focus, 0);
+    assert_eq!(app.rag_state_mut().unwrap().search_focus, 0);
 
     // The search sends only what `search` takes
     type_text(&mut app, "rust").await;
@@ -1930,7 +1943,12 @@ async fn test_rag_search_reports_trimmed_and_dropped_results() {
     type_text(&mut app, "needle").await;
     press(&mut app, KeyCode::Enter).await;
 
-    let message = app.rag_state.message.clone().unwrap_or_default();
+    let message = app
+        .rag_state_mut()
+        .unwrap()
+        .message
+        .clone()
+        .unwrap_or_default();
     assert_eq!(message, t().search_summary(1, 2, 1, true));
     let screen = render_to_string(&app, 140, 45);
     assert!(screen.contains("Találatok (1, rövidítve)"), "{screen}");
@@ -1955,10 +1973,10 @@ async fn test_rag_search_context_block_answer_is_a_translated_error() {
     press(&mut app, KeyCode::Enter).await;
 
     assert_eq!(
-        app.rag_state.error.as_deref(),
+        app.rag_state_mut().unwrap().error.as_deref(),
         Some(t().unexpected_search_response())
     );
-    assert!(app.rag_state.search_results.is_empty());
+    assert!(app.rag_state_mut().unwrap().search_results.is_empty());
 }
 
 #[tokio::test]
@@ -1969,9 +1987,9 @@ async fn test_rag_search_complete_results_through_the_fake_server() {
     type_text(&mut app, "developer").await;
     press(&mut app, KeyCode::Enter).await;
 
-    assert_eq!(app.rag_state.error, None);
+    assert_eq!(app.rag_state_mut().unwrap().error, None);
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some(t().search_summary(2, 0, 0, false).as_str())
     );
     let screen = render_to_string(&app, 140, 45);
@@ -1995,8 +2013,8 @@ async fn test_rag_search_rejects_a_malformed_response() {
     type_text(&mut app, "x").await;
     press(&mut app, KeyCode::Enter).await;
     // A successful, trimmed search first
-    assert_eq!(app.rag_state.search_results.len(), 1);
-    assert!(app.rag_state.search_incomplete());
+    assert_eq!(app.rag_state_mut().unwrap().search_results.len(), 1);
+    assert!(app.rag_state_mut().unwrap().search_incomplete());
 
     // `relevance` missing: never defaulted to 0
     server.respond(
@@ -2007,15 +2025,20 @@ async fn test_rag_search_rejects_a_malformed_response() {
     );
     press(&mut app, KeyCode::Enter).await;
 
-    let error = app.rag_state.error.clone().unwrap_or_default();
+    let error = app
+        .rag_state_mut()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
     assert!(error.contains("relevance"), "{error}");
     // Nothing of the previous search is left next to the error
-    assert!(app.rag_state.search_results.is_empty());
-    assert!(!app.rag_state.search_trimmed);
-    assert_eq!(app.rag_state.search_dropped_due_to_budget, 0);
-    assert_eq!(app.rag_state.search_dropped_empty, 0);
-    assert_eq!(app.rag_state.selected_result, 0);
-    assert_eq!(app.rag_state.message, None);
+    assert!(app.rag_state_mut().unwrap().search_results.is_empty());
+    assert!(!app.rag_state_mut().unwrap().search_trimmed);
+    assert_eq!(app.rag_state_mut().unwrap().search_dropped_due_to_budget, 0);
+    assert_eq!(app.rag_state_mut().unwrap().search_dropped_empty, 0);
+    assert_eq!(app.rag_state_mut().unwrap().selected_result, 0);
+    assert_eq!(app.rag_state_mut().unwrap().message, None);
     let screen = render_to_string(&app, 140, 45);
     assert!(!screen.contains("trimmed"), "{screen}");
     assert!(!screen.contains("Needles"), "{screen}");
@@ -2150,7 +2173,7 @@ async fn open_rag_tab(app: &mut App, back_tabs: usize, tab: RagTab) {
     for _ in 0..back_tabs {
         press_with(app, KeyCode::BackTab, KeyModifiers::SHIFT).await;
     }
-    assert_eq!(app.rag_state.active_tab, tab);
+    assert_eq!(app.rag_state_mut().unwrap().active_tab, tab);
 }
 
 /// `rag_collection_stats` of "users": 6 chunks of 4 documents, provider `length`
@@ -2200,7 +2223,7 @@ async fn test_rag_collections_tab_shows_the_nested_stats() {
 
     press(&mut app, KeyCode::Enter).await;
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some("users: 6 darab, 4 forrásdokumentum")
     );
 }
@@ -2236,16 +2259,17 @@ async fn test_rag_import_reports_the_stored_chunks() {
         ]
     );
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some("Importálva: „d1”, 3 darab létrehozva, 1 lecserélve")
     );
-    assert!(app.rag_state.import_result.is_some());
+    assert!(app.rag_state_mut().unwrap().import_result.is_some());
 
     server.fail("rag_document_import", "Embedding failed");
     press(&mut app, KeyCode::Enter).await;
-    assert!(app.rag_state.import_result.is_none());
+    assert!(app.rag_state_mut().unwrap().import_result.is_none());
     assert!(app
-        .rag_state
+        .rag_state()
+        .unwrap()
         .error
         .as_deref()
         .is_some_and(|e| e.contains("Embedding failed")));
@@ -2288,7 +2312,7 @@ async fn test_rag_create_reports_existing_indexes() {
             "text_field": "content", "provider": "ollama", "language": "hungarian"})]
     );
     assert_eq!(
-        app.rag_state.message.as_deref(),
+        app.rag_state_mut().unwrap().message.as_deref(),
         Some("A(z) „kb” RAG-kollekció kész: vektorindex már létezett, 0 fulltext index létrehozva (768 dimenzió, ollama)")
     );
 }
@@ -2892,24 +2916,27 @@ async fn test_rag_inputs_are_edited_at_the_cursor() {
     press(&mut app, KeyCode::End).await;
     press(&mut app, KeyCode::Left).await;
     press(&mut app, KeyCode::Delete).await;
-    assert_eq!(app.rag_state.search_query.value(), "a kiral");
+    assert_eq!(app.rag_state_mut().unwrap().search_query.value(), "a kiral");
 
     // Create form: Ctrl+W clears the default field name, the error goes
-    app.rag_state.active_tab = RagTab::Collections;
+    app.rag_state_mut().unwrap().active_tab = RagTab::Collections;
     press(&mut app, KeyCode::Char('c')).await;
-    assert!(app.rag_state.creating);
+    assert!(app.rag_state_mut().unwrap().creating);
     press(&mut app, KeyCode::Tab).await;
-    app.rag_state.error = Some("old".to_string());
+    app.rag_state_mut().unwrap().error = Some("old".to_string());
     press_with(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL).await;
     type_text(&mut app, "vec").await;
-    assert_eq!(app.rag_state.create_embedding_field.value(), "vec");
-    assert_eq!(app.rag_state.error, None);
+    assert_eq!(
+        app.rag_state_mut().unwrap().create_embedding_field.value(),
+        "vec"
+    );
+    assert_eq!(app.rag_state_mut().unwrap().error, None);
     // Space still toggles the provider, it is not typed
     press(&mut app, KeyCode::Tab).await;
     press(&mut app, KeyCode::Tab).await;
-    let provider = app.rag_state.create_provider.clone();
+    let provider = app.rag_state_mut().unwrap().create_provider.clone();
     press(&mut app, KeyCode::Char(' ')).await;
-    assert_ne!(app.rag_state.create_provider, provider);
+    assert_ne!(app.rag_state_mut().unwrap().create_provider, provider);
 }
 
 /// The multi-line editors share one widget: Delete, End and the readline
@@ -2974,7 +3001,10 @@ async fn test_paste_into_a_single_line_input_is_one_line() {
     let mut app = app_with_server(&server).await;
     open_rag_tab(&mut app, 0, RagTab::Search).await;
     crate::handlers::handle_paste(&mut app, "first line\nsecond");
-    assert_eq!(app.rag_state.search_query.value(), "first line second");
+    assert_eq!(
+        app.rag_state_mut().unwrap().search_query.value(),
+        "first line second"
+    );
     assert!(server.calls_to("search").is_empty());
 
     // The new collection name keeps only the characters it accepts
@@ -3016,16 +3046,16 @@ async fn test_paste_into_a_number_field() {
     let server = two_collections();
     let mut app = app_with_server(&server).await;
     open_rag_tab(&mut app, 0, RagTab::Search).await;
-    app.rag_state.active_tab = RagTab::Import;
-    app.rag_state.import_form_field = 2;
-    app.rag_state.import_chunk_size = 0;
+    app.rag_state_mut().unwrap().active_tab = RagTab::Import;
+    app.rag_state_mut().unwrap().import_form_field = 2;
+    app.rag_state_mut().unwrap().import_chunk_size = 0;
     crate::handlers::handle_paste(&mut app, "1 500\n");
-    assert_eq!(app.rag_state.import_chunk_size, 1500);
+    assert_eq!(app.rag_state_mut().unwrap().import_chunk_size, 1500);
     // Typed digits use the same rule, and no longer overflow
     for _ in 0..30 {
         press(&mut app, KeyCode::Char('9')).await;
     }
-    assert_eq!(app.rag_state.import_chunk_size, usize::MAX);
+    assert_eq!(app.rag_state_mut().unwrap().import_chunk_size, usize::MAX);
 }
 
 /// The API key, ACL and listener modals own their state: closing one drops

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the RAG modal's state lives with the open modal (tuti-tui 0.3.503, mcp-server 1.0.691 — version only, for the release tag)
+
+The RAG / embedding modal moves into `OpenModal` (`Rag`); its confirm dialogs (auto-embed disable, cache clear, job
+cancel) keep its state under them. No change of behavior. With this every modal that has state of its own lives in
+`OpenModal`; `OpenModal::Plain` is left for the ones without (help, actions menu, error details) and for the search
+and filter modals, whose state is view state kept in `App`.
+
 ### Changed — Tuti TUI: the script modal's state lives with the open modal (tuti-tui 0.3.502, mcp-server 1.0.690 — version only, for the release tag)
 
 The script modal moves into `OpenModal` (`Script`); the rollback confirm dialog keeps its state under it. No change

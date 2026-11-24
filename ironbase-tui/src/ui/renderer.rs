@@ -164,7 +164,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 }
             }
             Modal::Rag => {
-                modals::rag::render(frame, frame.area(), &app.rag_state, &theme);
+                if let Some(state) = app.rag_state() {
+                    modals::rag::render(frame, frame.area(), state, &theme);
+                }
             }
         }
     }

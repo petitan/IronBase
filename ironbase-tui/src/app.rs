@@ -148,9 +148,6 @@ pub struct App {
 
     // Update modal state
 
-    // RAG & Embedding state
-    pub rag_state: RagState,
-
     // Connection type (for permission checks)
     pub connection_type: ConnectionType,
 
@@ -192,7 +189,6 @@ impl App {
             collection_indexes: Vec::new(),
             filter_state: FilterState::default(),
             server_info_scroll: 0,
-            rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
             config,
             status_message: None,
@@ -434,6 +430,7 @@ impl App {
     modal_state!(index_state, index_state_mut, Index, IndexState);
     modal_state!(vector_state, vector_state_mut, Vector, VectorSearchState);
     modal_state!(script_state, script_state_mut, Script, ScriptState);
+    modal_state!(rag_state, rag_state_mut, Rag, RagState);
     modal_state!(
         api_key_state,
         api_key_state_mut,
@@ -529,7 +526,7 @@ impl App {
 
     /// Open confirmation for disabling auto-embed (RAG modal)
     pub fn open_disable_auto_embed_confirm(&mut self) {
-        let collection = self.rag_state.collection.clone();
+        let collection = open_state!(self, Rag).collection.clone();
         self.open_confirm(ConfirmState::disable_auto_embed(collection));
     }
 
@@ -540,7 +537,7 @@ impl App {
 
     /// Open confirmation for cancelling the selected embed job (RAG modal)
     pub fn open_cancel_embed_job_confirm(&mut self) {
-        let Some(job_id) = self.rag_state.selected_job_id() else {
+        let Some(job_id) = open_state!(self, Rag).selected_job_id() else {
             return;
         };
 
@@ -1713,11 +1710,11 @@ impl App {
             };
             match db.call::<AutoEmbedDisable>(&args).await {
                 Ok(_) => {
-                    self.rag_state.message = Some(t().auto_embed_disabled().to_string());
-                    self.rag_state.auto_embed_config = None;
+                    open_state!(self, Rag).message = Some(t().auto_embed_disabled().to_string());
+                    open_state!(self, Rag).auto_embed_config = None;
                 }
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1728,15 +1725,15 @@ impl App {
         if let Some(ref db) = self.db {
             match db.call::<EmbedCacheClear>(&NoParams {}).await {
                 Ok(EmbedCacheClearResponse::Cleared { message, .. }) => {
-                    self.rag_state.cache_stats = None;
-                    self.rag_state.message = Some(message);
+                    open_state!(self, Rag).cache_stats = None;
+                    open_state!(self, Rag).message = Some(message);
                 }
                 // No cache on the server: nothing was cleared
                 Ok(EmbedCacheClearResponse::Disabled { message, .. }) => {
-                    self.rag_state.error = Some(message);
+                    open_state!(self, Rag).error = Some(message);
                 }
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                 }
             }
         }
@@ -1750,12 +1747,12 @@ impl App {
             };
             match db.call::<EmbedJobCancel>(&args).await {
                 Ok(response) if response.success => {
-                    self.rag_state.message = Some(response.message);
+                    open_state!(self, Rag).message = Some(response.message);
                 }
                 // Unknown or already finished: the server says which
-                Ok(response) => self.rag_state.error = Some(response.message),
+                Ok(response) => open_state!(self, Rag).error = Some(response.message),
                 Err(e) => {
-                    self.rag_state.error = Some(format!("{}", e));
+                    open_state!(self, Rag).error = Some(format!("{}", e));
                     return;
                 }
             }
@@ -1764,8 +1761,8 @@ impl App {
                 .call::<EmbedJobList>(&JobListParams { active_only: false })
                 .await
             {
-                Ok(result) => self.rag_state.set_jobs(result.jobs),
-                Err(e) => self.rag_state.error = Some(t().failed(Op::LoadJobs, &e)),
+                Ok(result) => open_state!(self, Rag).set_jobs(result.jobs),
+                Err(e) => open_state!(self, Rag).error = Some(t().failed(Op::LoadJobs, &e)),
             }
         }
     }
@@ -2944,8 +2941,8 @@ mod tests {
     #[test]
     fn test_rag_destructive_actions_need_confirm_and_return_to_rag() {
         let mut app = App::new(Config::default());
-        app.rag_state = RagState::new("kb".to_string());
-        app.rag_state.jobs = vec![ironbase_mcp_types::responses::JobInfo {
+        app.open_modal = Some(OpenModal::Rag(RagState::new("kb".to_string())));
+        app.rag_state_mut().unwrap().jobs = vec![ironbase_mcp_types::responses::JobInfo {
             id: "job-1".to_string(),
             job_type: ironbase_mcp_types::responses::JobType::Compact,
             status: ironbase_mcp_types::responses::JobStatus::Pending,
@@ -2955,7 +2952,6 @@ mod tests {
             items_total: None,
         }];
 
-        app.set_modal(Modal::Rag);
         app.open_disable_auto_embed_confirm();
         assert_eq!(app.modal(), Some(Modal::Confirm));
         assert!(app.confirm_state().unwrap().message.contains("kb"));

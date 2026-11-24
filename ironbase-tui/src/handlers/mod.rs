@@ -114,7 +114,9 @@ pub fn handle_paste(app: &mut App, text: &str) {
             .map_or(InputOutcome::Ignored, |state| {
                 state.handle_text_input(input)
             }),
-        Some(Modal::Rag) => app.rag_state.handle_text_input(input),
+        Some(Modal::Rag) => app.rag_state_mut().map_or(InputOutcome::Ignored, |state| {
+            state.handle_text_input(input)
+        }),
         Some(
             Modal::Actions
             | Modal::Help
