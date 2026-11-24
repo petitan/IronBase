@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: every text color reads at WCAG AA contrast in every theme (tuti-tui 0.3.494, mcp-server 1.0.682 — version only, for the release tag)
+
+Hints, key help, disabled items and dimmed labels (`muted`), borders and section labels (`secondary`) and, in the
+light theme, the success, warning and error colors were below the 4.5:1 contrast the WCAG AA level asks for text
+(down to 2.1:1: the light theme's warning orange on white, 2.7:1: the Ocean theme's hints). Each of the twelve
+colors below the line is moved the least along its own hue — lighter on the dark themes, darker on the light one —
+until it reads at 4.6:1; the colors above it, the backgrounds and the theme names are unchanged.
+
+- A test computes the WCAG contrast of every text color (and of the header) against its background in all four
+  themes, so a later color change cannot fall below 4.5:1 unnoticed; it fails with the old colors.
+- Left for the next step of the plan: a marker on the selected row besides its color, and `NO_COLOR`.
+
 ### Changed — Tuti TUI: one key map for the main screen, the help and the actions menu (tuti-tui 0.3.493, mcp-server 1.0.681 — version only, for the release tag)
 
 The main screen's keys were a hand-written `match` in the key handler, the help a separate hand-written list and the
