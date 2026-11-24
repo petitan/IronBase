@@ -1,6 +1,7 @@
 //! Key handlers: filter
 
 use crate::app::App;
+use crate::i18n::t;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -60,7 +61,7 @@ pub(crate) async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifie
                     if !needs_value || has_value {
                         app.filter_state.add_filter();
                     } else {
-                        app.filter_state.error = Some("Ertek megadasa kotelezo!".to_string());
+                        app.filter_state.error = Some(t().value_required().to_string());
                     }
                 }
                 FilterFocus::Filters => {

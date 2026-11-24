@@ -1,6 +1,7 @@
 //! Key handlers: rag
 
 use crate::app::{App, Modal, RagState};
+use crate::i18n::{t, Op};
 use crate::widgets::{push_digits, Input};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{
@@ -16,7 +17,7 @@ use ironbase_mcp_types::tools::{
 /// Open RAG & Embedding modal
 pub(crate) async fn handle_rag_open(app: &mut App) {
     if app.collections.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
@@ -25,7 +26,7 @@ pub(crate) async fn handle_rag_open(app: &mut App) {
         .unwrap_or_default()
         .to_string();
     if collection.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
@@ -37,11 +38,11 @@ pub(crate) async fn handle_rag_open(app: &mut App) {
         let mut errors = Vec::new();
         match db.call::<EmbedModelsList>(&NoParams {}).await {
             Ok(models) => app.rag_state.set_models(models.models),
-            Err(e) => errors.push(format!("Models: {}", e)),
+            Err(e) => errors.push(t().failed(Op::LoadModels, &e)),
         }
         match load_auto_embed_status(db, &collection).await {
             Ok(status) => app.rag_state.auto_embed_config = Some(status),
-            Err(e) => errors.push(format!("Auto-embed status: {}", e)),
+            Err(e) => errors.push(t().failed(Op::LoadAutoEmbedStatus, &e)),
         }
         if !errors.is_empty() {
             app.rag_state.error = Some(errors.join("; "));
@@ -107,7 +108,7 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
         // Execute search
         (KeyCode::Enter, _) if app.rag_state.search_focus == 0 => {
             if app.rag_state.search_query.value().trim().is_empty() {
-                app.rag_state.error = Some("Query is empty".to_string());
+                app.rag_state.error = Some(t().query_empty().to_string());
                 return;
             }
 
@@ -184,7 +185,7 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
         // Execute import
         (KeyCode::Enter, _) => {
             if app.rag_state.import_content.text().trim().is_empty() {
-                app.rag_state.error = Some("Content is empty".to_string());
+                app.rag_state.error = Some(t().content_empty().to_string());
                 return;
             }
 
@@ -297,7 +298,7 @@ pub(crate) async fn handle_rag_collections_key(
                     .trim()
                     .to_string();
                 if name.is_empty() {
-                    app.rag_state.error = Some("Collection name is required".to_string());
+                    app.rag_state.error = Some(t().collection_name_required().to_string());
                     return;
                 }
 
@@ -376,11 +377,10 @@ pub(crate) async fn handle_rag_collections_key(
             if let Some(ref db) = app.db {
                 match load_rag_stats(db, &name).await {
                     Ok(stats) => {
-                        app.rag_state.message = Some(format!(
-                            "{}: {} chunks, {} source docs",
-                            stats.collection,
-                            stats.stats.chunk_count,
-                            stats.stats.source_document_count
+                        app.rag_state.message = Some(t().rag_stats_line(
+                            &stats.collection,
+                            &stats.stats.chunk_count,
+                            &stats.stats.source_document_count,
                         ));
                         if let Some(entry) = app
                             .rag_state
@@ -404,7 +404,7 @@ pub(crate) async fn handle_rag_collections_key(
             if let Some(ref db) = app.db {
                 match load_rag_stats(db, &collection).await {
                     Ok(stats) => {
-                        app.rag_state.message = Some("Stats refreshed".to_string());
+                        app.rag_state.message = Some(t().stats_refreshed().to_string());
                         app.rag_state.rag_collections = vec![stats];
                         app.rag_state.selected_collection = 0;
                     }
@@ -429,7 +429,7 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
         match (key, modifiers) {
             (KeyCode::Enter, _) => {
                 if app.rag_state.embed_test_input.value().trim().is_empty() {
-                    app.rag_state.error = Some("Text is empty".to_string());
+                    app.rag_state.error = Some(t().text_empty().to_string());
                     return;
                 }
 
@@ -489,18 +489,18 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                         // why the vectors may differ, not a bare "enabled"
                         let mut message = response
                             .message
-                            .unwrap_or_else(|| "Auto-embed enabled".to_string());
+                            .unwrap_or_else(|| t().auto_embed_enabled().to_string());
                         if let Some(job_id) = response.backfill_job_id {
-                            message.push_str(&format!(" (job {})", job_id));
+                            message.push_str(&t().job_suffix(&job_id));
                         }
                         if let Some(warning) = response.warning {
-                            message.push_str(&format!(" Warning: {}", warning));
+                            message.push_str(&t().warning_suffix(&warning));
                         }
                         app.rag_state.message = Some(message);
                         match load_auto_embed_status(db, &collection).await {
                             Ok(status) => app.rag_state.auto_embed_config = Some(status),
                             Err(e) => {
-                                app.rag_state.error = Some(format!("Auto-embed status: {}", e))
+                                app.rag_state.error = Some(t().failed(Op::LoadAutoEmbedStatus, &e))
                             }
                         }
                     }
@@ -521,7 +521,7 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                     Ok(stats) => {
                         app.rag_state.message = Some(match &stats {
                             EmbedCacheStatsResponse::Enabled { .. } => {
-                                "Cache stats loaded".to_string()
+                                t().cache_stats_loaded().to_string()
                             }
                             EmbedCacheStatsResponse::Disabled { message, .. } => message.clone(),
                         });
@@ -570,7 +570,7 @@ pub(crate) async fn handle_rag_jobs_key(app: &mut App, key: KeyCode) {
                 {
                     Ok(result) => {
                         app.rag_state.set_jobs(result.jobs);
-                        app.rag_state.message = Some("Jobs refreshed".to_string());
+                        app.rag_state.message = Some(t().jobs_refreshed().to_string());
                     }
                     Err(e) => {
                         app.rag_state.error = Some(format!("{}", e));
@@ -599,13 +599,11 @@ async fn load_rag_stats(
 /// What `rag_collection_create` did: an existing index is kept (the server
 /// does not report whether the collection itself existed)
 fn rag_created_message(response: &RagCollectionCreateResponse) -> String {
-    let created = |yes: bool| if yes { "created" } else { "already existed" };
-    format!(
-        "RAG collection '{}' ready: vector index {}, {} fulltext index(es) created ({} dims, {})",
-        response.collection,
-        created(response.indexes.vector_created),
+    t().rag_collection_ready(
+        &response.collection,
+        response.indexes.vector_created,
         response.indexes.fulltext_created,
         response.config.dimension,
-        response.config.provider
+        &response.config.provider,
     )
 }

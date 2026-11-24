@@ -3,6 +3,7 @@
 use crate::app::{App, Modal};
 use crate::config::TransportMode;
 use crate::db::DbWrapper;
+use crate::i18n::{t, Op};
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::DbOpenParams;
@@ -35,7 +36,7 @@ pub(crate) async fn handle_database_key_async(
         KeyCode::Enter => {
             let path = app.database_state.path.value().trim().to_string();
             if path.is_empty() {
-                app.database_state.error = Some("Az utvonal nem lehet ures!".to_string());
+                app.database_state.error = Some(t().path_required().to_string());
                 return;
             }
 
@@ -54,8 +55,12 @@ pub(crate) async fn handle_database_key_async(
                     match db.call::<DbOpen>(&args).await {
                         Ok(_) => {
                             app.database_state.loading = false;
-                            let action = if create { "letrehozva" } else { "megnyitva" };
-                            app.database_state.message = Some(format!("Sikeresen {}!", action));
+                            let ok = if create {
+                                t().created_ok()
+                            } else {
+                                t().opened_ok()
+                            };
+                            app.database_state.message = Some(ok.to_string());
 
                             // Reset UI state and refresh collections
                             app.reset_for_new_database();
@@ -65,8 +70,9 @@ pub(crate) async fn handle_database_key_async(
                             app.close_modal();
                             // set_status clears a stale error, so the load error must win
                             match refreshed {
-                                Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
-                                Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                                Ok(()) if create => app.set_status(t().database_created(&path)),
+                                Ok(()) => app.set_status(t().database_opened(&path)),
+                                Err(e) => app.set_error(t().failed(Op::LoadCollections, &e)),
                             }
                         }
                         Err(e) => {
@@ -75,7 +81,7 @@ pub(crate) async fn handle_database_key_async(
                         }
                     }
                 } else {
-                    app.database_state.error = Some("Nincs aktiv kapcsolat!".to_string());
+                    app.database_state.error = Some(t().no_connection().to_string());
                 }
                 return;
             }
@@ -88,15 +94,13 @@ pub(crate) async fn handle_database_key_async(
             match app.database_state.mode {
                 DatabaseMode::Open => {
                     if !file_exists {
-                        app.database_state.error =
-                            Some("A fajl nem letezik! Hasznald a 'Letrehozas' modot.".to_string());
+                        app.database_state.error = Some(t().file_missing_use_create().to_string());
                         return;
                     }
                 }
                 DatabaseMode::Create => {
                     if file_exists {
-                        app.database_state.error =
-                            Some("A fajl mar letezik! Hasznald a 'Megnyitas' modot.".to_string());
+                        app.database_state.error = Some(t().file_exists_use_open().to_string());
                         return;
                     }
                 }
@@ -120,11 +124,13 @@ pub(crate) async fn handle_database_key_async(
                     app.db_path = Some(path_buf);
                     app.database_state.loading = false;
 
-                    let action = match app.database_state.mode {
-                        DatabaseMode::Open => "megnyitva",
-                        DatabaseMode::Create => "letrehozva",
+                    let create = app.database_state.mode == DatabaseMode::Create;
+                    let ok = if create {
+                        t().created_ok()
+                    } else {
+                        t().opened_ok()
                     };
-                    app.database_state.message = Some(format!("Sikeresen {}!", action));
+                    app.database_state.message = Some(ok.to_string());
 
                     // Reset UI state and refresh collections
                     app.reset_for_new_database();
@@ -134,13 +140,14 @@ pub(crate) async fn handle_database_key_async(
                     app.close_modal();
                     // set_status clears a stale error, so the load error must win
                     match refreshed {
-                        Ok(()) => app.set_status(format!("Adatbazis {}: {}", action, path)),
-                        Err(e) => app.set_error(format!("Kollekcio betoltes hiba: {}", e)),
+                        Ok(()) if create => app.set_status(t().database_created(&path)),
+                        Ok(()) => app.set_status(t().database_opened(&path)),
+                        Err(e) => app.set_error(t().failed(Op::LoadCollections, &e)),
                     }
                 }
                 Err(e) => {
                     app.database_state.loading = false;
-                    app.database_state.error = Some(format!("Kapcsolodasi hiba: {}", e));
+                    app.database_state.error = Some(t().failed(Op::Connect, &e));
                 }
             }
         }

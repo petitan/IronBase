@@ -6,6 +6,7 @@ use super::server_info::handle_server_info_open;
 use super::update::handle_update_open;
 use super::vector::handle_vector_open;
 use crate::app::{App, Modal, Pane};
+use crate::i18n::{t, Op};
 use crate::modals;
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -43,10 +44,10 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         (KeyCode::Char('U'), _) => handle_update_open(app).await,
         (KeyCode::Char('R'), _) => {
             // Refresh collections (Shift+R)
-            app.set_status("Refreshing collections...");
+            app.set_status(t().refreshing());
             match app.refresh_collections_async().await {
-                Ok(_) => app.set_status("Collections refreshed!"),
-                Err(e) => app.set_error(format!("Refresh failed: {}", e)),
+                Ok(_) => app.set_status(t().refreshed()),
+                Err(e) => app.set_error(t().failed(Op::Refresh, &e)),
             }
         }
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
@@ -82,7 +83,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         // Set ACL/Permission for collection (Collections pane - Shift+P)
         (KeyCode::Char('P'), KeyModifiers::SHIFT) if app.active_pane == Pane::Collections => {
             if !app.connection_type.is_localhost() {
-                app.set_error("ACL editing requires localhost connection");
+                app.set_error(t().acl_needs_localhost());
             } else {
                 // Clone collection name before borrowing app mutably
                 let collection = app.current_collection_name().map(|s| s.to_string());
@@ -98,7 +99,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                             )
                             .await
                             .map_err(|e| e.to_string()),
-                        None => Err("Nincs megnyitva adatbázis".to_string()),
+                        None => Err(t().no_database().to_string()),
                     };
                     match existing {
                         Ok(acl) => {
@@ -125,7 +126,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                                 app.modal = Some(Modal::Acl);
                             }
                         }
-                        Err(e) => app.set_error(format!("ACL betoltese sikertelen: {}", e)),
+                        Err(e) => app.set_error(t().failed(Op::LoadAcl, &e)),
                     }
                 }
             }
@@ -176,8 +177,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                                 app.api_key_state.loading = false;
                             }
                             Err(e) => {
-                                app.api_key_state
-                                    .set_error(format!("Failed to load keys: {}", e));
+                                app.api_key_state.set_error(t().failed(Op::LoadApiKeys, &e));
                                 app.api_key_state.loading = false;
                             }
                         }
@@ -200,8 +200,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                         app.acl_state.loading = false;
                     }
                     Err(e) => {
-                        app.acl_state
-                            .set_error(format!("Failed to load ACL: {}", e));
+                        app.acl_state.set_error(t().failed(Op::LoadAcl, &e));
                         app.acl_state.loading = false;
                     }
                 }
@@ -223,7 +222,7 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
                     }
                     Err(e) => {
                         app.listener_state
-                            .set_error(format!("Failed to load listeners: {}", e));
+                            .set_error(t().failed(Op::LoadListeners, &e));
                         app.listener_state.loading = false;
                     }
                 }
@@ -234,10 +233,10 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
         // BUG FIX: refresh_collections_async already calls refresh_documents_inner,
         // so we don't need to call refresh_documents_async again
         (KeyCode::Char('r'), _) => {
-            app.set_status("Frissites...");
+            app.set_status(t().refreshing());
             match app.refresh_collections_async().await {
-                Ok(_) => app.set_status("Frissitve!"),
-                Err(e) => app.set_error(format!("Frissites hiba: {}", e)),
+                Ok(_) => app.set_status(t().refreshed()),
+                Err(e) => app.set_error(t().failed(Op::Refresh, &e)),
             }
         }
 
@@ -248,8 +247,8 @@ pub(crate) async fn handle_global_key_async(app: &mut App, key: KeyCode, modifie
             app.doc_scroll_offset = 0;
             app.selected_document = 0;
             match app.refresh_documents_async().await {
-                Ok(_) => app.set_status("Szuro torolve"),
-                Err(e) => app.set_error(format!("Frissites hiba: {}", e)),
+                Ok(_) => app.set_status(t().filter_cleared()),
+                Err(e) => app.set_error(t().failed(Op::Refresh, &e)),
             }
         }
 

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: the key handlers' messages in both languages (tuti-tui 0.3.492, mcp-server 1.0.680 — version only, for the release tag)
+
+The key handlers set their status, error and success messages from fixed strings that mixed English („Refresh
+failed”, „Key copied to clipboard!”, „Listener 'web' replaced”) and Hungarian without accents („Frissites hiba”,
+„Valassz ki egy kollekciot elobb!”, „A fajl nem letezik!”). They come from the language layer (`i18n::Messages`)
+now: refresh, database open/create, filter, full-text, vector, RAG, script, server info, update check, API key,
+ACL and listener messages.
+
+- Failures name their operation through `Messages::failed(Op, …)`; new operations: loading the API keys, the ACL,
+  the listeners, the models, the auto-embed status, the full-text indexes and the collections, reloading a list,
+  connecting, checking for updates.
+- The database switch reports which it did („Adatbázis megnyitva” / „Adatbázis létrehozva”) instead of a verb
+  inserted into one sentence.
+- Texts that come from the server (listener notes, auto-embed messages) are shown as the server sends them.
+- Tests: every new text differs between the two languages, with exact English texts for the composed ones; the
+  handler tests expect the Hungarian texts.
+- Left: the actions menu and the help, generated from the central key map next.
+
 ### Changed — Tuti TUI: the ACL modal in both languages (tuti-tui 0.3.491, mcp-server 1.0.679 — version only, for the release tag)
 
 The ACL modal was English only. Its titles, column headers, key hints, labels, confirmations and validation

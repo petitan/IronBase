@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::db::DbWrapper;
+use crate::i18n::{t, Op};
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{ListenerAddParams, ListenerIdParams, NoParams};
@@ -24,7 +25,7 @@ async fn refresh_listeners(app: &mut App) {
         Err(e) => {
             let state = &mut app.listener_state;
             let outcome = state.success.take().or(state.error.take());
-            let reload = format!("reloading the listeners failed: {}", e);
+            let reload = t().failed(Op::ReloadList, &e);
             state.set_error(match outcome {
                 Some(outcome) => format!("{} ({})", outcome, reload),
                 None => reload,
@@ -82,13 +83,12 @@ pub(crate) async fn handle_listener_key_async(
                 let tls = app.listener_state.add_tls;
 
                 if id.is_empty() {
-                    app.listener_state
-                        .set_error("ID cannot be empty".to_string());
+                    app.listener_state.set_error(t().id_required().to_string());
                     return;
                 }
                 if bind.is_empty() {
                     app.listener_state
-                        .set_error("Bind address cannot be empty".to_string());
+                        .set_error(t().bind_required().to_string());
                     return;
                 }
 
@@ -105,13 +105,11 @@ pub(crate) async fn handle_listener_key_async(
                         Ok(response) => {
                             // Replacing an existing listener is not "added"; the
                             // server applies either on its next start
-                            let action = match response.action {
-                                Created::Created => "added",
-                                Created::Updated => "replaced",
-                            };
-                            app.listener_state.set_success(format!(
-                                "Listener '{}' {}. {}",
-                                id, action, response.note
+                            let replaced = matches!(response.action, Created::Updated);
+                            app.listener_state.set_success(t().listener_created(
+                                &id,
+                                replaced,
+                                &response.note,
                             ));
                             app.listener_state.mode = ListenerModalMode::List;
                             app.listener_state.add_id.clear();
@@ -119,7 +117,7 @@ pub(crate) async fn handle_listener_key_async(
                             refresh_listeners(app).await;
                         }
                         Err(e) => {
-                            app.listener_state.set_error(format!("Failed: {}", e));
+                            app.listener_state.set_error(t().failed(Op::Create, &e));
                         }
                     }
                 }
@@ -160,19 +158,19 @@ pub(crate) async fn handle_listener_key_async(
                                 // The note says what changed and that it waits
                                 // for a restart
                                 app.listener_state
-                                    .set_success(format!("'{}': {}", id, note));
+                                    .set_success(format!("„{}”: {}", id, note));
                                 app.listener_state.mode = ListenerModalMode::List;
                                 app.listener_state.confirm_action = None;
                                 refresh_listeners(app).await;
                             }
                             Ok((false, _)) => {
                                 app.listener_state
-                                    .set_error("Listener not found".to_string());
+                                    .set_error(t().listener_not_found().to_string());
                                 app.listener_state.cancel();
                                 refresh_listeners(app).await;
                             }
                             Err(e) => {
-                                app.listener_state.set_error(format!("Failed: {}", e));
+                                app.listener_state.set_error(t().failed(Op::Update, &e));
                                 app.listener_state.cancel();
                             }
                         }

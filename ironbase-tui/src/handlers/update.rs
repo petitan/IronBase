@@ -1,6 +1,7 @@
 //! Key handlers: update
 
 use crate::app::App;
+use crate::i18n::{t, Op};
 use crossterm::event::KeyCode;
 
 /// Handle update modal keys
@@ -19,10 +20,10 @@ pub(crate) async fn handle_update_open(app: &mut App) {
     let current_version = if let Some(ref db) = app.db {
         match db.get_server_version().await {
             Ok(version) => version,
-            Err(_) => "unknown".to_string(),
+            Err(_) => t().unknown().to_string(),
         }
     } else {
-        "unknown".to_string()
+        t().unknown().to_string()
     };
 
     app.open_update(current_version);
@@ -33,7 +34,7 @@ pub(crate) async fn handle_update_open(app: &mut App) {
             app.update_update_state(latest_version, download_url, release_notes);
         }
         Err(e) => {
-            app.set_update_error(format!("GitHub API hiba: {}", e));
+            app.set_update_error(t().failed(Op::CheckUpdate, &e));
         }
     }
 }

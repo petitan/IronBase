@@ -148,6 +148,16 @@ impl Messages for En {
             Op::File => "File operation",
             Op::Write => "Writing",
             Op::Flush => "Flushing to disk",
+            Op::LoadApiKeys => "Loading the API keys",
+            Op::LoadAcl => "Loading the ACL",
+            Op::LoadListeners => "Loading the listeners",
+            Op::LoadModels => "Loading the models",
+            Op::LoadAutoEmbedStatus => "Loading the auto-embed status",
+            Op::LoadFulltextIndexes => "Loading the full-text indexes",
+            Op::LoadCollections => "Loading the collections",
+            Op::ReloadList => "Reloading the list",
+            Op::Connect => "Connecting",
+            Op::CheckUpdate => "Checking for updates",
         };
         format!("{op} failed: {error}")
     }
@@ -1520,5 +1530,169 @@ impl Messages for En {
     }
     fn add_a_rule(&self) -> &'static str {
         "Add at least one rule"
+    }
+
+    fn select_collection_first(&self) -> &'static str {
+        "Select a collection first!"
+    }
+    fn acl_needs_localhost(&self) -> &'static str {
+        "Editing the ACL needs a localhost connection"
+    }
+    fn refreshing(&self) -> &'static str {
+        "Refreshing..."
+    }
+    fn refreshed(&self) -> &'static str {
+        "Refreshed"
+    }
+    fn filter_cleared(&self) -> &'static str {
+        "Filter cleared"
+    }
+    fn acl_deleted(&self, collection: &str) -> String {
+        format!("ACL for \"{collection}\" deleted")
+    }
+    fn acl_not_found(&self) -> &'static str {
+        "ACL not found"
+    }
+    fn acl_saved(&self, collection: &str, rules: usize) -> String {
+        {
+            let rules = if rules == 1 {
+                "1 rule".to_string()
+            } else {
+                format!("{rules} rules")
+            };
+            format!("ACL for \"{collection}\" saved ({rules})")
+        }
+    }
+    fn key_copied(&self) -> &'static str {
+        "Key copied to the clipboard"
+    }
+    fn api_key_created(&self, name: &str, saved_to: Option<&str>) -> String {
+        match saved_to {
+            Some(path) => format!("API key \"{name}\" created, saved to {path}"),
+            None => format!("API key \"{name}\" created"),
+        }
+    }
+    fn api_key_revoked(&self, name: &str) -> String {
+        format!("Key \"{name}\" revoked")
+    }
+    fn api_key_deleted(&self, name: &str) -> String {
+        format!("Key \"{name}\" deleted")
+    }
+    fn key_not_found(&self) -> &'static str {
+        "Key not found"
+    }
+    fn path_required(&self) -> &'static str {
+        "The path cannot be empty"
+    }
+    fn database_opened(&self, path: &str) -> String {
+        format!("Database opened: {path}")
+    }
+    fn database_created(&self, path: &str) -> String {
+        format!("Database created: {path}")
+    }
+    fn opened_ok(&self) -> &'static str {
+        "Opened"
+    }
+    fn created_ok(&self) -> &'static str {
+        "Created"
+    }
+    fn file_missing_use_create(&self) -> &'static str {
+        "The file does not exist – use the \"Create\" mode."
+    }
+    fn file_exists_use_open(&self) -> &'static str {
+        "The file already exists – use the \"Open\" mode."
+    }
+    fn no_connection(&self) -> &'static str {
+        "No active connection"
+    }
+    fn value_required(&self) -> &'static str {
+        "A value is required"
+    }
+    fn id_required(&self) -> &'static str {
+        "The ID cannot be empty"
+    }
+    fn bind_required(&self) -> &'static str {
+        "The bind address cannot be empty"
+    }
+    fn listener_created(&self, id: &str, replaced: bool, note: &str) -> String {
+        {
+            let action = if replaced { "replaced" } else { "added" };
+            format!("Listener \"{id}\" {action}. {note}")
+        }
+    }
+    fn listener_not_found(&self) -> &'static str {
+        "Listener not found"
+    }
+    fn query_empty(&self) -> &'static str {
+        "The query is empty"
+    }
+    fn content_empty(&self) -> &'static str {
+        "The content is empty"
+    }
+    fn collection_name_required(&self) -> &'static str {
+        "A collection name is required"
+    }
+    fn stats_refreshed(&self) -> &'static str {
+        "Stats refreshed"
+    }
+    fn text_empty(&self) -> &'static str {
+        "The text is empty"
+    }
+    fn auto_embed_enabled(&self) -> &'static str {
+        "Auto-embed enabled"
+    }
+    fn job_suffix(&self, job_id: &str) -> String {
+        format!(" (job {job_id})")
+    }
+    fn warning_suffix(&self, warning: &str) -> String {
+        format!(" Warning: {warning}")
+    }
+    fn cache_stats_loaded(&self) -> &'static str {
+        "Cache stats loaded"
+    }
+    fn jobs_refreshed(&self) -> &'static str {
+        "Jobs refreshed"
+    }
+    fn rag_collection_ready(
+        &self,
+        collection: &str,
+        vector_created: bool,
+        fulltext_created: usize,
+        dimension: usize,
+        provider: &str,
+    ) -> String {
+        {
+            let vector = if vector_created {
+                "created"
+            } else {
+                "already existed"
+            };
+            let fulltext = if fulltext_created == 1 {
+                "1 fulltext index".to_string()
+            } else {
+                format!("{fulltext_created} fulltext indexes")
+            };
+            format!("RAG collection \"{collection}\" ready: vector index {vector}, {fulltext} created ({dimension} dims, {provider})")
+        }
+    }
+    fn dimension_positive(&self) -> &'static str {
+        "The dimension must be > 0"
+    }
+    fn version_loaded_readonly(&self, version: u32) -> String {
+        format!("Version v{version} loaded (read-only)")
+    }
+    fn unknown(&self) -> &'static str {
+        "unknown"
+    }
+    fn vector_index_created(&self, name: &str) -> String {
+        format!("Index \"{name}\" created")
+    }
+    fn rag_stats_line(
+        &self,
+        collection: &str,
+        chunks: &dyn Display,
+        documents: &dyn Display,
+    ) -> String {
+        format!("{collection}: {chunks} chunks, {documents} source docs")
     }
 }

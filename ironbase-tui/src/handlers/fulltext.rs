@@ -1,6 +1,7 @@
 //! Key handlers: fulltext
 
 use crate::app::{App, FulltextState, Modal};
+use crate::i18n::{t, Op};
 use crate::state::fulltext::FULLTEXT_LIMIT;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -11,13 +12,13 @@ use ironbase_mcp_types::tools::FulltextSearch;
 pub(crate) async fn handle_fulltext_open(app: &mut App) {
     // Need to have a selected collection
     if app.collections.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
     let collection = app.current_collection_name().unwrap_or_default();
     if collection.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
@@ -27,7 +28,7 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
             Ok(indexes) => indexes.into_iter().map(|idx| idx.field).collect(),
             // A failed listing is not "no index": show why it failed
             Err(e) => {
-                app.set_error(format!("Fulltext indexek lekerdezese sikertelen: {}", e));
+                app.set_error(t().failed(Op::LoadFulltextIndexes, &e));
                 return;
             }
         }
@@ -36,7 +37,7 @@ pub(crate) async fn handle_fulltext_open(app: &mut App) {
     };
 
     if indexed_fields.is_empty() {
-        app.set_error("Nincs fulltext index ezen a kollekcio! Hozz letre egyet elobb.");
+        app.set_error(t().no_fulltext_index());
         return;
     }
 

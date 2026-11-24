@@ -1,6 +1,7 @@
 //! Key handlers: vector
 
 use crate::app::{App, Modal, VectorSearchState};
+use crate::i18n::t;
 use crate::widgets::Input;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ironbase_mcp_types::params::{IndexCreateArgs, VectorIndexCreateParams, VectorSearchParams};
@@ -10,7 +11,7 @@ use ironbase_mcp_types::tools::{IndexCreate, VectorSearch};
 pub(crate) async fn handle_vector_open(app: &mut App) {
     // Need to have a selected collection
     if app.collections.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
@@ -19,7 +20,7 @@ pub(crate) async fn handle_vector_open(app: &mut App) {
         .unwrap_or_default()
         .to_string();
     if collection.is_empty() {
-        app.set_error("Valassz ki egy kollekciot elobb!");
+        app.set_error(t().select_collection_first());
         return;
     }
 
@@ -91,7 +92,7 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
             let k = app.vector_state.k;
 
             if field.is_empty() {
-                app.vector_state.error = Some("Field name is required".to_string());
+                app.vector_state.error = Some(t().field_name_required().to_string());
                 return;
             }
 
@@ -116,7 +117,7 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
                     Ok(results) => {
                         app.vector_state.update_results(results);
                         app.vector_state.message =
-                            Some(format!("Found {} results", app.vector_state.results.len()));
+                            Some(t().match_count(app.vector_state.results.len()));
                     }
                     Err(e) => {
                         app.vector_state.is_loading = false;
@@ -149,12 +150,12 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
             let metric = app.vector_state.metric.as_str().to_string();
 
             if field.is_empty() {
-                app.vector_state.error = Some("Field name is required".to_string());
+                app.vector_state.error = Some(t().field_name_required().to_string());
                 return;
             }
 
             if dimension == 0 {
-                app.vector_state.error = Some("Dimension must be > 0".to_string());
+                app.vector_state.error = Some(t().dimension_positive().to_string());
                 return;
             }
 
@@ -173,7 +174,7 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
                         // After clearing the form, which also clears the message
                         app.vector_state.clear_create_form();
                         app.vector_state.message =
-                            Some(format!("Index '{}' created!", created.index_name()));
+                            Some(t().vector_index_created(created.index_name()));
 
                         // Refresh index list
                         if let Ok(indexes) = db.vector_indexes(&collection).await {
