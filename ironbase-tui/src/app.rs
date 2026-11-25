@@ -541,7 +541,8 @@ impl App {
         };
 
         let doc_id = doc.get("_id").cloned().unwrap_or(Value::Null);
-        let preview = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string());
+        // One line (wrapped by the dialog): a multi-line preview did not fit
+        let preview = serde_json::to_string(&doc).unwrap_or_else(|_| "{}".to_string());
 
         self.open_confirm(ConfirmState::delete_document(coll_name, doc_id, &preview));
     }
