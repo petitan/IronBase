@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: filter values, literal "contains", script tags, narrow terminals (tuti-tui 0.3.509, mcp-server 1.0.697 — version only, for the release tag)
+
+- **Filter: `007` became 7, `nan` / `inf` became `null`.** A filter value was typed by Rust's number parsing, which
+  takes `007` and `+7` as 7 and `nan` / `inf` as floats JSON cannot hold (sent as `null`). A value is now typed only
+  when it is a JSON literal (number, `true`, `false`, `null`, or a quoted string: `"5"` filters for the text 5,
+  which had no way to be asked for); anything else is the text (`state/filter.rs`, `filter_value`).
+- **Filter "contains" / "starts with" took the text as a regex:** `a.b` matched `axb`, and `(` made the query fail.
+  The text is now escaped (`escape_regex`, the server's regex metacharacters). It stays a `$regex` — MongoDB's own
+  operator — rather than IronBase's `$contains` / `$startsWith`, which are case-insensitive by default and would
+  change what the filter finds (delegated decision: MongoDB compatibility, no new behavior).
+- **Script tags: deleting the last tag selected the `[+]` button** instead of the tag before it, so a second `x`
+  deleted nothing (`handlers/script.rs`).
+- **Narrow terminals:**
+  - The document table shows only the columns that fit at their narrowest. All six were drawn and squeezed: at
+    80×24 the year showed as `18…`.
+  - The delete confirmation is as high as its wrapped message needs, so the preview shows (a fixed 30% height showed
+    about 38 characters of it at 80×24). Uses `modals::render_modal_frame_rows`.
+- **Cutting text with emoji:** `widgets::truncate_width` measures grapheme clusters as ratatui draws them. A
+  per-character count made `❤️` sequences wider than the limit and could split a ZWJ family emoji. This adds
+  `unicode-segmentation` as a direct dependency; ratatui already uses it, so no new crate.
+- **Detail pane:** an escaped quote (`\"`) inside a string ended the string's color; it is now part of the string.
+- Tests:
+  - Filter value typing and regex escaping.
+  - Tag deletion.
+  - 80×24 screens: the table shows fewer columns, and the confirmation shows the preview.
+  - Grapheme cutting, and the escaped quote.
+  - The dialog's line estimate checked against ratatui's wrapping.
+  - Each fails without its fix (checked).
+
 ### Fixed — Tuti TUI: the detail pane's spacing, the document table's column widths, the delete confirmation (tuti-tui 0.3.508, mcp-server 1.0.696 — version only, for the release tag)
 
 - **Detail pane: `"elérhető":true ,`.** The JSON highlighter printed `true` / `false` / `null` (and numbers) at

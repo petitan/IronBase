@@ -1,6 +1,6 @@
 //! Confirm dialog modal
 
-use super::render_modal_frame;
+use super::render_modal_frame_rows;
 use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::{choice, truncate_width};
@@ -181,9 +181,44 @@ impl ConfirmState {
     }
 }
 
+/// Lines `text` takes wrapped at word boundaries into `width` columns (a
+/// word wider than a line is broken), as the dialog's paragraph wraps it
+fn wrapped_line_count(text: &str, width: u16) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let width = usize::from(width.max(1));
+    text.lines()
+        .map(|line| {
+            let mut lines = 1;
+            let mut used = 0;
+            for word in line.split(' ') {
+                let w = UnicodeWidthStr::width(word);
+                let gap = usize::from(used > 0);
+                if used + gap + w <= width {
+                    used += gap + w;
+                } else if w <= width {
+                    lines += 1;
+                    used = w;
+                } else {
+                    // Broken over lines: what is left of it starts the next
+                    lines += usize::from(used > 0) + (w - 1) / width;
+                    used = (w - 1) % width + 1;
+                }
+            }
+            lines
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
 /// Render the confirm dialog
 pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, &state.title, theme, 50, 30);
+    // As high as the message needs (wrapped), at least 30% of the screen:
+    // a fixed height cut a long message off
+    const WIDTH_PCT: u16 = 50;
+    let inner_width = (area.width * WIDTH_PCT / 100).saturating_sub(2);
+    let needed = wrapped_line_count(&state.message, inner_width) as u16 + 2 + 2;
+    let height = needed.max(area.height * 30 / 100);
+    let inner = render_modal_frame_rows(frame, area, &state.title, theme, WIDTH_PCT, height);
 
     // Split into message and buttons
     let chunks = Layout::vertical([
@@ -233,4 +268,37 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme
 
     let buttons_para = Paragraph::new(buttons).alignment(Alignment::Center);
     frame.render_widget(buttons_para, chunks[2]);
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrapped_line_count;
+    use ratatui::{backend::TestBackend, widgets::Paragraph, widgets::Wrap, Terminal};
+
+    /// The estimate matches the lines ratatui's wrapping draws
+    #[test]
+    fn test_wrapped_line_count_matches_the_paragraph() {
+        for (text, width) in [
+            (
+                "Biztosan törlöd a dokumentumot?\n\n{\"_id\":1,\"cím\":\"Az ember tragédiája\"}",
+                20,
+            ),
+            ("rövid", 20),
+            ("egy két három négy öt hat hét nyolc", 10),
+            ("aaaaaaaaaaaaaaaaaaaaaaaaa b", 10),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal
+                .draw(|f| {
+                    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), f.area())
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let last_drawn = (0..30)
+                .rev()
+                .find(|&y| (0..width).any(|x| buffer[(x, y)].symbol() != " "))
+                .map_or(0, |y| y as usize + 1);
+            assert_eq!(wrapped_line_count(text, width), last_drawn, "{text:?}");
+        }
+    }
 }

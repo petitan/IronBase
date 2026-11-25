@@ -8,27 +8,30 @@ pub use text_area::TextArea;
 pub use text_input::{Input, InputOutcome, TextInput};
 
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-/// `s` cut to at most `max` terminal columns, with `…` marking the cut
-/// (display width, not chars or bytes: wide characters take two columns)
+/// `s` cut to at most `max` terminal columns, with `…` marking the cut.
+/// Measured per grapheme cluster, as ratatui draws them: a wide character
+/// takes two columns, an emoji sequence (`❤️`, a ZWJ family) is one unit
+/// that is kept or cut whole
 pub fn truncate_width(s: &str, max: usize) -> String {
-    if unicode_width::UnicodeWidthStr::width(s) <= max {
+    let width = |g: &str| UnicodeWidthStr::width(g);
+    if s.graphemes(true).map(width).sum::<usize>() <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
     let mut out = String::new();
-    let mut width = 0;
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
+    let mut used = 0;
+    for g in s.graphemes(true) {
         // Room for the `…` (one column) after the kept part
-        if width + w > max - 1 {
+        if used + width(g) > max - 1 {
             break;
         }
-        out.push(c);
-        width += w;
+        out.push_str(g);
+        used += width(g);
     }
     out.push('…');
     out
@@ -77,7 +80,7 @@ pub fn push_digits(value: usize, text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{choice, marked, push_digits};
+    use super::{choice, marked, push_digits, truncate_width, Line};
 
     #[test]
     fn test_push_digits() {
@@ -101,5 +104,24 @@ mod tests {
             choice("x", true).chars().count(),
             choice("x", false).chars().count()
         );
+    }
+
+    /// The cut text (with its `…`) is never wider than `max` as ratatui
+    /// measures it, and an emoji sequence is not split
+    #[test]
+    fn test_truncate_width_by_grapheme() {
+        let drawn = |s: &str| Line::from(s.to_string()).width();
+        assert_eq!(truncate_width("abc", 3), "abc");
+        assert_eq!(truncate_width("abcd", 3), "ab…");
+        assert_eq!(truncate_width("abc", 1), "…");
+        assert_eq!(truncate_width("abc", 0), "");
+        assert_eq!(truncate_width("日本語", 4), "日…");
+        for (text, max) in [("❤️❤️❤️", 2), ("❤️❤️❤️", 4), ("👨‍👩‍👧x👨‍👩‍👧", 3)]
+        {
+            let cut = truncate_width(text, max);
+            assert!(drawn(&cut) <= max, "{text:?} {max}: {cut:?}");
+            assert!(!cut.contains("\u{200d}…"), "{cut:?}");
+        }
+        assert_eq!(truncate_width("👨‍👩‍👧x👨‍👩‍👧", 4), "👨‍👩‍👧x…");
     }
 }
