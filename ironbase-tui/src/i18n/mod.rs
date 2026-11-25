@@ -615,6 +615,12 @@ pub trait Messages: Sync + sealed::Sealed {
     fn tasks_cancelled(&self) -> &'static str;
     /// A background load runs (status bar)
     fn loading_in_background(&self) -> &'static str;
+    /// The open modal's request was stopped (Esc)
+    fn request_stopped(&self) -> &'static str;
+    /// An index is being built (index modal; Esc stops it)
+    fn creating_index(&self) -> &'static str;
+    /// An export runs: documents written so far of the expected count
+    fn exporting(&self, written: usize, total: usize) -> String;
     fn acl_deleted(&self, collection: &str) -> String;
     fn acl_not_found(&self) -> &'static str;
     fn acl_saved(&self, collection: &str, rules: usize) -> String;

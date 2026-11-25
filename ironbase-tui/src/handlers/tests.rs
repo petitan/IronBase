@@ -1582,6 +1582,79 @@ async fn test_index_create_reports_the_server_index_name() {
     );
 }
 
+/// Creating an index runs in the background (Enter again does not start a
+/// second one), and afterwards the modal's list and the collection's index
+/// count include the new index
+#[tokio::test]
+async fn test_index_create_runs_in_the_background_and_updates_the_list() {
+    let server = two_collections();
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
+    server.respond(
+        "index_create",
+        wire(r#"{"index_name":"users_n","field":"n","unique":false,"sparse":false}"#),
+    );
+    let mut app = app_with_server(&server).await;
+    open_index_create_form(&mut app, "n").await;
+    server.respond(
+        "index_list",
+        index_list(vec!["users_id", "users_n"], vec![], vec![], vec![]),
+    );
+
+    let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, enter).await;
+    assert!(app.tasks.is_busy());
+    assert_eq!(
+        app.index_state().unwrap().message.as_deref(),
+        Some(t().creating_index())
+    );
+    crate::handlers::handle_key(&mut app, enter).await;
+    app.settle().await;
+
+    assert_eq!(server.calls_to("index_create").len(), 1);
+    let state = app.index_state().unwrap();
+    assert_eq!(state.error, None);
+    assert_eq!(state.indexes, ["users_id", "users_n"]);
+    let names: Vec<&str> = state
+        .index_entries
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["users_id", "users_n"]);
+    assert_eq!(app.collections[0].index_count, Some(2));
+    assert_eq!(app.collection_indexes, ["users_id", "users_n"]);
+}
+
+/// Esc while an index is being created stops the request (its late answer
+/// changes nothing) and keeps the form
+#[tokio::test]
+async fn test_index_create_is_stopped_by_esc() {
+    let server = two_collections();
+    server.respond(
+        "index_stats",
+        to_value(IndexStatsResponse::BTree(TypedIndexList::new(vec![]))).unwrap(),
+    );
+    let mut app = app_with_server(&server).await;
+    open_index_create_form(&mut app, "n").await;
+
+    let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, enter).await;
+    let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, esc).await;
+    app.settle().await;
+    // Stopped: the form stays, with nothing created
+    assert!(!app.tasks.is_busy());
+    let state = app.index_state().unwrap();
+    assert!(state.is_creating);
+    assert_eq!(state.message.as_deref(), Some(t().request_stopped()));
+    assert!(state.indexes.is_empty());
+    // Without a request, Esc goes back as before
+    press(&mut app, KeyCode::Esc).await;
+    assert!(!app.index_state().unwrap().is_creating);
+}
+
 #[tokio::test]
 async fn test_index_create_rejects_a_response_of_another_tool() {
     let server = two_collections();
@@ -1779,8 +1852,7 @@ async fn test_a_search_of_a_closed_modal_is_dropped() {
     assert!(app.tasks.is_busy());
 
     // Closed and reopened before the answer: the new modal stays empty
-    let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    crate::handlers::handle_key(&mut app, esc).await;
+    app.close_modal();
     shift(&mut app, 'F').await;
     app.settle().await;
     assert!(app.fulltext_state().unwrap().results.is_empty());
@@ -2319,6 +2391,71 @@ async fn test_rag_import_reports_the_stored_chunks() {
         .error
         .as_deref()
         .is_some_and(|e| e.contains("Embedding failed")));
+}
+
+/// A RAG import runs in the background; Esc stops it and keeps the modal
+#[tokio::test]
+async fn test_rag_import_runs_in_the_background_and_esc_stops_it() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 4, RagTab::Import).await;
+    type_text(&mut app, "Hello").await;
+
+    let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, enter).await;
+    assert!(app.tasks.is_busy());
+    assert!(app.rag_state().unwrap().is_loading);
+
+    let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, esc).await;
+    app.settle().await;
+    assert_eq!(app.modal(), Some(Modal::Rag));
+    let state = app.rag_state().unwrap();
+    assert!(!state.is_loading);
+    assert!(state.import_result.is_none());
+    assert_eq!(state.message.as_deref(), Some(t().request_stopped()));
+}
+
+/// A search started while an import runs does not stop the import, and a
+/// write started while a search runs stops the search
+#[test]
+fn test_a_modal_write_is_not_replaced_by_a_read() {
+    use crate::runtime::{Slot, Tasks};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut tasks = Tasks::default();
+        tasks.spawn(Slot::Modal, std::future::pending());
+        tasks.spawn_write(std::future::pending());
+        assert!(!tasks.is_running(Slot::Modal));
+        assert!(tasks.writing());
+        assert!(tasks.modal_busy());
+        tasks.cancel_modal();
+        assert!(!tasks.modal_busy());
+    });
+}
+
+/// In the RAG modal, a search while an import runs is not started
+#[tokio::test]
+async fn test_rag_search_does_not_stop_a_running_import() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    open_rag_tab(&mut app, 4, RagTab::Import).await;
+    type_text(&mut app, "Hello").await;
+    let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, enter).await;
+    assert!(app.tasks.writing());
+
+    app.rag_state_mut().unwrap().active_tab = RagTab::Search;
+    app.rag_state_mut()
+        .unwrap()
+        .search_query
+        .set_value("q".to_string());
+    crate::handlers::handle_key(&mut app, enter).await;
+    app.settle().await;
+    assert_eq!(server.calls_to("rag_document_import").len(), 1);
+    assert!(server.calls_to("search").is_empty());
 }
 
 /// Creating a RAG collection says what already existed

@@ -1,7 +1,7 @@
 //! Key handlers: vector
 
 use crate::app::{App, OpenModal, VectorSearchState};
-use crate::i18n::t;
+use crate::i18n::{t, Op};
 use crate::runtime::{Slot, Update};
 use crate::state::open_state;
 use crate::widgets::Input;
@@ -102,6 +102,10 @@ pub(crate) async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifi
             let Some(db) = app.db.clone() else {
                 return;
             };
+            // A running index creation is not replaced by a search
+            if app.tasks.writing() {
+                return;
+            }
             open_state!(app, Vector).is_loading = true;
             open_state!(app, Vector).error = None;
 
@@ -172,34 +176,54 @@ pub(crate) async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifi
                 return;
             }
 
+            // One creation at a time: a second Enter would cancel the first
+            if app.tasks.writing() {
+                return;
+            }
+            let Some(db) = app.db.clone() else {
+                return;
+            };
             open_state!(app, Vector).is_loading = true;
             open_state!(app, Vector).error = None;
 
-            if let Some(ref db) = app.db {
-                let args = IndexCreateArgs::Vector(VectorIndexCreateParams::new(
-                    collection.clone(),
-                    field,
-                    dimension,
-                    metric,
-                ));
-                match db.call::<IndexCreate>(&args).await {
-                    Ok(created) => {
-                        // After clearing the form, which also clears the message
-                        open_state!(app, Vector).clear_create_form();
-                        open_state!(app, Vector).message =
-                            Some(t().vector_index_created(created.index_name()));
-
-                        // Refresh index list
-                        if let Ok(indexes) = db.vector_indexes(&collection).await {
-                            open_state!(app, Vector).update_indexes(indexes);
+            let args = IndexCreateArgs::Vector(VectorIndexCreateParams::new(
+                collection.clone(),
+                field,
+                dimension,
+                metric,
+            ));
+            // In the background: the screen keeps drawing, Esc stops it
+            app.tasks.spawn_write(async move {
+                let created = db.call::<IndexCreate>(&args).await;
+                let indexes = match created {
+                    Ok(_) => Some(db.vector_indexes(&collection).await),
+                    Err(_) => None,
+                };
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.vector_state_mut() else {
+                        return;
+                    };
+                    match created {
+                        Ok(created) => {
+                            // After clearing the form, which also clears the message
+                            state.clear_create_form();
+                            state.message = Some(t().vector_index_created(created.index_name()));
+                            match indexes {
+                                Some(Ok(indexes)) => state.update_indexes(indexes),
+                                Some(Err(e)) => {
+                                    state.is_loading = false;
+                                    state.error = Some(t().failed(Op::LoadIndexes, &e));
+                                }
+                                None => {}
+                            }
+                        }
+                        Err(e) => {
+                            state.is_loading = false;
+                            state.error = Some(format!("{}", e));
                         }
                     }
-                    Err(e) => {
-                        open_state!(app, Vector).is_loading = false;
-                        open_state!(app, Vector).error = Some(format!("{}", e));
-                    }
-                }
-            }
+                }) as Update
+            });
         }
 
         // Next form field

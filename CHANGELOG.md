@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Tuti TUI: index creation, RAG import and export run in the background; Esc stops a modal's request (tuti-tui 0.3.507, mcp-server 1.0.695 — version only, for the release tag)
+
+The slow requests of the modals blocked the screen until the server answered: creating a B+ tree or vector index
+over a large collection, a RAG import (chunking + embedding), creating a RAG collection, the embedding test,
+enabling auto-embed (the server probes the provider) and the export (many pages). They now run as background
+tasks (`runtime::Slot::Modal`), like the searches (0.3.506):
+
+- **Esc stops the open modal's request** and keeps the modal, which says "Megszakítva" / "Stopped"; the next Esc
+  goes back or closes it as before (`App::stop_modal_task`). Before, Esc in the index or RAG creation form only
+  left the form while the request kept running. The server is told (`notifications/cancelled`).
+- **A write is never replaced:** writes run in their own slot (`Slot::ModalWrite`, `Tasks::spawn_write`). A second
+  Enter while an index creation, import or export runs does not start another, and a search started meanwhile (RAG,
+  vector) does not start, so it cannot stop the write; a write stops a running search of its modal.
+- **Export progress:** the export modal shows the documents written so far ("Exportálás: N / M dokumentum…"). A
+  stopped or failed export removes its temp file (`TempFile` guard), and the target is replaced only by a complete
+  export.
+- **Fixed:** after creating a B+ tree index the modal's typed list (`index_entries`) was not refreshed, and the
+  whole collection list and document page were reloaded for the index count; now the collection's index list is
+  fetched once and both the modal and the collection's count show it. A failed vector-index list reload after a
+  creation no longer leaves the modal loading forever.
+- Tests: index creation is in the background and updates the list, its Esc stops it and keeps the form; RAG import
+  in the background, Esc stops it, a search meanwhile does not stop it (fails without the guard); export shows its progress, a stopped export keeps the existing file, the temp
+  file guard removes an unfinished file.
+
 ### Changed — Tuti TUI: the full-text, vector and RAG searches run in the background (tuti-tui 0.3.506, mcp-server 1.0.694 — version only, for the release tag)
 
 The three searches blocked the screen until the server answered (a RAG search embeds the query first, which can

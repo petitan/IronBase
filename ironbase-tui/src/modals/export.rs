@@ -81,6 +81,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
             ),
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
+    } else if let Some(ref written) = state.written {
+        let written = written.load(std::sync::atomic::Ordering::Relaxed);
+        Line::from(vec![Span::styled(
+            format!(" {}", t().exporting(written, state.doc_count)),
+            Style::default().fg(theme.warning),
+        )])
     } else if let Some(ref msg) = state.message {
         Line::from(vec![Span::styled(
             format!(" {}", msg),

@@ -1507,6 +1507,15 @@ impl Messages for Hu {
     fn loading_in_background(&self) -> &'static str {
         "Betöltés… (Esc: megszakítás)"
     }
+    fn request_stopped(&self) -> &'static str {
+        "Megszakítva"
+    }
+    fn creating_index(&self) -> &'static str {
+        "Index létrehozása… (Esc: megszakítás)"
+    }
+    fn exporting(&self, written: usize, total: usize) -> String {
+        format!("Exportálás: {written} / {total} dokumentum… (Esc: megszakítás)")
+    }
     fn acl_deleted(&self, collection: &str) -> String {
         format!("A(z) „{collection}” kollekció ACL-je törölve")
     }

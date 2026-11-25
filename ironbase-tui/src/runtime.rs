@@ -24,8 +24,12 @@ pub type Update = Box<dyn FnOnce(&mut App) + Send>;
 pub enum Slot {
     /// The document list's page and counts
     Documents,
-    /// A request of the open modal (a search); closing the modal stops it
+    /// A read of the open modal (a search); closing the modal stops it, a
+    /// newer read replaces it
     Modal,
+    /// A write of the open modal (index creation, import, export); closing
+    /// the modal stops it, nothing replaces it (see [`Tasks::spawn_write`])
+    ModalWrite,
 }
 
 /// A finished task's update, tagged with its task
@@ -71,6 +75,33 @@ impl Tasks {
             let _ = tx.send(Finished { slot, id, update });
         });
         self.running.insert(slot, (id, handle));
+    }
+
+    /// Run a modal's write: it stops the modal's running read. The caller
+    /// checks [`Tasks::writing`] first: a write is never replaced
+    pub fn spawn_write<F>(&mut self, task: F)
+    where
+        F: Future<Output = Update> + Send + 'static,
+    {
+        debug_assert!(!self.writing(), "a running write is never replaced");
+        self.cancel(Slot::Modal);
+        self.spawn(Slot::ModalWrite, task);
+    }
+
+    /// Whether a modal's write runs (a new read or write does not start)
+    pub fn writing(&self) -> bool {
+        self.is_running(Slot::ModalWrite)
+    }
+
+    /// Whether the open modal has a running request
+    pub fn modal_busy(&self) -> bool {
+        self.is_running(Slot::Modal) || self.writing()
+    }
+
+    /// Stop the open modal's requests
+    pub fn cancel_modal(&mut self) {
+        self.cancel(Slot::Modal);
+        self.cancel(Slot::ModalWrite);
     }
 
     /// Stop the task in `slot` (its update, if already sent, is dropped)
