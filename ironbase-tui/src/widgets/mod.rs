@@ -8,6 +8,31 @@ pub use text_area::TextArea;
 pub use text_input::{Input, InputOutcome, TextInput};
 
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
+
+/// `s` cut to at most `max` terminal columns, with `…` marking the cut
+/// (display width, not chars or bytes: wide characters take two columns)
+pub fn truncate_width(s: &str, max: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        // Room for the `…` (one column) after the kept part
+        if width + w > max - 1 {
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    out.push('…');
+    out
+}
 
 /// The mark in front of a list's selected row, and the same width of space
 /// in front of the others: the selection shows without color too (`NO_COLOR`,

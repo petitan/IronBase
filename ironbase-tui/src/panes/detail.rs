@@ -180,7 +180,6 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
     let mut chars = line.chars().peekable();
     let mut current = String::new();
     let mut in_string = false;
-    let mut is_key = false;
 
     // Simple state machine for JSON syntax highlighting
     while let Some(c) = chars.next() {
@@ -188,11 +187,12 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
             '"' => {
                 if in_string {
                     current.push(c);
+                    // A key is a string followed by `:` (whitespace aside)
+                    let is_key = chars.clone().find(|c| !c.is_whitespace()) == Some(':');
                     let color = if is_key { theme.accent } else { theme.success };
                     spans.push(Span::styled(current.clone(), Style::default().fg(color)));
                     current.clear();
                     in_string = false;
-                    is_key = false;
                 } else {
                     if !current.is_empty() {
                         spans.push(Span::styled(current.clone(), Style::default().fg(theme.fg)));
@@ -200,9 +200,6 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
                     }
                     current.push(c);
                     in_string = true;
-                    // Check if this is a key (followed by : somewhere after)
-                    let rest: String = chars.clone().collect();
-                    is_key = rest.contains(':');
                 }
             }
             ':' | ',' | '{' | '}' | '[' | ']' => {
@@ -226,6 +223,7 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
                     for _ in 0..3 {
                         chars.next();
                     }
+                    flush_plain(&mut spans, &mut current, theme);
                     spans.push(Span::styled("true", Style::default().fg(theme.success)));
                 } else {
                     current.push(c);
@@ -238,6 +236,7 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
                     for _ in 0..4 {
                         chars.next();
                     }
+                    flush_plain(&mut spans, &mut current, theme);
                     spans.push(Span::styled("false", Style::default().fg(theme.error)));
                 } else {
                     current.push(c);
@@ -250,12 +249,14 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
                     for _ in 0..3 {
                         chars.next();
                     }
+                    flush_plain(&mut spans, &mut current, theme);
                     spans.push(Span::styled("null", Style::default().fg(theme.muted)));
                 } else {
                     current.push(c);
                 }
             }
             _ if !in_string && (c.is_ascii_digit() || c == '-') => {
+                flush_plain(&mut spans, &mut current, theme);
                 current.push(c);
                 // Consume full number - BUG FIX: Use while-let instead of peek + unwrap
                 while let Some(&nc) = chars.peek() {
@@ -289,4 +290,54 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
     }
 
     Line::from(spans)
+}
+
+/// Push the plain text gathered so far (whitespace between tokens) before a
+/// token, so the spans keep the line's order
+fn flush_plain(spans: &mut Vec<Span<'static>>, current: &mut String, theme: &Theme) {
+    if !current.is_empty() {
+        spans.push(Span::styled(
+            std::mem::take(current),
+            Style::default().fg(theme.fg),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The highlighted line has the same text as the plain line
+    #[test]
+    fn test_highlight_keeps_the_text() {
+        let theme = Theme::dark();
+        for line in [
+            r#"  "elérhető": true,"#,
+            r#"  "a": false,"#,
+            r#"  "b": null"#,
+            r#"  "év": 1906,"#,
+            r#"  "url": "http://x:1","#,
+        ] {
+            assert_eq!(text(&syntax_highlight_line(line, &theme)), line);
+        }
+    }
+
+    /// Only a string followed by `:` is a key (a value with a colon is not)
+    #[test]
+    fn test_a_value_with_a_colon_is_not_a_key() {
+        let theme = Theme::dark();
+        let line = syntax_highlight_line(r#"  "url": "http://x","#, &theme);
+        let color = |s: &str| {
+            line.spans
+                .iter()
+                .find(|span| span.content == s)
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(color(r#""url""#), Some(theme.accent));
+        assert_eq!(color(r#""http://x""#), Some(theme.success));
+    }
 }

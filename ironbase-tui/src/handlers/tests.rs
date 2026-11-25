@@ -3306,3 +3306,62 @@ async fn test_admin_modals_state_lives_with_the_open_modal() {
     app.close_modal();
     assert!(app.api_key_state().is_none());
 }
+
+/// Books like on the screenshots: an accented key, a long title, short
+/// columns beside it
+fn books() -> Arc<FakeServer> {
+    let book = |id: i64, cim: &str, ev: i64| {
+        json!({"_id": id, "elérhető": true, "címkék": ["a", "b"],
+               "szerző": {"név": "X", "ország": "Y"}, "év": ev, "cím": cim})
+    };
+    FakeServer::new(vec![(
+        "könyvek",
+        vec![
+            book(1, "Az ember tragédiája", 1861),
+            book(2, "Egri csillagok", 1899),
+            book(3, "A Pál utcai fiúk", 1906),
+        ],
+    )])
+}
+
+/// The title column is not cut while the short columns leave room for it
+/// (all columns had one width, and the spaces between them were not
+/// counted, so the table squeezed every column further)
+#[tokio::test]
+async fn test_a_long_column_gets_the_room_the_short_ones_leave() {
+    let server = books();
+    let app = app_with_server(&server).await;
+    // Narrow: the title takes what the short values leave (it got 5)
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("Egri csillag…"), "{screen}");
+    assert!(screen.contains("1899"), "{screen}");
+    // Wide enough: whole titles, and the headers widened with the room left
+    let screen = render_to_string(&app, 160, 36);
+    assert!(screen.contains("Egri csillagok"), "{screen}");
+    assert!(screen.contains("Az ember tragédiája"), "{screen}");
+    assert!(screen.contains("címkék"), "{screen}");
+}
+
+/// The detail pane keeps `: true,` as it is (it printed `:true ,`)
+#[tokio::test]
+async fn test_detail_pane_keeps_the_spacing_of_literals() {
+    let server = books();
+    let app = app_with_server(&server).await;
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains(r#""elérhető": true,"#), "{screen}");
+}
+
+/// The delete confirmation shows the whole question and the document in
+/// one wrapped line (the pretty preview was cut after a few lines, and the
+/// question's end with it)
+#[tokio::test]
+async fn test_delete_confirm_shows_the_question_and_the_document() {
+    let server = books();
+    let mut app = app_with_server(&server).await;
+    app.active_pane = Pane::Documents;
+    app.open_delete_confirm();
+    assert_eq!(app.modal(), Some(Modal::Confirm));
+    let screen = render_to_string(&app, 120, 36);
+    assert!(screen.contains("kollekcióból?"), "{screen}");
+    assert!(screen.contains("tragédiája"), "{screen}");
+}

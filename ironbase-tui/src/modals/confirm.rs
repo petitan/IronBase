@@ -3,9 +3,9 @@
 use super::render_modal_frame;
 use crate::i18n::t;
 use crate::theme::Theme;
-use crate::widgets::choice;
+use crate::widgets::{choice, truncate_width};
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 /// Confirm dialog state
 #[derive(Debug, Clone)]
@@ -85,7 +85,7 @@ impl ConfirmState {
     pub fn delete_document(collection: String, doc_id: serde_json::Value, preview: &str) -> Self {
         Self {
             title: t().confirm_delete_document_title().to_string(),
-            message: t().confirm_delete_document(&collection, &truncate(preview, 100)),
+            message: t().confirm_delete_document(&collection, &truncate_width(preview, 200)),
             confirm_text: t().cmd_delete().to_string(),
             cancel_text: t().key_cancel().to_string(),
             selected: ConfirmOption::Cancel,
@@ -181,16 +181,6 @@ impl ConfirmState {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        // Safe UTF-8 truncation at character boundary
-        let truncated: String = s.chars().take(max).collect();
-        format!("{}...", truncated)
-    }
-}
-
 /// Render the confirm dialog
 pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme) {
     let inner = render_modal_frame(frame, area, &state.title, theme, 50, 30);
@@ -204,9 +194,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme
     .split(inner);
 
     // Message
+    // Wrapped: a line wider than the dialog (a long collection name, the
+    // document preview) is not cut off
     let msg = Paragraph::new(state.message.clone())
         .style(Style::default().fg(theme.fg))
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
     frame.render_widget(msg, chunks[0]);
 
     // Buttons

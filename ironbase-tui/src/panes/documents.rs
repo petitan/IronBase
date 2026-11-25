@@ -4,10 +4,11 @@ use crate::app::App;
 use crate::base64_detect::sanitize_base64_values;
 use crate::i18n::t;
 use crate::theme::Theme;
-use crate::widgets::selection_mark;
+use crate::widgets::{selection_mark, truncate_width};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::collections::HashSet;
+use unicode_width::UnicodeWidthStr;
 
 /// Number of document rows the pane draws for a given pane height
 /// (borders: 2, table header: 1). Single source of truth for the page size.
@@ -65,18 +66,39 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
         return;
     }
 
-    // Calculate column widths
-    let available_width = inner.width as usize;
+    // Column widths: the values first (each column as wide as its widest
+    // value on the page, the width left shared among the wide ones), then
+    // what is still left widens the headers that are cut. The table puts
+    // one column of space between columns: that is not the cells' width
     let id_width = 8; // Fixed width for _id
-    let remaining = available_width.saturating_sub(id_width + 1);
-    let col_width = remaining.checked_div(col_count).unwrap_or(10).clamp(6, 20);
+    let sanitized: Vec<serde_json::Value> = documents
+        .iter()
+        .take(visible_rows(area.height))
+        .map(sanitize_base64_values)
+        .collect();
+    let values: Vec<usize> = columns
+        .iter()
+        .map(|col| {
+            sanitized
+                .iter()
+                .map(|doc| doc.get(col).map(format_value).unwrap_or_else(|| "-".into()))
+                .map(|v| UnicodeWidthStr::width(v.as_str()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let headers: Vec<usize> = columns
+        .iter()
+        .map(|col| UnicodeWidthStr::width(col.as_str()))
+        .collect();
+    let available = (inner.width as usize).saturating_sub(id_width + COLUMN_SPACING * col_count);
+    let col_widths = widen_headers(fit_widths(&values, available), &headers, available);
 
     // Build header row
     let mut header_cells = vec![Cell::from("_id").style(Style::default().fg(theme.accent).bold())];
-    for col in &columns {
+    for (col, &width) in columns.iter().zip(&col_widths) {
         header_cells.push(
-            Cell::from(truncate_str(col, col_width))
-                .style(Style::default().fg(theme.accent).bold()),
+            Cell::from(truncate_width(col, width)).style(Style::default().fg(theme.accent).bold()),
         );
     }
     let header = Row::new(header_cells).height(1);
@@ -90,11 +112,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     };
     let visible_height = visible_rows(area.height);
 
-    let rows: Vec<Row> = documents
+    let rows: Vec<Row> = sanitized
         .iter()
         .enumerate()
         .take(visible_height)
-        .map(|(idx, doc)| {
+        .map(|(idx, sanitized)| {
             let is_selected = idx == local_selected && focused;
             let row_style = if is_selected {
                 Style::default().fg(theme.bg).bg(theme.accent)
@@ -103,8 +125,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
             } else {
                 Style::default().fg(theme.fg)
             };
-
-            let sanitized = sanitize_base64_values(doc);
 
             // _id column
             let id_val = sanitized
@@ -117,16 +137,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
             let mut cells = vec![Cell::from(format!(
                 "{}{}",
                 selection_mark(idx == local_selected),
-                truncate_str(&id_val, id_width.saturating_sub(2))
+                truncate_width(&id_val, id_width.saturating_sub(2))
             ))];
 
             // Data columns
-            for col in &columns {
+            for (col, &width) in columns.iter().zip(&col_widths) {
                 let val = sanitized
                     .get(col)
                     .map(format_value)
                     .unwrap_or_else(|| "-".to_string());
-                cells.push(Cell::from(truncate_str(&val, col_width)));
+                cells.push(Cell::from(truncate_width(&val, width)));
             }
 
             Row::new(cells).style(row_style)
@@ -135,11 +155,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
     // Build constraints
     let mut widths = vec![Constraint::Length(id_width as u16)];
-    for _ in &columns {
-        widths.push(Constraint::Length(col_width as u16));
+    for &width in &col_widths {
+        widths.push(Constraint::Length(width as u16));
     }
 
     let table = Table::new(rows, widths)
+        .column_spacing(COLUMN_SPACING as u16)
         .header(header)
         .row_highlight_style(Style::default().fg(theme.bg).bg(theme.accent));
 
@@ -201,12 +222,72 @@ fn format_value(v: &serde_json::Value) -> String {
     }
 }
 
-/// Truncate string to max length with ellipsis
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{}…", truncated)
+/// Space between two table columns
+const COLUMN_SPACING: usize = 1;
+
+/// Narrowest a column gets (a cut value still shows a character and `…`)
+const MIN_COLUMN_WIDTH: usize = 3;
+
+/// Widest a column gets even with room to spare (a long text does not
+/// push the other columns out)
+const MAX_COLUMN_WIDTH: usize = 40;
+
+/// Share `available` columns among columns that would need `natural` each:
+/// a column narrower than its share gets what it needs, the share it leaves
+/// goes to the wider ones (which are cut to an equal width)
+fn fit_widths(natural: &[usize], available: usize) -> Vec<usize> {
+    let mut widths = vec![0; natural.len()];
+    let mut order: Vec<usize> = (0..natural.len()).collect();
+    order.sort_by_key(|&i| natural[i]);
+    let mut left = available;
+    for (n, &i) in order.iter().enumerate() {
+        let share = left / (natural.len() - n);
+        let want = natural[i].clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        widths[i] = want.min(share).max(MIN_COLUMN_WIDTH);
+        left = left.saturating_sub(widths[i]);
+    }
+    widths
+}
+
+/// Give the columns' `widths` the room left of `available`, as far as their
+/// headers need it (in column order)
+fn widen_headers(mut widths: Vec<usize>, headers: &[usize], available: usize) -> Vec<usize> {
+    let mut left = available.saturating_sub(widths.iter().sum());
+    for (width, &header) in widths.iter_mut().zip(headers) {
+        let extra = header
+            .min(MAX_COLUMN_WIDTH)
+            .saturating_sub(*width)
+            .min(left);
+        *width += extra;
+        left -= extra;
+    }
+    widths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Narrow columns keep their width, the wide one gets the rest
+    #[test]
+    fn test_fit_widths_gives_the_rest_to_the_wide_column() {
+        // cím (long), címkék [2], elérh(ető), szerző {2}, év
+        assert_eq!(
+            fit_widths(&[30, 6, 8, 6, 4], 50),
+            [50 - 6 - 8 - 6 - 4, 6, 8, 6, 4]
+        );
+        // All fit: each its own width
+        assert_eq!(fit_widths(&[10, 4], 50), [10, 4]);
+        // Two wide columns share equally
+        assert_eq!(fit_widths(&[30, 30, 4], 30), [13, 13, 4]);
+        // Too narrow for anything: the minimum
+        assert_eq!(fit_widths(&[30, 30], 2), [3, 3]);
+    }
+
+    /// Room left after the values widens the cut headers
+    #[test]
+    fn test_widen_headers_uses_only_the_room_left() {
+        assert_eq!(widen_headers(vec![10, 3, 4], &[3, 6, 8], 20), [10, 6, 4]);
+        assert_eq!(widen_headers(vec![10, 3, 4], &[3, 6, 8], 30), [10, 6, 8]);
     }
 }

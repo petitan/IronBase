@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Tuti TUI: the detail pane's spacing, the document table's column widths, the delete confirmation (tuti-tui 0.3.508, mcp-server 1.0.696 — version only, for the release tag)
+
+- **Detail pane: `"elérhető":true ,`.** The JSON highlighter printed `true` / `false` / `null` (and numbers) at
+  once but the space before them only at the next punctuation, so `: true,` showed as `:true ,`. The gathered
+  whitespace is now written before the token (`panes/detail.rs`, `flush_plain`). Also, a string counted as a key
+  when a `:` came anywhere later on the line, so a value such as `"http://x"` got the key color; a key is now a
+  string followed by `:`.
+- **Document table: the title column was cut far too early.** Every column got the same width, and the width did
+  not count the one-column space the table puts between columns, so the table squeezed all columns further (a title
+  showed 5 characters while a year column had room to spare). Columns are now as wide as their widest value on the
+  page; the room the short ones leave goes to the wide ones (`fit_widths`), and what is still left widens cut
+  headers (`widen_headers`). Cutting counts terminal columns, not characters (`widgets::truncate_width`, shared by
+  the table and the confirmation dialog).
+- **Delete confirmation: the preview was cut off.** The document was shown as pretty-printed JSON, centered and
+  unwrapped, in a dialog a few lines high: it ended after three or four fields without a sign of the cut, and a
+  question wider than the dialog lost its end ("…kollekcióból?"). The preview is now one line (at most 200 columns)
+  and the message wraps.
+- Tests: a rendered screen (120 and 160 columns) shows the long title and the widened headers, the detail pane keeps
+  `: true,`, the delete confirmation shows the whole question and the document (all three fail without the fix);
+  unit tests for the highlighter, `fit_widths` and `widen_headers`.
+
 ### Changed — Tuti TUI: index creation, RAG import and export run in the background; Esc stops a modal's request (tuti-tui 0.3.507, mcp-server 1.0.695 — version only, for the release tag)
 
 The slow requests of the modals blocked the screen until the server answered: creating a B+ tree or vector index
