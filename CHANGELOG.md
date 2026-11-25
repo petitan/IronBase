@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when it is a JSON literal (number, `true`, `false`, `null`, or a quoted string: `"5"` filters for the text 5,
   which had no way to be asked for); anything else is the text (`state/filter.rs`, `filter_value`).
 - **Filter "contains" / "starts with" took the text as a regex:** `a.b` matched `axb`, and `(` made the query fail.
-  The text is now escaped (`escape_regex`, the server's regex metacharacters). It stays a `$regex` — MongoDB's own
+  The text is now escaped (`escape_regex`): only the characters special outside a class (`\\.+*?()|[]{}^$`), which
+  are also the escapes the server's query planner reads as a literal prefix — escaping `-` too would have lost the
+  index for a "starts with" such as `2024-01`. It stays a `$regex` — MongoDB's own
   operator — rather than IronBase's `$contains` / `$startsWith`, which are case-insensitive by default and would
   change what the filter finds (delegated decision: MongoDB compatibility, no new behavior).
 - **Script tags: deleting the last tag selected the `[+]` button** instead of the tag before it, so a second `x`
@@ -23,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The document table shows only the columns that fit at their narrowest. All six were drawn and squeezed: at
     80×24 the year showed as `18…`.
   - The delete confirmation is as high as its wrapped message needs, so the preview shows (a fixed 30% height showed
-    about 38 characters of it at 80×24). Uses `modals::render_modal_frame_rows`.
+    about 38 characters of it at 80×24). The rows are counted by drawing the message off screen with ratatui's own
+    wrapping (`drawn_rows`), not estimated. The dialog keeps its message's minimum of 3 rows: on a 20-row terminal
+    the 30% dialog had left the buttons out. Uses `modals::render_modal_frame_rows`; the arithmetic saturates.
 - **Cutting text with emoji:** `widgets::truncate_width` measures grapheme clusters as ratatui draws them. A
   per-character count made `❤️` sequences wider than the limit and could split a ZWJ family emoji. This adds
   `unicode-segmentation` as a direct dependency; ratatui already uses it, so no new crate.
@@ -33,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tag deletion.
   - 80×24 screens: the table shows fewer columns, and the confirmation shows the preview.
   - Grapheme cutting, and the escaped quote.
-  - The dialog's line estimate checked against ratatui's wrapping.
+  - The dialog shows a message's end and its buttons (runs of spaces, a leading space, wide characters, a short and a
+    huge screen).
   - Each fails without its fix (checked).
 
 ### Fixed — Tuti TUI: the detail pane's spacing, the document table's column widths, the delete confirmation (tuti-tui 0.3.508, mcp-server 1.0.696 — version only, for the release tag)

@@ -111,12 +111,14 @@ fn filter_value(text: &str) -> Value {
     Value::String(text.to_string())
 }
 
-/// `text` as a regex that matches it literally (the server's regex syntax:
-/// these characters are special)
+/// `text` as a regex that matches it literally: the characters special in
+/// the server's regex syntax outside a class are escaped, and only those
+/// (`-`, `#`, `&`, `~` are literal there; escaped, the server's query planner
+/// would not use an index for a "starts with" prefix such as `2024-01`)
 fn escape_regex(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
-        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+        if "\\.+*?()|[]{}^$".contains(c) {
             escaped.push('\\');
         }
         escaped.push(c);
@@ -538,6 +540,11 @@ mod tests {
         // Contains / starts with: the text literally (regex characters escaped)
         assert_eq!(q(Contains, "a.b"), json!({"f": {"$regex": "a\\.b"}}));
         assert_eq!(q(StartsWith, "12"), json!({"f": {"$regex": "^12"}}));
+        // `-` is literal outside a class: kept as is (the planner's prefix)
+        assert_eq!(
+            q(StartsWith, "2024-01"),
+            json!({"f": {"$regex": "^2024-01"}})
+        );
         assert_eq!(
             q(StartsWith, "(1+1)*"),
             json!({"f": {"$regex": "^\\(1\\+1\\)\\*"}})

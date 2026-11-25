@@ -1,9 +1,10 @@
 //! Confirm dialog modal
 
-use super::render_modal_frame_rows;
+use super::{centered_rect, render_modal_frame_rows};
 use crate::i18n::t;
 use crate::theme::Theme;
 use crate::widgets::{choice, truncate_width};
+use ratatui::buffer::Buffer;
 use ratatui::prelude::*;
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -181,60 +182,53 @@ impl ConfirmState {
     }
 }
 
-/// Lines `text` takes wrapped at word boundaries into `width` columns (a
-/// word wider than a line is broken), as the dialog's paragraph wraps it
-fn wrapped_line_count(text: &str, width: u16) -> usize {
-    use unicode_width::UnicodeWidthStr;
-    let width = usize::from(width.max(1));
-    text.lines()
-        .map(|line| {
-            let mut lines = 1;
-            let mut used = 0;
-            for word in line.split(' ') {
-                let w = UnicodeWidthStr::width(word);
-                let gap = usize::from(used > 0);
-                if used + gap + w <= width {
-                    used += gap + w;
-                } else if w <= width {
-                    lines += 1;
-                    used = w;
-                } else {
-                    // Broken over lines: what is left of it starts the next
-                    lines += usize::from(used > 0) + (w - 1) / width;
-                    used = (w - 1) % width + 1;
-                }
-            }
-            lines
-        })
-        .sum::<usize>()
-        .max(1)
+/// Rows `paragraph` fills when drawn `width` columns wide, counted up to
+/// `max_rows` (blank rows at the end do not count: nothing is lost there).
+/// Drawn off screen with ratatui's own wrapping, so the dialog's height is
+/// what the message really takes (an estimate of the word wrap fell short
+/// with runs of spaces)
+fn drawn_rows(paragraph: &Paragraph, width: u16, max_rows: u16) -> u16 {
+    let area = Rect::new(0, 0, width, max_rows);
+    let mut buffer = Buffer::empty(area);
+    Widget::render(paragraph, area, &mut buffer);
+    (0..max_rows)
+        .rev()
+        .find(|&y| (0..width).any(|x| buffer[(x, y)].symbol() != " "))
+        .map_or(0, |y| y + 1)
 }
 
 /// Render the confirm dialog
 pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme) {
-    // As high as the message needs (wrapped), at least 30% of the screen:
-    // a fixed height cut a long message off
-    const WIDTH_PCT: u16 = 50;
-    let inner_width = (area.width * WIDTH_PCT / 100).saturating_sub(2);
-    let needed = wrapped_line_count(&state.message, inner_width) as u16 + 2 + 2;
-    let height = needed.max(area.height * 30 / 100);
-    let inner = render_modal_frame_rows(frame, area, &state.title, theme, WIDTH_PCT, height);
-
-    // Split into message and buttons
-    let chunks = Layout::vertical([
-        Constraint::Min(3),    // Message
-        Constraint::Length(1), // Spacer
-        Constraint::Length(1), // Buttons
-    ])
-    .split(inner);
-
-    // Message
     // Wrapped: a line wider than the dialog (a long collection name, the
     // document preview) is not cut off
     let msg = Paragraph::new(state.message.clone())
         .style(Style::default().fg(theme.fg))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: false });
+
+    // As high as the message needs, at least 30% of the screen (a fixed
+    // height cut a long message off): borders 2, spacer 1, buttons 1
+    const WIDTH_PCT: u16 = 50;
+    const CHROME: u16 = 4;
+    const MESSAGE_MIN_ROWS: u16 = 3;
+    let inner_width = centered_rect(WIDTH_PCT, 100, area).width.saturating_sub(2);
+    // The message gets at least its layout's minimum (3 rows): fewer left
+    // the buttons out of a short dialog
+    let needed = drawn_rows(&msg, inner_width, area.height)
+        .max(MESSAGE_MIN_ROWS)
+        .saturating_add(CHROME);
+    let height = needed.max(centered_rect(100, 30, area).height);
+    let inner = render_modal_frame_rows(frame, area, &state.title, theme, WIDTH_PCT, height);
+
+    // Split into message and buttons
+    let chunks = Layout::vertical([
+        Constraint::Min(MESSAGE_MIN_ROWS), // Message
+        Constraint::Length(1),             // Spacer
+        Constraint::Length(1),             // Buttons
+    ])
+    .split(inner);
+
+    // Message
     frame.render_widget(msg, chunks[0]);
 
     // Buttons
@@ -272,33 +266,36 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ConfirmState, theme: &Theme
 
 #[cfg(test)]
 mod wrap_tests {
-    use super::wrapped_line_count;
-    use ratatui::{backend::TestBackend, widgets::Paragraph, widgets::Wrap, Terminal};
+    use super::*;
 
-    /// The estimate matches the lines ratatui's wrapping draws
+    /// The dialog fits its message: runs of spaces, a leading space, wide
+    /// characters (cases an estimate of the word wrap got wrong), and a
+    /// huge screen (the height arithmetic overflowed `u16`)
     #[test]
-    fn test_wrapped_line_count_matches_the_paragraph() {
-        for (text, width) in [
-            (
-                "Biztosan törlöd a dokumentumot?\n\n{\"_id\":1,\"cím\":\"Az ember tragédiája\"}",
-                20,
-            ),
-            ("rövid", 20),
-            ("egy két három négy öt hat hét nyolc", 10),
-            ("aaaaaaaaaaaaaaaaaaaaaaaaa b", 10),
+    fn test_dialog_fits_its_message() {
+        for (message, width, height) in [
+            (" abc".to_string(), 60, 20),
+            ("a  a x  bba bb ".repeat(20), 60, 30),
+            ("日本語日 ".repeat(30), 60, 30),
+            ("x".to_string(), 2000, 3000),
         ] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            let state = ConfirmState {
+                message: format!("{message} ZZEND"),
+                ..ConfirmState::default()
+            };
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|f| {
-                    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), f.area())
-                })
+                .draw(|f| render(f, f.area(), &state, &crate::theme::Theme::dark()))
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            let last_drawn = (0..30)
-                .rev()
-                .find(|&y| (0..width).any(|x| buffer[(x, y)].symbol() != " "))
-                .map_or(0, |y| y as usize + 1);
-            assert_eq!(wrapped_line_count(text, width), last_drawn, "{text:?}");
+            let screen: String = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|xy| buffer[xy].symbol().to_string())
+                .collect();
+            assert!(screen.contains("ZZEND"), "{message:?}");
+            // The buttons too (a short dialog left them out)
+            assert!(screen.contains(&state.cancel_text), "{message:?}");
         }
     }
 }
