@@ -1557,6 +1557,9 @@ impl Messages for En {
     fn request_stopped(&self) -> &'static str {
         "Stopped"
     }
+    fn index_create_stopped(&self) -> &'static str {
+        "Stopped – if the server had already built it, the index shows in the list"
+    }
     fn creating_index(&self) -> &'static str {
         "Creating index… (Esc: stop)"
     }

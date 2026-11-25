@@ -424,13 +424,46 @@ impl App {
     /// Stop the open modal's request: the modal stays, without its loading
     /// state, and says the request was stopped
     pub fn stop_modal_task(&mut self) {
+        let writing = self.tasks.writing();
         self.tasks.cancel_modal();
         let stopped = Some(t().request_stopped().to_string());
         match &mut self.open_modal {
-            Some(OpenModal::Index(state)) => state.message = stopped,
+            Some(OpenModal::Index(state)) => {
+                // The server may have finished the index before it heard of
+                // the stop: the list is reloaded to show what is there
+                state.message = Some(t().index_create_stopped().to_string());
+                let collection = state.collection.clone();
+                if let (true, Some(db)) = (writing, self.db.clone()) {
+                    self.tasks.spawn(Slot::Modal, async move {
+                        let entries = db.index_entries(&collection).await;
+                        Box::new(move |app: &mut App| {
+                            if let Ok(entries) = entries {
+                                app.apply_index_entries(&collection, entries);
+                            }
+                        }) as Update
+                    });
+                }
+            }
             Some(OpenModal::Vector(state)) => {
                 state.is_loading = false;
-                state.message = stopped;
+                if writing {
+                    state.message = Some(t().index_create_stopped().to_string());
+                    let collection = state.collection.clone();
+                    if let Some(db) = self.db.clone() {
+                        self.tasks.spawn(Slot::Modal, async move {
+                            let indexes = db.vector_indexes(&collection).await;
+                            Box::new(move |app: &mut App| {
+                                if let (Ok(indexes), Some(state)) =
+                                    (indexes, app.vector_state_mut())
+                                {
+                                    state.update_indexes(indexes);
+                                }
+                            }) as Update
+                        });
+                    }
+                } else {
+                    state.message = stopped;
+                }
             }
             Some(OpenModal::Rag(state)) => {
                 state.is_loading = false;
@@ -588,6 +621,12 @@ impl App {
     /// Open a confirm dialog over the open modal (if any), which it keeps
     /// and gives back when it closes
     pub fn open_confirm(&mut self, state: ConfirmState) {
+        // A modal's running request would answer to a modal hidden under the
+        // dialog (its result lost), and the confirmed action would run beside
+        // it: first the request ends or Esc stops it (the status bar says so)
+        if self.open_modal.is_some() && self.tasks.modal_busy() {
+            return;
+        }
         let previous = self.open_modal.take().map(Box::new);
         self.open_modal = Some(OpenModal::Confirm { state, previous });
     }
@@ -2606,8 +2645,12 @@ impl ExportJob<'_> {
 /// Temp file next to the export target (same directory, so the final rename
 /// stays on one filesystem)
 fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
+    // One per export: a stopped export may still be writing its own when the
+    // next one to the same target starts
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = target.file_name()?.to_string_lossy();
-    Some(target.with_file_name(format!(".{}.{}.tmp", name, std::process::id())))
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    Some(target.with_file_name(format!(".{}.{}.{}.tmp", name, std::process::id(), n)))
 }
 
 /// One page of `find`: `limit` documents after `skip`, optionally sorted
@@ -3161,7 +3204,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An export stopped by closing the modal keeps the existing file
+    /// An export stopped by closing the modal keeps the existing file (here
+    /// stopped before it started; a temp file of one stopped mid-write is
+    /// removed by its guard: `test_export_temp_file_is_removed_unless_persisted`)
     #[tokio::test]
     async fn test_stopped_export_keeps_existing_file() {
         let server = FakeServer::new(vec![("docs", numbered_docs(10))]);

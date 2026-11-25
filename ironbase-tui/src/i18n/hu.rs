@@ -1510,6 +1510,9 @@ impl Messages for Hu {
     fn request_stopped(&self) -> &'static str {
         "Megszakítva"
     }
+    fn index_create_stopped(&self) -> &'static str {
+        "Megszakítva – ha a szerver addigra elkészítette, az index a listában látszik"
+    }
     fn creating_index(&self) -> &'static str {
         "Index létrehozása… (Esc: megszakítás)"
     }

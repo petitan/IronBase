@@ -617,6 +617,8 @@ pub trait Messages: Sync + sealed::Sealed {
     fn loading_in_background(&self) -> &'static str;
     /// The open modal's request was stopped (Esc)
     fn request_stopped(&self) -> &'static str;
+    /// An index creation was stopped: the server may still have built it
+    fn index_create_stopped(&self) -> &'static str;
     /// An index is being built (index modal; Esc stops it)
     fn creating_index(&self) -> &'static str;
     /// An export runs: documents written so far of the expected count

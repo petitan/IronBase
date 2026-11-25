@@ -1639,6 +1639,7 @@ async fn test_index_create_is_stopped_by_esc() {
     let mut app = app_with_server(&server).await;
     open_index_create_form(&mut app, "n").await;
 
+    server.clear_calls();
     let enter = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     crate::handlers::handle_key(&mut app, enter).await;
     let esc = crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -1648,8 +1649,10 @@ async fn test_index_create_is_stopped_by_esc() {
     assert!(!app.tasks.is_busy());
     let state = app.index_state().unwrap();
     assert!(state.is_creating);
-    assert_eq!(state.message.as_deref(), Some(t().request_stopped()));
+    assert_eq!(state.message.as_deref(), Some(t().index_create_stopped()));
+    // The list is reloaded from the server (the fake has no index)
     assert!(state.indexes.is_empty());
+    assert_eq!(server.calls_to("index_list").len(), 1);
     // Without a request, Esc goes back as before
     press(&mut app, KeyCode::Esc).await;
     assert!(!app.index_state().unwrap().is_creating);
@@ -2391,6 +2394,43 @@ async fn test_rag_import_reports_the_stored_chunks() {
         .error
         .as_deref()
         .is_some_and(|e| e.contains("Embedding failed")));
+}
+
+/// While a modal's request runs, no confirm dialog opens over it (the
+/// request's answer would find no modal, leaving it loading)
+#[tokio::test]
+async fn test_no_confirm_opens_over_a_running_request() {
+    use crate::state::vector::VectorTab;
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    server.respond(
+        "index_list",
+        to_value(IndexListResponse::Vector(TypedIndexList::new(vec![
+            vector_index("users_emb_vec", "emb", VectorMetric::Cosine),
+        ])))
+        .unwrap(),
+    );
+    shift(&mut app, 'V').await;
+    assert_eq!(app.modal(), Some(Modal::VectorSearch));
+    app.vector_state_mut().unwrap().active_tab = VectorTab::CreateIndex;
+    type_text(&mut app, "emb2").await;
+    app.vector_state_mut().unwrap().dimension = 3;
+    let key = |code| crossterm::event::KeyEvent::new(code, KeyModifiers::NONE);
+    crate::handlers::handle_key(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.tasks.writing());
+
+    // `d` on the index list while the creation runs: no dialog
+    app.vector_state_mut().unwrap().active_tab = VectorTab::ListIndexes;
+    crate::handlers::handle_key(&mut app, key(KeyCode::Char('d'))).await;
+    assert_eq!(app.modal(), Some(Modal::VectorSearch));
+
+    // The creation's answer reaches the modal
+    app.settle().await;
+    let state = app.vector_state().unwrap();
+    assert!(!state.is_loading);
+    assert_eq!(state.error, None);
+    assert!(state.message.is_some());
+    assert!(server.calls_to("index_drop").is_empty());
 }
 
 /// A RAG import runs in the background; Esc stops it and keeps the modal

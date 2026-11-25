@@ -20,6 +20,11 @@ tasks (`runtime::Slot::Modal`), like the searches (0.3.506):
 - **A write is never replaced:** writes run in their own slot (`Slot::ModalWrite`, `Tasks::spawn_write`). A second
   Enter while an index creation, import or export runs does not start another, and a search started meanwhile (RAG,
   vector) does not start, so it cannot stop the write; a write stops a running search of its modal.
+- **No confirm dialog over a running request:** while a modal's request runs, `d`/`x` and the like open no confirm
+  dialog (`App::open_confirm`). The dialog takes the modal's place, so the request's answer found no modal and the
+  modal stayed loading after the dialog closed (also true of the 0.3.506 searches), and the confirmed action ran beside
+  the request. Esc stops the request first.
+- **Esc during an index creation** says the server may still have built it, and reloads the index list.
 - **Export progress:** the export modal shows the documents written so far ("Exportálás: N / M dokumentum…"). A
   stopped or failed export removes its temp file (`TempFile` guard), and the target is replaced only by a complete
   export.
@@ -29,7 +34,8 @@ tasks (`runtime::Slot::Modal`), like the searches (0.3.506):
   creation no longer leaves the modal loading forever.
 - Tests: index creation is in the background and updates the list, its Esc stops it and keeps the form; RAG import
   in the background, Esc stops it, a search meanwhile does not stop it (fails without the guard); export shows its progress, a stopped export keeps the existing file, the temp
-  file guard removes an unfinished file.
+  file guard removes an unfinished file, each export has its own temp file; no confirm dialog opens over a running
+  index creation (fails without the guard).
 
 ### Changed — Tuti TUI: the full-text, vector and RAG searches run in the background (tuti-tui 0.3.506, mcp-server 1.0.694 — version only, for the release tag)
 
