@@ -1554,6 +1554,18 @@ impl Messages for En {
     fn loading_in_background(&self) -> &'static str {
         "Loading… (Esc: stop)"
     }
+    fn request_stopped(&self) -> &'static str {
+        "Stopped"
+    }
+    fn index_create_stopped(&self) -> &'static str {
+        "Stopped – if the server had already built it, the index shows in the list"
+    }
+    fn creating_index(&self) -> &'static str {
+        "Creating index… (Esc: stop)"
+    }
+    fn exporting(&self, written: usize, total: usize) -> String {
+        format!("Exporting: {written} / {total} documents… (Esc: stop)")
+    }
     fn acl_deleted(&self, collection: &str) -> String {
         format!("ACL for \"{collection}\" deleted")
     }

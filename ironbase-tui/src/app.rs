@@ -7,6 +7,7 @@ use crate::db::{CollectionInfo, DbWrapper};
 use crate::i18n::{t, Op};
 use crate::modals::confirm::{ConfirmAction, ConfirmOption, ConfirmState};
 use crate::runtime::{Slot, Tasks, Update};
+use crate::state::index::IndexEntry;
 use crate::state::open_state;
 use crate::theme::{Theme, ThemeName};
 use ironbase_mcp_types::params::{
@@ -25,6 +26,8 @@ use ironbase_mcp_types::tools::{
 };
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // Import and re-export state types
 pub use crate::state::{
@@ -414,8 +417,68 @@ impl App {
     /// Close current modal
     pub fn close_modal(&mut self) {
         // The modal's own request has no one to show its answer to
-        self.tasks.cancel(Slot::Modal);
+        self.tasks.cancel_modal();
         self.open_modal = None;
+    }
+
+    /// Stop the open modal's request: the modal stays, without its loading
+    /// state, and says the request was stopped
+    pub fn stop_modal_task(&mut self) {
+        let writing = self.tasks.writing();
+        self.tasks.cancel_modal();
+        let stopped = Some(t().request_stopped().to_string());
+        match &mut self.open_modal {
+            Some(OpenModal::Index(state)) => {
+                // The server may have finished the index before it heard of
+                // the stop: the list is reloaded to show what is there
+                state.message = Some(t().index_create_stopped().to_string());
+                let collection = state.collection.clone();
+                if let (true, Some(db)) = (writing, self.db.clone()) {
+                    self.tasks.spawn(Slot::Modal, async move {
+                        let entries = db.index_entries(&collection).await;
+                        Box::new(move |app: &mut App| {
+                            if let Ok(entries) = entries {
+                                app.apply_index_entries(&collection, entries);
+                            }
+                        }) as Update
+                    });
+                }
+            }
+            Some(OpenModal::Vector(state)) => {
+                state.is_loading = false;
+                if writing {
+                    state.message = Some(t().index_create_stopped().to_string());
+                    let collection = state.collection.clone();
+                    if let Some(db) = self.db.clone() {
+                        self.tasks.spawn(Slot::Modal, async move {
+                            let indexes = db.vector_indexes(&collection).await;
+                            Box::new(move |app: &mut App| {
+                                if let (Ok(indexes), Some(state)) =
+                                    (indexes, app.vector_state_mut())
+                                {
+                                    state.update_indexes(indexes);
+                                }
+                            }) as Update
+                        });
+                    }
+                } else {
+                    state.message = stopped;
+                }
+            }
+            Some(OpenModal::Rag(state)) => {
+                state.is_loading = false;
+                state.message = stopped;
+            }
+            Some(OpenModal::Fulltext(state)) => {
+                state.loading = false;
+                state.error = stopped;
+            }
+            Some(OpenModal::Export(state)) => {
+                state.written = None;
+                state.message = stopped;
+            }
+            _ => {}
+        }
     }
 
     /// The open modal's kind
@@ -558,6 +621,12 @@ impl App {
     /// Open a confirm dialog over the open modal (if any), which it keeps
     /// and gives back when it closes
     pub fn open_confirm(&mut self, state: ConfirmState) {
+        // A modal's running request would answer to a modal hidden under the
+        // dialog (its result lost), and the confirmed action would run beside
+        // it: first the request ends or Esc stops it (the status bar says so)
+        if self.open_modal.is_some() && self.tasks.modal_busy() {
+            return;
+        }
         let previous = self.open_modal.take().map(Box::new);
         self.open_modal = Some(OpenModal::Confirm { state, previous });
     }
@@ -699,9 +768,6 @@ impl App {
             }
         }
     }
-
-    // execute_create_index, execute_delete_index törölve
-    // Használd az async verziókat: execute_create_index_async, execute_delete_index_async
 
     // === Query Builder ===
 
@@ -1930,8 +1996,12 @@ impl App {
 
     // === Async Index Management ===
 
-    /// Create a new index (async) - supports both single and compound indexes
-    pub async fn execute_create_index_async(&mut self) {
+    /// Create a new index (in the background) - single and compound indexes
+    pub fn execute_create_index(&mut self) {
+        // One creation at a time: a second Enter would cancel the first
+        if self.tasks.writing() {
+            return;
+        }
         let fields = open_state!(self, Index).get_fields();
 
         if fields.is_empty() {
@@ -1944,7 +2014,7 @@ impl App {
         let sparse = open_state!(self, Index).sparse;
         let is_compound = open_state!(self, Index).is_compound;
 
-        let Some(db) = &self.db else {
+        let Some(db) = self.db.clone() else {
             self.set_error(t().no_database());
             return;
         };
@@ -1957,15 +2027,37 @@ impl App {
             (Some(fields.first().cloned().unwrap_or_default()), None)
         };
         let args = IndexCreateArgs::BTree(IndexCreateParams {
-            collection,
+            collection: collection.clone(),
             field,
             fields: compound_fields,
             unique,
             sparse,
         });
 
-        match db.call::<IndexCreate>(&args).await {
-            Ok(created) => {
+        let state = open_state!(self, Index);
+        state.error = None;
+        state.message = Some(t().creating_index().to_string());
+        // In the background: building an index over a large collection takes
+        // a while, the screen keeps drawing and Esc stops it
+        self.tasks.spawn_write(async move {
+            let created = db.call::<IndexCreate>(&args).await;
+            // The list after the creation (its failure is reported, the
+            // creation still succeeded)
+            let entries = match created {
+                Ok(_) => Some(db.index_entries(&collection).await),
+                Err(_) => None,
+            };
+            Box::new(move |app: &mut App| {
+                let created = match created {
+                    Ok(created) => created,
+                    Err(e) => {
+                        if let Some(state) = app.index_state_mut() {
+                            state.message = None;
+                            state.error = Some(t().failed(Op::Create, &e));
+                        }
+                        return;
+                    }
+                };
                 let mut flags = Vec::new();
                 if unique {
                     flags.push("unique");
@@ -1985,16 +2077,37 @@ impl App {
                 } else {
                     fields.first().cloned().unwrap_or_default()
                 };
-                open_state!(self, Index).message =
+                let Some(state) = app.index_state_mut() else {
+                    return;
+                };
+                state.cancel_create();
+                state.message =
                     Some(t().index_created(&fields, compound, &flags_str, created.index_name()));
-                open_state!(self, Index).cancel_create();
-                open_state!(self, Index).indexes = self.get_current_indexes_async().await;
-                self.collection_indexes = open_state!(self, Index).indexes.clone();
-                // Refresh collection list to update index_count
-                self.reload_collections_async().await;
-            }
-            Err(e) => {
-                open_state!(self, Index).error = Some(t().failed(Op::Create, &e));
+                match entries {
+                    Some(Ok(entries)) => app.apply_index_entries(&collection, entries),
+                    Some(Err(e)) => {
+                        state.error = Some(t().failed(Op::LoadIndexes, &e));
+                    }
+                    None => {}
+                }
+            }) as Update
+        });
+    }
+
+    /// Show a collection's index list (fetched after a change): in the open
+    /// index modal, and in the collection's index count
+    fn apply_index_entries(&mut self, collection: &str, entries: Vec<IndexEntry>) {
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        if let Some(coll) = self.collections.iter_mut().find(|c| c.name == collection) {
+            coll.index_count = Some(names.len());
+        }
+        if self.current_collection_name() == Some(collection) {
+            self.collection_indexes = names.clone();
+        }
+        if let Some(state) = self.index_state_mut() {
+            if state.collection == collection {
+                state.indexes = names;
+                state.index_entries = entries;
             }
         }
     }
@@ -2268,7 +2381,11 @@ impl App {
     /// Exports what the document list shows (active filter + sort). The data
     /// goes to a temp file next to the target and is renamed on success, so a
     /// failed export never truncates an existing file.
-    pub async fn execute_export_async(&mut self) {
+    pub fn execute_export(&mut self) {
+        // One export at a time: a second Enter would cancel the first
+        if self.tasks.writing() {
+            return;
+        }
         let Some(state) = self.export_state() else {
             return;
         };
@@ -2290,41 +2407,91 @@ impl App {
             return;
         };
 
-        if self.db.is_none() {
+        let Some(db) = self.db.clone() else {
             self.set_error(t().no_database());
             return;
-        }
-
-        let result = match self
-            .write_export_async(&tmp_path, &collection, format)
-            .await
-        {
-            Ok(count) => std::fs::rename(&tmp_path, &file_path)
-                .map(|()| count)
-                .map_err(|e| t().failed(Op::File, &e)),
-            Err(e) => Err(e),
         };
 
-        match result {
-            Ok(count) => {
-                if let Some(state) = self.export_state_mut() {
-                    state.message = Some(t().exported(count, filtered, &file_path));
-                    state.error = None;
-                }
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
-                set_error(self, e);
-            }
+        // Same filter + sort as the document list
+        let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
+        let sort = self.active_sort.clone();
+        let written = Arc::new(AtomicUsize::new(0));
+        if let Some(state) = self.export_state_mut() {
+            state.error = None;
+            state.message = None;
+            state.written = Some(written.clone());
         }
-    }
 
+        // In the background: the screen keeps drawing (with the count so
+        // far) and Esc stops it. A stopped or failed export leaves no
+        // temp file, and the target is replaced only by a complete one.
+        self.tasks.spawn_write(async move {
+            let tmp = TempFile(tmp_path);
+            let export = ExportJob {
+                db: &db,
+                collection: &collection,
+                query: &query,
+                sort: sort.as_ref(),
+                written: &written,
+            };
+            let result = match export.write(&tmp.0, format).await {
+                Ok(count) => tmp
+                    .persist(std::path::Path::new(&file_path))
+                    .map(|()| count),
+                Err(e) => Err(e),
+            };
+            Box::new(move |app: &mut App| {
+                let Some(state) = app.export_state_mut() else {
+                    return;
+                };
+                state.written = None;
+                match result {
+                    Ok(count) => {
+                        state.message = Some(t().exported(count, filtered, &file_path));
+                        state.error = None;
+                    }
+                    Err(e) => state.error = Some(e),
+                }
+            }) as Update
+        });
+    }
+}
+
+/// The temp file of an export: removed when dropped (a failed or stopped
+/// export) unless persisted as the target
+struct TempFile(PathBuf);
+
+impl TempFile {
+    /// Rename onto the target (the temp file is gone either way after a success)
+    fn persist(self, target: &std::path::Path) -> Result<(), String> {
+        std::fs::rename(&self.0, target).map_err(|e| t().failed(Op::File, &e))
+        // On failure the drop removes the temp file
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        // After a successful rename the file is gone: nothing to remove
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// What an export writes: the documents of the list's view
+struct ExportJob<'a> {
+    db: &'a DbWrapper,
+    collection: &'a str,
+    query: &'a Value,
+    sort: Option<&'a Value>,
+    /// Documents written so far (read by the modal while it draws)
+    written: &'a AtomicUsize,
+}
+
+impl ExportJob<'_> {
     /// Write the export into `path` (the temp file); returns the exported
-    /// document count. On error the caller removes the file.
-    async fn write_export_async(
+    /// document count
+    async fn write(
         &self,
         path: &std::path::Path,
-        collection: &str,
         format: crate::modals::export::ExportFormat,
     ) -> Result<usize, String> {
         use crate::modals::export::ExportFormat;
@@ -2332,14 +2499,13 @@ impl App {
         use std::io::{BufWriter, Write};
 
         const BATCH_SIZE: usize = 1000;
-
-        // Same filter + sort as the document list
-        let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
-        let sort = self.active_sort.as_ref();
-
-        let Some(db) = &self.db else {
-            return Err(t().no_database().to_string());
-        };
+        let (db, collection, query, sort, written) = (
+            self.db,
+            self.collection,
+            self.query,
+            self.sort,
+            self.written,
+        );
 
         let file = File::create(path).map_err(|e| t().failed(Op::File, &e))?;
         let mut writer = BufWriter::new(file);
@@ -2356,7 +2522,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2384,6 +2550,7 @@ impl App {
                     }
 
                     exported += docs.len();
+                    written.store(exported, Ordering::Relaxed);
                     offset += docs.len();
                 }
 
@@ -2394,7 +2561,7 @@ impl App {
                 exported
             }
             ExportFormat::Csv => {
-                let sample = match find_page(db, collection, &query, 0, 100, sort).await {
+                let sample = match find_page(db, collection, query, 0, 100, sort).await {
                     Ok(d) => d,
                     Err(e) => {
                         return Err(t().failed(Op::Query, &e));
@@ -2425,7 +2592,7 @@ impl App {
 
                 loop {
                     let docs =
-                        match find_page(db, collection, &query, offset, BATCH_SIZE, sort).await {
+                        match find_page(db, collection, query, offset, BATCH_SIZE, sort).await {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(t().failed(Op::Query, &e));
@@ -2461,6 +2628,7 @@ impl App {
                     }
 
                     exported += docs.len();
+                    written.store(exported, Ordering::Relaxed);
                     offset += docs.len();
                 }
 
@@ -2477,8 +2645,12 @@ impl App {
 /// Temp file next to the export target (same directory, so the final rename
 /// stays on one filesystem)
 fn export_temp_path(target: &std::path::Path) -> Option<PathBuf> {
+    // One per export: a stopped export may still be writing its own when the
+    // next one to the same target starts
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = target.file_name()?.to_string_lossy();
-    Some(target.with_file_name(format!(".{}.{}.tmp", name, std::process::id())))
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    Some(target.with_file_name(format!(".{}.{}.{}.tmp", name, std::process::id(), n)))
 }
 
 /// One page of `find`: `limit` documents after `skip`, optionally sorted
@@ -2926,7 +3098,8 @@ mod tests {
             .unwrap()
             .file_path
             .set_value(target.to_string_lossy().into_owned());
-        app.execute_export_async().await;
+        app.execute_export();
+        app.settle().await;
         assert_eq!(app.export_state().unwrap().error, None);
         assert!(app
             .export_state()
@@ -2977,7 +3150,8 @@ mod tests {
             .set_value(target.to_string_lossy().into_owned());
 
         *server.failing_find.lock().unwrap() = Some("docs".to_string());
-        app.execute_export_async().await;
+        app.execute_export();
+        app.settle().await;
 
         assert!(app
             .export_state()
@@ -2989,6 +3163,95 @@ mod tests {
         assert_eq!(app.export_state().unwrap().message, None);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
         assert_eq!(files_in(&dir), ["docs.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The export runs in the background: the modal shows how far it got
+    /// (and the screen keeps drawing) until the file is written
+    #[tokio::test]
+    async fn test_export_runs_in_the_background_with_progress() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
+        let mut app = app_with_server(&server).await;
+        app.open_export_modal();
+        let dir = std::env::temp_dir().join(format!("tuti-tui-export-bg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("docs.json");
+        app.export_state_mut()
+            .unwrap()
+            .file_path
+            .set_value(target.to_string_lossy().into_owned());
+
+        app.execute_export();
+        assert!(app.tasks.is_busy());
+        assert!(crate::testing::render_to_string(&app, 120, 36)
+            .contains("Exportálás: 0 / 10 dokumentum"));
+        // A second Enter does not restart it
+        app.execute_export();
+
+        app.settle().await;
+        let state = app.export_state().unwrap();
+        assert!(state.written.is_none());
+        assert_eq!(state.error, None);
+        assert!(state.message.as_deref().unwrap().starts_with("10 "));
+        assert_eq!(
+            server.calls_to("find").len(),
+            2 + 1,
+            "{:?}",
+            server.calls_to("find")
+        );
+        assert_eq!(files_in(&dir), ["docs.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An export stopped by closing the modal keeps the existing file (here
+    /// stopped before it started; a temp file of one stopped mid-write is
+    /// removed by its guard: `test_export_temp_file_is_removed_unless_persisted`)
+    #[tokio::test]
+    async fn test_stopped_export_keeps_existing_file() {
+        let server = FakeServer::new(vec![("docs", numbered_docs(10))]);
+        let mut app = app_with_server(&server).await;
+        app.open_export_modal();
+        let dir = std::env::temp_dir().join(format!("tuti-tui-export-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("docs.json");
+        std::fs::write(&target, "precious").unwrap();
+        app.export_state_mut()
+            .unwrap()
+            .file_path
+            .set_value(target.to_string_lossy().into_owned());
+
+        app.execute_export();
+        app.close_modal();
+        app.settle().await;
+        assert!(!app.tasks.is_busy());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+        assert_eq!(files_in(&dir), ["docs.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The temp file of a stopped (dropped) export is removed; a persisted
+    /// one becomes the target
+    #[test]
+    fn test_export_temp_file_is_removed_unless_persisted() {
+        let dir = std::env::temp_dir().join(format!("tuti-tui-export-tmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dropped = dir.join(".a.tmp");
+        std::fs::write(&dropped, "half").unwrap();
+        drop(TempFile(dropped.clone()));
+        assert!(!dropped.exists());
+
+        let kept = dir.join(".b.tmp");
+        std::fs::write(&kept, "whole").unwrap();
+        TempFile(kept.clone()).persist(&dir.join("b.json")).unwrap();
+        assert!(!kept.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.json")).unwrap(),
+            "whole"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

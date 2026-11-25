@@ -2,6 +2,8 @@
 
 use crate::modals::export::ExportFormat;
 use crate::widgets::{Input, InputOutcome, TextInput};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 /// Export state
 #[derive(Debug, Clone)]
@@ -14,6 +16,8 @@ pub struct ExportState {
     pub file_path: TextInput,
     pub error: Option<String>,
     pub message: Option<String>,
+    /// While an export runs: the documents written so far (the task counts)
+    pub written: Option<Arc<AtomicUsize>>,
 }
 
 impl Default for ExportState {
@@ -26,6 +30,7 @@ impl Default for ExportState {
             file_path: TextInput::default(),
             error: None,
             message: None,
+            written: None,
         }
     }
 }
@@ -41,6 +46,7 @@ impl ExportState {
             file_path,
             error: None,
             message: None,
+            written: None,
         }
     }
 

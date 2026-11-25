@@ -127,6 +127,10 @@ pub(crate) async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers
             let Some(db) = app.db.clone() else {
                 return;
             };
+            // A running write (import, creation) is not replaced by a search
+            if app.tasks.writing() {
+                return;
+            }
             open_state!(app, Rag).is_loading = true;
             open_state!(app, Rag).error = None;
 
@@ -228,25 +232,36 @@ pub(crate) async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers
                 context_fields: None,
             };
 
+            // One import at a time: a second Enter would cancel the first
+            if app.tasks.writing() {
+                return;
+            }
+            let Some(db) = app.db.clone() else {
+                return;
+            };
             open_state!(app, Rag).is_loading = true;
             open_state!(app, Rag).error = None;
             // A failed import must not leave the previous one's result
             open_state!(app, Rag).import_result = None;
 
-            if let Some(ref db) = app.db {
-                match db.call::<RagDocumentImport>(&args).await {
-                    Ok(result) => {
-                        open_state!(app, Rag).is_loading = false;
-                        open_state!(app, Rag).message =
-                            Some(crate::modals::rag::import_result_text(&result));
-                        open_state!(app, Rag).import_result = Some(result);
+            // In the background: chunking and embedding a long text takes a
+            // while, the screen keeps drawing and Esc stops it
+            app.tasks.spawn_write(async move {
+                let result = db.call::<RagDocumentImport>(&args).await;
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.rag_state_mut() else {
+                        return;
+                    };
+                    state.is_loading = false;
+                    match result {
+                        Ok(result) => {
+                            state.message = Some(crate::modals::rag::import_result_text(&result));
+                            state.import_result = Some(result);
+                        }
+                        Err(e) => state.error = Some(format!("{}", e)),
                     }
-                    Err(e) => {
-                        open_state!(app, Rag).is_loading = false;
-                        open_state!(app, Rag).error = Some(format!("{}", e));
-                    }
-                }
-            }
+                }) as Update
+            });
         }
 
         // Toggle mode (when mode field focused)
@@ -330,22 +345,33 @@ pub(crate) async fn handle_rag_collections_key(
                     language: open_state!(app, Rag).create_language.clone(),
                 };
 
+                // One creation at a time: a second Enter would cancel the first
+                if app.tasks.writing() {
+                    return;
+                }
+                let Some(db) = app.db.clone() else {
+                    return;
+                };
                 open_state!(app, Rag).is_loading = true;
                 open_state!(app, Rag).error = None;
 
-                if let Some(ref db) = app.db {
-                    match db.call::<RagCollectionCreate>(&args).await {
-                        Ok(response) => {
-                            open_state!(app, Rag).is_loading = false;
-                            open_state!(app, Rag).creating = false;
-                            open_state!(app, Rag).message = Some(rag_created_message(&response));
+                // In the background (it creates the indexes): Esc stops it
+                app.tasks.spawn_write(async move {
+                    let result = db.call::<RagCollectionCreate>(&args).await;
+                    Box::new(move |app: &mut App| {
+                        let Some(state) = app.rag_state_mut() else {
+                            return;
+                        };
+                        state.is_loading = false;
+                        match result {
+                            Ok(response) => {
+                                state.creating = false;
+                                state.message = Some(rag_created_message(&response));
+                            }
+                            Err(e) => state.error = Some(format!("{}", e)),
                         }
-                        Err(e) => {
-                            open_state!(app, Rag).is_loading = false;
-                            open_state!(app, Rag).error = Some(format!("{}", e));
-                        }
-                    }
-                }
+                    }) as Update
+                });
             }
 
             // Toggle provider/language
@@ -455,27 +481,36 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
                     return;
                 }
 
+                let Some(db) = app.db.clone() else {
+                    return;
+                };
+                // A running write (import, creation) is not replaced by a test
+                if app.tasks.writing() {
+                    return;
+                }
                 let text = open_state!(app, Rag).embed_test_input.value().to_string();
                 open_state!(app, Rag).is_loading = true;
                 open_state!(app, Rag).error = None;
+                open_state!(app, Rag).embed_test_result = None;
+                let args = EmbedTextParams {
+                    text,
+                    provider: open_state!(app, Rag).selected_provider(),
+                };
 
-                if let Some(ref db) = app.db {
-                    let args = EmbedTextParams {
-                        text,
-                        provider: open_state!(app, Rag).selected_provider(),
-                    };
-                    open_state!(app, Rag).embed_test_result = None;
-                    match db.call::<EmbedText>(&args).await {
-                        Ok(result) => {
-                            open_state!(app, Rag).is_loading = false;
-                            open_state!(app, Rag).embed_test_result = Some(result);
+                // In the background: the provider may be slow (a model loads)
+                app.tasks.spawn(Slot::Modal, async move {
+                    let result = db.call::<EmbedText>(&args).await;
+                    Box::new(move |app: &mut App| {
+                        let Some(state) = app.rag_state_mut() else {
+                            return;
+                        };
+                        state.is_loading = false;
+                        match result {
+                            Ok(result) => state.embed_test_result = Some(result),
+                            Err(e) => state.error = Some(format!("{}", e)),
                         }
-                        Err(e) => {
-                            open_state!(app, Rag).is_loading = false;
-                            open_state!(app, Rag).error = Some(format!("{}", e));
-                        }
-                    }
-                }
+                    }) as Update
+                });
             }
 
             _ => {
@@ -493,45 +528,65 @@ pub(crate) async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers
 
         // Enable auto-embed
         (KeyCode::Char('e'), _) => {
-            let collection = open_state!(app, Rag).collection.clone();
-            if let Some(ref db) = app.db {
-                let args = AutoEmbedEnableParams {
-                    collection: collection.clone(),
-                    source_field: "content".to_string(),
-                    target_field: "embedding".to_string(),
-                    provider: open_state!(app, Rag).selected_provider(),
-                    model: None,
-                    dimension: None,
-                    skip_if_exists: false,
-                    chunking: None,
-                };
-                match db.call::<AutoEmbedEnable>(&args).await {
-                    Ok(response) => {
-                        // What the server started (backfill / re-embed) and
-                        // why the vectors may differ, not a bare "enabled"
-                        let mut message = response
-                            .message
-                            .unwrap_or_else(|| t().auto_embed_enabled().to_string());
-                        if let Some(job_id) = response.backfill_job_id {
-                            message.push_str(&t().job_suffix(&job_id));
-                        }
-                        if let Some(warning) = response.warning {
-                            message.push_str(&t().warning_suffix(&warning));
-                        }
-                        open_state!(app, Rag).message = Some(message);
-                        match load_auto_embed_status(db, &collection).await {
-                            Ok(status) => open_state!(app, Rag).auto_embed_config = Some(status),
-                            Err(e) => {
-                                open_state!(app, Rag).error =
-                                    Some(t().failed(Op::LoadAutoEmbedStatus, &e))
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        open_state!(app, Rag).error = Some(format!("{}", e));
-                    }
-                }
+            // One request at a time: a second `e` would cancel the first
+            if app.tasks.writing() {
+                return;
             }
+            let Some(db) = app.db.clone() else {
+                return;
+            };
+            let collection = open_state!(app, Rag).collection.clone();
+            let args = AutoEmbedEnableParams {
+                collection: collection.clone(),
+                source_field: "content".to_string(),
+                target_field: "embedding".to_string(),
+                provider: open_state!(app, Rag).selected_provider(),
+                model: None,
+                dimension: None,
+                skip_if_exists: false,
+                chunking: None,
+            };
+            open_state!(app, Rag).is_loading = true;
+            open_state!(app, Rag).error = None;
+
+            // In the background: the server probes the provider first
+            app.tasks.spawn_write(async move {
+                let response = db.call::<AutoEmbedEnable>(&args).await;
+                let status = match response {
+                    Ok(_) => Some(load_auto_embed_status(&db, &collection).await),
+                    Err(_) => None,
+                };
+                Box::new(move |app: &mut App| {
+                    let Some(state) = app.rag_state_mut() else {
+                        return;
+                    };
+                    state.is_loading = false;
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(e) => {
+                            state.error = Some(format!("{}", e));
+                            return;
+                        }
+                    };
+                    // What the server started (backfill / re-embed) and
+                    // why the vectors may differ, not a bare "enabled"
+                    let mut message = response
+                        .message
+                        .unwrap_or_else(|| t().auto_embed_enabled().to_string());
+                    if let Some(job_id) = response.backfill_job_id {
+                        message.push_str(&t().job_suffix(&job_id));
+                    }
+                    if let Some(warning) = response.warning {
+                        message.push_str(&t().warning_suffix(&warning));
+                    }
+                    state.message = Some(message);
+                    match status {
+                        Some(Ok(status)) => state.auto_embed_config = Some(status),
+                        Some(Err(e)) => state.error = Some(t().failed(Op::LoadAutoEmbedStatus, &e)),
+                        None => {}
+                    }
+                }) as Update
+            });
         }
 
         // Disable auto-embed (with confirmation)

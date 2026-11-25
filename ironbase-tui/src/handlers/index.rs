@@ -13,7 +13,7 @@ pub(crate) async fn handle_index_key_async(app: &mut App, key: KeyCode, modifier
                 open_state!(app, Index).cancel_create();
             }
             (KeyCode::Enter, _) => {
-                app.execute_create_index_async().await;
+                app.execute_create_index();
             }
             (KeyCode::Tab, _) => {
                 open_state!(app, Index).next_form_field();

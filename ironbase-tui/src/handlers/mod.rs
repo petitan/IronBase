@@ -58,6 +58,12 @@ use vector::handle_vector_key_async;
 
 /// Handle one key press: modal keys first, global keys otherwise
 pub async fn handle_key(app: &mut App, key: KeyEvent) {
+    // The open modal's request runs: Esc stops it, the modal stays (the
+    // next Esc goes back or closes it, as without a request)
+    if app.modal().is_some() && key.code == KeyCode::Esc && app.tasks.modal_busy() {
+        app.stop_modal_task();
+        return;
+    }
     if app.modal().is_some() {
         handle_modal_key_async(app, key.code, key.modifiers).await;
     } else {
