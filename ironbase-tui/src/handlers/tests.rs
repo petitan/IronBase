@@ -3365,3 +3365,52 @@ async fn test_delete_confirm_shows_the_question_and_the_document() {
     assert!(screen.contains("kollekcióból?"), "{screen}");
     assert!(screen.contains("tragédiája"), "{screen}");
 }
+
+/// Deleting the last tag selects the tag before it, not the `[+]` button
+/// (so a second `x` deletes that one too)
+#[tokio::test]
+async fn test_deleting_the_last_tag_selects_the_previous_tag() {
+    let server = two_collections();
+    let mut app = app_with_server(&server).await;
+    app.open_modal = Some(crate::app::OpenModal::Script(
+        crate::state::script::ScriptState::new(),
+    ));
+    let state = app.script_state_mut().unwrap();
+    state.tags = vec!["a".into(), "b".into(), "c".into()];
+    state.selected_tag = 2;
+    let x = || KeyCode::Char('x');
+
+    crate::handlers::script::handle_script_tags_key(&mut app, x(), KeyModifiers::NONE);
+    assert_eq!(app.script_state().unwrap().tags, ["a", "b"]);
+    assert_eq!(app.script_state().unwrap().selected_tag, 1);
+
+    crate::handlers::script::handle_script_tags_key(&mut app, x(), KeyModifiers::NONE);
+    crate::handlers::script::handle_script_tags_key(&mut app, x(), KeyModifiers::NONE);
+    assert!(app.script_state().unwrap().tags.is_empty());
+    assert_eq!(app.script_state().unwrap().selected_tag, 0);
+}
+
+/// An 80x24 terminal: the table shows the columns that fit (the year was
+/// cut to `18…` and the `_id` column squeezed when all were drawn)
+#[tokio::test]
+async fn test_a_narrow_pane_shows_fewer_columns() {
+    let server = books();
+    let app = app_with_server(&server).await;
+    let screen = render_to_string(&app, 80, 24);
+    assert!(!screen.contains("18…"), "{screen}");
+    assert!(!screen.contains("19…"), "{screen}");
+    assert!(screen.contains("▶ 1 "), "{screen}");
+}
+
+/// On a small terminal the delete confirmation grows to show the preview
+/// (a fixed 30% height showed a fraction of it)
+#[tokio::test]
+async fn test_delete_confirm_grows_for_its_preview() {
+    let server = books();
+    let mut app = app_with_server(&server).await;
+    app.active_pane = Pane::Documents;
+    app.open_delete_confirm();
+    let screen = render_to_string(&app, 80, 24);
+    assert!(screen.contains("1861"), "{screen}");
+    assert!(screen.contains("tragédiája"), "{screen}");
+}

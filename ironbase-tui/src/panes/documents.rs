@@ -58,19 +58,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
         return;
     }
 
-    // Collect all unique field names (excluding _id, limit to first 6 fields)
-    let columns = collect_columns(documents, 6);
+    // Collect all unique field names (excluding _id, limit to first 6 fields,
+    // and to as many as fit at their narrowest: more would be squeezed)
+    let id_width = 8; // Fixed width for _id
+    let columns = collect_columns(documents, 6.min(columns_that_fit(inner.width, id_width)));
     let col_count = columns.len();
 
-    if col_count == 0 {
-        return;
-    }
+    // No data column fits (or none exists): the `_id` column alone
 
     // Column widths: the values first (each column as wide as its widest
     // value on the page, the width left shared among the wide ones), then
     // what is still left widens the headers that are cut. The table puts
     // one column of space between columns: that is not the cells' width
-    let id_width = 8; // Fixed width for _id
     let sanitized: Vec<serde_json::Value> = documents
         .iter()
         .take(visible_rows(area.height))
@@ -171,6 +170,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 fn collect_columns(documents: &[serde_json::Value], max_cols: usize) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut columns: Vec<String> = Vec::new();
+    if max_cols == 0 {
+        return columns;
+    }
 
     // Priority fields - show these first if they exist
     let priority = ["name", "title", "email", "username", "type", "status"];
@@ -232,6 +234,11 @@ const MIN_COLUMN_WIDTH: usize = 3;
 /// push the other columns out)
 const MAX_COLUMN_WIDTH: usize = 40;
 
+/// How many data columns fit beside the `_id` column at their narrowest
+fn columns_that_fit(inner_width: u16, id_width: usize) -> usize {
+    (inner_width as usize).saturating_sub(id_width) / (MIN_COLUMN_WIDTH + COLUMN_SPACING)
+}
+
 /// Share `available` columns among columns that would need `natural` each:
 /// a column narrower than its share gets what it needs, the share it leaves
 /// goes to the wider ones (which are cut to an equal width)
@@ -282,6 +289,15 @@ mod tests {
         assert_eq!(fit_widths(&[30, 30, 4], 30), [13, 13, 4]);
         // Too narrow for anything: the minimum
         assert_eq!(fit_widths(&[30, 30], 2), [3, 3]);
+    }
+
+    /// A narrow pane shows fewer columns instead of squeezing them all
+    #[test]
+    fn test_columns_that_fit() {
+        // 80x24: the pane's inner width is 26
+        assert_eq!(columns_that_fit(26, 8), 4);
+        assert_eq!(columns_that_fit(40, 8), 8);
+        assert_eq!(columns_that_fit(5, 8), 0);
     }
 
     /// Room left after the values widens the cut headers

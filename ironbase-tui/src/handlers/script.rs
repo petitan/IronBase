@@ -240,12 +240,11 @@ pub(crate) fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: Key
                 if open_state!(app, Script).selected_tag < open_state!(app, Script).tags.len() => {
                     let state = open_state!(app, Script);
                     state.tags.remove(state.selected_tag);
-                    if open_state!(app, Script).selected_tag > 0
-                        && open_state!(app, Script).selected_tag >= open_state!(app, Script).tags.len()
-                    {
-                        open_state!(app, Script).selected_tag = open_state!(app, Script).tags.len();
+                    // The last tag went: the one before it (not the [+] button)
+                    if state.selected_tag >= state.tags.len() {
+                        state.selected_tag = state.tags.len().saturating_sub(1);
                     }
-                    open_state!(app, Script).dirty = true;
+                    state.dirty = true;
                 }
             _ => {}
         }

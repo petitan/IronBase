@@ -44,22 +44,7 @@ impl FilterOperator {
     pub fn to_query(&self, field: &str, value: &str) -> Value {
         use serde_json::json;
 
-        // Helper to parse value as number or return string
-        let parse_value = |v: &str| -> Value {
-            if let Ok(n) = v.parse::<i64>() {
-                json!(n)
-            } else if let Ok(n) = v.parse::<f64>() {
-                json!(n)
-            } else if v == "true" {
-                json!(true)
-            } else if v == "false" {
-                json!(false)
-            } else if v == "null" {
-                json!(null)
-            } else {
-                json!(v)
-            }
-        };
+        let parse_value = filter_value;
 
         match self {
             Self::Equals => {
@@ -86,8 +71,11 @@ impl FilterOperator {
                 let v = parse_value(value);
                 json!({ (field): { "$lte": v } })
             }
-            Self::Contains => json!({ (field): { "$regex": value } }),
-            Self::StartsWith => json!({ (field): { "$regex": format!("^{}", value) } }),
+            // The text literally: its regex characters are escaped
+            Self::Contains => json!({ (field): { "$regex": escape_regex(value) } }),
+            Self::StartsWith => {
+                json!({ (field): { "$regex": format!("^{}", escape_regex(value)) } })
+            }
             Self::Exists => json!({ (field): { "$exists": value != "false" && value != "0" } }),
             Self::In => {
                 let values: Vec<Value> = value
@@ -105,6 +93,37 @@ impl FilterOperator {
             }
         }
     }
+}
+
+/// A typed value: a JSON literal (number, `true`, `false`, `null`, a quoted
+/// string) as that value, anything else as the text itself. Rust's own
+/// number parsing took `007` and `+7` as 7 and `nan` / `inf` as numbers JSON
+/// cannot hold (sent as `null`); JSON's grammar has none of these.
+fn filter_value(text: &str) -> Value {
+    // Surrounding spaces are part of a string value (JSON would skip them)
+    if text.trim() == text {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            if !value.is_array() && !value.is_object() {
+                return value;
+            }
+        }
+    }
+    Value::String(text.to_string())
+}
+
+/// `text` as a regex that matches it literally: the characters special in
+/// the server's regex syntax outside a class are escaped, and only those
+/// (`-`, `#`, `&`, `~` are literal there; escaped, the server's query planner
+/// would not use an index for a "starts with" prefix such as `2024-01`)
+fn escape_regex(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// A single filter condition
@@ -518,9 +537,18 @@ mod tests {
         assert_eq!(q(LessThan, "5"), json!({"f": {"$lt": 5}}));
         assert_eq!(q(GreaterOrEq, "5"), json!({"f": {"$gte": 5}}));
         assert_eq!(q(LessOrEq, "5"), json!({"f": {"$lte": 5}}));
-        // Regex operators take the text as typed: no escaping, no options
-        assert_eq!(q(Contains, "a.b"), json!({"f": {"$regex": "a.b"}}));
+        // Contains / starts with: the text literally (regex characters escaped)
+        assert_eq!(q(Contains, "a.b"), json!({"f": {"$regex": "a\\.b"}}));
         assert_eq!(q(StartsWith, "12"), json!({"f": {"$regex": "^12"}}));
+        // `-` is literal outside a class: kept as is (the planner's prefix)
+        assert_eq!(
+            q(StartsWith, "2024-01"),
+            json!({"f": {"$regex": "^2024-01"}})
+        );
+        assert_eq!(
+            q(StartsWith, "(1+1)*"),
+            json!({"f": {"$regex": "^\\(1\\+1\\)\\*"}})
+        );
         // Exists: anything but "false" / "0" means true (also empty)
         assert_eq!(q(Exists, ""), json!({"f": {"$exists": true}}));
         assert_eq!(q(Exists, "true"), json!({"f": {"$exists": true}}));
@@ -534,16 +562,25 @@ mod tests {
         assert_eq!(q(In, " , "), json!({"f": {"$in": []}}));
     }
 
-    /// The value type is guessed from the text: integer, float, bool, null,
-    /// otherwise string (there is no way to ask for the string "5")
+    /// A value that is a JSON literal (number, `true`, `false`, `null`, a
+    /// quoted string) is that value, anything else is the text as a string:
+    /// `007`, `+7`, `nan`, `inf` are not JSON numbers (they became 7, 7, and
+    /// NaN / infinity, which JSON writes as `null`)
     #[test]
     fn test_value_type_guessing() {
         let q = |value: &str| FilterOperator::Equals.to_query("f", value)["f"].clone();
 
         assert_eq!(q("42"), json!(42));
         assert_eq!(q("-7"), json!(-7));
-        assert_eq!(q("+7"), json!(7));
-        assert_eq!(q("007"), json!(7));
+        assert_eq!(q("+7"), json!("+7"));
+        assert_eq!(q("007"), json!("007"));
+        assert_eq!(q("nan"), json!("nan"));
+        assert_eq!(q("NaN"), json!("NaN"));
+        assert_eq!(q("inf"), json!("inf"));
+        assert_eq!(q("-infinity"), json!("-infinity"));
+        assert_eq!(q("1."), json!("1."));
+        assert_eq!(q("\"5\""), json!("5"));
+        assert_eq!(q("[1]"), json!("[1]"));
         assert_eq!(q("1.5"), json!(1.5));
         assert_eq!(q("1e3"), json!(1000.0));
         assert_eq!(q("true"), json!(true));

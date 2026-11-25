@@ -184,6 +184,13 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
     // Simple state machine for JSON syntax highlighting
     while let Some(c) = chars.next() {
         match c {
+            // An escaped character (`\"`, `\\`) is part of the string
+            '\\' if in_string => {
+                current.push(c);
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
             '"' => {
                 if in_string {
                     current.push(c);
@@ -324,6 +331,25 @@ mod tests {
         ] {
             assert_eq!(text(&syntax_highlight_line(line, &theme)), line);
         }
+    }
+
+    /// An escaped quote does not end a string: the rest of it keeps the
+    /// string's color, and `true` inside it is not a literal
+    #[test]
+    fn test_escaped_quote_stays_in_the_string() {
+        let theme = Theme::dark();
+        let line = r#"  "a\"b": "x \"true\" -1","#;
+        let highlighted = syntax_highlight_line(line, &theme);
+        assert_eq!(text(&highlighted), line);
+        let color = |s: &str| {
+            highlighted
+                .spans
+                .iter()
+                .find(|span| span.content == s)
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(color(r#""a\"b""#), Some(theme.accent));
+        assert_eq!(color(r#""x \"true\" -1""#), Some(theme.success));
     }
 
     /// Only a string followed by `:` is a key (a value with a colon is not)

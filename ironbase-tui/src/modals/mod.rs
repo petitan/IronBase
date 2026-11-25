@@ -52,8 +52,36 @@ pub fn render_modal_frame(
     width_pct: u16,
     height_pct: u16,
 ) -> Rect {
-    let modal_area = centered_rect(width_pct, height_pct, area);
+    draw_modal_frame(
+        frame,
+        centered_rect(width_pct, height_pct, area),
+        title,
+        theme,
+    )
+}
 
+/// A modal of `width_pct` of the screen's width and `height` rows (at most
+/// the screen's height), centered; returns the inner area
+pub fn render_modal_frame_rows(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    theme: &Theme,
+    width_pct: u16,
+    height: u16,
+) -> Rect {
+    let column = centered_rect(width_pct, 100, area);
+    let height = height.min(area.height);
+    let modal_area = Rect {
+        y: area.y + (area.height - height) / 2,
+        height,
+        ..column
+    };
+    draw_modal_frame(frame, modal_area, title, theme)
+}
+
+/// Clear `modal_area` and draw the modal's frame there; returns the inner area
+fn draw_modal_frame(frame: &mut Frame, modal_area: Rect, title: &str, theme: &Theme) -> Rect {
     // Clear the background
     frame.render_widget(Clear, modal_area);
 
